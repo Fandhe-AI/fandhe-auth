@@ -1,0 +1,116 @@
+# template-dev
+
+Fandhe-AI の開発リポジトリ用テンプレートです。言語に依存しない開発基盤
+（Claude Code / Codex のスキル体系・Git hooks・EditorConfig・Make の入口・環境変数の雛形）を提供し、
+派生リポジトリで言語固有の設定を追加して使います。
+
+## 構成
+
+| パス | 役割 |
+|---|---|
+| `.agents/skills/`・`.claude/skills/` | エージェント用スキル（`skills-lock.json` で管理する外部取得物。`.claude/skills/` は `.agents/skills/` への symlink） |
+| `.claude/agents/` | Claude Code のサブエージェント定義（`quality/plan-verifier.md`: `create-plan` の計画に対する作業完了の読み取り専用検証）。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) の `.claude/` から取り込み |
+| `.claude/rules/` | Claude Code のルール（`dotclaude-via-temp.md`: `.claude/` 配下は `_/dotclaude/` で作成してから `mv` で配置する運用）。取り込み元は同上。本リポジトリ独自のルール（対象ファイルの編集時のみ読み込まれる）: `git-hooks.md`（`lefthook.yml`・`scripts/hooks/`。フックの時間予算と CI との役割分担）、`makefile.md`（`Makefile`・`scripts/`。薄い入口の書き方・ターゲット追加手順・契約）、`github-actions.md`（`.github/workflows/`。runner 方針・必須チェック・発火条件・ジョブ追加時のチェックリスト・キャッシュ方針）、`rust-build-profile.md`（`Cargo.toml`・`.cargo/`・`rust-toolchain.toml`。Rust 導入時の dev プロファイル・`target/` の掃除・CI キャッシュへの影響） |
+| `Makefile` | `scripts/` を呼ぶだけの薄い入口（`make help` で一覧） |
+| `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check`）。Make なしでも直接実行できる |
+| `scripts/hooks/` | lefthook から呼ばれる Git hooks の実体 |
+| `lefthook.yml` | Git hooks 定義（pre-commit / commit-msg） |
+| `.editorconfig`・`.editorconfig-checker.json` | 文字コード・改行・インデントの宣言と、その検査の除外設定 |
+| `.shellcheckrc` | shellcheck が `source` 先（`scripts/lib.sh`）を追って検査するための設定 |
+| `.envrc`・`.env.example` | direnv による `.env` の読み込みと、その雛形 |
+| `.mcp.json` | Claude Code のプロジェクト共有 MCP サーバー定義（ベースは空） |
+| `.gitmodules` | submodule 定義（ベースは空。記入例をコメントで記載） |
+| `.github/workflows/` | CI・AI PR レビュー・外部ソース自動追従（後述の「CI」） |
+
+## 必要なツール
+
+| ツール | 用途 | 必須 |
+|---|---|---|
+| [GNU Make](https://www.gnu.org/software/make/) 3.81+ | `make` 入口 | ✓ |
+| [lefthook](https://lefthook.dev/) | Git hooks | ✓ |
+| [editorconfig-checker](https://github.com/editorconfig-checker/editorconfig-checker) | `.editorconfig` 準拠チェック | ✓ |
+| [ShellCheck](https://www.shellcheck.net/) | シェルスクリプトの lint | ✓ |
+| [direnv](https://direnv.net/) | `.env` の自動読み込み | 任意 |
+
+macOS（Homebrew）の例:
+
+```bash
+brew install lefthook editorconfig-checker shellcheck direnv
+```
+
+`make doctor` で導入状況を確認できます（読み取りのみで、何も導入・変更しません）。
+
+## セットアップ
+
+```bash
+make doctor   # 必要なツールが揃っているか確認する
+make setup    # Git hooks を有効化し、.env が無ければ .env.example から作成する
+direnv allow  # direnv を使う場合のみ。.envrc の読み込みを許可する
+```
+
+`make setup` は何度実行しても安全です（既存の `.env` は上書きしません）。
+
+## コマンド
+
+| コマンド | 直接実行 | 内容 |
+|---|---|---|
+| `make help` | `scripts/help.sh` | 操作の一覧を表示する |
+| `make doctor` | `scripts/doctor.sh` | 開発環境を診断する |
+| `make setup` | `scripts/setup.sh` | Git hooks 有効化と `.env` 雛形の配置 |
+| `make check` | `scripts/check.sh` | editorconfig-checker + shellcheck（ソースは変更しない） |
+| `make test-hooks` | `scripts/hooks/test-hooks.sh` | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
+
+## Git hooks
+
+`make setup` 後、以下が自動実行されます。
+
+- **pre-commit**
+  - 簡易シークレット検知（`.env` 系ファイルの追加、トークン形式・秘密鍵・認証情報入り URL・ハードコード値）。
+    保守的なヒューリスティックであり、網羅的なスキャナの代替ではありません
+  - staged ファイルの editorconfig-checker
+  - staged の `*.sh` に対する shellcheck
+- **commit-msg**: [Conventional Commits](https://www.conventionalcommits.org/ja/) 形式の検証
+  （`<type>[(<scope>)][!]: <要約>`、type は `feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`）
+
+hooks に引っかかった場合は原因を修正してから再コミットしてください。`--no-verify` によるバイパスは行いません。
+
+開発速度を落とさないため、hooks には staged ファイル限定で一瞬で終わる検査と、コミット単位でしか意味がない検査
+（シークレット検知・コミットメッセージ）だけを置きます。テスト・ビルド・全体 lint など重い処理や CI と重複する検査は
+CI（`.github/workflows/ci.yml`）で行います。時間予算（pre-commit 合計 1 秒未満）と判断手順は `.claude/rules/git-hooks.md` に定義しています。
+
+フックスクリプト（`scripts/hooks/*.sh`）自体のテストもフックには置かず、CI の `test-hooks` ジョブ（`make test-hooks`）で
+Linux・macOS（標準の bash 3.2 を含む）について実行します。`scripts/hooks/` を変更したらローカルでも `make test-hooks` を実行してください。
+
+## CI
+
+| ワークフロー | 内容 |
+|---|---|
+| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`ci-complete`: 全ジョブ結果の集約 |
+| `ai-review.yml` | Fandhe-AI/actions の ai-review（codex）による PR 自動レビュー。Actions variable `CODEX_HOME_DIR` が未設定の間は skip される |
+| `update-external.yml` | エージェントスキル（`skills-lock.json`）と submodule（`.gitmodules`）の日次自動追従 PR。secrets は org の `SUBMODULE_PAT` を使う（`SKILLS_PAT` 未登録時は共通側が `SUBMODULE_PAT` へフォールバック）。作成する PR には `dependencies` / `automated` ラベルが付く |
+
+- ruleset の required status checks には `ci-complete`（と ai-review の `codex / *`）を登録する。
+  ruleset・マージ設定の導入は `setup-repo-guards` スキルの手順に従う
+- CI にジョブを追加したら `ci-complete` の `needs` にも必ず追加する
+- runner 方針（public は GitHub ホステッド、ai-review の review ジョブのみ self-hosted の例外）・発火条件・
+  ジョブ追加時のチェックリスト・キャッシュ方針は `.claude/rules/github-actions.md` に定義している
+
+## MCP サーバー
+
+`.mcp.json` はベースとして空（`"mcpServers": {}`）にしてある。派生リポジトリで必要なサーバーを追加する。
+API キー等は値を直接書かず `"${EXAMPLE_API_KEY:-}"` のように環境変数参照とし、実値は `.env`（direnv 経由）に置く。
+
+## 環境変数
+
+- 雛形は `.env.example`（キー名と空値・ダミー値のみ）、実値は `.env`（git 管理外）に置きます
+- direnv を導入している場合、`.envrc` が `.env` をシェルへ読み込みます
+- 個人用の追加設定は `.envrc.local`（git 管理外）に置けます
+
+## 派生リポジトリでの拡張
+
+1. **言語固有のコマンド**: `scripts/` に処理（例: `scripts/verify.sh`）を追加し、`Makefile` に 1 行で呼ぶターゲットと `## ` コメントを足し、`scripts/help.sh` の一覧も更新する（中身の無いターゲット `@true` 等は置かない。手順と規約は `.claude/rules/makefile.md`）
+2. **`make check` の拡張**: `scripts/check.sh` に fmt チェック・lint 等を追記する（自動修正は別ターゲットに分ける）
+3. **hooks の追加**: `.claude/rules/git-hooks.md` の時間予算と判断手順に従う。staged 限定で 1 秒未満の検査のみ `lefthook.yml` に job を追加し（実体が長くなる場合は `scripts/hooks/` へ切り出す）、テスト・ビルド等は `ci.yml` にジョブを追加して `ci-complete` の `needs` にも加える
+4. **EditorConfig**: 言語ごとのセクション（例: `[*.rs] indent_size = 4`）を `.editorconfig` に追加する
+5. **`.gitignore`**: ビルド成果物（`/target`・`/dist`・`node_modules/` 等）を追加する
+6. **Rust の導入**: `.claude/rules/rust-build-profile.md` に従い、ルートの `Cargo.toml` に依存クレートの debuginfo を行番号のみにする dev プロファイルを入れ、README のセットアップ節に `cargo sweep` による `target/` の掃除手順を書く。ビルド設定（`[profile]`・`RUSTFLAGS`・`CARGO_PROFILE_*` 等）を変えるときは CI キャッシュのキーへの影響を確認する（`.claude/rules/github-actions.md` の「キャッシュ方針」）
