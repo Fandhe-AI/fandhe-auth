@@ -31,8 +31,10 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | パス | 役割 |
 |---|---|
 | `.agents/skills/`・`.claude/skills/` | エージェント用スキル（`skills-lock.json` で管理する外部取得物。`.claude/skills/` は `.agents/skills/` への symlink） |
-| `.claude/agents/` | Claude Code のサブエージェント定義（`quality/plan-verifier.md`: `create-plan` の計画に対する作業完了の読み取り専用検証）。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) の `.claude/` から取り込み |
-| `.claude/rules/` | Claude Code のルール（`dotclaude-via-temp.md`: `.claude/` 配下は `_/dotclaude/` で作成してから `mv` で配置する運用）。取り込み元は同上。本リポジトリ独自のルール（対象ファイルの編集時のみ読み込まれる）: `git-hooks.md`（`lefthook.yml`・`scripts/hooks/`。フックの時間予算と CI との役割分担）、`makefile.md`（`Makefile`・`scripts/`。薄い入口の書き方・ターゲット追加手順・契約）、`github-actions.md`（`.github/workflows/`。runner 方針・必須チェック・発火条件・ジョブ追加時のチェックリスト・キャッシュ方針）、`rust-build-profile.md`（`Cargo.toml`・`.cargo/`・`rust-toolchain.toml`。Rust 導入時の dev プロファイル・`target/` の掃除・CI キャッシュへの影響） |
+| `CLAUDE.md` | Claude Code 向けの案内（委譲方針・model 配分・サブエージェント・ルール・スキルの一覧・spec の扱い）。`.claude/` の全体像はこちらを参照 |
+| `.claude/agents/`・`.claude/rules/` | サブエージェント定義（research / implement / testing / quality / author）とルール（委譲・セキュリティ・spec の参照・Rust の規約・秘密値・DB 層・依存方針・既存の hooks / Makefile / Actions / Rust ビルド設定など）。一覧は `CLAUDE.md`。`.claude/` 配下は `_/dotclaude/` で作成してから `mv` で配置する（`dotclaude-via-temp.md`） |
+| `.claude/settings.json`・`.claude/hooks/` | Claude Code の hooks（SessionStart のリマインダー、編集した `.rs` への `rustfmt`） |
+| `.claude/workflows/` | `implement-issue-tree` の named workflow（スキル内スクリプトへの相対 symlink） |
 | `Makefile` | `scripts/` を呼ぶだけの薄い入口（`make help` で一覧） |
 | `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check`）。Make なしでも直接実行できる |
 | `scripts/hooks/` | lefthook から呼ばれる Git hooks の実体 |
