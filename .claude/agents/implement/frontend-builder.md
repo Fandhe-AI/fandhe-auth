@@ -77,8 +77,10 @@ cargo build --workspace --locked
 ```
 
 ```bash
-cargo tree --locked -p fandhe-auth-server -e normal -i web-sys
+cargo tree --locked -p fandhe-auth-server -e normal,build --features "<本番で有効にする feature>" -i web-sys
 ```
+
+`-e normal` だけでは build-dependencies が抜ける。`--all-features` は試験用の feature も有効にするため使わない（`../../rules/dependency-policy.md`）。
 
 wasm32 のターゲットが導入済みなら `cargo build -p fandhe-auth-webauthn-wasm --target wasm32-unknown-unknown --locked` も実行する（未導入なら未実施と書く）。
 ブラウザでの確認（PoC は Chrome・Firefox の仮想 authenticator のみ。Safari・実機は MS-9。CG-1）は実施した範囲だけを書く。

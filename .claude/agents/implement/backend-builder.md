@@ -47,7 +47,7 @@ tools:
 
 ## 実装の要点（ID の本文と詳細は security）
 
-- CSRF Gate の登録箇所は 1 つ、外せる経路 0（CSRF-7）。状態変更を GET で受けない（CSRF-4）。除外は `POST /authorize` の 1 パスだけ・完全一致（CSRF-14・CSRF-20）
+- CSRF Gate の登録箇所は 1 つ、外せる経路 0（CSRF-7）。状態変更を GET で受けない（CSRF-4）。ブラウザを通る経路の Gate の例外は `POST /authorize` の 1 パスだけ・完全一致（CSRF-14）。バックチャネルの除外は 1 パス 1 件の完全一致で列挙し、前方一致・ワイルドカードは使わない（CSRF-20）
 - `Set-Cookie` を付ける箇所は発行と消去の 2 つだけ。属性は SESS-1 の形（CSRF-49・CSRF-50）
 - 応答ヘッダ（CSRF-24・CSRF-28〜32・CSRF-51）を全ての該当応答に付ける。付ける場所の設計（共通の Middleware か個別か）は spec に定めが無く、付け漏れの無い形を選んで報告に書く
 - レート制限は検証の前（THRT-1・THRT-6）。列挙防止で外に出す失敗理由は 1 種類（THRT-25・THRT-27）
@@ -79,8 +79,10 @@ cargo build --workspace --locked
 ```
 
 ```bash
-cargo tree --locked -p fandhe-auth-server -e normal -i web-sys
+cargo tree --locked -p fandhe-auth-server -e normal,build --features "<本番で有効にする feature>" -i web-sys
 ```
+
+`-e normal` だけでは build-dependencies が抜ける。`--all-features` は試験用の feature も有効にするため使わない（`../../rules/dependency-policy.md`）。
 
 `did not match any packages` の誤り（非 0 終了）は 0 件を意味する。`fandhe-auth-server` が無い間はサーバー側の crate ごとに `-p` で見る。逆依存の木が出たら DPOL-40 に反するため報告する。HTTP の振る舞いの試験は test-writer へ依頼事項として挙げる。
 
