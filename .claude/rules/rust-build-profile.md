@@ -16,8 +16,9 @@ description: >
 
 ## 目的
 
-本リポジトリは Rust を含まないが、派生リポジトリで Rust を導入したとき（ルートの `Cargo.toml`・`.cargo/`・
-`rust-toolchain.toml` を作成・編集したとき）に本ルールが読み込まれる。
+本リポジトリは Rust 製の認証基盤の実装 repo で、crate 群を 1 つの workspace に置く（`D-2026-10-29-1`・DPOL-41。
+crate の構成は `.claude/rules/coding-rust.md`、依存の方針は `.claude/rules/dependency-policy.md`）。
+ルートの `Cargo.toml`・`.cargo/`・`rust-toolchain.toml` を作成・編集するとき（最初は TASK-3 の雛形）に本ルールが読み込まれる。
 
 Rust の `target/` は依存クレートの debuginfo で膨らみ、組織内ではローカルの `target/` が 20 GB を超えて
 ディスクを圧迫した（2026-10-11 時点で fandhe-db 25 GB・rust-ai-library 23 GB）。また、ビルド設定の変更は CI の

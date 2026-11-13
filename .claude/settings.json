@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'fandhe-auth: 日本語でやりとり / 作業は subagent へ委譲し main 消費を抑える (.claude/rules/delegation.md, delegation-impl.md) / .claude 配下の編集は _/dotclaude 経由 (dotclaude-via-temp) / 仕様の正は docs/spec/04-behavior、根拠は spec ID で示し AI は「確定」にしない (spec-reference.md) / Conventional Commits 厳守 (--no-verify 禁止) / implement-issue は計画承認後に実装'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/rustfmt-on-edit.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
