@@ -388,6 +388,28 @@ test('recoverImplementPrompt: commitlint 事前確認の指示を含む', () => 
   }
 })
 
+// Review fix は隔離された別 worktree からブランチ先端を更新し、使用中のブランチは動かさずに中止する。実装側（新規・回復）が
+// コミット後に detach してブランチを外さないと、最初の fix が必ず commitFailed で終わる。
+test('implementPrompt / recoverImplementPrompt: コミット後に git checkout --detach でブランチを worktree から外す', () => {
+  for (const prompt of [implementPrompt(item, { steps: ['noop'] }), recoverImplementPrompt(item, { done: [], remaining: [], broken: [] }, 'fix/42-noop')]) {
+    assert.match(prompt, /7\. push・PR 作成はここでは行わない。[^\n]*git checkout --detach を実行して終了する（必須/)
+  }
+})
+
+// Issue #761: detach の前に追跡ファイルの未コミット変更を確かめる。amend せず追加コミット・未追跡は対象外・失敗にしない。
+test('implementPrompt / recoverImplementPrompt: detach の前に追跡ファイルの clean を確かめる', () => {
+  for (const prompt of [implementPrompt(item, { steps: ['noop'] }), recoverImplementPrompt(item, { done: [], remaining: [], broken: [] }, 'fix/42-noop')]) {
+    const line = prompt.split('\n').find((l) => l.includes('7. push・PR 作成はここでは行わない。'))
+    assert.ok(line, '手順 7 の行が無い')
+    const check = line.indexOf('git status --porcelain --untracked-files=no')
+    assert.ok(check >= 0 && check < line.indexOf('git checkout --detach'), '確認が detach より前に無い')
+    assert.ok(line.includes('git add -u'))
+    assert.ok(line.includes('amend はしない'))
+    assert.ok(line.includes('失敗にはしない'))
+    assert.ok(!line.includes('git add -A') && !line.includes('git add .'))
+  }
+})
+
 // Bugbot（PR #436 追補）: pr-create は base 取り込みコミットを detached HEAD から push しローカル
 // refs/heads を更新しないため、PR 作成失敗後の Recover → 回復 Implement が古いローカル tip を掴むと
 // 次の pr-create が remote-ahead / diverged で再失敗しループする。checkout 後の ff 追従を固定する。
@@ -403,6 +425,15 @@ test('recoverImplementPrompt: 手順 2 で checkout 後にリモート tip へ f
   assert.ok(prompt.includes('merge-base --is-ancestor refs/remotes/origin/'), '返却前の祖先確認がない')
   assert.ok(!prompt.includes('(iv) が fail-closed で止める'), '旧文言（ff 不能でも続行）が残っている')
   assert.match(prompt, /rebase・commit --amend・reset・squash で書き換えない/)
+})
+
+test('祖先確認の省略: Recover は abort 続行時に省略して summary に書き、0b-a には入らない（#751）', () => {
+  const rec = recoverImplementPrompt(item, { done: [], remaining: [], broken: [] }, 'fix/42-noop')
+  assert.match(rec, /返却前（リモートに branch があるとき）git merge-base --is-ancestor [^。]*偽なら merge で取り込み直す（abort して続行した場合は確認を省略し、その旨を summary に書く）。/)
+  const p = implementPrompt(item, { steps: ['noop'] })
+  const sec = p.slice(p.indexOf('0b-a.'), p.indexOf('0b-b.'))
+  assert.ok(!sec.includes('確認を省略'), '0b-a に省略条件が入っている')
+  assert.ok(sec.includes('成功後は git merge-base --is-ancestor'), '0b-a の成功後の祖先確認が消えている')
 })
 
 test('implementPrompt: 0b-a にも push 済みコミットの書き換え禁止が入る', () => {
@@ -435,6 +466,18 @@ test('implementPrompt: 0b-a で既存 open PR のブランチ取得後にリモ�
   assert.ok(section0ba.includes('git fetch origin -- "<branch>:refs/remotes/origin/<branch>"'), 'ff 追従の fetch が -- とクォート付きで書かれていない')
 })
 
+test('implementPrompt: 0b-a は分岐取り込みのコンフリクトを commit --no-edit で確定し、引数つきで祖先確認する', () => {
+  const prompt = implementPrompt(item, { steps: ['noop'] })
+  const sec = prompt.slice(prompt.indexOf('0b-a.'), prompt.indexOf('0b-b.'))
+  assert.match(sec, /git add[^。]*git commit --no-edit/)
+  assert.ok(sec.includes('MERGE_HEAD'), 'MERGE_HEAD を残さない指示がない')
+  assert.ok(sec.includes('--is-ancestor "refs/remotes/origin/<branch>" HEAD'), '引数つきの祖先確認がない')
+  assert.ok(sec.includes('偽なら merge で取り込み直す'), '偽のときの取り込み直しがない')
+  assert.match(sec, /hook 拒否なら conventional な件名を一時ファイルへ書き git commit -F で確定する/)
+  assert.ok(!sec.includes('コンフリクトは解消し確定'), '旧文言が残っている')
+  assert.ok(!sec.includes('--is-ancestor で祖先確認'), '旧文言が残っている')
+})
+
 test('fixPrompt: pushAfterFix の両分岐で commitlint 事前確認の指示を含む', () => {
   // fixPrompt は boundaryNonce() を内部で使うため、テスト専用 setter で seed を注入する
   // （本番では ensureBoundaryNonceSeed() がラン開始時に 1 回だけ行う）。
@@ -456,17 +499,16 @@ test('fixPrompt: pushAfterFix の両分岐で commitlint 事前確認の指示�
 // ---------------------------------------------------------------------------
 
 // resolveReviewThread mutation の指示行の有無が「resolve 実行主体か」の判定基準。
-const RESOLVE_MUTATION_MARKER = 'resolveReviewThread'
+// Issue #759: fix は reply-resolve.sh 経由でだけ返信・resolve する。生の mutation は fixPrompt に現れない
+const RESOLVE_MUTATION_MARKER = 'reply-resolve.sh --pr'
 
 test('fixPrompt: pushAfterFix=true はリモート head 反映済み前提の resolveReviewThread mutation 指示と resolvedThreadIds 報告を含む', () => {
   mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
   const finding = { summary: 'テスト用の指摘', unresolvedComments: [{ threadId: 'PRRT_abc123', text: '指摘テキスト' }] }
   const prompt = fixPrompt(item, { ...impl, branch: 'fix/42-noop' }, finding, true)
-  assert.ok(prompt.includes(RESOLVE_MUTATION_MARKER), 'pushAfterFix=true の fixPrompt に resolveReviewThread mutation の指示がない')
-  assert.ok(
-    prompt.includes(`gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`),
-    'resolve mutation のコマンド形が期待どおりでない',
-  )
+  assert.ok(prompt.includes(RESOLVE_MUTATION_MARKER), 'pushAfterFix=true の fixPrompt に reply-resolve.sh の指示がない')
+  assert.ok(/reply-resolve\.sh --pr 123(?: --repo '[^']+')? --branch fix\/42-noop --allow 'PRRT_abc123' --thread-id <threadId>/.test(prompt), 'reply-resolve.sh のコマンド形が期待どおりでない')
+  assert.ok(!prompt.includes('resolveReviewThread') && !prompt.includes('addPullRequestReviewThreadReply'), '生の mutation が fixPrompt に残っている')
   assert.ok(prompt.includes('resolvedThreadIds'), 'resolve 済み threadId の報告フィールド（resolvedThreadIds）の指示がない')
   // resolve の前提条件: (a) 今回 push 成功、または (b) ホストが決定的に算出した許可リスト
   // （resolveProof。Issue #430）。fix 自身の反映確認・一覧再取得での対象拡大は禁止する文言を
