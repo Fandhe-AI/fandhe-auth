@@ -9,7 +9,14 @@ passkey・認証セッション・失効・復旧・登録済み自社クライ�
   取得手順と読み方は `.claude/rules/spec-reference.md`）。**仕様の正は `docs/spec/04-behavior/`**
 - spec 中の「`fandhe-auth-backend` の repo／workspace」は本リポジトリを指す（`D-2026-10-29-1` の読み替え）
 - 現在地: Phase 1〜6（仕様・PoC）完了。次は `06-roadmap.md` の MS-1「決定と土台」（TASK-3 雛形・TASK-4 技術選定・
-  TASK-5 開発 DB と migration の骨組み）。`Cargo.toml`・crate はまだ無い。実装の着手と Issue の起票は利用者の指示を待つ
+  TASK-5 開発 DB と migration の骨組み）。`Cargo.toml`・crate はまだ無い。実装の着手は利用者の指示を待つ
+- Issue: 2026-11-15 に spec の全 712 TASK を Issue ツリーとして起票済み。ルートは #8、Phase N = MS-N（11 Phase）。
+  各 TASK の下に 2h ごとの sub-issue があり、合計 5,134 件。担当が人間の TASK には `owner:human`、共同の TASK には
+  `owner:joint` のラベルが付いている
+- 利用者の指示で `implement-issue-tree` を回すときは、ルート #8 に `skipLabels: ["owner:human","owner:joint"]` を必ず付ける。
+  sub-issue のタイトルと受け入れ条件は目安で、正は spec の原文
+- crate は repo ルートの 1 つの workspace に置く。crate 名は接頭辞 `fandhe-auth-` 付き、ディレクトリは接頭辞を除いた
+  `crates/<名前>`（`D-2026-10-27-8`・`D-2026-10-28-1`。詳細は `.claude/rules/coding-rust.md`）
 - 判定・値の決定・例外の承認・「確定」への変更は人が行う。Claude Code は手順・仕組み・試験を作って流すところまで（ACPT-7）
 
 開発基盤（Makefile・lefthook・CI・ツール導入）の説明は [README.md](README.md) を参照する。
@@ -46,3 +53,4 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 - repo の設定変更・外部への投稿・spec repo への PR は利用者の明示の指示を待つ
 - `_/` は git 管理外の作業領域（計画・`.claude/` の一時作成）
 - 外部取得のスキル（`.agents/skills/`・`.claude/skills/`）は `skills-lock.json` で管理し、編集しない。改修は `contribute-skill` で upstream へ
+- `.claude/workflows/implement-issue-tree.js` は `../skills/implement-issue-tree/scripts/implement-issue-tree.js` への symlink であり、実体を直接編集しない（更新は skills-lock の追従で入る）
