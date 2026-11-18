@@ -54,27 +54,27 @@ T 表は 1.2 節、重大は 4.1 節、中は 4.2 節、RFC 9700 の照合は 2 
 
 ## 行ごとの表
 
-「未確認の残り」の項目数は QP-1 の 1.2 節（T 表）の該当列を数えた値である。項目の本文は写さず、
+「未確認の残り」は QP-1 の 1.2 節（T 表）の該当列で確かめる。項目の本文・件数は写さず、
 (1)〜(n) のそれぞれに C-2 を当てる。区分は [scope-ids.md](scope-ids.md) の表に従う。
 
 ### T 行（14 行。QP-1 の 1.2 節）
 
 | 範囲の行 | 区分 | 読む PoC の README（`03-poc/<dir>/README.md`）と手順 | `04-behavior/` のファイル | 確認の観点 |
 |---|---|---|---|---|
-| T-1 | 候補 | PoC-8 手順 4・6、PoC-1 ADB-6・ADB-25 | `lifecycle.md` | C-1〜C-4。残り (1)〜(3) の 3 項目を C-2 で確かめる |
-| T-2 | 候補 | PoC-8 手順 4、PoC-3 手順 5・発見事項 10、PoC-12 手順 10、PoC-1 ADB-24、PoC-10 手順 7 | `rate-limit.md` | C-1〜C-4。残り 3 項目。判定と加算の単位が 1 文であることを `THRT-6`・`AUDB-27`（`db-contract.md`）まで辿る |
-| T-4 | 候補 | PoC-8 手順 3・4 | `api-session.md`・`lifecycle.md`・`rate-limit.md` | C-1〜C-4。残り 3 項目 |
-| T-6 | 原文指定 | PoC-2 手順 4・5、PoC-3 手順 5、PoC-9 手順 6・7 | `api-device-grant.md` | C-1〜C-3、C-5。残り 3 項目。PoC の合否の範囲を、対応 ID の確定の範囲と照らす |
-| T-7 | 候補 | PoC-8 手順 4・5・9、PoC-10 手順 4 | `api-session.md`・`lifecycle.md` | C-1〜C-4。残り 6 項目 |
-| T-10 | 原文指定 | PoC-3 手順 7、PoC-12 手順 5、PoC-4 手順 4、PoC-6 の足した機能 4 | `oidc-clients.md`（関連: `csrf-ssr.md`） | C-1〜C-3、C-5。残り 5 項目。Gate の例外が 1 パスだけである点は `.claude/rules/security.md` の CSRF の節と照らす |
-| T-13 | 候補 | PoC-5 手順 3・5、PoC-4 手順 5・9 | `agent-credential.md`・`oidc-clients.md`・`api-oidc-provider.md` | C-1〜C-4。残り 4 項目。トークン種別の区別は `token-signing.md` の `typ` の項と照らす |
-| T-16 | 原文指定 | PoC-9 手順 3・4・6 | `screen-device.md` | C-1〜C-3、C-5。残り 4 項目 |
-| T-17 | 候補 | PoC-9 手順 5・8・9、DPoP の検査 | `agent-credential.md` | C-1〜C-4。残り 4 項目 |
-| T-19 | 候補 | PoC-5 手順 2・6、PoC-10 手順 2・3・12、PoC-1 ADB-17・ADB-25 | `token-signing.md`・`ops-restore-runbook.md` | C-1〜C-4。残り 5 項目 |
-| T-20 | 候補 | PoC-10 手順 4、PoC-1 ADB-18・ADB-19、PoC-8 の台帳 | `ops-restore-runbook.md`・`availability.md` | C-1〜C-4。残り 6 項目。R-2 と対応 ID が重なるため、R-2 の観点と合わせて確かめる |
-| T-21 | 候補 | PoC-10 手順 9、PoC-1 ADB-25、PoC-3・4・7・8・9・11 の走査 | `secret-handling.md`・`audit.md` | C-1〜C-4。残り 1 項目。秘密値の保存の形は `.claude/rules/secret-values.md` と照らす |
-| T-22 | 候補 | PoC-1 ADB-15・ADB-16、PoC-10 手順 5・6、PoC-8 | `db-contract.md`・`availability.md` | C-1〜C-4。残り 3 項目 |
-| T-23 | 候補 | PoC-11 手順 3・4、PoC-7 手順 4・8、PoC-9 手順 7 | `agent-delegation.md` | C-1〜C-4。残り 4 項目。手順 4（失効と配送の競合）は R-1 と同じ事象を扱うため、R-1 の観点と合わせて確かめる |
+| T-1 | 候補 | PoC-8 手順 4・6、PoC-1 ADB-6・ADB-25 | `lifecycle.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
+| T-2 | 候補 | PoC-8 手順 4、PoC-3 手順 5・発見事項 10、PoC-12 手順 10、PoC-1 ADB-24、PoC-10 手順 7 | `rate-limit.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。判定と加算の単位が 1 文であることを `THRT-6`・`AUDB-27`（`db-contract.md`）まで辿る |
+| T-4 | 候補 | PoC-8 手順 3・4 | `api-session.md`・`lifecycle.md`・`rate-limit.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
+| T-6 | 原文指定 | PoC-2 手順 4・5、PoC-3 手順 5、PoC-9 手順 6・7 | `api-device-grant.md` | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる。PoC の合否の範囲を、対応 ID の確定の範囲と照らす |
+| T-7 | 候補 | PoC-8 手順 4・5・9、PoC-10 手順 4 | `api-session.md`・`lifecycle.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
+| T-10 | 原文指定 | PoC-3 手順 7、PoC-12 手順 5、PoC-4 手順 4、PoC-6 の足した機能 4 | `oidc-clients.md`（関連: `csrf-ssr.md`） | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる。Gate の例外が 1 パスだけである点は `.claude/rules/security.md` の CSRF の節と照らす |
+| T-13 | 候補 | PoC-5 手順 3・5、PoC-4 手順 5・9 | `agent-credential.md`・`oidc-clients.md`・`api-oidc-provider.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。トークン種別の区別は `token-signing.md` の `typ` の項と照らす |
+| T-16 | 原文指定 | PoC-9 手順 3・4・6 | `screen-device.md` | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる |
+| T-17 | 候補 | PoC-9 手順 5・8・9、DPoP の検査 | `agent-credential.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
+| T-19 | 候補 | PoC-5 手順 2・6、PoC-10 手順 2・3・12、PoC-1 ADB-17・ADB-25 | `token-signing.md`・`ops-restore-runbook.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
+| T-20 | 候補 | PoC-10 手順 4、PoC-1 ADB-18・ADB-19、PoC-8 の台帳 | `ops-restore-runbook.md`・`availability.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。R-2 と対応 ID が重なるため、R-2 の観点と合わせて確かめる |
+| T-21 | 候補 | PoC-10 手順 9、PoC-1 ADB-25、PoC-3・4・7・8・9・11 の走査 | `secret-handling.md`・`audit.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。秘密値の保存の形は `.claude/rules/secret-values.md` と照らす |
+| T-22 | 候補 | PoC-1 ADB-15・ADB-16、PoC-10 手順 5・6、PoC-8 | `db-contract.md`・`availability.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
+| T-23 | 候補 | PoC-11 手順 3・4、PoC-7 手順 4・8、PoC-9 手順 7 | `agent-delegation.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。PoC-11 手順 4 は R-1 と同じ手順を引くため、R-1 の観点と合わせて確かめる |
 
 ### R 行（6 行。QP-1 の 4.1 節・4.2 節）
 
@@ -95,22 +95,7 @@ T 表は 1.2 節、重大は 4.1 節、中は 4.2 節、RFC 9700 の照合は 2 
 
 ## PoC 番号と README の対応
 
-| PoC | `03-poc/` のディレクトリ |
-|---|---|
-| PoC-1 | `auth-db-contract` |
-| PoC-2 | `webauthn-rp-id` |
-| PoC-3 | `passkey-vertical` |
-| PoC-4 | `oidc-provider-sso` |
-| PoC-5 | `jwt-signing-alg` |
-| PoC-6 | `oidc-conformance-local` |
-| PoC-7 | `revocation-propagation` |
-| PoC-8 | `lifecycle-recovery` |
-| PoC-9 | `agent-device-grant` |
-| PoC-10 | `ops-resilience` |
-| PoC-11 | `delegation-revocation-race` |
-| PoC-12 | `session-ssr` |
-| PoC-13 | `agent-sid-stability` |
-| PoC-14 | `logout-token-size` |
+PoC-N のディレクトリは `docs/spec/03-poc/` の一覧から番号で引く。ディレクトリ名は private の構造を示すため、ここには写さない。
 
 ## ビヘイビア ID の接頭辞と `04-behavior/` のファイル
 
