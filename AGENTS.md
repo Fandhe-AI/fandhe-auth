@@ -1,0 +1,130 @@
+# AGENTS.md
+
+`fandhe-auth` は Keycloak を使わない Rust 製の共通認証基盤の実装リポジトリ（public、`MIT OR Apache-2.0`）。
+本書は ai-review が PR の base コミットから読む **レビュー観点集**で、規約の本文は持たず、要点と根拠の所在を示す。
+全体の運用は `CLAUDE.md`、規約の本文は `.claude/rules/` を正とする。
+
+## 文書の位置づけとレビュアーへの注意
+
+- 仕様は private の `Fandhe-AI/fandhe-auth-spec` を `docs/spec/` に submodule で置く。仕様の正は `docs/spec/04-behavior/`。
+- **CI 上では private の spec submodule は取得されない。** spec の原文を確かめられないことを理由に指摘を作らない。
+  spec に由来する指摘について判断するのは次の 2 点に限る。
+  - 根拠の ID（`SECR-11`・`TASK-3`・`D-2026-10-29-1` 等）の有無と書式
+  - `.claude/rules/` に書かれた要点との整合
+- 現時点で `Cargo.toml`・crate は無い（MS-1 前）。「Rust の観点」は crate を足す PR から適用する。
+  今ある対象（文書・rules・scripts・workflow・Makefile・フック）の観点は今から適用する。
+- 新しい基準はマージ後の次の PR から効く（ai-review は base コミットの本書を読む）。
+
+## 重大度
+
+| 区分 | 定義 | CI の扱い |
+| --- | --- | --- |
+| P0 | マージブロック。秘密値の露出、認証・認可・検証の迂回（署名検証を外す類型・`redirect_uri` 検証の欠けを含む）、`rsa` の混入、人の判定への LLM 経路、書き込み権限の過剰な付与・特権トリガー・新規の `self-hosted` runner の workflow など、直接の被害や取り返しのつかない不整合 | review ジョブが fail。ruleset で `codex / review` 等を必須チェックに登録しているとき、マージを止める。修正まで PR を進めない |
+| P1 | マージ前に直す。規約違反・設計の整合崩れ・根拠の欠け・試験や検査の弱体化。ai-review の `block-priorities`（既定 `P0,P1`）により **P1 でも review ジョブが fail する。ruleset で必須チェックに登録しているとき、実質マージを止める** | review ジョブが fail。直すか、誤検知なら理由を書いて解消する |
+| P2 | 提案。可読性・命名・軽微な重複・記録の不足・将来の改善案 | 止めない。指摘のみ |
+
+- 観点 2〜4 で迷ったら重い側にせず、根拠（ファイル・行・ID・rules のパス）を示して区分する。根拠を示せない指摘は P2 以下にする。
+- **観点 1（セキュリティ）には上の一般則を一切適用しない。** 迷ったら上位に区分し、「要確認」と書いて人の判断に回す。
+  根拠（ID）を示せない場合も P2 に落とさず、「要確認」とする。
+- 例外を受け入れるか、規約を緩めるかは人が決める。AI のレビュー合格は安全の確定ではない（CG-2・TASK-83）。
+
+## 観点 1: セキュリティ
+
+根拠の本文は `.claude/rules/security.md`・`secret-values.md`・`dependency-policy.md`・`github-actions.md`。
+
+| 区分 | 項目 | 根拠 |
+| --- | --- | --- |
+| P0 | トークン・鍵・パスワード・復旧コード・接続文字列をコード・サンプル・試験記録・ログ・コメント・PR・Issue に入れる | SECR-23〜27・`security.md` |
+| P0 | 実機の名前・ホームのパス・内部のアドレス・個人情報の混入（文書・rules・コメントを含む） | 04-behavior/README.md の (d)・`security.md` |
+| P0 | 本人確認・passkey の検証・復旧・権限付与・管理者承認の判定に LLM・検索を通す経路 | HAPR-1・SECR-28 |
+| P0 | 検証を外す feature・設定・環境変数・要求ヘッダ（`no_gate`・`unchecked` 等）、試験専用のログイン分岐 | DPOL-28・30〜32・CSRF-7・`coding-rust.md` |
+| P0 | `rsa`・`openssl` の直接宣言・`vendored`・`native-tls` を本番の依存に入れる。`openssl` の逆依存の根が `webauthn-rs` 系以外、配備先の OpenSSL への動的リンクでない構成。`jsonwebtoken` の `rust_crypto` feature | DPOL-10〜13・17・18・21・46 |
+| P0 | 暗号・署名・乱数・パスワードハッシュ・WebAuthn 検証の自前実装 | DPOL-4・DPOL-47 |
+| P0 | SQL に値を文字列で埋め込む（`$n` のパラメータ以外）。`format!` での SQL 組み立て | AUDB-43・`db-layer.md` |
+| P0 | workflow で `pull_request_target` 等の特権トリガーを PR のコードと組み合わせる、外部入力（PR タイトル・ブランチ名等）を `run:` に直接展開する | `github-actions.md` |
+| P0 | 状態を変える操作を `GET` で受ける。CSRF Gate を外す・複数箇所で登録する | CSRF-1・CSRF-4・CSRF-7 |
+| P1 | 認証 Cookie が `__Host-`・`HttpOnly`・`Secure`・`SameSite=Lax`・`Path=/`・`Domain` なしでない。`Set-Cookie` を発行と消去の 2 箇所以外で付ける | SESS-1・CSRF-49・CSRF-50 |
+| P1 | セッション値・トークンを `document.cookie`・`localStorage`・`sessionStorage` に置く。セッション依存の応答に `no-store` と `Vary: Cookie` が無い | SESS-3・CSRF-24 |
+| P1 | CSP・`X-Frame-Options`・`X-Content-Type-Options`・`Referrer-Policy` の欠け、インラインスクリプト、wasm 以外への `'wasm-unsafe-eval'` | CSRF-28〜32・CSRF-51 |
+| P0 | 署名検証を外す類型: `none`・HS 系の `alg` を受け入れる、`typ` の不一致を通す、許可する `alg` をトークンのヘッダ・discovery・JWKS から導く、`jku`・`x5u`・`jwk` で外から鍵を取る | SIGN-1・2・6・8〜10・16 |
+| P0 | `exp == now` のトークンを通す | SIGN-17 |
+| P0 | `redirect_uri` を登録との完全一致で検証しない、未登録 `client_id` へリダイレクトする（`400` の誤りの画面にしない） | OPRV-64・OPRV-71・LGUI-14 |
+| P1 | 戻り先を同一 origin のパス以外から作る、誤りの画面への内部状態・未エスケープの値の出力 | CSRF-33〜35・LGUI-14 |
+| P1 | 転送ヘッダを許可リスト外から信用する、レート制限を検証の後で判定する、判定と加算を 1 文にしない | CSRF-40・41・THRT-1・THRT-6・AUDB-27 |
+| P0 | 秘密値の型が `Debug`・`Display`・`Serialize` で値・値の一部・長さ・ハッシュを出す | SECR-11・12・17（検討中）・`secret-values.md` |
+| P1 | 秘密値を生の `String`・`Vec<u8>` で持つ、`expose()` 以外の取り出し経路 | SECR-10・16・29〜33・`secret-values.md` |
+| P1 | 外向き HTTP が `reqwest` 以外、OS の信頼ストアを使う、リダイレクトを追う | DPOL-46 |
+| P0 | workflow で書き込み権限（`contents: write`・`pull-requests: write` 等）を過剰に付与する。public で新規に `runs-on: self-hosted` を書く（`ai-review.yml` の review ジョブの例外を除く） | `github-actions.md` |
+| P1 | workflow の `permissions` の読み取りの範囲が必要より広い、アクションを SHA で固定していない | `github-actions.md` |
+| P1 | checkout に `persist-credentials: false` が無い、ジョブに `timeout-minutes` が無い | `github-actions.md`（ジョブ追加時のチェックリスト） |
+| P0 | `--no-verify`・`LEFTHOOK=0` などのフック迂回を促す変更。フックや CI の検査を黙って外す・緩める | `git-hooks.md`・`verification.md` |
+| P1 | 例外（`ignore`・`skip`・許可の追加）に理由・期限・対象の範囲が無い。`cargo deny`・`cargo audit` を通さない依存の追加 | DPOL-20・34・35 |
+| P2 | 失敗の記録の不足、ログ文言の改善、タイミング差の許容値を測らず推測で置く（持ち越し） | SECR-23・THRT-29 |
+
+## 観点 2: アーキテクチャ・設計整合
+
+根拠の本文は `CLAUDE.md`・`.claude/rules/coding-rust.md`・`db-layer.md`・`makefile.md`・`dotclaude-via-temp.md`。
+
+| 区分 | 項目 | 根拠 |
+| --- | --- | --- |
+| P0 | `docs/spec/`（submodule）の中身を編集する。spec を直す PR をこの repo に混ぜる | `spec-reference.md` |
+| P1 | `.agents/skills/`・`.claude/skills/`（`skills-lock.json` 管理の外部取得物）を直接編集する。`.claude/workflows/implement-issue-tree.js`（symlink）の実体を編集する | `CLAUDE.md` |
+| P1 | 仕様の正を `docs/spec/04-behavior/` 以外に置く、実装が spec の ID と食い違う記述を規約として断定する | `spec-reference.md` |
+| P1 | crate の配置・命名が `crates/<名前>`（crate 名は `fandhe-auth-` 接頭辞）に従わない。workspace を repo ルートの 1 つにしない | D-2026-10-27-8・D-2026-10-28-1・DPOL-36・41 |
+| P1 | `core` が非同期ランタイム・DB ドライバ・HTTP サーバー・`fandhe-backend`・`fandhe-frontend`・`web-sys` に依存する。`core` が現在時刻・乱数・ファイル・ネットワークを直接読む（時刻・乱数・ID は引数か注入で受ける） | DPOL-1・3 |
+| P1 | `client`・`types`・`frontend` が `fandhe-auth-db*` に依存する。`types` に I/O 依存や `wasm32` で通らない依存を入れる。サーバーのビルドに `web-sys` を入れる | DPOL-7・39・40 |
+| P1 | DB 層: 汎用 CRUD の trait を作る、SQL・ロック・SQLSTATE を契約 trait や誤り型に出す、DB の現在時刻関数や `timestamptz` を使う、認証経路で「読んでから書く」を使う | AUDB-1〜3・16・35・36・`db-layer.md` |
+| P0 | 契約テストの変異スイッチが本番ビルドで有効になる（既定で有効、環境変数だけで有効になる経路を含む。検証を外す経路に当たる） | DPOL-31・`coding-rust.md` |
+| P1 | 契約テスト本体が PostgreSQL や `sqlx` に依存する。`Ops` が認証サーバーの bin から到達する | DPOL-37・38 |
+| P1 | 誤り応答の形・列挙防止が rules と異なる（失敗理由を区別して返す等） | THRT-25・`coding-rust.md` |
+| P1 | `.claude/` の変更が運用に従わない（`_/` に作ってから反映する経路を外れる）。Agent・Rule の frontmatter や参照パスが実体と合わない | `dotclaude-via-temp.md` |
+| P1 | Makefile・`scripts/`・CI・フックで同じ検査を別実装にする。CI 独自のロジックを持つ。`make help` と `scripts/help.sh` の不一致 | `makefile.md`・`github-actions.md` |
+| P1 | ワークフローを安易に増やす、集約ジョブ `ci-complete` の `needs` への追加漏れ、skipped を全許容する fail-open | `github-actions.md` |
+| P2 | 責務の分け方・命名の改善案、`CLAUDE.md` と rules の記述の重複 | `CLAUDE.md` |
+
+## 観点 3: 再利用・アセット化
+
+根拠の本文は `.claude/rules/coding-rust.md`・`secret-values.md`・`code-comment-style.md`・`spec-reference.md`。
+
+| 区分 | 項目 | 根拠 |
+| --- | --- | --- |
+| P1 | 他所有者（Hub・`fandhe-backend`・`fandhe-frontend`・`fandhe-db`）の値・本文を写す。ID・repo・commit で引くこと | `spec-reference.md`・`D-2026-10-15-21` |
+| P1 | 相手側が未決の値を本番の値として推測で置く。設定で受け、試験用の仮の値で実装する | A-2026-10-28-1〜14 |
+| P1 | 設定値・接続先・期限・上限をコードにハードコードする。環境変数で読むのは接続先・待ち受け・ログの置き場などの設定値だけで、読む変数の一覧を残す | DPOL-32 |
+| P1 | 公開 crate（`client`・`secret`・`types` 等）の公開 API・設定の型に、内部の実装や秘密値の生の型が漏れる。非公開の型・bin crate に秘密値を持たせる | SECR-19・33・`secret-values.md` |
+| P1 | 秘密値の型を `fandhe-auth-secret` 以外に新設する、PoC の実装（`Secret`・`Token`・`alt/`）や PoC の固定値（60 秒・300 秒等）を本番へ持ち込む | SECR-15・31・`coding-rust.md` |
+| P2 | 汎用部（時刻・乱数・秘密値・検証部）を用途固有の crate から切り出せる、重複した実装、公開 API の rustdoc の不足 | `code-comment-style.md` |
+| P2 | コメントが「何をしているか」だけで、根拠の ID（例: `// THRT-25: …`）や理由が無い。日本語を基本とする方針から外れる | `code-comment-style.md`・`japanese-style.md` |
+
+## 観点 4: この repo 固有の規約
+
+| 区分 | 項目 | 根拠 |
+| --- | --- | --- |
+| P1 | AI・自動処理が spec の振る舞いを「確定」にする記述。〔仮想〕〔モック〕の合格で〔実機〕〔人の操作〕の項目を確定扱いする。「標準準拠済み」を適合性テストの範囲外に書く | ACPT-7・ACPT-33・`verification.md` |
+| P1 | 試験の期待・検査・lint を緩めて通す（期待値の差し替え、`#[ignore]`、検査の削除、許可リストの拡大） | AUDB-6・AUDB-69・`verification.md` |
+| P1 | 完了の主張に証拠が無い（実行したコマンドと終了コードが PR に無い）。推測語（「〜のはず」等）での完了の宣言 | `verification.md` |
+| P1 | PR 本文に対象の `TASK-N` と、実装・試験した振る舞い ID が無い。満たしていない期待が残りとして書かれていない | `spec-reference.md` |
+| P1 | 追跡先（`TASK-N`・Issue 番号）の無い `TODO` を残す。スコープ外の修正を同じ PR に混ぜる | `out-of-scope-tracking.md`・`code-comment-style.md` |
+| P1 | この repo は public で spec は private。spec 本文のまとまった転記を文書・コメント・PR・Issue に入れる | `spec-reference.md` |
+| P1 | PR タイトル・コミット件名が Conventional Commits（`<type>[(<scope>)][!]: <要約>`）に従わない。type は `feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert` | `conventional-commits.md`（正は `scripts/hooks/commit-msg-check.sh`） |
+| P1 | 公開 crate の公開 API・設定の型・DB の列の形を変えるのに破壊的変更の印（`!` または `BREAKING CHANGE:`）が無い | `conventional-commits.md` |
+| P2 | 要約が 72 文字を超える、末尾に句点がある、本文に背景・根拠の ID が無い | `conventional-commits.md` |
+| P2 | 文体が常体でない、コード・識別子を翻訳している、絵文字の多用 | `japanese-style.md` |
+
+## Rust の観点（crate を足す PR から適用）
+
+`unsafe` 等のセキュリティに関わる項目は観点 1 と同じ扱いとし、迷ったら上位に区分して「要確認」と書く（上の一般則を適用しない）。
+
+| 区分 | 項目 | 根拠 |
+| --- | --- | --- |
+| P1 | `unsafe` を使う（`#![forbid(unsafe_code)]` が既定。例外は手順に従い理由を書く） | `coding-rust.md` |
+| P1 | `cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` を通さない。make ターゲットができた後は make を正とする | `verification.md` |
+| P1 | `Cargo.lock` をコミットしない、版の固定が方針と異なる（相手側の部品は固定して流し直してから差し替える） | DPOL-9・CSRF-13 |
+| P1 | 自身の crate に `license = "MIT OR Apache-2.0"` が無い。git 依存・crates.io 以外の registry | DPOL-25・26 |
+| P1 | MSRV・edition・構造化ログの部品など未定の値を決まったものとして書く（未定は「未定（TASK-n で決める）」と書く） | `coding-rust.md`・`spec-reference.md` |
+
+## 指摘の書き方
+
+- 指摘には、該当のファイル・行、破られる規約の根拠（本書の表の ID または rules のパス）、直し方の方向を書く。
+- 根拠の ID を spec の原文で確かめられない場合は、ID の書式と rules の記述との整合だけを見る（上記の注意）。
+- 判定・値の決定・例外の承認・「確定」への変更は人が行う。レビューは判断材料を示すところまでとする。
