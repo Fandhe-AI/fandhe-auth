@@ -42,7 +42,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 ### 例外 2: `ai-review.yml` の review ジョブ（public で self-hosted）
 
 `codex / review` は provider と同名のラベル `codex` を持つ self-hosted の codex 専用 runner で動く
-（2026-10-11 の実行で runner `fandhe-ai-review-1-codex-runner-2`・ラベル `codex` を確認）。
+（2026-10-11 の実行で、ラベル `codex` を持つ self-hosted runner で動くことを確認）。
 組織方針 `docs/runner-policy.md` §3 が public リポジトリでも許容する例外と定めている。理由は、認証が runner 上の
 ログイン済みディレクトリ（home-dir 方式）で、GitHub ホステッドでは資格情報を保持できないため。
 
