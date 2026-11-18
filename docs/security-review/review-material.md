@@ -30,13 +30,14 @@
 - PoC の数値・件数、PoC のコードのファイルパスと行番号
 - 実機の名前（環境の記録は引かない）
 
+行ごとの表の PoC の手順番号・`ADB-N` は、本文ではなく読む位置を示す参照であり、許容する。
 下の観点は、spec の本文を言い換えず、人への問いの形で書く。
 
 ## レビューの準備と読む順
 
 1. spec を固定の commit で取得する。
-2. `03-poc/quality-checks/qp1-security-review/results/fixed-before-run.md` の 3 節（T 表の判定の定義）と 5 節（重大度と「未対応」の数え方）で語の定義を確かめる。
-3. 下の「行ごとの表」に沿って、QP-1 の README、PoC の README、`04-behavior/` の順に読む。
+2. QP-1 の README が引く、実行前に固定した記録の 3 節（T 表の判定の定義）と 5 節（重大度と「未対応」の数え方）で語の定義を確かめる。記録の所在は QP-1 の README から辿る。
+3. 下の「行ごとの表」に沿って、QP-1 の README、PoC の README、`04-behavior/` の順に読む。PoC-N のディレクトリは `docs/spec/03-poc/` の一覧から番号で引く（ディレクトリ名は写さない）。
 4. 対応 ID のステータス（確定／検討中）を原文で確かめ直す。[scope-ids.md](scope-ids.md) の値は commit 時点の写しである。
 
 QP-1 の README は `03-poc/quality-checks/qp1-security-review/README.md`（以下「QP-1」）。
@@ -92,10 +93,6 @@ T 表は 1.2 節、重大は 4.1 節、中は 4.2 節、RFC 9700 の照合は 2 
 | 範囲の行 | 区分 | 読む PoC の README | `04-behavior/` のファイル | 確認の観点 |
 |---|---|---|---|---|
 | `AGCR-29` | 原文指定 | PoC-9 の README（DPoP の検査）、QP-1 の R の表 | `agent-credential.md` | C-1〜C-3。`ACPT-12` が R の行と別に挙げた DPoP の検証部で、特定の T・R の行には結び付けない |
-
-## PoC 番号と README の対応
-
-PoC-N のディレクトリは `docs/spec/03-poc/` の一覧から番号で引く。ディレクトリ名は private の構造を示すため、ここには写さない。
 
 ## ビヘイビア ID の接頭辞と `04-behavior/` のファイル
 
