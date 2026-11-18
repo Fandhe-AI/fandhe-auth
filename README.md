@@ -44,6 +44,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `.envrc`・`.env.example` | direnv による `.env` の読み込みと、その雛形 |
 | `.mcp.json` | Claude Code のプロジェクト共有 MCP サーバー定義（ベースは空） |
 | `docs/spec/` | 仕様・フェーズ文書（private の submodule。前述の「仕様」） |
+| `docs/security-review/` | 人のセキュリティレビュー（`TASK-83`）の資料・記録票（`TASK-82`）。範囲の各行と対応ビヘイビア ID の表など |
 | `docs/records/` | TASK ごとの確認・走査の記録（判定は人が記録する） |
 | `.gitmodules` | submodule 定義（`docs/spec` を `update = none` で登録） |
 | `LICENSE-MIT`・`LICENSE-APACHE` | ライセンス（前述の「ライセンス」） |
