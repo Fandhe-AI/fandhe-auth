@@ -9,7 +9,7 @@ use crate::harness::HarnessError;
 /// 複数インスタンス・前段のプロキシ・TLS の終端の種類は作らない（Hub の `ARUN` の担当）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ComponentKind {
-    /// 最小の組込み先（TASK-716。実体は 2/6 が TASK-716 の後に置く）。
+    /// 最小の組込み先（TASK-716。実体は TASK-716 の完成後に置く）。
     Host,
     /// DB（`dev/postgres`。TASK-5。実体は 2/6）。
     Database,
@@ -39,8 +39,9 @@ impl ComponentKind {
 
 /// 構成要素の起動・停止の契約。誤りに秘密値・接続文字列を載せない（SECR-11・SECR-23）。
 ///
-/// TODO(TASK-10): 実体は 2/6（#91。DB・Host）・3/6（#92。Hub stub）・4/6（#93。console stub）が置く。
-/// TODO(TASK-716): Host の実体は最小の組込み先の完成後に置く。
+/// Database の実体は 2/6（#91）で [`crate::database::Database`] に置いた。
+/// TODO(TASK-10): Hub stub は 3/6（#92）、console stub は 4/6（#93）が置く。
+/// TODO(TASK-716): Host の実体は最小の組込み先の完成後に置く（2/6 では置かない）。
 pub trait Component {
     /// 種類。
     fn kind(&self) -> ComponentKind;

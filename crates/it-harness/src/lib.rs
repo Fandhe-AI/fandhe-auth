@@ -18,7 +18,9 @@
 #![forbid(unsafe_code)]
 
 pub mod component;
+pub mod database;
 pub mod harness;
 
 pub use component::{Component, ComponentKind};
+pub use database::{Database, DatabaseConfig, DatabaseEndpoint, EndpointHandle};
 pub use harness::{Harness, HarnessConfig, HarnessError, HarnessErrorKind, RunningHarness};

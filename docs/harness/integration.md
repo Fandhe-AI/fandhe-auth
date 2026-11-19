@@ -17,8 +17,8 @@
 
 | 種類（`ComponentKind`） | 担当の段 | 実体 | 形 |
 | --- | --- | --- | --- |
-| `Database` | 2/6（#91） | `dev/postgres`（`TASK-5`） | 外部プロセス |
-| `Host` | 2/6（#91） | 最小の組込み先（`TASK-716`。完成後に置く） | in-process |
+| `Database` | 2/6（#91。実体あり: `database::Database`） | `dev/postgres`（`TASK-5`） | 外部プロセス（`docker compose`） |
+| `Host` | `TASK-716` の完了待ち（未設置） | 最小の組込み先（`TASK-716`。2/6 では代用を作らない） | in-process |
 | `HubStub` | 3/6（#92） | `crates/hub-stub`（`TASK-7`） | in-process |
 | `ConsoleStub` | 4/6（#93） | `crates/console-stub`（`TASK-8`） | in-process |
 
@@ -32,13 +32,27 @@
 - 起動の途中で失敗したら、起動済みを逆順に停止してから誤りを返す。`Drop` でも停止を試みる。
 - 誤りは種類と構成要素の種類だけを持つ。秘密値・接続文字列を載せない（`SECR-11`・`SECR-23`）。
 
-入口を make ターゲットにしない理由: DB のパスワードを生成して呼び出し元へ渡せないため
-（`SECR-6`。`dev/postgres/README.md` の方針）。
+Database の起動: 試験ごとに固有の compose project 名・空きポート（既定）で `dev/postgres/compose.yaml` を
+`docker compose up -d --wait` し、ループバックだけの公開・ホストからの到達・`sslmode=require` の接続を確かめる。
+どれかが満たされなければ起動の失敗にする（fail-closed）。停止は `down --volumes`。
+
+起動の入口を make ターゲットにしない理由: パスワードを make から渡せないため（`SECR-6`）。
+Docker を使う試験の入口 `make it-db` は、パスワードを試験プロセスの中で生成するので、この理由に当たらない。
+
+## DB の接続情報の受け方
+
+- 設定は `DatabaseConfig`（引数の型）で試験ごとに差し替える。環境変数・ファイルは読まない（`DPOL-32`）。
+- パスワードは `openssl rand -hex 16` を試験プロセスの中で呼んで生成し、`SecretString` で持つ。子プロセスへは
+  環境変数だけで渡し、argv・誤り・`Debug`・記録に載せない（`SECR-6`・`SECR-11`・`SECR-23`・`SECR-30`）。
+  `docker compose config`・`docker inspect` は展開した値を出すので呼ばない。
+- 接続情報は `EndpointHandle`（共有のハンドル）で渡す。試験が `Database::endpoint_handle()` を先に取り、Host へ
+  構築時に渡す。起動前と停止後は `None`。URL の形（userinfo 付き）の接続文字列は作らない。
 
 ## CI との関係
 
-CI の runner に DB は無い。DB を使う試験を `make test` からどう分けるかは 2/6 で決める（未定）。
-検証を外す feature・環境変数の分岐は作らない前提で選ぶ（`DPOL-30`〜`DPOL-32`）。
+CI の runner に DB は無い。Docker を使う試験は `#[ignore]` にして `make test` から分け（「ignored」と数えられ、
+黙って合格にはならない）、`make it-db` で明示に流す。Docker の有無で自動に飛ばす分岐・feature は作らない
+（`DPOL-30`〜`DPOL-32`）。DB を使う試験を CI に載せるかは `TASK-6` の範囲。
 
 ## stub の扱い
 
@@ -55,4 +69,7 @@ stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）
 ## 未決・人の確認待ち
 
 - crate の追加・名前 `fandhe-auth-it-harness`・置き場 `crates/it-harness`・許可表の行
+- 2/6 の追加: `fandhe-auth-it-harness` → `fandhe-auth-secret` の辺（許可表の行）、make ターゲット名 `it-db`、
+  Database の待ち時間の既定 60 秒（開発の値で要件の値ではない）
+- 2/6 の未達: Host（最小の組込み先）の起動。`TASK-716` の完了待ちで、試験内の Fake Host を達成に数えない（`ACPT-7`）
 - `LIB-14`・`LIB-15` との関係（段階 1 のリリースのメンバーに含めない扱い）
