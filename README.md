@@ -140,7 +140,8 @@ workspace の members は 8 crate で、ルートの `Cargo.toml` に明示し�
 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査（CI の `lint` ジョブと同じ契約） |
 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
 | `make pg-check` | `scripts/dev-pg-check.sh` | 開発・検証用 PostgreSQL の起動の確かめ（起動中のインスタンスが対象。起動・停止はしない。CI では流さない。名前は暫定） |
-| `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。CI への組み込みは別 Issue。名前は暫定） |
+| `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。CI の `secret-scan` ジョブと同一。名前は暫定） |
+| `make scan-canary` | `scripts/secret-scan-canary.sh` | `make secret-scan` の陰性対照（実行時に組み立てたダミーで検出器が 1 を返すことを確かめる。何も変更しない。名前は暫定） |
 | `make test-hooks` | `scripts/hooks/test-hooks.sh` | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
 
 ## 開発・検証用 DB
@@ -174,7 +175,7 @@ Linux・macOS（標準の bash 3.2 を含む）について実行します。`sc
 
 | ワークフロー | 内容 |
 |---|---|
-| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`build-test`: `make build` と `make test`（Rust の workspace のビルドと試験。ubuntu-latest）。`lint`: `make lint`（rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査。ubuntu-latest）。`ci-complete`: 全ジョブ結果の集約 |
+| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`build-test`: `make build` と `make test`（Rust の workspace のビルドと試験。ubuntu-latest）。`lint`: `make lint`（rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査。ubuntu-latest）。`secret-scan`: `make secret-scan` と `make scan-canary`（秘密情報の混入検査と陰性対照。ubuntu-latest）。`ci-complete`: 全ジョブ結果の集約 |
 | `ai-review.yml` | Fandhe-AI/actions の ai-review（codex）による PR 自動レビュー。Actions variable `CODEX_HOME_DIR` が未設定の間は skip される |
 | `update-external.yml` | エージェントスキル（`skills-lock.json`）と submodule（`.gitmodules`）の日次自動追従 PR。secrets は org の `SUBMODULE_PAT` を使う（`SKILLS_PAT` 未登録時は共通側が `SUBMODULE_PAT` へフォールバック）。作成する PR には `dependencies` / `automated` ラベルが付く |
 

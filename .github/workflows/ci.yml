@@ -3,6 +3,7 @@
 # ローカル（`make check`）・Git hooks（lefthook.yml）・CI が同じコマンド契約を共有する。
 # CI 側で独自のチェックを定義せず、scripts/ の実体を呼ぶ（make スキルの「入口は複数でも
 # 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブで流す（TASK-6）。
+# 秘密情報の検査は secret-scan ジョブで流す（TASK-6）。
 # 言語固有のジョブを足すときは、必ず ci-complete の needs にも追加すること。
 # ジョブ・発火条件の追加・変更時は .claude/rules/github-actions.md に従う。
 #
@@ -173,6 +174,26 @@ jobs:
       - name: make lint
         run: make lint
 
+  # 秘密情報の混入検査（TASK-6）。PR のマージ結果の追跡ファイル全体を走査し、1 件以上で失敗する（SECR-23）。
+  # 続けて陰性対照（scan-canary）で、実行時に組み立てたダミーを足した一時 index に検出器が 1 を返すことを
+  # 確かめる（検出器が常に合格する状態を見逃さない）。ダミーは commit しない。本検査を先に流す。
+  # 範囲外: コミット履歴・submodule の中・バイナリ。検出時は .claude/rules/security.md の重大度「高」に従う。
+  secret-scan:
+    name: "make secret-scan + make scan-canary"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: make secret-scan
+        run: make secret-scan
+
+      - name: make scan-canary
+        run: make scan-canary
+
   # squash merge では PR タイトルがそのままコミット件名になるため、commit-msg フックと
   # 同じスクリプトで Conventional Commits 形式を検証する（フックの CI 側の対）。
   # PR タイトルは任意文字列のため、${{ }} を run へ直接展開せず env 経由でファイルへ書き出す
@@ -212,6 +233,7 @@ jobs:
       - test-hooks
       - build-test
       - lint
+      - secret-scan
       - pr-title
     steps:
       - name: 全ジョブ結果の検証

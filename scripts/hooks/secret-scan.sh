@@ -3,7 +3,7 @@
 #
 # 呼び出し:
 #   secret-scan.sh            staged 差分の追加行を走査する（lefthook pre-commit から呼ばれる）
-#   secret-scan.sh --tracked  追跡済みファイル全体を走査する（`make secret-scan`。CI への組み込みは別 Issue）
+#   secret-scan.sh --tracked  追跡済みファイル全体を走査する（`make secret-scan`。CI の secret-scan ジョブ）
 #   それ以外の引数は usage を出して終了コード 2。検査を外す引数・環境変数・除外リストは置かない。
 #
 # 規則表（規則 ID は暫定。確定は人が行う）:
