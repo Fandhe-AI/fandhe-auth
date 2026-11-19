@@ -16,6 +16,8 @@
 //! 5/6 で実行の記録（版・構成・日時。[`record`]）を置いた。
 //! 6/6 で使い方（`docs/harness/integration.md` の「使い方」）と、手順どおりのサンプル（`tests/sample.rs`）を置いた。
 //!
+//! TASK-13 の 1/8 で障害注入の種類と記録の形式（[`fault`]）を置いた。
+//!
 //! 構成の下書きは `docs/harness/integration.md`。
 
 #![forbid(unsafe_code)]
@@ -23,6 +25,7 @@
 pub mod component;
 pub mod console_stub;
 pub mod database;
+pub mod fault;
 pub mod harness;
 pub mod hub_stub;
 pub mod record;
@@ -30,6 +33,7 @@ pub mod record;
 pub use component::{Component, ComponentKind};
 pub use console_stub::{ConsoleStubComponent, ConsoleStubHandle, ConsoleStubSession};
 pub use database::{Database, DatabaseConfig, DatabaseEndpoint, EndpointHandle};
+pub use fault::{FaultCategory, FaultKind, FaultRecord, FaultTimeline, RunMode};
 pub use harness::{
     CompositionEntry, CompositionRecord, Harness, HarnessConfig, HarnessError, HarnessErrorKind,
     RunningHarness,

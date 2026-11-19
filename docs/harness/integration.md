@@ -43,7 +43,7 @@ Hub の stub の起動: `HubStubComponent::new(HubStubConfig)` を作り、`Box`
 `HubStubHandle` を取る。起動は設定から模擬一式（JWKS・生存確認・`fandhe-auth` の JWKS 取得・変更のフィード）を
 組んでハンドルに置くことで、ソケット・スレッド・子プロセスは作らない。試験は `handle.with(|s| ..)` で起動中の模擬を
 呼ぶ。起動前と停止後は `None`。鍵・期待値の要る受け口（本人トークン・Logout Token・assertion）はセッションに
-含めず、`session.config()` から試験が組む。障害注入は `TASK-13` の担当。
+含めず、`session.config()` から試験が組む。障害注入は `TASK-13` の担当（[fault-injection.md](fault-injection.md)）。
 
 console の stub の起動: `ConsoleStubComponent::new(ConsoleStubConfig, AgentCredentialConfig)` を作り（両方必須。
 既定値なし）、`Box` に入れる前に `handle()` で `ConsoleStubHandle` を取る。起動は設定から模擬一式（introspection・
@@ -163,7 +163,7 @@ UTF-8・LF の 1 行 1 項目 `key: value`。キーは ASCII 固定。
 ### この段で使えないもの
 
 - Host: `TASK-716` の完了待ち。記録では常に `not_started`。Fake の Host は置かない。
-- 障害注入: `TASK-13`。
+- 障害注入: `TASK-13`（[fault-injection.md](fault-injection.md)）。
 - 複数インスタンス・前段のリバースプロキシ・TLS の終端: Hub の `ARUN` の担当。本番の前段: `TASK-97`。
   どれも種類を足して作らない。同じ種類の 2 つ目の拒否は見本の 2 本目の試験と `tests/lifecycle.rs` で確かめる。
 
