@@ -1,0 +1,27 @@
+# 開発・検証用の PostgreSQL（契約テストを流す参照実装向け。TASK-5）。
+# 本番では Docker を前提にしない。本番の DB の所有・接続・migration は Hub の担当で、ここでは扱わない。
+# 資格情報は書かない。環境変数で実行時に注入する（README.md を参照）。
+name: fandhe-auth-dev-pg
+
+services:
+  postgres:
+    # 版は PoC-1（PostgreSQL 17）に由来する。版と digest の更新は人が決める（2026-11-19 に解決した値）。
+    image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
+    environment:
+      # 既定値は置かない。未設定なら起動に失敗する（trust に落とさない）。変数名は #38 で確定する。
+      POSTGRES_PASSWORD: ${FANDHE_AUTH_DEV_PG_PASSWORD:?FANDHE_AUTH_DEV_PG_PASSWORD must be set}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      # ループバックにだけ公開する。ポートは開発の設定で、要件の値ではない。
+      - "127.0.0.1:${FANDHE_AUTH_DEV_PG_PORT:-55432}:5432"
+    tmpfs:
+      # 停止（down）でデータは消える。
+      - /var/lib/postgresql/data:size=1g
+    healthcheck:
+      # 初期化中の一時サーバーは TCP で待ち受けないので、-h 127.0.0.1 で初期化の途中を準備完了と誤判定しない。
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: "no"
