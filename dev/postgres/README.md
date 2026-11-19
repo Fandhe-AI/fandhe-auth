@@ -23,6 +23,11 @@ docker compose -f dev/postgres/compose.yaml up -d --wait
 
 - 公開は `127.0.0.1` のみ。ポートは `FANDHE_AUTH_DEV_PG_PORT`（既定 55432）で変える
 - パスワードが未設定なら起動に失敗する
+- TLS は起動のたびに自己署名の証明書をコンテナ内（tmpfs）に生成する（`initdb/tls.sh`）。鍵はホストにもリポジトリにも出さない。
+  TCP の平文接続は拒否し（`AUDP-9` → Hub `ASTORE-55`）、認証は `scram-sha-256`。証明書の検証（`verify-full`）は対象外で、
+  `sslmode=require` の範囲にとどめる
+- `max_connections` は 300。`AUDB-82`・`ADB-11` の 64 並列と試験ごとのプールを収める開発の設定で、PoC の起動の条件に由来する。
+  要件の値ではなく、人が決める
 - `--env-file` を付けない場合、compose は変数補間用の `.env` を自動で読む。読み込み元は project directory（`-f` 指定時は
   compose ファイルのあるディレクトリ）と実行ディレクトリで、compose の版により異なる。リポジトリルートから実行するとルートの
   `.env` も読まれうる。読み込み元を固定したいときは `--env-file` を明示する。`dev/postgres/.env` は置いてもコミットされないが、使わない
@@ -44,6 +49,7 @@ docker compose -f dev/postgres/compose.yaml exec postgres psql -U postgres -c 's
 | port | `FANDHE_AUTH_DEV_PG_PORT`（既定 55432） |
 | user | `postgres` |
 | dbname | `postgres` |
+| sslmode | `require` |
 | password | `FANDHE_AUTH_DEV_PG_PASSWORD` から注入する。値は書かない |
 
 - ルートの `.env`（`make setup` が作る）は、実行ディレクトリがルートのとき compose に自動で読まれうる。ポートを変えるときは
@@ -55,7 +61,7 @@ docker compose -f dev/postgres/compose.yaml exec postgres psql -U postgres -c 's
 - ホストからの接続例。パスワードは環境変数で渡し、引数・URL に書かない
 
 ```bash
-PGPASSWORD="${FANDHE_AUTH_DEV_PG_PASSWORD}" psql "host=127.0.0.1 port=${FANDHE_AUTH_DEV_PG_PORT:-55432} user=postgres dbname=postgres" -c 'select 1'
+PGPASSWORD="${FANDHE_AUTH_DEV_PG_PASSWORD}" psql "host=127.0.0.1 port=${FANDHE_AUTH_DEV_PG_PORT:-55432} user=postgres dbname=postgres sslmode=require" -c 'select 1'
 ```
 
 ## 停止
@@ -64,7 +70,28 @@ PGPASSWORD="${FANDHE_AUTH_DEV_PG_PASSWORD}" psql "host=127.0.0.1 port=${FANDHE_A
 docker compose -f dev/postgres/compose.yaml down
 ```
 
-データは tmpfs にあり、停止で消える。
+データは tmpfs にあり、停止で消える。停止にパスワードの設定は要らない（実際に確かめた）。
+
+## 起動の確かめ
+
+契約テストを流す参照実装が前提にする条件が、起動中のインスタンスで揃っていることを確かめる。起動も停止もしない。
+
+```bash
+scripts/dev-pg-check.sh
+```
+
+- 確かめる項目: コンテナの healthy・ループバックだけの公開・PostgreSQL 17・`ssl on`・使える接続数が 64 以上・
+  平文の TCP の拒否・TLS と `scram-sha-256` でのログイン・一時ロールが非 superuser・
+  `REVOKE`/`GRANT` が効くこと（`AUDB-80` の前提だけ）・64 本の同時の TLS 接続（`AUDB-82` の前提だけ）
+- 一時のロールと DB（`fa_devchk_` 接頭辞）を作り、終了時に必ず消す。パスワードは表示せず、引数にも載せない
+- 失敗が 1 つでもあれば非 0 で終わる。CI では流さない（runner に DB が無い。`TASK-6`）
+- 並列で流すときは `COMPOSE_PROJECT_NAME` とポートを固有にする
+- 成功は「前提が揃った」という証拠にとどまる。`AUDB-80`・`AUDB-82` は検討中のままで、確定は人が記録する（`ACPT-7`）
+
+## ロール
+
+常設のロールは作らない。参照実装の試験の道具が superuser で試験用のロールと DB をその場で作る。
+DB の主体の分離・初期設定は Hub `ASTORE-5` 以降の担当で、ここでは扱わない。
 
 ## 注意
 
@@ -73,5 +100,7 @@ docker compose -f dev/postgres/compose.yaml down
 
 ## 持ち越し
 
-- TLS・ロール・`max_connections`: #39
-- 手順のまとめとルート README への反映: #40
+- `AUDB-80` の確かめの本体（カタログの点検・100 回の試行・変異）: `TASK-797`。`AUDB-82` の `40P01` の吸収の試験: `TASK-799`
+- 起動の確かめの make ターゲット化・手順のまとめ・ルート README への反映: #40
+- CI への搭載: `TASK-6`
+- TLS 証明書の検証（`verify-full`。`AUDP-10`・`AUDP-11`）・`ssl_min_protocol_version` の引き上げ: 人が決める
