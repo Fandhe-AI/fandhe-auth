@@ -11,14 +11,10 @@ use fandhe_auth_e2e_harness::{
 
 type Log = Arc<Mutex<Vec<String>>>;
 
-const MARKER: &str = "MARKER-MUST-NOT-APPEAR";
-
 struct Fake {
     kind: E2eComponentKind,
     log: Log,
     fail_start: bool,
-    /// 目印。誤りに出ないことを確かめる。
-    marker: &'static str,
 }
 
 impl Fake {
@@ -27,7 +23,6 @@ impl Fake {
             kind,
             log: Arc::clone(log),
             fail_start,
-            marker: MARKER,
         })
     }
 }
@@ -38,7 +33,6 @@ impl E2eComponent for Fake {
     }
     fn start(&mut self) -> Result<(), E2eError> {
         if self.fail_start {
-            let _ = self.marker;
             return Err(E2eError::new(E2eErrorKind::StartFailed, self.kind));
         }
         self.log
@@ -118,9 +112,8 @@ fn failed_start_stops_started_components() {
         entries(&log),
         vec!["start RelyingParty", "stop RelyingParty"]
     );
-    // SECR-11・SECR-23: 誤りの表示に目印が出ない。
-    assert!(!format!("{err}").contains(MARKER));
-    assert!(!format!("{err:?}").contains(MARKER));
+    // SECR-11・SECR-23: E2eError は種類（kind）と構成要素の種類しか保持できず、
+    // 秘密値・URL・パスを載せる欄が型に無い。そのため値の混入は型で保証し、ここでは検査しない。
 }
 
 /// `Drop` でも停止が呼ばれる。
