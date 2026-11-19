@@ -2,6 +2,8 @@
 
 契約テストを流す参照実装向けの、開発・検証用 PostgreSQL の起動定義（`TASK-5`、2026-11-04 の追随で範囲を絞った後の内容）。
 
+手順の流れは「前提 → 起動 → 初期化（初回の起動で自動）→ 起動の確かめ → 接続 → 停止 → 初期化のやり直し」。
+
 ## 位置づけ
 
 - 開発・検証用だけである。**本番では Docker を必須にしない**（`TASK-5`）
@@ -37,6 +39,24 @@ docker compose -f dev/postgres/compose.yaml up -d --wait
 ```bash
 docker compose -f dev/postgres/compose.yaml exec postgres psql -U postgres -c 'select version()'
 ```
+
+## 初期化
+
+初回の起動（データが無い状態）で、次が自動で行われる。手で流す手順は無い。
+
+- `initdb` が認証方式を `scram-sha-256` にする（`POSTGRES_INITDB_ARGS` の `--auth-host=scram-sha-256`）
+- `initdb/tls.sh` が自己署名の証明書を作り、`ssl = on` にして `pg_hba.conf` を書き換える（TCP の平文は `reject`）
+
+データは tmpfs にあるため、初期化をやり直すには `down` で消してから `up` し直す。パスワードは `up` のたびに生成して `export` する。
+
+```bash
+FANDHE_AUTH_DEV_PG_PASSWORD=unused docker compose -f dev/postgres/compose.yaml down
+export FANDHE_AUTH_DEV_PG_PASSWORD="$(openssl rand -hex 16)"
+docker compose -f dev/postgres/compose.yaml up -d --wait
+```
+
+ここで行わないこと: migration の適用・常設ロールの作成・DB の主体の分離。`TASK-5` の 2026-11-04 の追随で範囲から外れており、
+Hub `ASTORE-5` 以降の担当である（下の「ロール」）。
 
 ## 接続設定
 
@@ -79,8 +99,11 @@ FANDHE_AUTH_DEV_PG_PASSWORD=unused docker compose -f dev/postgres/compose.yaml d
 契約テストを流す参照実装が前提にする条件が、起動中のインスタンスで揃っていることを確かめる。起動も停止もしない。
 
 ```bash
-scripts/dev-pg-check.sh
+make pg-check   # 直接: scripts/dev-pg-check.sh
 ```
+
+`FANDHE_AUTH_DEV_PG_PASSWORD` を起動時と同じ値で `export` しておく。ターゲット名 `pg-check` は暫定で、人が確定する。
+起動・停止の make ターゲットは置かない（生成したパスワードを呼び出し元のシェルへ `export` できず、保存へ流れるため。`SECR-6`）。
 
 - 確かめる項目: コンテナの healthy・ループバックだけの公開・PostgreSQL 17・`ssl on`・使える接続数が 64 以上・
   `pg_hba_file_rules` の実効ルール（host 系が `scram-sha-256` か `reject` だけで、`hostssl` は `scram-sha-256`・
@@ -105,6 +128,5 @@ DB の主体の分離・初期設定は Hub `ASTORE-5` 以降の担当で、こ�
 ## 持ち越し
 
 - `AUDB-80` の確かめの本体（カタログの点検・100 回の試行・変異）: `TASK-797`。`AUDB-82` の `40P01` の吸収の試験: `TASK-799`
-- 起動の確かめの make ターゲット化・手順のまとめ・ルート README への反映: #40
 - CI への搭載: `TASK-6`
 - TLS 証明書の検証（`verify-full`。`AUDP-10`・`AUDP-11`）・`ssl_min_protocol_version` の引き上げ: 人が決める

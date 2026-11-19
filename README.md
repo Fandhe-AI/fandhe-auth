@@ -38,7 +38,8 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `Cargo.toml`・`Cargo.lock`・`crates/` | Cargo の workspace（virtual workspace）と段階 1 の crate 雛形（`crates/<名前>`、crate 名は `fandhe-auth-<名前>`）。members は明示列挙する（後述の「ビルド」） |
 | `Makefile` | `scripts/` を呼ぶだけの薄い入口（`make help` で一覧） |
 | `rustfmt.toml` | rustfmt の設定（edition のみ。暫定） |
-| `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check` / `lint` / `check-crate-deps`）。Make なしでも直接実行できる |
+| `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check` / `lint` / `check-crate-deps` / `dev-pg-check`）。Make なしでも直接実行できる |
+| `dev/postgres/` | 開発・検証用 PostgreSQL の Docker 構成（`TASK-5`）。契約テストを流す参照実装向けで、本番では Docker を必須にしない。手順は [dev/postgres/README.md](./dev/postgres/README.md) |
 | `scripts/hooks/` | lefthook から呼ばれる Git hooks の実体 |
 | `lefthook.yml` | Git hooks 定義（pre-commit / commit-msg） |
 | `.editorconfig`・`.editorconfig-checker.json` | 文字コード・改行・インデントの宣言と、その検査の除外設定（ライセンス本文は除外） |
@@ -62,6 +63,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | [ShellCheck](https://www.shellcheck.net/) | シェルスクリプトの lint | ✓ |
 | Rust toolchain（cargo・rustfmt・clippy） | `make fmt`・`make lint`（版は未定。TASK-4 で決める） | ✓ |
 | [direnv](https://direnv.net/) | `.env` の自動読み込み | 任意 |
+| Docker・Docker Compose v2 以降・openssl | 開発・検証用 PostgreSQL と `make pg-check`（[dev/postgres/README.md](./dev/postgres/README.md)） | 任意 |
 
 macOS（Homebrew）の例:
 
@@ -129,7 +131,14 @@ Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）�
 | `make fmt` | `cargo fmt --all` | rustfmt で整形を適用する（ソースを書き換える） |
 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査（CI への搭載は TASK-6） |
 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
+| `make pg-check` | `scripts/dev-pg-check.sh` | 開発・検証用 PostgreSQL の起動の確かめ（起動中のインスタンスが対象。起動・停止はしない。CI では流さない。名前は暫定） |
 | `make test-hooks` | `scripts/hooks/test-hooks.sh` | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
+
+## 開発・検証用 DB
+
+契約テストを流す参照実装向けの PostgreSQL を Docker で起動する構成です（`TASK-5`）。本番の DB の所有・接続・migration は
+Hub `ASTORE-5` 以降の担当で、ここでは扱いません。起動・初期化・停止・起動の確かめの手順は
+[dev/postgres/README.md](./dev/postgres/README.md) にまとめています。接続設定の雛形は `.env.example` です（パスワードは置かず、実行時に生成します）。
 
 ## Git hooks
 

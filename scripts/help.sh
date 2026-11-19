@@ -23,6 +23,7 @@ cat <<'EOF'
   fmt         cargo fmt --all                rustfmt で整形を適用する（ソースを書き換える）
   lint        scripts/lint.sh                rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向き
   crate-deps  scripts/check-crate-deps.sh    crate 間の依存の向きの検査（許可表との照合）
+  pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
 
 Git hooks（lefthook.yml から呼ばれる。直接実行も可）:
 

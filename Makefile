@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks build test fmt lint crate-deps
+.PHONY: help doctor setup check test-hooks build test fmt lint crate-deps pg-check
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-10s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -48,3 +48,8 @@ lint: ## rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向
 
 crate-deps: ## crate 間の依存の向きの検査（許可表との照合）。直接: scripts/check-crate-deps.sh
 	@scripts/check-crate-deps.sh
+
+# pg-check は暫定の名前（人が確定する）。起動・停止の make ターゲットは置かない
+# （make の子プロセスは生成したパスワードを呼び出し元のシェルへ export できず、保存へ流れるため。SECR-6）。
+pg-check: ## 開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）。直接: scripts/dev-pg-check.sh
+	@scripts/dev-pg-check.sh

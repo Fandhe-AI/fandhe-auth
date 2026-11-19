@@ -37,6 +37,8 @@ check_tool required cargo cargo --version
 check_tool required cargo-fmt cargo fmt --version
 check_tool required cargo-clippy cargo clippy --version
 check_tool optional direnv direnv version
+check_tool optional docker-compose docker compose version
+check_tool optional openssl openssl version
 
 if [ -f "${ROOT_DIR}/.env" ]; then
   echo "ok   .env: present (values are not displayed)"
