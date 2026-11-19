@@ -61,6 +61,7 @@ dependencies = [
 name = "fandhe-auth-it-harness"
 version = "0.0.0"
 dependencies = [
+ "fandhe-auth-console-stub",
  "fandhe-auth-hub-stub",
  "fandhe-auth-secret",
 ]

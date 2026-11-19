@@ -2,7 +2,7 @@
 //!
 //! 役割: 最小の組込み先（TASK-716）・DB（dev/postgres。TASK-5）・Hub の stub（TASK-7）・console の stub
 //! （TASK-8）をつなぐ本体の結合試験で、構成要素の起動と停止の入口を 1 か所にそろえる。呼び出し元は
-//! 結合試験（試験ビルド）だけで、構成要素の実体は [`Component`] を実装して置く（DB は 2/6、Hub の stub は 3/6 で置いた）。
+//! 結合試験（試験ビルド）だけで、構成要素の実体は [`Component`] を実装して置く（DB は 2/6、Hub の stub は 3/6、console の stub は 4/6 で置いた）。
 //!
 //! 範囲外: 複数インスタンス・前段のリバースプロキシ・TLS の終端を含む統合の試験は Hub の `ARUN` の担当で、
 //! ここには置かない。E2E（TASK-11）・計測と負荷（TASK-12）も別のハーネスで、区別のため `it-` を付けた。
@@ -18,11 +18,13 @@
 #![forbid(unsafe_code)]
 
 pub mod component;
+pub mod console_stub;
 pub mod database;
 pub mod harness;
 pub mod hub_stub;
 
 pub use component::{Component, ComponentKind};
+pub use console_stub::{ConsoleStubComponent, ConsoleStubHandle, ConsoleStubSession};
 pub use database::{Database, DatabaseConfig, DatabaseEndpoint, EndpointHandle};
 pub use harness::{
     CompositionEntry, CompositionRecord, Harness, HarnessConfig, HarnessError, HarnessErrorKind,

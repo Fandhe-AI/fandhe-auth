@@ -10,9 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# workspace 内の依存は secret（DB のパスワードを秘密値の型で持つ。SECR-30。TASK-10 (2/6)）と hub-stub
-# （TASK-10 (3/6)。試験専用どうしの辺）。外部の crate は直接は足さない。console-stub・minimal-host への辺は
-# 後続の段で足し、足すときに scripts/check-crate-deps.sh の許可表を人に確かめる。hub-stub の辺の行も人の確認待ち。
+# workspace 内の依存は secret（DB のパスワードを秘密値の型で持つ。SECR-30。TASK-10 (2/6)）・hub-stub
+# （TASK-10 (3/6)）・console-stub（TASK-10 (4/6)）。いずれも試験専用どうしの辺。外部の crate は直接は足さない。
+# minimal-host への辺は後続の段で足し、足すときに scripts/check-crate-deps.sh の許可表を人に確かめる。
+# hub-stub・console-stub の辺の行は人の確認待ち。
 [dependencies]
 fandhe-auth-secret = { path = "../secret" }
 fandhe-auth-hub-stub = { path = "../hub-stub" }
+fandhe-auth-console-stub = { path = "../console-stub" }
