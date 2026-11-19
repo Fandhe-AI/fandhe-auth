@@ -99,14 +99,16 @@ UTF-8・LF の 1 行 1 項目 `key: value`。キーは ASCII 固定。
 | `format` | 形式の識別子 `fandhe-auth-it-run-record/1` | 定数。形式を変えたら末尾の版を上げる |
 | `started_at`・`recorded_at` | UTC・RFC 3339（秒） | ハーネスの起動時刻・記録を作った時刻 |
 | `harness_version` | crate の版 | `CARGO_PKG_VERSION`（コンパイル時） |
-| `source_revision` | 試験したソースの git revision（16 進 40 または 64 文字） | `git rev-parse HEAD` |
-| `source_dirty` | 作業ツリーに変更があるか（`true`/`false`） | `git status --porcelain` が空かだけ。ファイル名は載せない |
-| `spec_revision` | pin している spec の revision | `git rev-parse HEAD:docs/spec`（submodule を取得していなくても取れる） |
-| `rustc` | コンパイラの版 | `rustc --version` |
+| `source_revision_at_record` | 記録時点のソースの git revision（16 進 40 または 64 文字） | `git rev-parse HEAD`（記録時） |
+| `source_dirty_at_record` | 記録時点で作業ツリーに変更があるか（`true`/`false`） | `git status --porcelain` が空かだけ。ファイル名は載せない |
+| `spec_revision_at_record` | 記録時点で pin している spec の revision | `git rev-parse HEAD:docs/spec`（記録時。submodule を取得していなくても取れる） |
+| `rustc_at_build` | ビルド時のコンパイラの版 | `rustc --version`（`build.rs` がビルド時に取得） |
 | `component` | 種類ごとに `started real`・`started stub`・`not_started` | 構成の記録。4 種すべてを出す |
 | `note` | stub を含むときだけ。stub の合格を実物の合格に数えない旨 | `A-2026-10-28-9`・`ACPT-7` |
 | `hub_stub_field` | Hub の stub の欄名と「仮置き」の印 | `ProvisionalRecord`（取り込んだとき） |
 | `console_contract` | console の stub の項目名・印・根拠 ID | `ContractRecord`（取り込んだとき） |
+
+`*_at_record` は記録を作った時点の情報で、`*_at_build` はビルド時の情報である。記録時の作業ツリーとビルド対象が食い違いうるため、キー名で時点を区別する。
 
 未起動の種類も `not_started` と出すのは、Host（`TASK-716` 待ち）を試したと読まれないようにするため。
 
