@@ -95,6 +95,7 @@ workspace の members は段階 1 の 5 crate（`core`・`secret`・`db-tests`�
 Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）は置きません（`LIB-14`・`LIB-15`）。
 これとは別に、試験専用の `hub-stub`（Hub の検証用 stub。`TASK-7`）を members に足しています。段階 1 のリリースの
 メンバーではなく、どの crate からも依存しません。名前と置き場は仮称・暫定で、人が確定します。
+同様に試験専用の `console-stub`（console の検証用 stub。`TASK-8`）も members に足しています。扱いは `hub-stub` と同じです。
 
 手順は次の順です。直接実行する場合のコマンドも併記します。
 
