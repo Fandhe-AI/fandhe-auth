@@ -116,7 +116,8 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 
 ### 2. 区分（値の区別）の表し方
 
-区分は各行に `class=<トークン>` で明示する。キーから暗黙に決めない。どの行にも区分が出る（「値の区別」の規則 1）。
+区分は値を持つ各行に `class=<トークン>` と `refs=<…>` で明示する。キーから暗黙に決めない（「値の区別」の規則 1）。
+適用除外は値を持たないメタデータの行だけ（`format:`・`run_started_at:`・`recorded_at:`・`note:`・`judgment:`）。下の 3〜5 の各行の形式は、すべて `class=`・`refs=` を含む。
 
 | トークン | 区分 |
 | --- | --- |
@@ -147,11 +148,11 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 - 時間は整数のナノ秒で、単位はキーに入れる（`p95_ns` 等）。小数・単位の換算はしない。人向けの表示の単位は 10/10 の手順書で扱う。
 - 単位のトークンは `ns`・`count`・`per_s`。値は整数だけにする。
 - 指標の行:
-  `metric: <段階>.<回> interval=<区間名> class=measured n=<n> p50_ns=<v|none> p95_ns=<v|none> p99_ns=<v|none> max_ns=<v|none> max_trial=<通し番号|none>`
+  `metric: <段階>.<回> interval=<区間名> class=measured n=<n> p50_ns=<v|none> p95_ns=<v|none> p99_ns=<v|none> max_ns=<v|none> max_trial=<通し番号|none> refs=measured`
   - 百分位の値には必ず `n` と区間名が並ぶ。`n=0` のときは百分位・最大・`max_trial` をすべて `none` にする（0 と書かない）。
-  - 不変条件: `p50 <= p95 <= p99 <= max`、`n <= success`。時間の分布は成功の試行だけで作る。
-  - 失敗の時間の分布は同じ形の `failure_metric:` 行で別に出す。時間切れは件数だけで数える。
-- 最悪の回の行: `worst_run: <段階> by=<比べる指標> interval=<区間名> run=<回の通し番号|none>`
+  - 不変条件: `p50 <= p95 <= p99 <= max`、`n <= success`。`metric` の分布は成功の試行だけで作る（成功のみの集計の規則は `metric` に限る）。
+  - 失敗の時間の分布は同じ形の `failure_metric:` 行（`class=measured`・`refs=measured` を持つ）で別に出し、標本は失敗の試行だけで作る。不変条件は `n <= failure`（`n <= success` は適用しない）。時間切れは件数だけで数える。
+- 最悪の回の行: `worst_run: <段階> by=<比べる指標> interval=<区間名> run=<回の通し番号|none> class=measured refs=measured`
   - 比べる指標は呼び出し元が明示する（既定の仮置きは `p99_ns`）。同じ値が並んだときは通し番号の小さい回を採る。どの回も `n=0` のときは `run=none`。
   - 「最大」（`metric` 行の `max_ns`・`max_trial`）と「最悪の回」の両方を出す。
 
@@ -159,22 +160,22 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 
 - `stage: <段階の通し番号> class=test_condition refs=harness_config concurrency_configured=<n> repetitions=<r> trials_planned=<k> warmup=<w>`
 - `run: <段階>.<回> class=measured refs=measured concurrency_observed_max=<n> executed=<e> success=<s> failure=<f> timeout=<t> excluded=<x>`
-- `failure_kind: <段階>.<回> class=measured kind=<種類名> count=<c>`
+- `failure_kind: <段階>.<回> class=measured refs=measured kind=<種類名> count=<c>`
 - 件数の不変条件: `executed = success + failure + timeout`、`failure = Σ failure_kind の count`。除外は `executed` の外に別に数える。
 - 設定の並行数（`stage` 行）と実測の最大同時実行数（`run` 行）は別の欄にする。閉ループのときは `concurrency_observed_max <= concurrency_configured` を不変条件の候補とする（5/10 の決定に依る）。
 - 段階が 1 つでも `stage: 1 …` を出す。段階を変える実行（8/10）は同じ行の並びを繰り返す。
 
 ### 5. 測定の条件（機材・構成・並行数）
 
-- 機材は抽象的な属性だけで、`condition_machine: <属性> <値|unknown>` の形にする。属性は 6 つで、すべて常に出し、取れないものは `unknown` と明示する。
+- 機材は抽象的な属性だけで、`condition_machine: <属性> <値|unknown> class=test_condition refs=harness_config` の形にする。属性は 6 つで、すべて常に出し、取れないものは `unknown` と明示する。
   - `cpu_count`・`memory_mib`・`arch`・`os_family`
   - `virtualization`（`none`・`vm`・`container`・`unknown`）
   - `build_profile`（`debug`・`release`・`unknown`）
 - 自動での取得は 7/10 で、この段は欄だけを定める。
 - ホスト名・機材の名前・内部のアドレス・ホームのパス・利用者名の欄は作らない（`SECR-11`・`SECR-23`、04-behavior/README.md の (d)）。
-- 構成は `condition_component: <種類> started real|started stub|not_started` の形にし、語彙と 4 種は実行の記録の `component` 行と同じにする。
+- 構成は `condition_component: <種類> started real|started stub|not_started class=test_condition refs=harness_config` の形にし、語彙と 4 種は実行の記録の `component` 行と同じにする。
   stub を含むときは、stub の合格を実物の合格に数えない旨の `note:` を出す（`A-2026-10-28-9`・`ACPT-7`）。
-- `condition_loop: closed|open|undecided`（5/10 が決めるまでは `undecided` を許す）。並行数は 4 の `stage` 行に書く。
+- `condition_loop: closed|open|undecided class=test_condition refs=harness_config`（5/10 が決めるまでは `undecided` を許す）。並行数は 4 の `stage` 行に書く。
 - 版の情報（revision・rustc の版）は実行の記録側にあり、`run_started_at` で結ぶ。この記録には重複して持たない。
 
 ### 6. 差し込み対策（出してはいけないものと守り方）
@@ -195,22 +196,22 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 format: fandhe-auth-load-record/1
 run_started_at: 1970-01-01T00:00:00Z
 recorded_at: 1970-01-01T00:01:00Z
-condition_machine: cpu_count unknown
-condition_machine: memory_mib unknown
-condition_machine: arch unknown
-condition_machine: os_family unknown
-condition_machine: virtualization unknown
-condition_machine: build_profile unknown
-condition_component: Database not_started
-condition_component: Host not_started
-condition_component: HubStub started stub
-condition_component: ConsoleStub not_started
+condition_machine: cpu_count unknown class=test_condition refs=harness_config
+condition_machine: memory_mib unknown class=test_condition refs=harness_config
+condition_machine: arch unknown class=test_condition refs=harness_config
+condition_machine: os_family unknown class=test_condition refs=harness_config
+condition_machine: virtualization unknown class=test_condition refs=harness_config
+condition_machine: build_profile unknown class=test_condition refs=harness_config
+condition_component: Database not_started class=test_condition refs=harness_config
+condition_component: Host not_started class=test_condition refs=harness_config
+condition_component: HubStub started stub class=test_condition refs=harness_config
+condition_component: ConsoleStub not_started class=test_condition refs=harness_config
 note: stub results are not counted as real results
-condition_loop: undecided
+condition_loop: undecided class=test_condition refs=harness_config
 stage: 1 class=test_condition refs=harness_config concurrency_configured=1 repetitions=1 trials_planned=100 warmup=0
 run: 1.1 class=measured refs=measured concurrency_observed_max=1 executed=100 success=100 failure=0 timeout=0 excluded=0
-metric: 1.1 interval=client_response class=measured n=100 p50_ns=50 p95_ns=95 p99_ns=99 max_ns=100 max_trial=100
-worst_run: 1 by=p99_ns interval=client_response run=1
+metric: 1.1 interval=client_response class=measured n=100 p50_ns=50 p95_ns=95 p99_ns=99 max_ns=100 max_trial=100 refs=measured
+worst_run: 1 by=p99_ns interval=client_response run=1 class=measured refs=measured
 value: p99_target class=undecided value=none unit=ns refs=none
 judgment:
 ```
