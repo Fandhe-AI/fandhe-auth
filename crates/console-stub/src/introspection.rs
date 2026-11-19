@@ -150,6 +150,22 @@ impl ConsoleIntrospector {
     }
 }
 
+/// RFC 6749 §3.3・RFC 7662 §2.2 の scope 構文。区切りは ASCII SP のみ。
+/// 各トークンは `%x21 / %x23-5B / %x5D-7E` の 1 文字以上。違反は `None`。
+fn parse_scope(s: &str) -> Option<Vec<String>> {
+    if s.is_empty() {
+        return Some(Vec::new());
+    }
+    s.split(' ')
+        .map(|t| {
+            let ok = !t.is_empty()
+                && t.bytes()
+                    .all(|b| matches!(b, 0x21 | 0x23..=0x5B | 0x5D..=0x7E));
+            ok.then(|| t.to_owned())
+        })
+        .collect()
+}
+
 /// 応答の解釈だけを行う。有効になるのは `200`・`active:true`・要件の充足のときだけ。
 pub fn evaluate(
     response: &IntrospectionHttpResponse,
@@ -179,7 +195,7 @@ pub fn evaluate(
         }
     };
     let scope: Vec<String> = match opt_str("scope")? {
-        Some(s) => s.split_whitespace().map(str::to_owned).collect(),
+        Some(s) => parse_scope(&s).ok_or(malformed)?,
         None => Vec::new(),
     };
     let exp = match obj.get("exp") {

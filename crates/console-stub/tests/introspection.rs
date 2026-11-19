@@ -137,6 +137,28 @@ fn failures_never_become_valid() {
 }
 
 #[test]
+fn scope_is_split_on_ascii_space_only() {
+    // RFC 6749 §3.3・RFC 7662 §2.2: 区切りは SP のみ。タブ・改行・Unicode 空白・空トークンは不正
+    let i = introspector();
+    let cases = [
+        "other\\tagent:test",
+        "a\\nagent:test",
+        "a\u{3000}agent:test",
+        "a  agent:test",
+        " a",
+        "a ",
+    ];
+    for scope in cases {
+        let body = format!(r#"{{"active":true,"scope":"{scope}"}}"#);
+        assert_eq!(
+            i.check(TOKEN, &req(false), 1000, |_, _| resp(200, &body)),
+            Err(IntrospectionFailure::MalformedResponse),
+            "{scope:?}"
+        );
+    }
+}
+
+#[test]
 fn request_follows_config_and_token_is_passed_by_argument() {
     let seen = Cell::new(false);
     let _ = introspector().check(TOKEN, &req(false), 1000, |r, t| {
