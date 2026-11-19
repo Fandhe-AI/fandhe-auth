@@ -67,10 +67,12 @@ PGPASSWORD="${FANDHE_AUTH_DEV_PG_PASSWORD}" psql "host=127.0.0.1 port=${FANDHE_A
 ## 停止
 
 ```bash
-docker compose -f dev/postgres/compose.yaml down
+FANDHE_AUTH_DEV_PG_PASSWORD=unused docker compose -f dev/postgres/compose.yaml down
 ```
 
-データは tmpfs にあり、停止で消える。停止にパスワードの設定は要らない（実際に確かめた）。
+データは tmpfs にあり、停止で消える。compose.yaml は `FANDHE_AUTH_DEV_PG_PASSWORD` を必須の補間にしているため、
+変数が未設定だと `down` も補間で失敗する。起動時の `export` が残っていなければ、上のように値を与える
+（停止には使われない値で、実際のパスワードでなくてよい）。
 
 ## 起動の確かめ
 
@@ -81,9 +83,11 @@ scripts/dev-pg-check.sh
 ```
 
 - 確かめる項目: コンテナの healthy・ループバックだけの公開・PostgreSQL 17・`ssl on`・使える接続数が 64 以上・
-  平文の TCP の拒否・TLS と `scram-sha-256` でのログイン・一時ロールが非 superuser・
-  `REVOKE`/`GRANT` が効くこと（`AUDB-80` の前提だけ）・64 本の同時の TLS 接続（`AUDB-82` の前提だけ）
-- 一時のロールと DB（`fa_devchk_` 接頭辞）を作り、終了時に必ず消す。パスワードは表示せず、引数にも載せない
+  `pg_hba_file_rules` の実効ルール（host 系が `scram-sha-256` か `reject` だけで、`hostssl` は `scram-sha-256`・
+  `hostnossl` は `reject`）・平文の TCP の拒否・誤ったパスワードの拒否・正しい資格情報での TLS ログイン・
+  一時ロールが非 superuser・`REVOKE`/`GRANT` が効くこと（`AUDB-80` の前提だけ）・
+  64 本の同時の TLS 接続（`AUDB-82` の前提だけ。全接続をバリアで保持し、`pg_stat_activity` で 64 到達を確かめてから解放する）
+- 一時のロールと DB（`fa_devchk_` 接頭辞）を作り、終了時に必ず消す。名前とパスワードは SQL に連結せず、環境変数経由で psql 変数に束縛する（`AUDB-43`）。パスワードは表示せず、引数にも載せない
 - 失敗が 1 つでもあれば非 0 で終わる。CI では流さない（runner に DB が無い。`TASK-6`）
 - 並列で流すときは `COMPOSE_PROJECT_NAME` とポートを固有にする
 - 成功は「前提が揃った」という証拠にとどまる。`AUDB-80`・`AUDB-82` は検討中のままで、確定は人が記録する（`ACPT-7`）
