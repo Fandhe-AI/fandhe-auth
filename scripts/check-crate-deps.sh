@@ -24,6 +24,7 @@ cd "${ROOT_DIR}"
 # 一方向（PLG-26・PLG-28・LIB-19。client には依存しない）、hub-stub は試験専用で secret のみ（秘密値の型。SECR-31）
 # （TASK-7。本体・Plugin から hub-stub への辺は無い。LIB-2・LIB-4 の向き）、
 # console-stub も試験専用で workspace 内の依存なし（TASK-8。同じ向き）。
+# backend は差し替え点の枠だけで workspace 内の依存なし（TASK-9。辺を足すのは中身の TASK で、足すときに確かめる）。
 allowed_deps() {
   case "$1" in
     fandhe-auth-secret) echo "" ;;
@@ -33,6 +34,7 @@ allowed_deps() {
     fandhe-auth-plugin-oidc) echo "fandhe-auth-core fandhe-auth-secret" ;;
     fandhe-auth-hub-stub) echo "fandhe-auth-secret" ;;
     fandhe-auth-console-stub) echo "" ;;
+    fandhe-auth-backend) echo "" ;;
     *) return 1 ;;
   esac
 }
