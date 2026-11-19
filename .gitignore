@@ -32,3 +32,6 @@ Thumbs.db
 !/.vscode/settings.json
 *.swp
 *~
+
+# 開発・検証用 PostgreSQL の compose が自動で読む .env
+/dev/postgres/.env
