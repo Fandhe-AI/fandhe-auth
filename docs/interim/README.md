@@ -26,11 +26,11 @@ spec の本文・版の数値は写さず、ID で引く（`.claude/rules/spec-r
 | # | 提供元の部品 | 暫定の実装を作る TASK | 差し替え・再試験の TASK | コードの置き場 | この repo での扱い |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `fandhe-backend` CSRF の Gate | TASK-523 | TASK-527 | `backend`（段階 2・未作成・未定） | TASK-527 は置き換え（→ Hub `ARUN-17`）。Gate の登録・実行は Hub（`csrf-ssr.md` の適用範囲・`D-2026-10-30-1`） |
-| 2 | `fandhe-backend` 安全な既定値の `SetCookie` | TASK-214 | TASK-527 | 同上 | 同上 |
-| 3 | `fandhe-backend` 同一オリジンのリダイレクト先 | TASK-533 | TASK-527 | 同上 | 同上 |
-| 4 | `fandhe-backend` `no-store` の補助 | TASK-530 | TASK-527 | 同上 | 同上 |
+| 2 | `fandhe-backend` 安全な既定値の `SetCookie` | TASK-214（目安。認証 Cookie の発行・消去の TASK で、部品そのものの TASK ではない） | TASK-527 | 同上 | 同上（差し替えの実施は Hub の担当） |
+| 3 | `fandhe-backend` 同一オリジンのリダイレクト先 | TASK-533 | TASK-527 | 同上 | 同上（差し替えの実施は Hub の担当） |
+| 4 | `fandhe-backend` `no-store` の補助 | TASK-530 | TASK-527 | 同上 | 同上（差し替えの実施は Hub の担当） |
 | 5 | `fandhe-backend` フォームの上限 | TASK-534 | TASK-527 | 同上 | TASK-534・TASK-61 は移管（→ Hub `ARUN-46`・`ARUN-47`） |
-| 6 | `fandhe-backend` 信頼するプロキシ | TASK-535・TASK-536 | 差し替えない | 同上 | 提供を待たず自前の accept ループで代える（`D-2026-10-27-2`・`D-2026-10-16-19`）。提供された場合は改めて検討する |
+| 6 | `fandhe-backend` 信頼するプロキシ | TASK-535・TASK-536 | TASK-527（提供された場合）。現時点は提供なし（`D-2026-10-27-2`） | 同上 | 提供されるまで自前の accept ループで代える（`D-2026-10-16-19` の (1)・`D-2026-10-27-2`）。差し替えの実施は Hub の担当（TASK-527 は置き換え → Hub `ARUN-17`） |
 | 7 | `fandhe-backend` 下流の JWT の検証（`REQ-16`） | TASK-370 | TASK-372（再試験 TASK-89） | `crates/client`（段階 1・既存） | 本 repo の範囲 |
 | 8 | `fandhe-frontend` の builder（`REQ-17`） | TASK-532 | TASK-90（TASK-152 は移管 → `UISF-10`・`UISF-22`） | `frontend`（段階 2・未作成・未定） | 画面は Hub。TASK-664 は移管（→ Hub `ASCR-1`・`ARUN-17`） |
 | 9 | `fandhe-db` | PostgreSQL の参照実装（`dev/postgres/`・TASK-5） | TASK-628（契約 trait は TASK-584） | 契約 trait の置き場は未定（TASK-584・TASK-684）。契約テストは `crates/db-tests` | 本 repo は契約と契約テストまで（DPOL-37・DPOL-38）。`fandhe-db` 向けの実装は Hub の担当（LIB-14） |
