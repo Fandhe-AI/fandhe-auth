@@ -49,11 +49,21 @@ fn sigkill_stops_and_records() {
 
 #[test]
 fn ignored_sigterm_does_not_block_and_sigkill_follows() {
-    let mut h =
-        InstanceFaultHandle::spawn(Command::new("sh").args(["-c", "trap '' TERM; exec sleep 30"]))
-            .unwrap();
-    // trap の設定を待つ猶予（開発の値）
-    std::thread::sleep(Duration::from_millis(300));
+    // trap の設定完了の合図は準備完了ファイルの作成（固定の待ちに頼らない）
+    let ready = std::env::temp_dir().join(format!("fandhe-it-ready-{}", std::process::id()));
+    let _ = std::fs::remove_file(&ready);
+    let mut h = InstanceFaultHandle::spawn(
+        Command::new("sh")
+            .args(["-c", "trap '' TERM; : > \"$1\"; exec sleep 30", "sh"])
+            .arg(&ready),
+    )
+    .unwrap();
+    let deadline = Instant::now() + LONG;
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "trap ready signal timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = std::fs::remove_file(&ready);
     let mut tl = timeline();
     let started = Instant::now();
     h.sigterm(&mut tl).unwrap();
@@ -122,7 +132,17 @@ fn debug_errors_and_record_do_not_leak_pid() {
         "{h:?} {e} {e:?} {e2} {e2:?} {:?}",
         finish(tl).unwrap().events()
     );
-    assert!(!all.contains(&pid), "pid leaked");
+    assert!(!contains_bounded(&all, &pid), "pid leaked");
+}
+
+/// 前後が数字でない位置の一致だけを数える（offset・時刻の数値への偶然の一致を除く）
+fn contains_bounded(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(needle).any(|(i, m)| {
+        let before = i == 0 || !bytes[i - 1].is_ascii_digit();
+        let after = bytes.get(i + m.len()).is_none_or(|b| !b.is_ascii_digit());
+        before && after
+    })
 }
 
 #[test]
