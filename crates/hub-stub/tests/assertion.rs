@@ -14,9 +14,8 @@ use fandhe_auth_hub_stub::assertion::{
     CallRejected, CalledEndpoint, ClientAssertionType, HubAssertionCaller, PortResponse,
 };
 use fandhe_auth_hub_stub::config::HubStubConfig;
-use ring::rand::SystemRandom;
+use ring::signature::ECDSA_P256_SHA256_FIXED;
 use ring::signature::UnparsedPublicKey;
-use ring::signature::{ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
 use serde_json::{Value, json};
 
 const ISS: &str = "https://auth.example.test";
@@ -24,12 +23,6 @@ const CLIENT_ID: &str = "hub-client.test";
 const MAX: u64 = 300;
 const NOW: u64 = 1_000;
 const JWT_BEARER: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-
-fn new_key() -> EcdsaKeyPair {
-    let rng = SystemRandom::new();
-    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
-    EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap()
-}
 
 fn config() -> HubStubConfig {
     HubStubConfig {
@@ -45,7 +38,7 @@ fn config() -> HubStubConfig {
 }
 
 fn caller() -> (HubAssertionCaller, Vec<u8>) {
-    let key = AssertionSigningKey::es256("k1", new_key());
+    let key = AssertionSigningKey::generate("k1").unwrap();
     let public = key.public_key().to_vec();
     let target = AssertionTarget {
         issuer: ISS.to_owned(),
@@ -256,7 +249,7 @@ fn assertion_never_appears_in_debug_or_display() {
     let mut port = FakePort::judging(vec![0; 65]); // 公開鍵が合わず拒否される。
     let err = c.call(&mut port, &r).unwrap_err();
 
-    let key = AssertionSigningKey::es256("k1", new_key());
+    let key = AssertionSigningKey::generate("k1").unwrap();
     let outputs = [
         format!("{key:?}"),
         format!("{a:?}"),
@@ -272,4 +265,32 @@ fn assertion_never_appears_in_debug_or_display() {
             assert!(!out.contains(part));
         }
     }
+}
+
+/// OCL-23: P-256 以外の ECDSA 鍵（P-384）は鍵の読み込みで拒否され、ES256 のヘッダのまま別の署名が出ない。
+#[test]
+fn non_p256_key_is_rejected() {
+    use ring::rand::SystemRandom;
+    use ring::signature::{ECDSA_P384_SHA384_FIXED_SIGNING, EcdsaKeyPair};
+    let pkcs8 =
+        EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_FIXED_SIGNING, &SystemRandom::new())
+            .unwrap();
+    assert!(AssertionSigningKey::from_pkcs8("k1", pkcs8.as_ref()).is_err());
+}
+
+/// SECR-11・SECR-23〜27: `extra` の token 等の値も `Debug` に出ない。
+#[test]
+fn extra_values_never_appear_in_request_debug() {
+    let (c, _) = caller();
+    let a = c.sign(&c.conforming_claims("jti-1", NOW)).unwrap();
+    let r = c.request(
+        CalledEndpoint::Revocation,
+        &a,
+        ClientAssertionType::JwtBearer,
+        true,
+        vec![("token".to_owned(), "extra-secret-value".to_owned())],
+    );
+    let out = format!("{r:?}");
+    assert!(!out.contains("extra-secret-value"));
+    assert_eq!(r.param("token"), Some("extra-secret-value"));
 }

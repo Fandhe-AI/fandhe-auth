@@ -21,14 +21,14 @@
 //!   `application/x-www-form-urlencoded` への符号化は口の実装側が行う。
 //! - assertion の文字列は `Debug`・誤り・記録に出さない（SECR-23〜27）。
 //!
-//! TODO(TASK-511): 署名鍵と assertion は秘密値の型（`fandhe-auth-secret`）が未実装のため、`ring` の不透明な型と
-//! 固定の `Debug` を持つ自前の型で持つ。実装後にその型へ置き換え、許可表（`scripts/check-crate-deps.sh`）を
-//! 見直す。表の変更は利用者に確かめる。
+//! 秘密値は `fandhe-auth-secret` の型で持つ（SECR-15・SECR-30・SECR-31）。署名鍵は `ring` の不透明な型で、
+//! `Debug` は固定の文字列。
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use fandhe_auth_secret::SecretString;
 use ring::rand::SystemRandom;
-use ring::signature::{EcdsaKeyPair, KeyPair};
+use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
 use serde_json::{Map, Value, json};
 
 use crate::config::HubStubConfig;
@@ -43,12 +43,27 @@ pub struct AssertionSigningKey {
 }
 
 impl AssertionSigningKey {
-    /// ES256（P-256）の鍵。`key_pair` は `ECDSA_P256_SHA256_FIXED_SIGNING` で作ったもの（OCL-23）。
-    pub fn es256(kid: impl Into<String>, key_pair: EcdsaKeyPair) -> Self {
-        Self {
+    /// PKCS#8 から ES256（P-256）の鍵を読む。アルゴリズムは `ECDSA_P256_SHA256_FIXED_SIGNING` に固定し、
+    /// P-256 以外の鍵は拒否する（OCL-23。署名は r‖s の 64 バイト）。
+    pub fn from_pkcs8(kid: impl Into<String>, pkcs8: &[u8]) -> Result<Self, SigningFailed> {
+        let key_pair = EcdsaKeyPair::from_pkcs8(
+            &ECDSA_P256_SHA256_FIXED_SIGNING,
+            pkcs8,
+            &SystemRandom::new(),
+        )
+        .map_err(|_| SigningFailed)?;
+        Ok(Self {
             kid: kid.into(),
             key_pair,
-        }
+        })
+    }
+
+    /// 実行時に ES256（P-256）の鍵を新しく生成する（OCL-23）。
+    pub fn generate(kid: impl Into<String>) -> Result<Self, SigningFailed> {
+        let pkcs8 =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
+                .map_err(|_| SigningFailed)?;
+        Self::from_pkcs8(kid, pkcs8.as_ref())
     }
 
     /// 非圧縮の公開鍵の点（65 バイト）。JWKS の模擬（#65）と試験側の署名の確認に使う。
@@ -88,17 +103,17 @@ pub struct AssertionClaims {
     pub jti: Option<String>,
 }
 
-/// 署名した assertion（compact な JWT）。`Debug` は固定の文字列で、`Display` は持たない。
-/// 取り出しは [`ClientAssertion::expose_compact`] だけ（SECR-16 の考え方）。TODO(TASK-511): 秘密値の型へ置き換える。
+/// 署名した assertion（compact な JWT）。`fandhe-auth-secret` の秘密値の型で持ち、`Debug` は固定の文字列、
+/// `Display` は持たない。取り出しは [`ClientAssertion::expose_compact`] だけ（SECR-16・SECR-30）。
 pub struct ClientAssertion {
-    compact: String,
+    compact: SecretString,
     jti: Option<String>,
 }
 
 impl ClientAssertion {
     /// 口へ渡すために文字列を取り出す。ログ・誤り・記録に使わない（SECR-23〜27）。
     pub fn expose_compact(&self) -> &str {
-        &self.compact
+        self.compact.expose()
     }
 }
 
@@ -127,10 +142,11 @@ pub enum ClientAssertionType {
 }
 
 /// 口へ渡す要求。名前と値の並びで持ち、form の符号化は口の実装側に任せる（OCL-30）。
-#[derive(Clone, PartialEq, Eq)]
+/// 値は `client_assertion` のほか `extra` の token・code 等も含みうるため、すべて秘密値の型で持つ（SECR-30）。
+#[derive(Clone)]
 pub struct AssertionRequest {
     endpoint: CalledEndpoint,
-    params: Vec<(String, String)>,
+    params: Vec<(String, SecretString)>,
     jti: Option<String>,
 }
 
@@ -139,9 +155,9 @@ impl AssertionRequest {
         self.endpoint
     }
 
-    /// form の本文に入れる名前と値の並び。`client_assertion` の値を含むので、記録に使わない。
-    pub fn params(&self) -> &[(String, String)] {
-        &self.params
+    /// form の本文に入れる名前と値の並び。値は秘密値を含むので、ログ・誤り・記録に使わない（SECR-23〜27）。
+    pub fn params(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.params.iter().map(|(k, v)| (k.as_str(), v.expose()))
     }
 
     /// 名前で最初の値を引く。
@@ -149,7 +165,7 @@ impl AssertionRequest {
         self.params
             .iter()
             .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
+            .map(|(_, v)| v.expose())
     }
 
     /// 要求に使った assertion の `jti`（記録用。秘密値ではない）。
@@ -160,21 +176,11 @@ impl AssertionRequest {
 
 impl std::fmt::Debug for AssertionRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // SECR-23〜27: client_assertion の値は伏せる。
-        let masked: Vec<(&str, &str)> = self
-            .params
-            .iter()
-            .map(|(k, v)| {
-                if k == "client_assertion" {
-                    (k.as_str(), "<redacted>")
-                } else {
-                    (k.as_str(), v.as_str())
-                }
-            })
-            .collect();
+        // SECR-11・SECR-23〜27: 値（client_assertion・extra の token 等）は出さず、名前だけを出す。
+        let names: Vec<&str> = self.params.iter().map(|(k, _)| k.as_str()).collect();
         f.debug_struct("AssertionRequest")
             .field("endpoint", &self.endpoint)
-            .field("params", &masked)
+            .field("param_names", &names)
             .field("jti", &self.jti)
             .finish()
     }
@@ -306,7 +312,7 @@ impl HubAssertionCaller {
             .sign(&self.rng, input.as_bytes())
             .map_err(|_| SigningFailed)?;
         Ok(ClientAssertion {
-            compact: format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref())),
+            compact: SecretString::new(format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()))),
             jti: claims.jti.clone(),
         })
     }
@@ -320,24 +326,30 @@ impl HubAssertionCaller {
         include_client_id: bool,
         extra: Vec<(String, String)>,
     ) -> AssertionRequest {
-        let mut params = Vec::new();
+        let mut params: Vec<(String, SecretString)> = Vec::new();
         match assertion_type {
             ClientAssertionType::JwtBearer => {
-                params.push(("client_assertion_type".to_owned(), JWT_BEARER.to_owned()));
+                params.push((
+                    "client_assertion_type".to_owned(),
+                    SecretString::new(JWT_BEARER),
+                ));
             }
             ClientAssertionType::Omitted => {}
             ClientAssertionType::Other(v) => {
-                params.push(("client_assertion_type".to_owned(), v));
+                params.push(("client_assertion_type".to_owned(), SecretString::new(v)));
             }
         }
         params.push((
             "client_assertion".to_owned(),
-            assertion.expose_compact().to_owned(),
+            SecretString::new(assertion.expose_compact()),
         ));
         if include_client_id {
-            params.push(("client_id".to_owned(), self.client_id.clone()));
+            params.push((
+                "client_id".to_owned(),
+                SecretString::new(self.client_id.as_str()),
+            ));
         }
-        params.extend(extra);
+        params.extend(extra.into_iter().map(|(k, v)| (k, SecretString::new(v))));
         AssertionRequest {
             endpoint,
             params,

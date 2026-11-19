@@ -21,7 +21,7 @@ cd "${ROOT_DIR}"
 # allowed_deps <crate>: 依存してよい workspace の crate を空白区切りで返す。表に無ければ失敗する。
 # 根拠: secret は小さな葉（DPOL-41）、core は secret のみ（DPOL-1・LIB-2）、db-tests は契約の操作を呼ぶ
 # （LIB-11・LIB-12・DPOL-37）、client は秘密値の型だけ（LIB-16・DPOL-7）、plugin-oidc は本体の公開 API へ
-# 一方向（PLG-26・PLG-28・LIB-19。client には依存しない）、hub-stub は試験専用で workspace 内の依存なし
+# 一方向（PLG-26・PLG-28・LIB-19。client には依存しない）、hub-stub は試験専用で secret のみ（秘密値の型。SECR-31）
 # （TASK-7。本体・Plugin から hub-stub への辺は無い。LIB-2・LIB-4 の向き）、
 # console-stub も試験専用で workspace 内の依存なし（TASK-8。同じ向き）。
 allowed_deps() {
@@ -31,7 +31,7 @@ allowed_deps() {
     fandhe-auth-db-tests) echo "fandhe-auth-core fandhe-auth-secret" ;;
     fandhe-auth-client) echo "fandhe-auth-secret" ;;
     fandhe-auth-plugin-oidc) echo "fandhe-auth-core fandhe-auth-secret" ;;
-    fandhe-auth-hub-stub) echo "" ;;
+    fandhe-auth-hub-stub) echo "fandhe-auth-secret" ;;
     fandhe-auth-console-stub) echo "" ;;
     *) return 1 ;;
   esac
