@@ -244,11 +244,16 @@ impl Database {
     }
 
     fn down(&mut self) -> bool {
-        let Some((port, password)) = self.running.take() else {
+        let Some((port, password)) = self.running.clone() else {
             return true;
         };
         self.handle.set(None);
-        succeeds(self.cmd(port, &password, &["down", "--volumes", "--remove-orphans"]))
+        let ok = succeeds(self.cmd(port, &password, &["down", "--volumes", "--remove-orphans"]));
+        // 失敗したら running を残す。stop の再試行と Drop で取り残しを片付け直せる。
+        if ok {
+            self.running = None;
+        }
+        ok
     }
 
     /// 起動して確かめる。失敗の詳細（出力）は返さない。
@@ -344,5 +349,23 @@ impl Component for Database {
 impl Drop for Database {
     fn drop(&mut self) {
         let _ = self.down();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // down が失敗したら running を保ち、再試行できる（取り残し防止）。
+    #[test]
+    fn down_failure_keeps_running_for_retry() {
+        let cfg = DatabaseConfig::new().with_compose_file("/nonexistent/compose.yaml");
+        let mut db = Database::new(cfg);
+        db.running = Some((1, SecretString::new("x".to_string())));
+        assert!(!db.down());
+        assert!(db.running.is_some());
+        assert!(db.stop().is_err());
+        assert!(db.running.is_some());
+        // Drop が再び down を試みても落ちない。
     }
 }
