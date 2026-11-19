@@ -26,6 +26,22 @@ TASK-13 の設計の下書き。名前・形式の識別子・キー名・文言
 パラメータは作るときに検査し、0 の遅れ・0 のずれを拒否する。遅れ・ずれの値は試験用の仮の値で要件の値ではない（THRT-29・A-2026-10-28-1）。
 `ComponentKind` には種類を足さない（DB の外の保存先は構成要素ではない）。
 
+## DB の遮断と遅延（2/8）
+
+`crates/it-harness/src/fault/db.rs` の `DbFaultProxy`（仮称）。PostgreSQL の前に置くループバックの TCP 転送器で、
+PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を遮断する）に合わせる。外部の crate は足さず `std::net` と `std::thread` だけで書く。
+
+- 待ち受けも上流も `127.0.0.1` 固定。上流はポートだけを受け、任意のホストへは転送しない。TLS は素通しで、中身は読まない。
+- 入口: `start_to_port`（試験用）・`start_for(EndpointHandle)`（`Database` の起動前に作れる。値が無い間は接続を閉じる）・
+  `proxied_endpoint`（ポートを差し替えた接続情報。Host への結線は TASK-716 待ち）・`block`・`release_block`・`delay`・`release_delay`・`stop`。
+- 遮断は開いている接続を切り、新しい接続を直ちに閉じる。解除しても切れた接続は戻らないので、client はつなぎ直す。
+- 遅延は応答（上流から client）の向きの塊ごとに足す。開いている接続にも効く。解除は同じ値で `Released` を記録する。
+- 記録が成功してから状態を変える。基準線の `FaultTimeline` への注入は記録が拒否し、注入もされない。
+  二重の開始は `AlreadyActive`、無い注入の解除は `NotActive`。
+- 誤りと `Debug` にポート・アドレスを載せない（SECR-11・SECR-23）。
+- 試験: `make test`（`tests/fault_db.rs`。Docker 不要）・`make it-db`（`tests/fault_db_docker.rs`。実際の PostgreSQL に SSLRequest を送る）。
+  時間に依る確認は下限だけ。
+
 ## 記録の形式（`fandhe-auth-it-fault-record/1`）
 
 `RunRecord`（`fandhe-auth-it-run-record/1`）とは別のファイル。`run_started_at` で結ぶ。UTF-8・LF・1 行 1 項目の `key: value`。
@@ -61,3 +77,7 @@ note: ...
 - DB の外の保存先の実体（ORST-2 の持ち越し）。4/8 で扱う
 - console stub の注入（TASK-8）を TASK-13 の一覧に入れるか（spec の列挙には無い）
 - 記録のファイルを秘密値の走査の対象に入れること（`secret-values.md`）。本段は canary の試験で代える。出力先は追跡ツリーの外（`target/`）
+- DB の遮断の形を「直ちに閉じる」にしたこと。「受けて黙る（blackhole）」を入れるか（2/8）
+- 遅延を応答の向きの塊ごとに足す形（2/8）
+- 開発の値（accept の刻み 5 ms・待ちの刻み 10 ms・上流への接続の上限 5 秒・遅延の上限 600 秒）（2/8）
+- 転送器を `Component` にせず `ComponentKind` を 4 種のままにしたこと。Host への結線は TASK-716 待ち（2/8）
