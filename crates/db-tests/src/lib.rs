@@ -12,8 +12,12 @@
 //! どちらも置き場と名前は未定。契約 trait の置き場も未定（TASK-584・TASK-684）。
 //!
 //! 期待を緩めて試験を通さない（AUDB-6・AUDB-69）。
+//!
+//! `runner`: 契約テストを複数の DB 実装で流す枠（TASK-9。ケースは空で、名前は仮称）。
 
 #![forbid(unsafe_code)]
+
+pub mod runner;
 
 // TODO(TASK-584): 契約 trait の骨組みと契約テストの本体の分離・走査を置く。
 // TODO(TASK-716): メモリの代替アダプターの置き場（試験用 feature または別 crate）を決める。

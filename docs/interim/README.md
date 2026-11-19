@@ -43,7 +43,7 @@ spec の本文・版の数値は写さず、ID で引く（`.claude/rules/spec-r
 | 6 | `fandhe-backend` 信頼するプロキシ | TASK-535・TASK-536 | TASK-527（提供された場合）。現時点は提供なし（`D-2026-10-27-2`） | 枠なし（`crates/backend/src/interim/trusted_proxy.rs` は外した） | 移管の部分（`CSRF-40`〜`42`・`CSRF-47`〔自前の accept ループ〕→ Hub `ARUN-43`、`CSRF-44` → Hub `ARUN-44`）は本体では作らない（`D-2026-11-20-3` の (イ)）。本体の部分（`CSRF-43`・`CSRF-52` は TASK-535、`CSRF-45`・`CSRF-46` は TASK-536）は枠の外で作り、置き場は未決（`LIB-1` の判定で利用者が決める）。`TODO(TASK-535)`・`TODO(TASK-536)` は `crates/backend/src/interim/mod.rs` に移した。差し替えの実施は Hub の担当（TASK-527 は置き換え → Hub `ARUN-17`） |
 | 7 | `fandhe-backend` 下流の JWT の検証（`REQ-16`） | TASK-370 | TASK-372（再試験 TASK-89） | `crates/client`（段階 1・既存） | 本 repo の範囲。#82 では触らない（中身は TASK-370） |
 | 8 | `fandhe-frontend` の builder（`REQ-17`） | TASK-532 | TASK-90（TASK-152 は移管 → `UISF-10`・`UISF-22`） | `crates/frontend/src/interim/builder.rs`（案。crate の作成は利用者の確認待ち。#83 で形だけ記録） | 画面は Hub。TASK-664 は移管（→ Hub `ASCR-1`・`ARUN-17`） |
-| 9 | `fandhe-db` | PostgreSQL の参照実装（`dev/postgres/`・TASK-5） | TASK-628（契約 trait は TASK-584） | 差し替えの境界は契約 trait（置き場は未定: DPOL-38・TASK-584・TASK-684）。契約テストは `crates/db-tests`。#84 で形だけ記録 | 本 repo は契約と契約テストまで（DPOL-37・DPOL-38）。`fandhe-db` 向けの実装は Hub の担当（LIB-14） |
+| 9 | `fandhe-db` | PostgreSQL の参照実装（`dev/postgres/`・TASK-5） | TASK-628（契約 trait は TASK-584） | 差し替えの境界は契約 trait（置き場は未定: DPOL-38・TASK-584・TASK-684）。契約テストは `crates/db-tests`（流す枠は `crates/db-tests/src/runner.rs`。#87 で作成、ケースは空）。#84 で形だけ記録 | 本 repo は契約と契約テストまで（DPOL-37・DPOL-38）。`fandhe-db` 向けの実装は Hub の担当（LIB-14） |
 
 ## この置き場に足すもの
 
@@ -120,7 +120,7 @@ LIB-15 の判定前の材料。判定は人が行う（ACPT-7）。基準 (1)〜
 
 ## db の枠（作成前の形。#84）
 
-crate・trait は作っていない。契約 trait の置き場は DPOL-38 で未定（独立 crate か `fandhe-auth-core` の中か。
+契約 trait の crate は作っていない（契約テストを流す枠だけ #87 で `crates/db-tests/src/runner.rs` に作成。ケースは空）。契約 trait の置き場は DPOL-38 で未定（独立 crate か `fandhe-auth-core` の中か。
 PoC-15 の後に LIB-15 の基準で人が決める）で、中身は TASK-584、crate の分け方の検査は TASK-684 の範囲のため、
 先取りしない。下は差し替えの境界の考え方を文書で示すもので、trait の名前・シグネチャは定めない。
 
@@ -149,7 +149,7 @@ db に固有の安全条件:
 - PostgreSQL での合格を `fandhe-db` が契約を満たす根拠にしない（TASK-628）。
 - 契約テストを通すために期待・安全条件を緩めない（AUDB-6・AUDB-69）。
 
-兄弟の範囲: 版の固定の記録の形式は #85（末尾の「版の固定の記録の形式」の節）、差し替えの手順は #86、契約テストを複数の DB 実装で同じ trait から流す枠は #87、
+兄弟の範囲: 版の固定の記録の形式は #85（末尾の「版の固定の記録の形式」の節）、差し替えの手順は #86、契約テストを複数の DB 実装で流す枠は #87（作成済み。契約 trait・ケース・提供形・メモリ実装は残りで、TASK-584・TASK-716・TASK-718）、
 空の実装での確認は #88。中身を先取りしない。
 
 作るときの手順（利用者の決定の後。この Issue では実行しない）:
@@ -231,7 +231,7 @@ commit の欄は、公開された版の識別のためだけに置く。リポ�
 | 1〜6 | TASK-527（置き換え → Hub `ARUN-17`） | 記録の参照だけ。差し替えも版の固定も行わない | 部品の版の固定と再試験（`.claude/rules/dependency-policy.md` の「版」の節） |
 | 7 | TASK-372（再試験は TASK-89） | `crates/client` の差し替えと版の固定 | 提供元は公開の版を出すまで |
 | 8 | TASK-90 | frontend の crate を作った後に、`interim` の差し替え（crate は未作成。作る前に利用者に確かめる） | 画面は Hub |
-| 9 | TASK-628 | 契約テストを流す対象の差し替えまで（Cargo の依存ではない。枠は #87） | `fandhe-db` 向けの実装は Hub（LIB-14） |
+| 9 | TASK-628 | 契約テストを流す対象の差し替えまで（Cargo の依存ではない。枠は #87 の `crates/db-tests/src/runner.rs`） | `fandhe-db` 向けの実装は Hub（LIB-14） |
 
 未決: 差し替えのとき、どの再試験の範囲を必須にするか。#86 は手順の形だけを置き、範囲の確定は人が行う。
 
