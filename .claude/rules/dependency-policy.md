@@ -63,7 +63,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 - advisory DB は実行の前に 1 回だけ取得し、全ての実行に `--disable-fetch`（cargo deny）・`--no-fetch`（cargo audit）を付ける。
   使った DB の commit と取得日を記録し、`Cargo.lock` を書き換えない（DPOL-33）。
 - licenses の許可リスト: MIT・Apache-2.0・Apache-2.0 WITH LLVM-exception・Unicode-3.0・BSD-3-Clause・ISC・BSD-2-Clause・
-  MPL-2.0・BSL-1.0・CDLA-Permissive-2.0・Zlib。LGPL-2.1-or-later は `r-efi` に限った例外で、単独の LGPL は通さない（DPOL-22・DPOL-24）。
+  MPL-2.0・BSL-1.0・CDLA-Permissive-2.0・Zlib・NCSA。NCSA は `libfuzzer-sys`（`(MIT OR Apache-2.0) AND NCSA`）のために足した（許可リスト全体に足す選択〔main の読み〕。確定の範囲（QP-2 の 18 ワークスペース）は広げない。crate 限りの例外（`[[licenses.exceptions]]`）にするかは、`deny.toml`（TASK-668）を作るときに決める未定。DPOL-22 の 2026-11-20 追記・`D-2026-11-20-9`。足した後の厳格版の通過は本番の依存解決では未確認）。LGPL-2.1-or-later は `r-efi` に限った例外で、単独の LGPL は通さない（DPOL-22・DPOL-24）。
 - 自身の crate は `license = "MIT OR Apache-2.0"` を宣言する（DPOL-26・`D-2026-10-23-8`）。
 - sources は crates.io だけ。git 依存・他の registry 0 件（DPOL-25）。
 - 例外（`ignore`・`skip`・許可の追加）には理由・期限・対象 crate の範囲を同じ場所に書く（DPOL-20）。
@@ -114,8 +114,15 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 - `--all-features` は DPOL-31 の変異スイッチなど試験用の feature も有効にし、本番のビルドの木と変わるので使わない。
   feature を明示しないと既定の feature だけを見る。
 - `web-sys` の確認は、`fandhe-auth-webauthn-wasm` を `--exclude` で除いた workspace 全体に `--target all` を付けて行う（crate ごとの `-p` は使わない）。`--exclude` の crate が workspace に無い間（段階 2 の前）は `--exclude` を外して流す。Hub の本番のバイナリでの確認は Hub が持つ（`ARUN-16`）。
-- 新しい依存の要否は、TASK-4 の選定対象（構文木の走査・property test と fuzz・構造化ログと計測の口）なら選定の記録（spec の `D-`。`D-2026-11-20-6`）を待つ。
-  メール送信と外向き HTTP クライアントは選定の対象から外れた。本体は口と契約テストだけを持ち、具象は組込み先が選ぶ（`D-2026-11-20-4`・`HOST-7`・`AMTH-14`・`AAUD-40`・`DPOL-46`）ので、本体の依存に足さない。
+- TASK-4 の選定基準は K1〜K12（`D-2026-11-20-7`）。K7: 試験の道具は dev 依存か別の workspace に置き、本番の依存の木に入れない。K11（推移依存の少なさ・保守）の測り方と閾値は **未定**。
+- 選定の結果（`D-2026-11-20-6`〜`10`）。版は spec の記録時点のもので、版の固定の手順は未定:
+  - ログの出す口 `tracing`・計測の出す口 `metrics`（本体の依存）。`tracing-subscriber` は dev-dependencies だけ（`D-2026-11-20-8`）
+  - property test は `proptest`、fuzz は `cargo-fuzz`（`libfuzzer-sys` を使う）。いずれも本番の依存の木に入れない（K7）。
+    fuzz の nightly は日付で固定せず最新を追う。実行の記録に nightly の版を残すかは **未定**（`D-2026-11-20-9`）
+  - `SECR-21` の構文木の走査は `syn` を使う自前の検査（`D-2026-11-20-10`）。置き場は spec に記録が無く **未定**。
+    マクロ呼び出しの中の型を見落とすかは `TASK-514` の試し実装で確かめる（main の読み）
+  - 最小の試し実装（TASK-4 の成果物）は未実施。足す前に利用者へ確かめる
+  上の対象以外の依存は選定の記録に無いので、足す前に利用者へ確かめる。メール送信と外向き HTTP クライアントは選定の対象から外れた。本体は口と契約テストだけを持ち、具象は組込み先が選ぶ（`D-2026-11-20-4`・`HOST-7`・`AMTH-14`・`AAUD-40`・`DPOL-46`）ので、本体の依存に足さない。
 
 ## 関連 rule
 

@@ -39,7 +39,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `.claude/workflows/` | `implement-issue-tree` の named workflow（スキル内スクリプトへの相対 symlink） |
 | `Cargo.toml`・`Cargo.lock`・`crates/` | Cargo の workspace（virtual workspace）と段階 1 の crate 雛形（`crates/<名前>`、crate 名は `fandhe-auth-<名前>`）。members は明示列挙する（後述の「ビルド」） |
 | `Makefile` | `scripts/` を呼ぶだけの薄い入口（`make help` で一覧） |
-| `rustfmt.toml` | rustfmt の設定（edition のみ。暫定） |
+| `rustfmt.toml` | rustfmt の設定（edition のみ。値は 2024。`D-2026-11-20-12`） |
 | `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check` / `lint` / `check-crate-deps` / `dev-pg-check`）。Make なしでも直接実行できる |
 | `scripts/hooks/` | lefthook から呼ばれる Git hooks の実体 |
 | `dev/postgres/` | 開発・検証用 PostgreSQL の Docker 構成（`TASK-5`）。契約テストを流す参照実装向けで、本番では Docker を必須にしない。手順は [dev/postgres/README.md](./dev/postgres/README.md) |
@@ -65,7 +65,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | [lefthook](https://lefthook.dev/) | Git hooks | ✓ |
 | [editorconfig-checker](https://github.com/editorconfig-checker/editorconfig-checker) | `.editorconfig` 準拠チェック | ✓ |
 | [ShellCheck](https://www.shellcheck.net/) | シェルスクリプトの lint | ✓ |
-| Rust toolchain（cargo・rustfmt・clippy） | `make fmt`・`make lint`（版は未定。TASK-4 で決める） | ✓ |
+| Rust toolchain（cargo・rustfmt・clippy） | `make fmt`・`make lint`（stable の 1.100 以上が要る。`D-2026-11-20-12`） | ✓ |
 | [direnv](https://direnv.net/) | `.env` の自動読み込み | 任意 |
 | Docker・Docker Compose v2 以降・openssl | 開発・検証用 PostgreSQL と `make pg-check`（[dev/postgres/README.md](./dev/postgres/README.md)） | 任意 |
 
@@ -94,7 +94,7 @@ worktree はそれぞれ別の `target/` を持つため、不要になった wo
 
 ## ビルド
 
-前提は Rust toolchain（cargo・rustfmt・clippy）です。版・MSRV・edition は暫定で、TASK-4 で人が決めます。
+前提は Rust toolchain（cargo・rustfmt・clippy）です。MSRV は 1.100、edition は 2024 と決まっています（`D-2026-11-20-12`）。そのため stable の 1.100 以上が要ります。ルートの `Cargo.toml` の `rust-version` は、まだ入っていません。
 
 workspace の members は 8 crate で、ルートの `Cargo.toml` に明示して並べています（glob にしません）。
 段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）に、次の 3 つを足しています。
