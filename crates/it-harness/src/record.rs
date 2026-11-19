@@ -39,6 +39,8 @@ pub enum RecordError {
     VersionCommandFailed { field: &'static str },
     /// 版の文字列が文字種・長さの検査を満たさない。
     InvalidVersionField { field: &'static str },
+    /// 取り込んだ stub の記録の文字列が検査を満たさない（改行等の制御文字・長さ超過・空）。
+    InvalidStubEntry { source: &'static str },
     /// ファイルの書き込みに失敗した。
     WriteFailed,
 }
@@ -52,6 +54,9 @@ impl fmt::Display for RecordError {
             }
             Self::InvalidVersionField { field } => {
                 write!(f, "run record error: invalid version field ({field})")
+            }
+            Self::InvalidStubEntry { source } => {
+                write!(f, "run record error: invalid stub entry ({source})")
             }
             Self::WriteFailed => f.write_str("run record error: write failed"),
         }
@@ -112,7 +117,10 @@ impl fmt::Display for UtcTimestamp {
     }
 }
 
-/// 試験した版。欄の選び方は書き手の読みで、人が確認する（spec に「版」の中身の規定は見当たらない）。
+/// 試験した版。取得の時点が欄ごとに違う: `rustc` はこのバイナリのビルド時（build.rs）、
+/// 他の版は `detect` を呼んだ時点の作業ツリー。ビルド後に checkout を切り替えた場合は記録の
+/// `*_at_record` が実際のビルド対象と食い違いうるため、キー名で時点を区別する。
+/// 欄の選び方は書き手の読みで、人が確認する（spec に「版」の中身の規定は見当たらない）。
 /// 値はすべて検査済み。パス・ファイル名・ホスト名・利用者名を持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionInfo {
@@ -132,6 +140,24 @@ fn is_plain_text(s: &str, max: usize) -> bool {
         && s.len() <= max
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b" .()+-_".contains(&b))
+}
+
+/// stub の記録の 1 片の検査。制御文字（改行を含む）・行区切り・空・長すぎるものを拒否する。
+/// 公開フィールドから偽の記録行を注入されないための fail-closed（SECR-11・SECR-23・SECR-26）。
+fn is_safe_piece(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 200
+        && !s
+            .chars()
+            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+}
+
+/// 根拠 ID の検査。ASCII の英数字・`-`・空白だけ（例: `Hub DELEG-9`）。
+fn is_safe_ref(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b' ')
 }
 
 fn invalid(field: &'static str) -> RecordError {
@@ -185,7 +211,8 @@ impl VersionInfo {
             "git",
             &["-C", repo, "rev-parse", "HEAD:docs/spec"],
         )?;
-        let rustc = run("rustc", "rustc", &["--version"])?;
+        // コンパイラの版は実行時の PATH ではなくビルド時に取った値（build.rs）。
+        let rustc = env!("FANDHE_IT_BUILD_RUSTC");
         Self::new(
             env!("CARGO_PKG_VERSION"),
             rev.trim(),
@@ -241,32 +268,49 @@ impl RunRecord {
     }
 
     /// Hub の stub の「仮置き」の印の記録を取り込む。欄名と印だけで、値は無い。
-    #[must_use]
-    pub fn with_hub_stub_record(mut self, r: &ProvisionalRecord) -> Self {
-        self.hub_stub_lines = r
-            .entries
-            .iter()
-            .map(|e| format!("hub_stub_field: {} {}", e.field, e.mark))
-            .collect();
-        self
+    ///
+    /// # Errors
+    /// 欄名・印の文字列が検査を満たさないとき `InvalidStubEntry`（記録行を作らない）。
+    pub fn with_hub_stub_record(mut self, r: &ProvisionalRecord) -> Result<Self, RecordError> {
+        let bad = || RecordError::InvalidStubEntry { source: "hub_stub" };
+        let mut lines = Vec::with_capacity(r.entries.len());
+        for e in &r.entries {
+            let mark = e.mark.to_string();
+            if !is_safe_piece(e.field) || !is_safe_piece(&mark) {
+                return Err(bad());
+            }
+            lines.push(format!("hub_stub_field: {} {}", e.field, mark));
+        }
+        self.hub_stub_lines = lines;
+        Ok(self)
     }
 
     /// console の stub の契約の記録を取り込む。項目名・印・根拠 ID だけで、値は無い。
-    #[must_use]
-    pub fn with_console_contract(mut self, r: &ContractRecord) -> Self {
-        self.console_contract_lines = r
-            .entries
-            .iter()
-            .map(|e| {
-                format!(
-                    "console_contract: {} {} [{}]",
-                    e.item.name(),
-                    e.mark,
-                    e.refs.join(",")
-                )
-            })
-            .collect();
-        self
+    ///
+    /// # Errors
+    /// 項目名・印・根拠 ID が検査を満たさないとき `InvalidStubEntry`（記録行を作らない）。
+    pub fn with_console_contract(mut self, r: &ContractRecord) -> Result<Self, RecordError> {
+        let bad = || RecordError::InvalidStubEntry {
+            source: "console_contract",
+        };
+        let mut lines = Vec::with_capacity(r.entries.len());
+        for e in &r.entries {
+            let mark = e.mark.to_string();
+            if !is_safe_piece(e.item.name())
+                || !is_safe_piece(&mark)
+                || !e.refs.iter().all(|x| is_safe_ref(x))
+            {
+                return Err(bad());
+            }
+            lines.push(format!(
+                "console_contract: {} {} [{}]",
+                e.item.name(),
+                mark,
+                e.refs.join(",")
+            ));
+        }
+        self.console_contract_lines = lines;
+        Ok(self)
     }
 
     /// 起動時刻。
@@ -305,10 +349,14 @@ impl fmt::Display for RunRecord {
         writeln!(f, "started_at: {}", self.started_at)?;
         writeln!(f, "recorded_at: {}", self.recorded_at)?;
         writeln!(f, "harness_version: {}", self.version.harness_version)?;
-        writeln!(f, "source_revision: {}", self.version.source_revision)?;
-        writeln!(f, "source_dirty: {}", self.version.source_dirty)?;
-        writeln!(f, "spec_revision: {}", self.version.spec_revision)?;
-        writeln!(f, "rustc: {}", self.version.rustc)?;
+        writeln!(
+            f,
+            "source_revision_at_record: {}",
+            self.version.source_revision
+        )?;
+        writeln!(f, "source_dirty_at_record: {}", self.version.source_dirty)?;
+        writeln!(f, "spec_revision_at_record: {}", self.version.spec_revision)?;
+        writeln!(f, "rustc_at_build: {}", self.version.rustc)?;
         let mut any_stub = false;
         for kind in ComponentKind::START_ORDER {
             match self.composition.entries.iter().find(|e| e.kind == kind) {
@@ -407,10 +455,10 @@ mod tests {
             "started_at: 1970-01-01T00:00:00Z".to_owned(),
             "recorded_at: 1970-01-01T00:01:00Z".to_owned(),
             "harness_version: 0.1.0".to_owned(),
-            format!("source_revision: {REV}"),
-            "source_dirty: false".to_owned(),
-            format!("spec_revision: {REV}"),
-            "rustc: rustc 1.90.0 (abc 2026-01-01)".to_owned(),
+            format!("source_revision_at_record: {REV}"),
+            "source_dirty_at_record: false".to_owned(),
+            format!("spec_revision_at_record: {REV}"),
+            "rustc_at_build: rustc 1.90.0 (abc 2026-01-01)".to_owned(),
             "component: Database not_started".to_owned(),
             "component: Host not_started".to_owned(),
             "component: HubStub started stub".to_owned(),
@@ -420,6 +468,24 @@ mod tests {
         .join("\n")
             + "\n";
         assert_eq!(r.to_string(), expect);
+    }
+
+    #[test]
+    fn stub_entries_reject_injection() {
+        use fandhe_auth_hub_stub::config::{ProvisionalEntry, ValueMark};
+        let base = || RunRecord::new(ts(0), ts(0), ver(), comp(&[]));
+        let rec = |field: &'static str| ProvisionalRecord {
+            entries: vec![ProvisionalEntry {
+                field,
+                mark: ValueMark::TestProvisional,
+            }],
+        };
+        assert!(base().with_hub_stub_record(&rec("a\nformat: x")).is_err());
+        assert!(base().with_hub_stub_record(&rec("")).is_err());
+        assert!(base().with_hub_stub_record(&rec("a\u{2028}b")).is_err());
+        let long: &'static str = Box::leak("a".repeat(201).into_boxed_str());
+        assert!(base().with_hub_stub_record(&rec(long)).is_err());
+        assert!(base().with_hub_stub_record(&rec("port")).is_ok());
     }
 
     #[test]

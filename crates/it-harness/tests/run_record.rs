@@ -74,7 +74,9 @@ fn run_record_has_version_composition_time_and_no_values() {
         .run_record(version)
         .unwrap()
         .with_hub_stub_record(&hub_handle.provisional_record().unwrap())
-        .with_console_contract(&console_handle.contract_record().unwrap());
+        .unwrap()
+        .with_console_contract(&console_handle.contract_record().unwrap())
+        .unwrap();
     let text = record.to_string();
 
     // 版・日時
@@ -89,10 +91,13 @@ fn run_record_has_version_composition_time_and_no_values() {
     assert!(value("started_at").ends_with('Z'));
     assert!(value("recorded_at").ends_with('Z'));
     assert!(!value("harness_version").is_empty());
-    assert!(is_hex_rev(&value("source_revision")));
-    assert!(is_hex_rev(&value("spec_revision")));
-    assert!(value("rustc").starts_with("rustc "));
-    assert!(matches!(value("source_dirty").as_str(), "true" | "false"));
+    assert!(is_hex_rev(&value("source_revision_at_record")));
+    assert!(is_hex_rev(&value("spec_revision_at_record")));
+    assert!(value("rustc_at_build").starts_with("rustc "));
+    assert!(matches!(
+        value("source_dirty_at_record").as_str(),
+        "true" | "false"
+    ));
 
     // 構成（Host・Database は起動していない）
     assert!(text.contains("component: Database not_started\n"));
