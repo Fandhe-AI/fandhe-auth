@@ -1,0 +1,8 @@
+[package]
+name = "fandhe-auth-client"
+description = "fandhe-auth の RP 向けクライアント"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true

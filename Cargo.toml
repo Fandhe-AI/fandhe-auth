@@ -1,0 +1,26 @@
+# fandhe-auth の workspace ルート（virtual workspace）。
+# TASK-3 (1/6): 段階 1 の crate だけを並べる（LIB-14・LIB-15、D-2026-10-27-8）。
+# メンバーは glob にせず明示列挙する。段階 2（backend・webauthn-wasm・frontend 等）、Hub が担当する
+# crate（db-pg・db-fandhe・db-migrate・server）、同梱 Plugin（名前・置き場は TASK-3 の 4/6 で決める）は含めない。
+[workspace]
+resolver = "3" # 暫定。人が確定する。
+members = [
+  "crates/core",
+  "crates/secret",
+  "crates/db-tests",
+  "crates/client",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024" # 暫定。MSRV・edition は TASK-3・TASK-4 で人が確定する。
+license = "MIT OR Apache-2.0" # DPOL-26
+repository = "https://github.com/Fandhe-AI/fandhe-auth"
+# crates.io へ公開するかは別に決める（D-2026-10-27-8）。決まるまで誤公開を防ぐ。
+publish = false
+
+# 依存クレート（workspace メンバー以外）のデバッグ情報を行番号のみにする。
+# panic 位置・バックトレース・プロファイラの行番号は残り、失うのはデバッガで依存の
+# 変数・型を見る機能だけ。自分たちのクレートは full debuginfo のまま。
+[profile.dev.package."*"]
+debug = "line-tables-only"
