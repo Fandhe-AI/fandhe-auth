@@ -40,7 +40,8 @@ description: >
 
 - `{staged_files}` に限定し、`glob` / `exclude` で対象を絞った 1 秒未満の検査
 - CI ではコミット単位で検知できない、または push 後では遅いもの
-  - secret-scan（`scripts/hooks/secret-scan.sh`）: 秘密情報は push 前に止める必要がある
+  - secret-scan（`scripts/hooks/secret-scan.sh`）: 秘密情報は push 前に止める必要がある。
+    引数なしが staged 差分（フック用）で、`--tracked`（追跡ファイル全体）はフックから呼ばない（`make secret-scan`・CI 用）
   - commit-msg（`scripts/hooks/commit-msg-check.sh`）: CI の `pr-title` は PR タイトルしか検証しない
 
 ### 明示的な例外

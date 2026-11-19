@@ -140,6 +140,7 @@ workspace の members は 8 crate で、ルートの `Cargo.toml` に明示し�
 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査（CI の `lint` ジョブと同じ契約） |
 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
 | `make pg-check` | `scripts/dev-pg-check.sh` | 開発・検証用 PostgreSQL の起動の確かめ（起動中のインスタンスが対象。起動・停止はしない。CI では流さない。名前は暫定） |
+| `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。CI への組み込みは別 Issue。名前は暫定） |
 | `make test-hooks` | `scripts/hooks/test-hooks.sh` | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
 
 ## 開発・検証用 DB

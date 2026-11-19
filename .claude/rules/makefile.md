@@ -28,7 +28,7 @@ description: >
 - 全ターゲットを `.PHONY` に列挙する。`.DEFAULT_GOAL := help` を維持する
 - 各ターゲットに `## <説明>。直接: scripts/<name>.sh` 形式のコメントを付ける
   - `help` は正規表現 `^[a-zA-Z0-9_-]+:.*## ` に一致する行だけを表示する。`## ` が無いターゲットは一覧に出ない
-  - ターゲット名の表示幅は `%-10s`（`test-hooks` でちょうど 10 文字）。11 文字以上の名前を足す場合は幅も広げる
+  - ターゲット名の表示幅は `%-11s`（`secret-scan` でちょうど 11 文字）。12 文字以上の名前を足す場合は幅も広げる
 - 中身の無いターゲット（`@true`・`echo` だけ等）は置かない。呼び出し元が終了コードを信用して素通りするため
 - GNU Make 3.81（macOS 標準）互換を保つ。`.ONESHELL`・`.RECIPEPREFIX`・`define` + `$(eval)` の多用など 3.82+ 前提の機能は使わない
 - Makefile 冒頭のコメント（役割・3.81 互換・help の仕組み）は削らない
@@ -57,6 +57,7 @@ description: >
 | `setup` | `scripts/setup.sh` | 冪等（再実行しても安全）。`lefthook install` と `.env` 雛形の配置のみで、既存の `.env` は上書きしない。ツール本体は導入しない |
 | `check` | `scripts/check.sh` | ソースを変更しない（自動修正しない）。editorconfig-checker + shellcheck。CI の `check` ジョブと同一 |
 | `test-hooks` | `scripts/hooks/test-hooks.sh` | 一時 git リポジトリで検証し作業ツリーを変更しない。依存は bash + git のみ。CI の `test-hooks` ジョブと同一 |
+| `secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 検査のみ。追跡ファイル全体の秘密情報の混入を規則表で検査し、規則 ID ごとの件数・合計・ファイル名だけを出す（値は出さない）。0 件で 0・検出で 1・検査不能で 2。CI への組み込みは別 Issue（TASK-6）。名前は暫定 |
 | `build` | `cargo build --workspace --locked`（直書き） | ソースを変更しない。`--locked` で `Cargo.lock` の外を解決しない。`--all-features` は付けない（DPOL-31）。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
 | `test` | `cargo test --workspace --locked`（直書き） | ソースを変更しない。`--locked`・`--all-features` なし。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
 | `fmt` | `cargo fmt --all`（直書き） | rustfmt を適用する（ソースを書き換える唯一の make ターゲット） |
