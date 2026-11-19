@@ -67,6 +67,21 @@ fn client(port: u16) -> WebDriverClient {
 }
 
 #[test]
+fn huge_content_length_is_rejected_without_panic() {
+    // 上限超過・usize::MAX の Content-Length は overflow せず CommandFailed にする（fail-closed）。
+    for cl in ["18446744073709551615", "99999999"] {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {cl}\r\nConnection: close\r\n\r\n{{\"value\":{{}}}}"
+        )
+        .into_bytes();
+        let (port, h, _rx) = fake_driver(resp);
+        let err = client(port).request("GET", "/status", None).unwrap_err();
+        assert_eq!(err.kind(), E2eErrorKind::CommandFailed);
+        h.join().unwrap();
+    }
+}
+
+#[test]
 fn request_returns_value_on_success() {
     let (port, h, rx) = fake_driver(http("200 OK", r#"{"value":{"ready":true}}"#));
     let v = client(port).request("GET", "/status", None).unwrap();

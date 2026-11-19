@@ -158,6 +158,10 @@ fn parse_response(stream: &mut TcpStream) -> Result<Value, E2eError> {
             content_length = header_value(&buf[..pos], "content-length")
                 .map(|v| v.parse::<usize>().map_err(|_| failed()))
                 .transpose()?;
+            // 上限を超える Content-Length は読む前に拒否する（end + cl の overflow も防ぐ）。
+            if content_length.is_some_and(|cl| cl > MAX_RESPONSE_BYTES) {
+                return Err(failed());
+            }
         }
     }
     let end = header_end.ok_or_else(failed)?;
