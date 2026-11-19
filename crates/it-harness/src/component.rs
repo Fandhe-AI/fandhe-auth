@@ -50,7 +50,7 @@ impl ComponentKind {
 ///
 /// Database の実体は 2/6（#91）で [`crate::database::Database`] に置いた。
 /// Hub stub の実体は 3/6（#92）で [`crate::hub_stub::HubStubComponent`] に置いた。
-/// TODO(TASK-10): console stub は 4/6（#93）が置く。
+/// console stub の実体は 4/6（#93）で [`crate::console_stub::ConsoleStubComponent`] に置いた。
 /// TODO(TASK-716): Host の実体は最小の組込み先の完成後に置く（2/6 では置かない）。
 pub trait Component {
     /// 種類。

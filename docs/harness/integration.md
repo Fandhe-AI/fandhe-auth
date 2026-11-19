@@ -20,7 +20,7 @@
 | `Database` | 2/6（#91。実体あり: `database::Database`） | `dev/postgres`（`TASK-5`） | 外部プロセス（`docker compose`） |
 | `Host` | `TASK-716` の完了待ち（未設置） | 最小の組込み先（`TASK-716`。2/6 では代用を作らない） | in-process |
 | `HubStub` | 3/6（#92。実体あり: `hub_stub::HubStubComponent`） | `crates/hub-stub`（`TASK-7`） | in-process（sans-IO。ソケットなし） |
-| `ConsoleStub` | 4/6（#93） | `crates/console-stub`（`TASK-8`） | in-process |
+| `ConsoleStub` | 4/6（#93。実体あり: `console_stub::ConsoleStubComponent`） | `crates/console-stub`（`TASK-8`） | in-process（sans-IO。ソケットなし） |
 
 実体は `fandhe_auth_it_harness::Component` を実装して置く。種類はこの 4 つだけで、増やさない。
 
@@ -45,6 +45,12 @@ Hub の stub の起動: `HubStubComponent::new(HubStubConfig)` を作り、`Box`
 呼ぶ。起動前と停止後は `None`。鍵・期待値の要る受け口（本人トークン・Logout Token・assertion）はセッションに
 含めず、`session.config()` から試験が組む。障害注入は `TASK-13` の担当。
 
+console の stub の起動: `ConsoleStubComponent::new(ConsoleStubConfig, AgentCredentialConfig)` を作り（両方必須。
+既定値なし）、`Box` に入れる前に `handle()` で `ConsoleStubHandle` を取る。起動は設定から模擬一式（introspection・
+配送の時点の確認・資格情報の発行と失効の呼び出し）を組んでハンドルに置くことで、ソケット・スレッド・子プロセスは作らない。
+相手側の口の偽物（`Scripted*Ports`）はセッションに含めず、試験が渡す。console の stub と Hub の stub の結線は作らない
+（Hub の stub に `ADLG-31` ③ の口が無い）。
+
 ## DB の接続情報の受け方
 
 - 設定は `DatabaseConfig`（引数の型）で試験ごとに差し替える。環境変数・ファイルは読まない（`DPOL-32`）。
@@ -68,7 +74,8 @@ stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）
 - `RunningHarness::composition_record()`: 起動順の `CompositionRecord`。stub は「実物ではない」の印で残る。
   種類と印だけを持ち、設定の値・接続情報・鍵を載せない。
 - `HubStubHandle::provisional_record()`: 設定の欄ごとの「仮置き」の印（`HubStubConfig::provisional_record`）。
-- ファイル出力・版・日時は 5/6（#94）。console の stub は 4/6（#93）。
+- `ConsoleStubHandle::contract_record()`: 契約が仮定である旨の記録（`A-2026-10-28-12`）。値・URL を載せない。
+- ファイル出力・版・日時は 5/6（#94）。
 
 ## 実行の記録の形式
 
@@ -88,4 +95,8 @@ stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）
   構成の記録の文言（仮置き）
 - 3/6 の未達: Host（最小の組込み先）から Hub の stub への接続。`TASK-716` の完了待ちで、試験内の Fake Host を達成に数えない（`ACPT-7`）
 - 3/6 でセッションに含めない受け口: 本人トークンの提示・失効の通知・assertion（鍵・期待値が要るため）
+- 4/6 の追加: `fandhe-auth-it-harness` → `fandhe-auth-console-stub` の辺（許可表の行。`Cargo.toml`・`coding-rust.md` の記述も）、
+  構成の記録・契約の記録の文言（仮置き）、`ConsoleStubComponent::new` が `AgentCredentialConfig` も必須で受ける設計（書き手の読み）
+- 4/6 の未達: Host（最小の組込み先）から console の stub への接続。`TASK-716` の完了待ちで、試験内の Fake Host・Scripted の口を達成に数えない（`ACPT-7`）
+- 4/6 でセッションに含めないもの: 相手側の口の偽物（`Scripted*Ports`・`Recording*`）・障害注入（`TASK-13`）
 - `LIB-14`・`LIB-15` との関係（段階 1 のリリースのメンバーに含めない扱い）
