@@ -20,7 +20,7 @@
 //!   全て `Err` か非成功の値で、成功に数えない（AVLB-18・AVLB-22 の向き）。承認・拒否・期限切れは口の答え
 //!   （試験の設定値）として現れるだけで、本モジュールは承認を模さない。
 //! - 各呼び出しは結果に関わらず 1 件記録してから返す（[`crate::record`]）。
-//! - 判定しないもの: DPoP の proof の生成、遅延・拒否の注入（#76）、仮定の契約の印（#77）、実物との差（#79）。
+//! - 判定しないもの: DPoP の proof の生成、遅延・拒否の注入（[`crate::fault`]。#76）、仮定の契約の印（#77）、実物との差（#79）。
 
 use crate::config::AgentCredentialConfig;
 use crate::introspection::TransportFailure;
@@ -395,7 +395,7 @@ pub struct CredentialScript {
     pub revoke_registration: RevokeAnswer,
 }
 
-/// 設定どおりに応答する [`CredentialPorts`]。借りた値は読まずに捨てる。送れない・遅延の注入は持たない（#76）。
+/// 設定どおりに応答する [`CredentialPorts`]。借りた値は読まずに捨てる。送れない・遅延の注入は持たず、[`crate::fault`] で包む（#76）。
 #[derive(Debug, Clone)]
 pub struct ScriptedCredentialPorts {
     script: CredentialScript,

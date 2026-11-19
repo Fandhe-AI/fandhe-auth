@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 
+use crate::credential::OAuthErrorCode;
+
 /// console の値を受ける設定。他所有者（Hub 等）の値は写さず、ID で引く。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsoleStubConfig {
@@ -38,6 +40,93 @@ pub struct AgentCredentialConfig {
     pub revocation_endpoint: String,
     /// エージェントの登録の失効の口の URL（AGCR-35・AGCR-36。受付の正本は Hub ARUN-58）。
     pub registration_revocation_endpoint: String,
+}
+
+/// 口ごとの呼び出し回数の範囲（1 始まり、両端を含む）。範囲の検査はしない。
+/// `first == 0` は 1 と同じに振る舞う。`last: None` は以降すべて。回数は口ごとの通算で、設定を切り替えても戻らない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallWindow {
+    pub first: u32,
+    pub last: Option<u32>,
+}
+
+impl CallWindow {
+    /// `n` 回目（1 始まり）の呼び出しが範囲に入るか。
+    pub fn contains(&self, n: u32) -> bool {
+        n >= self.first && self.last.is_none_or(|l| n <= l)
+    }
+}
+
+/// 注入する 1 件の規則。`delay` は呼び出し元の待ちのフック（[`crate::fault::Wait`]）へ渡す値で、stub は待たない。
+/// 遅れの値は試験用の仮の値で、要件の値ではない。stub での測定を数値の根拠にしない（TASK-30・THRT-29・A-2026-10-28-14）。
+/// 注入で起こせるのは失敗の向き（遅れ・送れない・拒否）だけで、成功を作る型は持たない（AVLB-18・AVLB-22）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultRule<R> {
+    pub calls: CallWindow,
+    pub delay: Option<Duration>,
+    pub refusal: Option<R>,
+}
+
+/// introspection の口の拒否。`Status` は本文を空にして返す（401・503 はそれぞれ既存の失敗に写る。
+/// `Status(200)` は本文が空のため `MalformedResponse` になり、成功にならない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntrospectionRefusal {
+    Unreachable,
+    Status(u16),
+}
+
+/// 有効性の照会（②③）の口の拒否。口は有効か無効かしか返せない抽象の型（Hub が正本）のため、送れないだけを表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidityRefusal {
+    Unreachable,
+}
+
+/// 資格情報の口の拒否。失効の口へは `error: Some(..)` に写る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialRefusal {
+    Unreachable,
+    Rejected { status: u16, error: OAuthErrorCode },
+}
+
+/// 配送の時点の確認の口（①②③）へ注入する規則。複数の規則が当たるときは Vec の先頭から見て最初の 1 件だけを使う。
+/// 既定値は持たない。注入なしの基準線は [`DeliveryFaultConfig::baseline`] で明示する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryFaultConfig {
+    pub introspection: Vec<FaultRule<IntrospectionRefusal>>,
+    pub decider: Vec<FaultRule<ValidityRefusal>>,
+    pub hub: Vec<FaultRule<ValidityRefusal>>,
+}
+
+impl DeliveryFaultConfig {
+    /// 注入なし（基準線）。同じラッパを通して流すための空の設定。
+    pub fn baseline() -> Self {
+        Self {
+            introspection: Vec::new(),
+            decider: Vec::new(),
+            hub: Vec::new(),
+        }
+    }
+}
+
+/// 資格情報の口（発行・失効）へ注入する規則。規則の選び方は [`DeliveryFaultConfig`] と同じ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialFaultConfig {
+    pub device_authorization: Vec<FaultRule<CredentialRefusal>>,
+    pub token: Vec<FaultRule<CredentialRefusal>>,
+    pub revoke_token: Vec<FaultRule<CredentialRefusal>>,
+    pub revoke_registration: Vec<FaultRule<CredentialRefusal>>,
+}
+
+impl CredentialFaultConfig {
+    /// 注入なし（基準線）。
+    pub fn baseline() -> Self {
+        Self {
+            device_authorization: Vec::new(),
+            token: Vec::new(),
+            revoke_token: Vec::new(),
+            revoke_registration: Vec::new(),
+        }
+    }
 }
 
 // TODO(TASK-8): 仮定の契約の印（#77）を足す。
