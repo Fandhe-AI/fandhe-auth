@@ -25,7 +25,7 @@ description: >
 | YAML frontmatter の値 | 日本語可（キー名は英語） |
 | `scripts/*.sh` の実行時出力（`log`・エラー・usage） | 英語（`./makefile.md`。既存スクリプトに合わせる） |
 
-Rust のログ・誤り応答の文言の言語は、構造化ログの部品とあわせて未定（TASK-4 で決める）。
+Rust のログ・誤り応答の文言の言語は、構造化ログの口とあわせて未定（TASK-4 で決める）。
 外に返す誤り応答の形は spec の ID（THRT-1・CSRF-1・AVLB-22 等）に従い、ここで文言を決めない。
 
 例:

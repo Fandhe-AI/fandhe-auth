@@ -36,7 +36,7 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 | Hub の担当 | `-db-pg`・`-db-fandhe`・`-db-migrate`・`-server` | DB の実装・migration・認証サーバーの bin | 本体の workspace に含めない。作らない |
 | 試験専用 | `fandhe-auth-hub-stub`（`crates/hub-stub`） | Hub の検証用 stub（仮称・TASK-7。どの crate からも依存しない） | 段階 1 のリリースに含めない |
 | 試験専用 | `fandhe-auth-console-stub`（`crates/console-stub`） | console の検証用 stub（仮称・TASK-8。どの crate からも依存しない） | 同上 |
-| 位置が未定 | `-db-contract`・`-types`・`-webauthn`・`-provider`・`-keys` | 契約 trait・共有型・WebAuthn アダプタ・Provider 層・鍵管理 | 独立 crate か `-core` の中かは未定（TASK-3・TASK-4 で決める。`DPOL-41` の追記は `LIB-15` の基準で決めるとする） |
+| 位置が未定 | `-db-contract`・`-types`・`-webauthn`・`-provider`・`-keys` | 契約 trait・共有型・WebAuthn アダプタ・Provider 層・鍵管理 | 独立 crate か `-core` の中かは未定（`PoC-15` の後に `LIB-15` の基準で決める。判定は人。`DPOL-38`・`DPOL-41`。TASK-4 の扱い〔2026-11-20 の追随〕の (4) が挙げる残りの対象〔構文木の走査・property test と fuzz・構造化ログと計測の口〕に無い） |
 
 - 「Hub の担当」の crate の名前は、将来の切り出し候補として spec に残るだけで、本体の最初のリリースに含まれない（LIB-14）。
 - `fandhe-auth-backend`（`crates/backend`）: 名前の採用は `D-2026-10-29-2` で spec に記録済み（`D-2026-11-06-6`）。役割は spec に合わせ、
@@ -116,7 +116,10 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 
 ## ログ
 
-- 構造化ログ・計測の部品は **未選定**（TASK-4）。決まるまで部品を固定する依存を足さない。
+- 構造化ログ・計測は、本体の依存に置くのは出す口（facade）だけで、受ける側（subscriber・exporter・保存先）は組込み先が選ぶ（`D-2026-11-20-5`・`LIB-1`）。
+  どの口を採るかは **未定**（TASK-4 で決める。決める人は利用者。結果は spec の `D-` に記録する。`D-2026-11-20-6`）。決まるまで口を固定する依存を足さない。
+  試験でログを捕まえる受ける側を dev-dependencies に置いてよいかは spec に書かれておらず未定（TASK-4 で利用者が決める）。
+  秘密値を出さない要求は変えない（SECR-23・SECR-24・SECR-26・SECR-27）。
 - 監査は業務トランザクションの ROLLBACK の後に書く（AUDB-26）。
   本体が他へ渡すデータに秘密値を出さない（SECR-23・SECR-24・SECR-26・SECR-27。前段のログの `SECR-25` は → Hub `ARUN-78`）。
 
