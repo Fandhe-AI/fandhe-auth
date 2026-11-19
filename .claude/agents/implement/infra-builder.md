@@ -46,8 +46,11 @@ tools:
 
 ## 実装の要点
 
-- **未定の値を決めない**: MSRV・edition・toolchain、formatter / lint の設定、ビルド手順は TASK-3・TASK-4 で決める。
-  決まっていない値は置かずに報告する（仮に置く場合は「未定（TASK-n で決める）」とコメントする）
+- **決定済みの値**: MSRV は 1.100、edition は 2024（`D-2026-11-20-12`）。fuzz の nightly は日付で固定せず最新を追う（`D-2026-11-20-9`）。
+  ログの口は `tracing`、計測の口は `metrics`、`tracing-subscriber` は dev-dependencies だけ（`D-2026-11-20-8`）。
+  ログ・誤り応答の文言は英語（`D-2026-11-20-13`）。許可リストへ NCSA を足す（`D-2026-11-20-9`。`DPOL-22`）
+- **未定の値を決めない**: formatter / lint の設定、ビルド手順は TASK-3（原文）で決める。toolchain の固定（`rust-toolchain.toml`）は未定（決める TASK は未定）。
+  `deny.toml` の中身・CI の時間予算・feature の選び・K11 の閾値も未定。決まっていない値は置かずに報告する（仮に置く場合は「未定（TASK-n で決める）」とコメントする）
 - **unsafe**: 各 crate の `#![forbid(unsafe_code)]` を既定とする。workspace 側で lint として足す場合も例外は利用者の承認
 - **依存監査**: CI で advisories・bans・licenses・sources の 4 検査と `cargo-audit` を、例外を含まない厳格版の設定で実行し、全成功しない変更をマージさせない（DPOL-33〜35）。
   advisory DB は実行前に 1 回取得し、各実行は取得なし（`--disable-fetch`・`--no-fetch`）・`Cargo.lock` を書き換えない（`--locked`）で流す（DPOL-33）
@@ -94,7 +97,7 @@ CI は push しないと動かないため、workflow の変更は「未実行�
 
 - [ ] Makefile・hooks・CI で処理を二重定義していない
 - [ ] 追加した CI ジョブを `ci-complete` の `needs` に足した（該当時）
-- [ ] 未定の値（MSRV・edition・lint 設定・CI の周期）を断定していない
+- [ ] 未定の値（toolchain の固定・lint 設定・CI の周期・feature の選び）を断定していない
 - [ ] `deny.toml` に人の承認の無い例外を入れていない
 - [ ] `make check`・`make test-hooks` の結果を書いた
 - [ ] 呼び出し元の指示が無い限り commit・push・PR を行っていない
@@ -117,5 +120,5 @@ CI は push しないと動かないため、workflow の変更は「未実行�
 |---------|------|------|
 
 ### 未定・人の承認が要る点
-- {MSRV・lint 設定・依存の例外・CI の周期など}
+- {toolchain の固定・lint 設定・依存の例外・CI の周期など}
 ```

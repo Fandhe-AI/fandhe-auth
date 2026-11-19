@@ -5,7 +5,7 @@ paths:
 description: >
   fandhe-auth（Hub が組み込むライブラリの本体）の Rust コードを書くときの規約。workspace と crate の表（段階 1・段階 2・Hub の担当・位置が未定。
   crates/<名前>）、crate 間の依存の向き（DPOL-1・3・7・39・40）、時刻・乱数・ID の注入、#![forbid(unsafe_code)] の既定と例外手順、
-  MSRV・edition が未定であること、試験用の分岐を feature・環境変数で作らないこと（DPOL-27〜32）、本体の判定が返す誤りの種類と列挙防止
+  MSRV 1.100・edition 2024（D-2026-11-20-12）、ログ・誤り応答の文言は英語（D-2026-11-20-13）、試験用の分岐を feature・環境変数で作らないこと（DPOL-27〜32）、本体の判定が返す誤りの種類と列挙防止
   （THRT-25・27 ほか。応答の出力は Hub）、本番に持ち込まない PoC 由来物を定める。境界は library-boundary.md、
   秘密値・DB・依存・Web のセキュリティ要求は別 rule を参照する。
 ---
@@ -81,7 +81,9 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 
 - 各 crate のルート（`lib.rs`・`main.rs`）に `#![forbid(unsafe_code)]` を置く（利用者の決定 2026-11-13。spec に記録なし）。
 - 例外が要るときは、外す crate・理由・代替案を書いて利用者の承認を待つ。AI の判断で外さない・`deny` に緩めない。
-- MSRV・edition・toolchain は **未定**（TASK-3・TASK-4 で決める）。決まるまで `rust-version`・`edition` の値を推測で書かない。
+- MSRV は 1.100、edition は 2024（利用者の決定。`D-2026-11-20-12`）。`rust-version`・`edition` にはこの値を書く。
+  組込み先は stable の 1.100 以上が要る（spec の「main の読み」で、規約としては断定しない）。
+  `rust-toolchain.toml` を置くか・toolchain の固定の仕方は **未定**（決まるまで推測で足さない）。
 - rustfmt・clippy の設定とビルド手順は TASK-3 で決まる。決まるまで独自の lint 設定を足さない。
 - Cargo のプロファイルは `./rust-build-profile.md`。
 
@@ -110,6 +112,7 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 | 本文の上限超過 | 413（→ Hub `ARUN-46`・`ARUN-47`。旧 CSRF-37・CSRF-39） | 移管済み |
 | fail-closed（DB 不達など） | 503・`Cache-Control: no-store`・本文空・`Retry-After`（入口ごとの差は原文を確かめる） | AVLB-22 |
 
+- ログと誤り応答の文言は英語で書く（`D-2026-11-20-13`）。外に返す誤り応答の形は spec（THRT-1 等）に従い、ここで文言を決めない。
 - 外に出す失敗理由は 1 種類に統一する（`login_failed`・`recovery_failed`・`invite_invalid`）。登録済み・未登録で本文と状態コードの差 0（THRT-25）。
 - 存在しないハンドルにも同形の challenge を返す。偽の credential ID を作る鍵は永続化する（THRT-27）。
 - 画面・応答にスタックトレースや DB の状態などの内部の事情を出さない（LGUI-14。画面の安全条件は `ui-safety.md`）。
@@ -118,8 +121,9 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 ## ログ
 
 - 構造化ログ・計測は、本体の依存に置くのは出す口（facade）だけで、受ける側（subscriber・exporter・保存先）は組込み先が選ぶ（`D-2026-11-20-5`・`LIB-1`）。
-  どの口を採るかは **未定**（TASK-4 で決める。決める人は利用者。結果は spec の `D-` に記録する。`D-2026-11-20-6`）。決まるまで口を固定する依存を足さない。
-  試験でログを捕まえる受ける側を dev-dependencies に置いてよいかは spec に書かれておらず未定（TASK-4 で利用者が決める）。
+  ログの出す口は `tracing`、計測の出す口は `metrics`（利用者の決定。`D-2026-11-20-8`）。
+  試験でログを捕まえる受ける側の `tracing-subscriber` は、`SECR-23` の試験のためだけに dev-dependencies へ置いてよい。本番の依存の木には入れない（`D-2026-11-20-7` の K7）。
+  口の feature の選びは、最小の試し実装で決める（**未定**。TASK-4 の成果物。#35）。依存の版の固定の手順は **未定**。
   秘密値を出さない要求は変えない（SECR-23・SECR-24・SECR-26・SECR-27）。
 - 監査は業務トランザクションの ROLLBACK の後に書く（AUDB-26）。
   本体が他へ渡すデータに秘密値を出さない（SECR-23・SECR-24・SECR-26・SECR-27。前段のログの `SECR-25` は → Hub `ARUN-78`）。
