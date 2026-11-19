@@ -11,6 +11,9 @@ name: CI
 
 on:
   pull_request:
+    # edited: PR タイトルの修正だけで pr-title ジョブを走らせ直す（既定の types に edited は無い）。
+    # edited でも全ジョブを走らせる。一部を if: で skip すると required check が skipped=合格扱いになるため
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
