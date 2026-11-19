@@ -7,6 +7,10 @@ name = "fandhe-auth-client"
 version = "0.0.0"
 
 [[package]]
+name = "fandhe-auth-console-stub"
+version = "0.0.0"
+
+[[package]]
 name = "fandhe-auth-core"
 version = "0.0.0"
 

@@ -1,0 +1,11 @@
+[package]
+name = "fandhe-auth-console-stub"
+description = "console の検証用 stub（試験専用。実物ではない）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
