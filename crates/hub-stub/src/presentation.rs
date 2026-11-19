@@ -24,8 +24,8 @@ use serde_json::{Map, Value};
 /// 検証に使う公開鍵。公開鍵だけなので秘密値ではない。後続の JWKS の模擬（#65）に置き換わる前提。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationKey {
-    kid: String,
-    public_key: Vec<u8>,
+    pub(crate) kid: String,
+    pub(crate) public_key: Vec<u8>,
 }
 
 impl VerificationKey {
@@ -236,7 +236,7 @@ impl IdentityTokenReceiver {
     }
 }
 
-fn decode_object(part: &str) -> Result<Map<String, Value>, PresentationRejection> {
+pub(crate) fn decode_object(part: &str) -> Result<Map<String, Value>, PresentationRejection> {
     let bytes = URL_SAFE_NO_PAD
         .decode(part)
         .map_err(|_| PresentationRejection::Malformed)?;
