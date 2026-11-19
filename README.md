@@ -110,7 +110,7 @@ Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）�
 - `--all-features` でビルド・試験をしません（`DPOL-31`）
 - crate を足すときは次の 3 つを同じ変更で行い、いずれも利用者の確認を経ます。`Cargo.toml` の members、
   `scripts/check-crate-deps.sh` の許可表、`LIB-15` の基準の記録。許可表に無い member があると検査は失敗します（fail-closed）
-- `make build`・`make test`・`make lint` の CI への搭載は TASK-6 で、まだです
+- `make build`・`make test` は CI の `build-test` ジョブで流します。`make lint` の CI への搭載は TASK-6 で、まだです
 - ターゲット名 `build`・`test` は暫定で、人が確定します
 
 確認した結果は `docs/records/task-3-build-check.md` に残しています（判定は人が記録します）。
@@ -153,7 +153,7 @@ Linux・macOS（標準の bash 3.2 を含む）について実行します。`sc
 
 | ワークフロー | 内容 |
 |---|---|
-| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`ci-complete`: 全ジョブ結果の集約 |
+| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`build-test`: `make build` と `make test`（Rust の workspace のビルドと試験。ubuntu-latest）。`ci-complete`: 全ジョブ結果の集約 |
 | `ai-review.yml` | Fandhe-AI/actions の ai-review（codex）による PR 自動レビュー。Actions variable `CODEX_HOME_DIR` が未設定の間は skip される |
 | `update-external.yml` | エージェントスキル（`skills-lock.json`）と submodule（`.gitmodules`）の日次自動追従 PR。secrets は org の `SUBMODULE_PAT` を使う（`SKILLS_PAT` 未登録時は共通側が `SUBMODULE_PAT` へフォールバック）。作成する PR には `dependencies` / `automated` ラベルが付く |
 
