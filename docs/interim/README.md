@@ -11,13 +11,15 @@ spec の本文・版の数値は写さず、ID で引く（`.claude/rules/spec-r
 ## 置き場の規則
 
 - 本ディレクトリは文書だけを置く。暫定の実装のコードは、その部品を使う crate の中に置き、下の台帳の行から引く。
-  コードの具体のパスはここで決めない（段階 2 の crate を作る判断を先取りしないため）。
+  `backend` の配置は `crates/backend` で決定済み（利用者の決定 2026-11-13。`.claude/rules/coding-rust.md`）。
+  それ以外のコードの具体のパスはここで決めない。
 - 暫定の実装と提供版を、feature・環境変数・設定で実行時に切り替える経路は作らない（DPOL-30〜32・CSRF-7）。
   差し替えはコードの変更と版の固定で行う。
 - 差し替えの前に再試験を流す（CG-6）。
 - 暫定コードの module doc と `TODO(TASK-n)` には、中身を作る TASK と差し替える TASK を書く
   （`.claude/rules/code-comment-style.md`・`.claude/rules/out-of-scope-tracking.md`）。
-- 段階 2 の crate（`backend`・`frontend` 等）は、作る前に利用者に確かめる（LIB-14・LIB-15）。
+- `backend`（`fandhe-auth-backend`・`crates/backend`）は採用済み・実装は未作成。作るのは #82 で、再確認は要らない。
+  `frontend` 等その他の段階 2 の crate は、作る前に利用者に確かめる（LIB-14・LIB-15）。
 
 ## 差し替え対象の一覧
 
@@ -25,7 +27,7 @@ spec の本文・版の数値は写さず、ID で引く（`.claude/rules/spec-r
 
 | # | 提供元の部品 | 暫定の実装を作る TASK | 差し替え・再試験の TASK | コードの置き場 | この repo での扱い |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `fandhe-backend` CSRF の Gate | TASK-523 | TASK-527 | `backend`（段階 2・未作成・未定） | TASK-527 は置き換え（→ Hub `ARUN-17`）。Gate の登録・実行は Hub（`csrf-ssr.md` の適用範囲・`D-2026-10-30-1`） |
+| 1 | `fandhe-backend` CSRF の Gate | TASK-523 | TASK-527 | `crates/backend`（採用済み・未作成） | TASK-527 は置き換え（→ Hub `ARUN-17`）。Gate の登録・実行は Hub（`csrf-ssr.md` の適用範囲・`D-2026-10-30-1`） |
 | 2 | `fandhe-backend` 安全な既定値の `SetCookie` | TASK-214（目安。認証 Cookie の発行・消去の TASK で、部品そのものの TASK ではない） | TASK-527 | 同上 | 同上（差し替えの実施は Hub の担当） |
 | 3 | `fandhe-backend` 同一オリジンのリダイレクト先 | TASK-533 | TASK-527 | 同上 | 同上（差し替えの実施は Hub の担当） |
 | 4 | `fandhe-backend` `no-store` の補助 | TASK-530 | TASK-527 | 同上 | 同上（差し替えの実施は Hub の担当） |
@@ -52,6 +54,7 @@ TASK-9 の sub-issue で順に足す。文書は本ディレクトリに、コ�
 
 ## 未定の事項（人が決める）
 
-- `backend`・`frontend` の crate を作るか、作る場合の中の置き場
+- `backend` の中の置き場（暫定の実装を置く module の構成）。crate の採用と配置は決定済み
+- `frontend` の crate を作るか、作る場合の中の置き場
 - 契約 trait の置き場（TASK-584・TASK-684 で決める）
 - 固定する版の値（#85 と各差し替え TASK で決める。`A-2026-10-16-5`）
