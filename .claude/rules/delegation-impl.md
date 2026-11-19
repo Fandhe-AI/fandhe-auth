@@ -26,9 +26,9 @@ description: >
 
 | 対象 | subagent_type | model | 適用ルール |
 | --- | --- | --- | --- |
-| 段階 1: `crates/core`・`secret`・`client`（外部ログイン Plugin の OIDC 共通部品も、名前の決定後に同じ builder）。位置が未定の `webauthn`・`provider`・`keys`・`types`。試験専用の `hub-stub`・`console-stub` | `core-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./secret-values.md`・`./security.md` |
+| 段階 1: `crates/core`・`secret`・`client`・`plugin-oidc`（外部ログイン Plugin の OIDC 共通部品。`D-2026-11-20-2`）。位置が未定の `webauthn`・`provider`・`keys`・`types`。試験専用の `hub-stub`・`console-stub` | `core-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./secret-values.md`・`./security.md` |
 | 段階 1: `crates/db-tests`。位置が未定の `db-contract`（契約 trait。`-core` の中なら `core-builder` と調整） | `db-builder` | sonnet | `./db-layer.md`・`./coding-rust.md`・`./secret-values.md` |
-| 段階 2: `crates/backend`（任意の接続部品） | `backend-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./security.md`・`./secret-values.md` |
+| 段階 2: `crates/backend`（任意の接続部品。`LIB-15` の判定の記録まで `interim` に中身を入れない＝委譲しない。下記） | `backend-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./security.md`・`./secret-values.md` |
 | 段階 2: `crates/frontend`・`webauthn-wasm`（任意の部品） | `frontend-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./security.md` |
 | ルート `Cargo.toml`・`deny.toml`・`.cargo/`・`scripts/`・`Makefile`・`.github/`・`lefthook.yml` | `infra-builder` | sonnet | `./dependency-policy.md`・`./rust-build-profile.md`・`./makefile.md`・`./git-hooks.md`・`./github-actions.md` |
 | 試験（`#[cfg(test)]`・`crates/*/tests/`・`crates/db-tests` の試験ケース・property test・fuzz） | `test-writer` | sonnet | `./coding-rust.md`・`./db-layer.md`・`./verification.md` |
@@ -44,6 +44,11 @@ description: >
 - `crates/db-tests` は crate の構成を `db-builder`、試験ケースの追加を `test-writer` が担う
 - `crates/backend` は名前の採用が `D-2026-10-29-2` で spec に記録済み。役割は段階 2 の任意の接続部品で、`crates/server`・outbox の配送・Gate の登録は Hub が持つ
   （利用者の決定 2026-11-19。`./coding-rust.md`）
+- `crates/backend` は `TASK-9` の暫定の置き場で、最初のリリースに含めない扱い（`D-2026-11-20-1`）。`LIB-15` の判定を人が記録するまで、
+  `crates/backend` のどこにも（`interim` の外も含めて）中身を足す作業・`fandhe-backend` への依存を足す作業を `backend-builder` 等へ委譲しない（`D-2026-11-20-3`）。
+  進めてよいのは `docs/interim/README.md` の「backend の切り出しの記録」の判定 (1)〜(4) の 4 欄すべてに「満たす」という人の記入があるときだけで、「未記入」・「満たさない」の欄があれば止めて報告する。
+  `form_limit`・`trusted_proxy` の移管分は作らない（→ Hub `ARUN-46`・`ARUN-47`・`ARUN-43`・`ARUN-44`）。
+  `CSRF-43`・`CSRF-52`・`CSRF-45`・`CSRF-46` の本体の部分は `trusted_proxy` の枠の外で作る。本体に残る部分は `LIB-1` で行ごとに判定し、置き場が未決の部分は `LIB-1` の判定で利用者が決めるまで委譲しない
 - crate の `Cargo.toml` の依存を足す・変える場合は、担当の builder が書き、`./dependency-policy.md` に従う
 - 複数 crate にまたがる変更は crate ごとに分けて委譲する。依存の向き（DPOL-1・DPOL-7・DPOL-39・DPOL-40）を
   変える設計判断は main が利用者と決めてから委譲する

@@ -29,10 +29,10 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 | 段階 1 | `fandhe-auth-secret`（`crates/secret`） | 秘密値の型（`./secret-values.md`） | 作る前提 |
 | 段階 1 | `fandhe-auth-db-tests`（`crates/db-tests`） | 契約テスト（`./db-layer.md`） | 作る前提 |
 | 段階 1 | `fandhe-auth-client`（`crates/client`） | RP（ログインを使う側）向け。同じ repo の別 crate とする案（`Q-2026-10-30-7` の推奨） | 作る前提 |
-| 段階 1 | 外部ログイン Plugin の OIDC 共通部品 | 同梱の Plugin（本体に含めない。PLG-26） | 名前は未決（TASK-3・TASK-4） |
-| 段階 2 | `-backend`（`crates/backend`） | `fandhe-backend` の HTTP の型との接続の部品（任意。下記） | `LIB-15` の基準を満たしたとき。作る前に利用者に確かめる |
-| 段階 2 | `-webauthn-wasm`・`-frontend` | ブラウザ側 WebAuthn モジュール・画面部品（任意） | 同上 |
-| 段階 2 | SAML・ID トークンを使わない SNS の OAuth の Plugin | 外部ログイン Plugin | 同上。名前は未決 |
+| 段階 1 | `fandhe-auth-plugin-oidc`（`crates/plugin-oidc`） | 外部ログイン Plugin の OIDC 共通部品。同梱の Plugin（本体に含めない。PLG-26） | 作る前提。名前は決定済み（`D-2026-11-20-2`。crates.io の空きは未照会。公開するかは別に決める） |
+| 段階 2 | `-backend`（`crates/backend`） | `fandhe-backend` の HTTP の型との接続の部品（任意。`TASK-9` の暫定の置き場。下記） | 暫定で workspace に残す（`D-2026-11-20-1`）。`interim` に中身を足す前、または `fandhe-backend` への依存を足す前の早い方で `LIB-15` の判定を記録する（`D-2026-11-20-3`）。最初のリリースには含めない扱い |
+| 段階 2 | `-webauthn-wasm`・`-frontend` | ブラウザ側 WebAuthn モジュール・画面部品（任意） | `LIB-15` の基準を満たしたとき。作る前に利用者に確かめる |
+| 段階 2 | SAML・ID トークンを使わない SNS の OAuth の Plugin | 外部ログイン Plugin | `LIB-15` の基準を満たしたとき。作る前に利用者に確かめる。名前は未決 |
 | Hub の担当 | `-db-pg`・`-db-fandhe`・`-db-migrate`・`-server` | DB の実装・migration・認証サーバーの bin | 本体の workspace に含めない。作らない |
 | 試験専用 | `fandhe-auth-hub-stub`（`crates/hub-stub`） | Hub の検証用 stub（仮称・TASK-7。どの crate からも依存しない） | 段階 1 のリリースに含めない |
 | 試験専用 | `fandhe-auth-console-stub`（`crates/console-stub`） | console の検証用 stub（仮称・TASK-8。どの crate からも依存しない） | 同上 |
@@ -40,8 +40,24 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 
 - 「Hub の担当」の crate の名前は、将来の切り出し候補として spec に残るだけで、本体の最初のリリースに含まれない（LIB-14）。
 - `fandhe-auth-backend`（`crates/backend`）: 名前の採用は `D-2026-10-29-2` で spec に記録済み（`D-2026-11-06-6`）。役割は spec に合わせ、
-  段階 2 の任意の接続部品とする（利用者の決定 2026-11-19）。`fandhe-auth-server`・outbox の配送・CSRF Gate の登録は Hub で、この repo では作らない
+  段階 2 の任意の接続部品とする（利用者の決定 2026-11-19。この役割の決定は spec に記録が無く、役割は `LIB-14` に合わせる。
+  暫定の置き場として残すことの記録は `D-2026-11-20-1`）。`fandhe-auth-server`・outbox の配送・CSRF Gate の登録は Hub で、この repo では作らない
   （LIB-14・AUDB-22 の行内分割〔配送は Hub の AEVT〕・`csrf-ssr.md` の適用範囲）。当初の役割（ハンドラ・outbox を持つ lib）は 2026-10-29 時点の記録で、書き換えない。
+- `crates/backend` の扱い（`D-2026-11-20-1`・`D-2026-11-20-3`。判定は人が行う）:
+  - `TASK-9` の暫定の置き場（`interim` module）として workspace に残す。`LIB-14` の最初のリリースには含めない扱い。
+    ただし今の `LIB-14` の操作では段階 2 のメンバーとして見つかる。メンバーから除くか・どの仕組みで除くかは未決（`Q-2026-11-20-1`）。
+  - `interim` に最初の中身を足す前、または `fandhe-backend` への依存を足す前の早い方で、`LIB-15` の 4 基準の判定を記録する。
+    **判定を記録するまで、`crates/backend` のどこにも（`interim` の外の新しい module・ファイルも含めて）中身を足さない（自動の実装を含む）**。記録は人が行う。進めてよいのは、記録欄の (1)〜(4) すべてに「満たす」という人の記入があるときだけで、「未記入」・「満たさない」の欄があれば止めて利用者に報告する。
+    今の `crates/backend`（空の枠）は `LIB-15` の期待（記録のない切り出しが 0 件）を満たしておらず、利用者がそれを判定の時点までの外れとして受け入れた（`D-2026-11-20-3` の (ア)）。
+  - 作らない枠: `form_limit`（`TASK-534` は移管。→ Hub `ARUN-46`・`ARUN-47`）、`trusted_proxy` の移管分
+    （`CSRF-40`〜`42` → Hub `ARUN-43`、`CSRF-44` → Hub `ARUN-44`。`TASK-536` の accept ループと `CSRF-47` → Hub `ARUN-43`）。
+    Gate の登録（Hub `ARUN-39`）・Cookie の発行（Hub `ARUN-36`・`ARUN-38`）も作らない。
+  - 本体に残る部分（`LIB-1` で行ごとに判定）:
+    - `CSRF-43`・`CSRF-52`（`TASK-535`）と `CSRF-45`・`CSRF-46`（`TASK-536`）の本体の部分は、`trusted_proxy` の枠の外で作る。
+      枠を外す PR では、枠の中の `TODO(TASK-535)`・`TODO(TASK-536)` を消さずに移す。
+    - 残り 4 枠（`csrf_gate`・`set_cookie`・`local_redirect`・`no_store`）の要求値の部分。
+    - 置き場は未決で、`LIB-1` の判定のときに利用者が決める。置き場が `interim` の中なら、上のとおり先に `LIB-15` の判定が要る。
+    - `CSRF-33`〜`35` など本体の契約を最初のリリースから外す決定ではない。
 - 利用者の決定 2026-11-13（spec に記録なし）: `#![forbid(unsafe_code)]` を各 crate に置く（下記）。
 - 表に無い crate を足すとき、段階 2・Hub の crate を作るときは、作る前に利用者に確かめる。
 

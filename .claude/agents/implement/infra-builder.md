@@ -55,6 +55,7 @@ tools:
   TASK-2 の残り（`Cargo.toml` の license、`[licenses.private] ignore = false`）もここで扱う。例外の追加は理由・期限・範囲を付けた案に留め、承認は人（DPOL-20）
 - **feature・環境変数**: 検証を省く経路・試験用ログインを有効にする feature や環境変数を CI・scripts に置かない（DPOL-27〜32）
 - **CI の値**: 実行の周期・時間の予算などの値は未決（ACPT-33・`D-2026-10-17-62`）。決まっていない周期を断定しない
+- **backend への依存**: `docs/interim/README.md` の「backend の切り出しの記録」の `LIB-15` の判定 (1)〜(4) の 4 欄すべてに「満たす」という人の記入が無い間（「未記入」・「満たさない」を含む）は、ルートの `[workspace.dependencies]` や `crates/backend` に `fandhe-backend` への依存を足さず、止めて報告する（`D-2026-11-20-3`）
 - `--no-verify` や検査の無効化で通さない
 
 ## 手順
