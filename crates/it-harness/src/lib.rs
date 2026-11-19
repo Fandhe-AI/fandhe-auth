@@ -13,6 +13,8 @@
 //! 安全: 検証を外す意味の分岐・feature は作らない（DPOL-30〜32）。誤りの値に秘密値・接続文字列を載せない
 //! （SECR-11・SECR-23）。stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）。
 //!
+//! 5/6 で実行の記録（版・構成・日時。[`record`]）を置いた。
+//!
 //! 構成の下書きは `docs/harness/integration.md`。
 
 #![forbid(unsafe_code)]
@@ -22,6 +24,7 @@ pub mod console_stub;
 pub mod database;
 pub mod harness;
 pub mod hub_stub;
+pub mod record;
 
 pub use component::{Component, ComponentKind};
 pub use console_stub::{ConsoleStubComponent, ConsoleStubHandle, ConsoleStubSession};
@@ -31,3 +34,4 @@ pub use harness::{
     RunningHarness,
 };
 pub use hub_stub::{HubStubComponent, HubStubHandle, HubStubSession};
+pub use record::{RecordError, RunRecord, UtcTimestamp, VersionInfo};

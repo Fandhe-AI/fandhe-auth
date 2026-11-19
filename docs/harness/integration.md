@@ -75,11 +75,50 @@ stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）
   種類と印だけを持ち、設定の値・接続情報・鍵を載せない。
 - `HubStubHandle::provisional_record()`: 設定の欄ごとの「仮置き」の印（`HubStubConfig::provisional_record`）。
 - `ConsoleStubHandle::contract_record()`: 契約が仮定である旨の記録（`A-2026-10-28-12`）。値・URL を載せない。
-- ファイル出力・版・日時は 5/6（#94）。
+- 記録への取り込み: `RunRecord::with_hub_stub_record`・`with_console_contract` で、欄名・項目名・印・根拠 ID だけを
+  実行の記録に写す（次の節）。
 
 ## 実行の記録の形式
 
-未定。5/6（#94）で版・構成・日時を決めて追記する。
+`crates/it-harness/src/record.rs` の `RunRecord`（5/6。#94）。形式・キー名・文言は仮置きで、人が確認する。
+記録は実行の事実の出力で、合否の判定でも spec の「確定」でもない（`ACPT-7`）。
+
+### 作り方と出力先
+
+- `RunningHarness::run_record(VersionInfo)` で作り、必要なら stub の記録を取り込み、`RunRecord::write_new(dir)` で書く。
+- 出力先 `dir` は呼び出し元が渡す（無ければ作る）。ファイル名は `it-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。
+  既存のファイルは上書きしない（`create_new`）。試験では `CARGO_TARGET_TMPDIR`（`target/` の下）を使い、追跡ツリーに書かない。
+- 環境変数・設定ファイルは読まない（`DPOL-32`）。
+
+### 形式
+
+UTF-8・LF の 1 行 1 項目 `key: value`。キーは ASCII 固定。
+
+| キー | 中身 | 出どころ |
+| --- | --- | --- |
+| `format` | 形式の識別子 `fandhe-auth-it-run-record/1` | 定数。形式を変えたら末尾の版を上げる |
+| `started_at`・`recorded_at` | UTC・RFC 3339（秒） | ハーネスの起動時刻・記録を作った時刻 |
+| `harness_version` | crate の版 | `CARGO_PKG_VERSION`（コンパイル時） |
+| `source_revision` | 試験したソースの git revision（16 進 40 または 64 文字） | `git rev-parse HEAD` |
+| `source_dirty` | 作業ツリーに変更があるか（`true`/`false`） | `git status --porcelain` が空かだけ。ファイル名は載せない |
+| `spec_revision` | pin している spec の revision | `git rev-parse HEAD:docs/spec`（submodule を取得していなくても取れる） |
+| `rustc` | コンパイラの版 | `rustc --version` |
+| `component` | 種類ごとに `started real`・`started stub`・`not_started` | 構成の記録。4 種すべてを出す |
+| `note` | stub を含むときだけ。stub の合格を実物の合格に数えない旨 | `A-2026-10-28-9`・`ACPT-7` |
+| `hub_stub_field` | Hub の stub の欄名と「仮置き」の印 | `ProvisionalRecord`（取り込んだとき） |
+| `console_contract` | console の stub の項目名・印・根拠 ID | `ContractRecord`（取り込んだとき） |
+
+未起動の種類も `not_started` と出すのは、Host（`TASK-716` 待ち）を試したと読まれないようにするため。
+
+### 出してはいけないものと守り方
+
+設定の値・接続情報・ポート・compose project 名・パス・ホスト名・パスワードを記録に入れない（`SECR-11`・`SECR-23`・`SECR-26`）。
+
+- 記録の型は値を持たない部品（種類・印・静的な欄名・数値の時刻）と検査済みの版の文字列だけで組む。設定の値が入る経路が無い。
+- 実行時に外から入る文字列（revision・`rustc` の版）は文字種と長さで検査し、外れたら誤りにする（黙って省かない）。
+  改行・制御文字を通さないので、偽の行を差し込めない。
+- 誤り（`RecordError`）は種類だけを持ち、パス・コマンドの出力・`io::Error` の文言を載せない。
+- 試験 `tests/run_record.rs` が、設定に入れた目印の文字列と crate のパスが `Display`・`Debug` に出ないことを確かめる。
 
 ## 使い方
 
@@ -99,4 +138,11 @@ stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）
   構成の記録・契約の記録の文言（仮置き）、`ConsoleStubComponent::new` が `AgentCredentialConfig` も必須で受ける設計（書き手の読み）
 - 4/6 の未達: Host（最小の組込み先）から console の stub への接続。`TASK-716` の完了待ちで、試験内の Fake Host・Scripted の口を達成に数えない（`ACPT-7`）
 - 4/6 でセッションに含めないもの: 相手側の口の偽物（`Scripted*Ports`・`Recording*`）・障害注入（`TASK-13`）
+- 5/6 の追加（すべて仮置き。人が確認する）: 形式の識別子・キー名・文言・ファイル名の形、テキストの `key: value` にした選択
+  （JSON は依存の辺が増えるので採らなかった）
+- 5/6 の読み: 「版」の中身（crate の版・git の revision・作業ツリーの汚れの有無・spec の pin・`rustc` の版）は spec に規定が見当たらず、
+  書き手の読み。DB のイメージの版は入れていない（`docker inspect` は展開した値を出すので呼ばない方針）
+- 5/6 の設計: `git`・`rustc` を子プロセスで呼ぶことが `DPOL-32` の読みに沿うか
+- 5/6 の未対応: 記録の出力先を秘密値の走査の対象に入れる扱い（本段は目印の文字列の試験で代える）。
+  Docker 越しの記録（Database を含む）の試験は未追加で、Docker を使える環境で `make it-db` の対象に足す。Host の行は `TASK-716` まで常に `not_started`
 - `LIB-14`・`LIB-15` との関係（段階 1 のリリースのメンバーに含めない扱い）
