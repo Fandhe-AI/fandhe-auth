@@ -18,6 +18,7 @@ cat <<'EOF'
   setup       scripts/setup.sh               Git hooks 有効化と .env 雛形の配置（再実行しても安全）
   check       scripts/check.sh               editorconfig-checker + shellcheck（ソースは変更しない）
   test-hooks  scripts/hooks/test-hooks.sh    フックスクリプト自体の回帰テスト（bash + git のみ）
+  secret-scan scripts/hooks/secret-scan.sh --tracked   追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定）
   build       cargo build --workspace --locked   workspace 全体をビルドする（--locked。--all-features は使わない）
   test        cargo test --workspace --locked    workspace 全体の試験を流す
   fmt         cargo fmt --all                rustfmt で整形を適用する（ソースを書き換える）
@@ -27,7 +28,7 @@ cat <<'EOF'
 
 Git hooks（lefthook.yml から呼ばれる。直接実行も可）:
 
-  scripts/hooks/secret-scan.sh          staged 差分の簡易シークレット検知
+  scripts/hooks/secret-scan.sh          staged 差分の秘密情報検知（--tracked は追跡ファイル全体。フックからは呼ばない）
   scripts/hooks/commit-msg-check.sh F   コミットメッセージ F の Conventional Commits 検証
 
 `make <target>` は上記と同じコマンドを呼ぶだけの薄い入口であり、

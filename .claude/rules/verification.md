@@ -37,6 +37,7 @@ implement-review・implement-review-pr・create-pr 等）。サブエージェ�
 | Rust のソース・crate の構成 | `make build`・`make test` | `cargo build`・`cargo test`（`--workspace --locked`。CI の `build-test` ジョブと同一。TASK-6。名前は暫定） |
 | crate 間の依存 | `make crate-deps` | 許可表との照合（`scripts/check-crate-deps.sh`） |
 | `lefthook.yml`・`scripts/hooks/` の時間予算 | `time lefthook run pre-commit --all-files` | `./git-hooks.md` の時間予算の確認 |
+| 秘密情報の検査規則（`scripts/hooks/secret-scan.sh`） | `make secret-scan` と `make test-hooks` | 追跡ファイル全体で合計 0 件（終了コード 0）。規則の追加は `test-hooks.sh` にも足す |
 | `Makefile`・`scripts/*.sh` | `make help` と `scripts/help.sh` の一致 | `./makefile.md` の手順 5 |
 | `.github/workflows/` | `actionlint`・PR 上での実際の CI の実行 | `./github-actions.md` |
 
