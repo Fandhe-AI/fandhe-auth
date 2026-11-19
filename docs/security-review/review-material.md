@@ -40,7 +40,7 @@
 3. 下の「行ごとの表」に沿って、QP-1 の README、PoC の README、`04-behavior/` の順に読む。PoC-N のディレクトリは `docs/spec/03-poc/` の一覧から番号で引く（ディレクトリ名は写さない）。
 4. 対応 ID のステータス（確定／検討中）を原文で確かめ直す。[scope-ids.md](scope-ids.md) の値は commit 時点の写しである。
 
-QP-1 の README は `03-poc/quality-checks/qp1-security-review/README.md`（以下「QP-1」）。
+QP-1 の README は `docs/spec/03-poc/` の一覧から QP-1 で引く（ディレクトリ名は写さない。以下「QP-1」）。
 T 表は 1.2 節、重大は 4.1 節、中は 4.2 節、RFC 9700 の照合は 2 節にある。
 
 ## 全行に共通の観点
