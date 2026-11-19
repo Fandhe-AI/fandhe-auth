@@ -2,7 +2,7 @@
 # 開発・検証用 PostgreSQL（dev/postgres/compose.yaml。TASK-5）の起動の確かめ。手で呼ぶ。
 # 契約テストを流す参照実装が前提にする条件（TLS 必須の接続・接続数・REVOKE/GRANT の効き・64 並列）が
 # 起動中のインスタンスで揃っていることだけを確かめる。起動も停止もしない。CI では流さない（runner に DB は無い。TASK-6）。
-# 作るのは一時のロールと DB だけで、trap で必ず消す。秘密値は表示せず、docker・psql の引数にも載せない。
+# 作るのは一時のロールと DB だけ（固定名。並列に流さない）で、trap で必ず消す。秘密値は表示せず、docker・psql の引数にも載せない。
 # AUDB-80 のカタログ点検・100 回の試行・変異は TASK-797、AUDB-82 の 40P01 の吸収の試験は TASK-799 の担当で、
 # ここでは「流せる前提」の確認にとどめる。両行は検討中のままで、本スクリプトの成功は確定の根拠にしない（ACPT-7）。
 # 終了コード: 0 = 全項目 ok、1 = 失敗あり、2 = 誤用。
@@ -68,66 +68,44 @@ expect "ssl on" "$(admin -c 'show ssl')" "on"
 usable="$(admin -c "select current_setting('max_connections')::int - current_setting('superuser_reserved_connections')::int - current_setting('reserved_connections')::int")"
 if [ "${usable:-0}" -ge 64 ]; then pass "usable connections >= 64"; else fail "usable-connections"; fi
 
-# 一時のオブジェクト。名前は 16 進だけで組む。名前もパスワードも SQL の文字列に連結せず、環境変数で
-# コンテナへ渡して psql の \getenv で変数に取る。値を使う問い合わせは \bind による $n の束縛で渡す（AUDB-43）。
-# 値は docker・psql の argv にも載せない（-e NAME は名前だけを渡す）。
-# 未決（人の判断待ち）: CREATE/DROP ROLE・DATABASE と GRANT は DDL で $n を使えず、format の %I・%L（サーバー側の
-# 引用）と :"var"（識別子の引用）で組む。これは AUDB-43 の「埋め込みで回避しない」と緊張するため、
-# 規約上の扱いは人が決める。決定が出るまで、値は自前で生成した 16 進だけに限る。
-sfx="$(openssl rand -hex 4)"
-FA_DB="fa_devchk_${sfx}"
-FA_APP="fa_devchk_${sfx}_app"
-FA_OTHER="fa_devchk_${sfx}_other"
+# 一時のオブジェクト。名前は固定（衝突時は作成が失敗する。並列には流さない）。SQL 本文に値を組み込まない（AUDB-43）。
+# 作成・削除は PostgreSQL 同梱の createuser・dropuser・createdb・dropdb（ツール側が引用する）で行い、パスワードは
+# createuser -P の標準入力で渡す（クライアント側で SCRAM の検証子にして送られる）。値は docker・psql の argv に載せない。
+# GRANT・REVOKE は名前も値も固定の静的な SQL。値を使う問い合わせは \bind による $n の束縛で渡す。
+FA_DB="fa_devchk"
+FA_APP="fa_devchk_app"
+FA_OTHER="fa_devchk_other"
 FA_APP_PW="$(openssl rand -hex 16)"
 FA_OTHER_PW="$(openssl rand -hex 16)"
-export FA_DB FA_APP FA_OTHER FA_APP_PW FA_OTHER_PW
+export FA_APP FA_DB
 
-# 各 SQL の先頭に付ける。環境変数を psql 変数へ取り込む（psql 15 以降）。
-pre='\getenv fa_db FA_DB
-\getenv fa_app FA_APP
-\getenv fa_other FA_OTHER
-\getenv fa_app_pw FA_APP_PW
-\getenv fa_other_pw FA_OTHER_PW'
-# 管理用（unix socket・trust）で、標準入力の SQL に pre を前置して流す。
-admin_env() {
-  { printf '%s\n' "${pre}"; cat; } |
-    dc exec -T -e FA_DB -e FA_APP -e FA_OTHER -e FA_APP_PW -e FA_OTHER_PW postgres \
-      psql -U postgres -v ON_ERROR_STOP=1 -qAt "$@"
-}
-
-# 各削除を別の psql 呼び出しにし、1 つ失敗しても後続を続ける。失敗は名前だけを stderr に出し（秘密値・
-# psql の出力は出さない）、元の処理が成功でも終了コードを非 0 にする。
+pgtool() { dc exec -T postgres "$@"; }
+created=""
+# 後始末。作成に成功したものだけを、各々別の呼び出しで消し、1 つ失敗しても続ける。失敗は名前だけを stderr に出し
+# （秘密値・ツールの出力は出さない）、元の処理が成功でも終了コードを非 0 にする。
 cleanup() {
   local rc=$? cfail=""
   trap - EXIT
-  admin_env >/dev/null 2>&1 <<'SQL' || cfail="${cfail} drop-database"
-SELECT format('DROP DATABASE IF EXISTS %I WITH (FORCE)', $1::text) AS q \bind :fa_db \gset
-:q \g
-SQL
-  admin_env >/dev/null 2>&1 <<'SQL' || cfail="${cfail} drop-role-app"
-SELECT format('DROP ROLE IF EXISTS %I', $1::text) AS q \bind :fa_app \gset
-:q \g
-SQL
-  admin_env >/dev/null 2>&1 <<'SQL' || cfail="${cfail} drop-role-other"
-SELECT format('DROP ROLE IF EXISTS %I', $1::text) AS q \bind :fa_other \gset
-:q \g
-SQL
+  case "${created}" in *" db"*) pgtool dropdb -U postgres --force --if-exists "${FA_DB}" >/dev/null 2>&1 || cfail="${cfail} drop-database" ;; esac
+  case "${created}" in *" app"*) pgtool dropuser -U postgres --if-exists "${FA_APP}" >/dev/null 2>&1 || cfail="${cfail} drop-role-app" ;; esac
+  case "${created}" in *" other"*) pgtool dropuser -U postgres --if-exists "${FA_OTHER}" >/dev/null 2>&1 || cfail="${cfail} drop-role-other" ;; esac
   if [ -n "${cfail}" ]; then
-    echo "[$(basename "$0")] FAIL: cleanup:${cfail} (temporary objects fa_devchk_${sfx}* may remain)" >&2
+    echo "[$(basename "$0")] FAIL: cleanup:${cfail} (temporary objects ${FA_DB}* may remain)" >&2
     [ "${rc}" -eq 0 ] && rc=1
   fi
   exit "${rc}"
 }
 trap cleanup EXIT
 
-admin_env >/dev/null <<'SQL'
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', $1::text, $2::text) AS q \bind :fa_app :fa_app_pw \gset
-:q \g
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', $1::text, $2::text) AS q \bind :fa_other :fa_other_pw \gset
-:q \g
-SELECT format('CREATE DATABASE %I', $1::text) AS q \bind :fa_db \gset
-:q \g
-SQL
+mkrole() { # <role> <password>
+  printf '%s\n%s\n' "$2" "$2" | pgtool createuser -U postgres -P "$1" >/dev/null 2>&1
+}
+if mkrole "${FA_APP}" "${FA_APP_PW}"; then created="${created} app"; else
+  echo "error: cannot create role ${FA_APP} (left over from another run? drop it first)" >&2; exit 1; fi
+if mkrole "${FA_OTHER}" "${FA_OTHER_PW}"; then created="${created} other"; else
+  echo "error: cannot create role ${FA_OTHER} (left over from another run? drop it first)" >&2; exit 1; fi
+if pgtool createdb -U postgres "${FA_DB}" >/dev/null 2>&1; then created="${created} db"; else
+  echo "error: cannot create database ${FA_DB} (left over from another run? drop it first)" >&2; exit 1; fi
 
 # コンテナ内の TCP 接続。パスワードはホストの環境変数に置き、docker へは名前だけ渡す（-e PGPASSWORD。値は argv に出ない）。
 tcp_psql() { # <role> <pwvar> <sslmode> ...psql args
@@ -140,11 +118,11 @@ tcp_psql() { # <role> <pwvar> <sslmode> ...psql args
 # 認証の方式: TLS の成功だけでは scram の証拠にならない（hostssl が trust でも通る）ので、実効ルールを見る。
 # 実効ルールは pg_hba_file_rules。host 系は scram-sha-256 か reject だけで、両方が存在すること。
 expect "pg_hba: no host rule other than scram-sha-256/reject" \
-  "$(echo "select count(*) from pg_hba_file_rules where error is null and type like 'host%' and auth_method not in ('scram-sha-256','reject')" | admin_env)" "0"
+  "$(admin -c "select count(*) from pg_hba_file_rules where error is null and type like 'host%' and auth_method not in ('scram-sha-256','reject')")" "0"
 expect "pg_hba: hostssl is scram-sha-256" \
-  "$(echo "select count(*) > 0 from pg_hba_file_rules where error is null and type = 'hostssl' and auth_method = 'scram-sha-256'" | admin_env)" "t"
+  "$(admin -c "select count(*) > 0 from pg_hba_file_rules where error is null and type = 'hostssl' and auth_method = 'scram-sha-256'")" "t"
 expect "pg_hba: hostnossl is reject" \
-  "$(echo "select count(*) > 0 from pg_hba_file_rules where error is null and type = 'hostnossl' and auth_method = 'reject'" | admin_env)" "t"
+  "$(admin -c "select count(*) > 0 from pg_hba_file_rules where error is null and type = 'hostnossl' and auth_method = 'reject'")" "t"
 
 # 平文の拒否（pg_hba の拒否であること）・誤ったパスワードの拒否・正しい資格情報での TLS ログインを別々に判定する。
 plain="$(tcp_psql "${FA_APP}" FA_APP_PW disable -c 'select 1' 2>&1 || true)"
@@ -160,17 +138,14 @@ esac
 expect "tls login with correct password (sslmode=require)" \
   "$(tcp_psql "${FA_APP}" FA_APP_PW require -c 'select ssl from pg_stat_ssl where pid = pg_backend_pid()' 2>/dev/null || true)" "t"
 expect "temp role is not superuser" \
-  "$(admin_env <<'SQL'
-select rolsuper from pg_roles where rolname = $1 \bind :fa_app \g
-SQL
-)" "f"
+  "$(admin -c "select rolsuper from pg_roles where rolname = 'fa_devchk_app'")" "f"
 
 # AUDB-80 の前提だけ: REVOKE/GRANT が効く環境か（本体は TASK-797）。
-admin_env -d "${FA_DB}" >/dev/null <<'SQL'
+admin -d "${FA_DB}" >/dev/null <<'SQL'
 CREATE FUNCTION public.fa_probe() RETURNS int LANGUAGE sql AS 'select 1';
 REVOKE EXECUTE ON FUNCTION public.fa_probe() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.fa_probe() TO :"fa_app";
-GRANT USAGE ON SCHEMA public TO :"fa_app", :"fa_other";
+GRANT EXECUTE ON FUNCTION public.fa_probe() TO fa_devchk_app;
+GRANT USAGE ON SCHEMA public TO fa_devchk_app, fa_devchk_other;
 SQL
 expect "granted role can execute" \
   "$(tcp_psql "${FA_APP}" FA_APP_PW require -c 'select public.fa_probe()' 2>/dev/null || true)" "1"
