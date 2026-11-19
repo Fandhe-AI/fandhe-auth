@@ -35,5 +35,3 @@ pub mod heartbeat;
 pub mod jwks;
 pub mod logout;
 pub mod presentation;
-
-// TODO(TASK-7): 模擬の項目と Hub の ID の照合の表は #70 で `docs/stubs/hub-stub.md` へ足す。

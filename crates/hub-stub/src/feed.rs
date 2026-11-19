@@ -32,7 +32,7 @@ use crate::config::HubStubConfig;
 use crate::logout::{GROUPED_CLAIM, LogoutTokenReceiver};
 
 /// カーソルを運ぶ form の名前。spec に定めが無い仮置き。
-/// TODO(TASK-7): 本体の `ChangeFeed::read_since`（仮称。RVPG-42）の形が決まったら置き換える（#70）。
+/// TODO(TASK-398): 本体の `ChangeFeed::read_since`（仮称。RVPG-42）の形が決まったら置き換える。
 const CURSOR_PARAM: &str = "cursor";
 
 /// 口が返した結果。項目は検討中の形のまま JSON で受ける（RVPG-38・RVPG-41）。
