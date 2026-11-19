@@ -29,7 +29,8 @@ impl TestOrigin {
                     break;
                 }
                 if let Ok(s) = conn {
-                    handle(s, port);
+                    // 投機的な preconnect が受け付けを塞がないよう、接続ごとに別スレッドで処理する。
+                    std::thread::spawn(move || handle(s, port));
                 }
             }
         });
@@ -62,7 +63,7 @@ impl Drop for TestOrigin {
 }
 
 fn handle(mut s: TcpStream, port: u16) {
-    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 16 * 1024 {

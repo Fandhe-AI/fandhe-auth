@@ -35,8 +35,10 @@ fn registers_one_passkey_with_chrome_virtual_authenticator() {
         })
         .expect("authenticator");
     handle.navigate(&origin.origin()).expect("navigate");
+    // script timeout は command timeout（既定 30 秒）より短くし、時間切れを WebDriver の
+    // script timeout として観測できるようにする。
     handle
-        .set_script_timeout(Duration::from_secs(30))
+        .set_script_timeout(Duration::from_secs(20))
         .expect("timeout");
 
     let outcome = register_once(&handle, &origin.origin(), "localhost").expect("register");
