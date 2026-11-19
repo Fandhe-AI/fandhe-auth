@@ -92,6 +92,43 @@ fn rejects_wrong_typ() {
     );
 }
 
+/// SIGN-1・SIGN-6: 未対応の critical ヘッダ（crit）を持つトークンは、正しい鍵で署名されていても拒否する。
+#[test]
+fn rejects_crit_header() {
+    let key = new_key();
+    let mut r = receiver(&key);
+    let h = json!({"alg": "ES256", "typ": "at+jwt", "kid": "k1", "crit": ["x-ext"], "x-ext": 1});
+    assert_eq!(
+        r.present(&sign(&key, &h, &claims()), NOW),
+        Err(PresentationRejection::HeaderMismatch)
+    );
+    assert!(r.received().is_empty());
+}
+
+/// CLM-2・CLM-17: 任意クレームは欠落なら受理し、存在して型が合わなければ拒否する。
+#[test]
+fn rejects_optional_claims_with_wrong_type() {
+    let key = new_key();
+    let evt = "https://auth.example.test/claims/auth_event_id";
+    for (k, v) in [
+        ("auth_time", json!("x")),
+        ("acr", json!(1)),
+        ("amr", json!("pwd")),
+        ("amr", json!([1])),
+        (evt, json!(5)),
+    ] {
+        let mut r = receiver(&key);
+        let mut c = claims();
+        c[k] = v;
+        assert_eq!(
+            r.present(&sign(&key, &header(), &c), NOW),
+            Err(PresentationRejection::MissingClaim),
+            "{k}"
+        );
+        assert!(r.received().is_empty());
+    }
+}
+
 /// SIGN-17: exp == now は拒否する。
 #[test]
 fn rejects_exp_equal_to_now() {

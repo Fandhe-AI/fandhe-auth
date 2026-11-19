@@ -138,6 +138,10 @@ impl IdentityTokenReceiver {
         {
             return Err(R::HeaderMismatch);
         }
+        // 未対応の拡張は実装しない段階のため、crit を持つヘッダは拒否する（RFC 7515 4.1.11）。
+        if header.contains_key("crit") {
+            return Err(R::HeaderMismatch);
+        }
         // SIGN-16: kid は手元の一覧からだけ引く。
         let kid = header
             .get("kid")
@@ -193,13 +197,24 @@ impl IdentityTokenReceiver {
                 .collect::<Result<Vec<_>, _>>()?,
             _ => return Err(R::MissingClaim),
         };
+        // 任意クレームは「欠落」なら None、「存在するが型不正」なら拒否する。
+        let opt_str = |k: &str| match c.get(k) {
+            None => Ok(None),
+            Some(Value::String(v)) => Ok(Some(v.clone())),
+            Some(_) => Err(R::MissingClaim),
+        };
+        let auth_time = match c.get("auth_time") {
+            None => None,
+            Some(v) => Some(v.as_u64().ok_or(R::MissingClaim)?),
+        };
         let amr = match c.get("amr") {
+            None => None,
             Some(Value::Array(a)) => Some(
                 a.iter()
                     .map(|v| v.as_str().map(str::to_owned).ok_or(R::MissingClaim))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-            _ => None,
+            Some(_) => return Err(R::MissingClaim),
         };
         // CLM-17: 認証イベント ID のクレーム名は期待値の issuer から組み立てる。
         let event_key = format!("{}/claims/auth_event_id", self.expectations.issuer);
@@ -213,10 +228,10 @@ impl IdentityTokenReceiver {
             sid: st("sid")?,
             client_id: st("client_id")?,
             scope: st("scope")?,
-            auth_time: c.get("auth_time").and_then(Value::as_u64),
-            acr: c.get("acr").and_then(Value::as_str).map(str::to_owned),
+            auth_time,
+            acr: opt_str("acr")?,
             amr,
-            auth_event_id: c.get(&event_key).and_then(Value::as_str).map(str::to_owned),
+            auth_event_id: opt_str(&event_key)?,
         })
     }
 }
