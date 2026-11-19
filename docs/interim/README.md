@@ -100,7 +100,7 @@ crate は作っていない。`frontend` の追加は段階 2 で（LIB-14）、
 
 - builder は `interim` の子 module からだけ参照する。
 - 暫定版と提供版を feature・環境変数・設定で切り替える経路は作らない（DPOL-30〜32・CSRF-7）。
-- 差し替えの前に再試験を流す（CG-6）。手順は末尾の「差し替えの手順」の節（#86）、空の実装での確認は #88。
+- 差し替えの前に再試験を流す（CG-6）。手順は末尾の「差し替えの手順」の節（#86）、空の実装での確認は末尾の「空の実装での確認」の節（#88）。
 
 frontend に固有の制約: サーバーのビルドに `web-sys` を入れない（DPOL-40）。`fandhe-auth-db*` に依存しない（DPOL-7）。
 
@@ -150,7 +150,7 @@ db に固有の安全条件:
 - 契約テストを通すために期待・安全条件を緩めない（AUDB-6・AUDB-69）。
 
 兄弟の範囲: 版の固定の記録の形式は #85（末尾の「版の固定の記録の形式」の節）、差し替えの手順は #86、契約テストを複数の DB 実装で流す枠は #87（作成済み。契約 trait・ケース・提供形・メモリ実装は残りで、TASK-584・TASK-716・TASK-718）、
-空の実装での確認は #88。中身を先取りしない。
+空の実装での確認は末尾の「空の実装での確認」の節（#88）。中身を先取りしない。
 
 作るときの手順（利用者の決定の後。この Issue では実行しない）:
 
@@ -287,3 +287,63 @@ commit の欄は、公開された版の識別のためだけに置く。リポ�
 ### 書かないもの
 
 版の値・試験の中身・相手側の本文や値・秘密値・実機の名前・ホームのパス・内部のアドレス（`.claude/rules/security.md`・`.claude/rules/spec-reference.md`）。
+
+## 空の実装での確認（#88）
+
+`TASK-9` の 8/8 段目。中身の無い（空の）枠のままで、ビルド・lint・試験・`make check` が通ることを新しく流した結果を残す。
+この節は実行したコマンドと出力の事実だけを書く。判定・「確定」への変更は人が行う（ACPT-7・CG-2）。
+「試験が通る」を契約の充足として読まない（AUDB-6）。
+
+### 基準
+
+- base: `origin/main` の `c62a28300ca7290379b2c01c739258ebcaa4323a`。本変更（結合試験 1 ファイルと本節）を載せて流した。
+- spec の pin: `547e30593f7f623585850350d107a9d9a0868aa6`（`docs/spec`。取得せず `git submodule status` で確認）。
+- ツール: cargo 1.99.1・rustc 1.99.1・rustfmt 1.10.0-stable・clippy 0.1.99・GNU Make 4.4.1・editorconfig-checker v3.7.0・shellcheck 0.11.0。
+
+### 全体
+
+| コマンド | 終了コード | 出力の要点 |
+| --- | --- | --- |
+| `make check` | 0 | editorconfig-checker・shellcheck の実行が成功した |
+| `make lint` | 0 | fmt・clippy `-D warnings`・crate 間の依存の検査が成功した |
+| `make build` | 0 | workspace 全体がビルドできた |
+| `make test` | 0 | 失敗 0。追加した結合試験 `runner_empty_impls` の 2 件が実行された |
+
+### 枠ごとの確認
+
+| 台帳の行 | 枠の置き場 | 流したコマンド | 終了コード | 出力の要点 |
+| --- | --- | --- | --- | --- |
+| 1〜4（backend） | `crates/backend/src/interim/` | `cargo test -p fandhe-auth-backend --locked` | 0 | 試験は 0 件（機構が動くことだけを示す） |
+| 同上 | 同上 | `RUSTDOCFLAGS='-D warnings' cargo doc -p fandhe-auth-backend --no-deps --locked` | 0 | 警告なし |
+| 同上 | 同上 | 宣言（`fn`・`struct`・`impl`・`use` 等）の `git grep`（`crates/backend/src`） | - | 一致なし。`mod` と doc・`TODO` だけ |
+| 同上 | 同上 | `cargo tree -p fandhe-auth-backend --locked -e normal,build,dev --target all` | 0 | 依存 0 件（自身のみ） |
+| 8（frontend） | 無し | `Cargo.toml` の members と `crates/` を数えた | - | `crates/frontend` は 0 件。確認の対象外 |
+| 9（db の runner） | `crates/db-tests/src/runner.rs` | `cargo test -p fandhe-auth-db-tests --locked` | 0 | 単体 4 件・結合 2 件が ok、失敗 0 |
+
+- `crates/backend` の差分は 0 行（`LIB-15` の判定が未記入のため中身を足していない。`D-2026-11-20-3` の (ア)）。
+- 結合試験 `crates/db-tests/tests/runner_empty_impls.rs` は、公開 API だけで別々の空の型 2 つに本物の `cases()` を流し、
+  流した件数 0・不合格 0・factory の呼び出し 0 回と、`run_all` の報告 2 件の名前の順を確かめる。
+  `run_all` は 1 つの型 `S` しか受けないため、別々の型を同時には渡せない（観察のみ。`S` の境界は TASK-584）。
+
+### 差し替えの後の確認コマンドの空打ち
+
+| コマンド | 結果 |
+| --- | --- |
+| `git grep -n -e 'fandhe_backend' -e 'fandhe_frontend' -- 'crates/' ':!crates/*/src/interim/'` | 一致なし |
+| `cargo tree --locked --workspace -e normal,build --target all -i fandhe-backend` | `did not match any packages`（出力の文言で判断） |
+| `git grep -nE 'cfg\(feature' -- 'crates/'` | 一致なし |
+
+### この結果が示さないこと
+
+- `LIB-15` の判定ではない。
+- ケースが 0 件のため、PostgreSQL・`fandhe-db` のどちらの契約の充足の根拠にもならない（TASK-628・CG-7）。
+- 〔実機〕の確認ではない（ACPT-7）。
+
+### 判定
+
+未記入（人が記入）。
+
+### 残り
+
+TASK-584（契約 trait とケース表）、TASK-716（メモリ実装）、TASK-718（提供形）、TASK-628（`fandhe-db` 向けの根拠）、
+`LIB-15` の判定（人）、`Q-2026-11-20-1`。
