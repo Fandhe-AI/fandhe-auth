@@ -69,8 +69,11 @@ usable="$(admin -c "select current_setting('max_connections')::int - current_set
 if [ "${usable:-0}" -ge 64 ]; then pass "usable connections >= 64"; else fail "usable-connections"; fi
 
 # 一時のオブジェクト。名前は 16 進だけで組む。名前もパスワードも SQL の文字列に連結せず、環境変数で
-# コンテナへ渡して psql の \getenv で変数に取り、:'var'（リテラル）・:"var"（識別子）・format の %I・%L で束縛する（AUDB-43）。
+# コンテナへ渡して psql の \getenv で変数に取る。値を使う問い合わせは \bind による $n の束縛で渡す（AUDB-43）。
 # 値は docker・psql の argv にも載せない（-e NAME は名前だけを渡す）。
+# 未決（人の判断待ち）: CREATE/DROP ROLE・DATABASE と GRANT は DDL で $n を使えず、format の %I・%L（サーバー側の
+# 引用）と :"var"（識別子の引用）で組む。これは AUDB-43 の「埋め込みで回避しない」と緊張するため、
+# 規約上の扱いは人が決める。決定が出るまで、値は自前で生成した 16 進だけに限る。
 sfx="$(openssl rand -hex 4)"
 FA_DB="fa_devchk_${sfx}"
 FA_APP="fa_devchk_${sfx}_app"
@@ -92,19 +95,38 @@ admin_env() {
       psql -U postgres -v ON_ERROR_STOP=1 -qAt "$@"
 }
 
+# 各削除を別の psql 呼び出しにし、1 つ失敗しても後続を続ける。失敗は名前だけを stderr に出し（秘密値・
+# psql の出力は出さない）、元の処理が成功でも終了コードを非 0 にする。
 cleanup() {
-  admin_env <<'SQL' >/dev/null 2>&1 || true
-SELECT format('DROP DATABASE IF EXISTS %I WITH (FORCE)', :'fa_db') \gexec
-SELECT format('DROP ROLE IF EXISTS %I', :'fa_app') \gexec
-SELECT format('DROP ROLE IF EXISTS %I', :'fa_other') \gexec
+  local rc=$? cfail=""
+  trap - EXIT
+  admin_env >/dev/null 2>&1 <<'SQL' || cfail="${cfail} drop-database"
+SELECT format('DROP DATABASE IF EXISTS %I WITH (FORCE)', $1::text) AS q \bind :fa_db \gset
+:q \g
 SQL
+  admin_env >/dev/null 2>&1 <<'SQL' || cfail="${cfail} drop-role-app"
+SELECT format('DROP ROLE IF EXISTS %I', $1::text) AS q \bind :fa_app \gset
+:q \g
+SQL
+  admin_env >/dev/null 2>&1 <<'SQL' || cfail="${cfail} drop-role-other"
+SELECT format('DROP ROLE IF EXISTS %I', $1::text) AS q \bind :fa_other \gset
+:q \g
+SQL
+  if [ -n "${cfail}" ]; then
+    echo "[$(basename "$0")] FAIL: cleanup:${cfail} (temporary objects fa_devchk_${sfx}* may remain)" >&2
+    [ "${rc}" -eq 0 ] && rc=1
+  fi
+  exit "${rc}"
 }
 trap cleanup EXIT
 
 admin_env >/dev/null <<'SQL'
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'fa_app', :'fa_app_pw') \gexec
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'fa_other', :'fa_other_pw') \gexec
-SELECT format('CREATE DATABASE %I', :'fa_db') \gexec
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', $1::text, $2::text) AS q \bind :fa_app :fa_app_pw \gset
+:q \g
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', $1::text, $2::text) AS q \bind :fa_other :fa_other_pw \gset
+:q \g
+SELECT format('CREATE DATABASE %I', $1::text) AS q \bind :fa_db \gset
+:q \g
 SQL
 
 # コンテナ内の TCP 接続。パスワードはホストの環境変数に置き、docker へは名前だけ渡す（-e PGPASSWORD。値は argv に出ない）。
@@ -138,7 +160,10 @@ esac
 expect "tls login with correct password (sslmode=require)" \
   "$(tcp_psql "${FA_APP}" FA_APP_PW require -c 'select ssl from pg_stat_ssl where pid = pg_backend_pid()' 2>/dev/null || true)" "t"
 expect "temp role is not superuser" \
-  "$(echo "select rolsuper from pg_roles where rolname = :'fa_app'" | admin_env)" "f"
+  "$(admin_env <<'SQL'
+select rolsuper from pg_roles where rolname = $1 \bind :fa_app \g
+SQL
+)" "f"
 
 # AUDB-80 の前提だけ: REVOKE/GRANT が効く環境か（本体は TASK-797）。
 admin_env -d "${FA_DB}" >/dev/null <<'SQL'
@@ -175,7 +200,7 @@ done
 peak=0
 end=$((SECONDS + 30))
 while [ "${SECONDS}" -lt "${end}" ]; do
-  n="$(echo "select count(*) from pg_stat_activity where backend_type = 'client backend' and usename = :'app' and datname = :'db'" |
+  n="$(echo "select count(*) from pg_stat_activity where backend_type = 'client backend' and usename = \$1 and datname = \$2 \\bind :app :db \\g" |
     psql -U postgres -v app="${FA_APP}" -v db="${FA_DB}" -qAt 2>/dev/null || echo 0)"
   [ "${n:-0}" -gt "${peak}" ] && peak="${n}"
   [ "${peak}" -ge 64 ] && break
