@@ -1,7 +1,8 @@
 # fandhe-auth の workspace ルート（virtual workspace）。
-# TASK-3 (1/6): 段階 1 の crate だけを並べる（LIB-14・LIB-15、D-2026-10-27-8）。
-# メンバーは glob にせず明示列挙する。段階 2 のうち webauthn-wasm・frontend 等、Hub が担当する
-# crate（db-pg・db-fandhe・db-migrate・server）は含めない。
+# TASK-3 (1/6): 段階 1 の crate（core・secret・db-tests・client・plugin-oidc）を並べる（LIB-14・LIB-15、
+# D-2026-10-27-8）。ほかに試験専用の stub 2 つ（hub-stub・console-stub）と、暫定の置き場の backend を
+# メンバーに含める（下の注記）。メンバーは glob にせず明示列挙する。段階 2 のうち webauthn-wasm・frontend 等、
+# Hub が担当する crate（db-pg・db-fandhe・db-migrate・server）は含めない。
 # TASK-9 (2/8): crates/backend は TASK-9 の暫定の置き場（D-2026-11-20-1）。spec 上は段階 2（LIB-14）。
 # interim に最初の中身を足す前、または fandhe-backend への依存を足す前の早い方で、LIB-15 の判定を記録する
 # （D-2026-11-20-3）。判定の記録は docs/interim/README.md の「backend の切り出しの記録」の判定の欄
