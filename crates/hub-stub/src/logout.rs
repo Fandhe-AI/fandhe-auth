@@ -20,7 +20,7 @@
 //!   `iat` が `now` より先、または `iat >= exp` の通知は拒否する。
 //! - 同じ `jti` の再受信（送信器の再送。RVPG-28）は拒否せず、重複の印を付けて記録する。適用は 1 回だけ数える。
 //! - トークンの文字列は保持せず、誤りの `Display`・`Debug` にも出さない（SECR-23〜27）。拒否は記録を変えない。
-//! - 判定しないもの: Hub が所有する値（`exp − iat` の上限など）。実物との差として #69・#70 で文書にする。
+//! - 判定しないもの: Hub が所有する値（`exp − iat` の上限など）。実物との差は `docs/stubs/hub-stub.md` に書いた（#69）。
 //!   期待値の `issuer`・`audience` は試験用の仮の値で受ける（A-2026-10-28-1）。
 
 use crate::presentation::{VerificationKey, decode_object};

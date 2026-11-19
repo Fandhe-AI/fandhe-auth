@@ -15,8 +15,8 @@
 //!   `jti` の一意性は呼び出し側が持つ。OCL-27 の重複の作り分けに要るため、ここでは重複を止めない。
 //! - 署名は `ring` の ES256（r‖s の 64 バイト）だけ（OCL-23・DPOL-4・DPOL-47）。`alg` はコードに固定し、
 //!   設定や入力から導かない（SIGN-1・SIGN-6）。`jku`・`x5u`・`jwk`・`x5c` は出さない（SIGN-16・SIGN-56）。
-//! - `typ` は付けない。spec（OCL-21〜28）に定めが無く、推測で足さない。Hub `AUTHC-39` との照合と
-//!   実物との差は #69・#70 で文書にする。
+//! - `typ` は付けない。spec（OCL-21〜28）に定めが無く、推測で足さない。実物との差は
+//!   `docs/stubs/hub-stub.md` に書いた（#69）。Hub `AUTHC-39` との照合は同文書の §5 の該当行で受ける（Hub の原文との照合は人の確認待ち）。
 //! - 資格情報は POST の form の本文だけで渡す（OCL-30）。ここは名前と値の並びまでを作り、
 //!   `application/x-www-form-urlencoded` への符号化は口の実装側が行う。
 //! - assertion の文字列は `Debug`・誤り・記録に出さない（SECR-23〜27）。
@@ -64,6 +64,11 @@ impl AssertionSigningKey {
             EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
                 .map_err(|_| SigningFailed)?;
         Self::from_pkcs8(kid, pkcs8.as_ref())
+    }
+
+    /// 鍵の識別子。JWKS の `kid` に使う（#65）。
+    pub fn kid(&self) -> &str {
+        &self.kid
     }
 
     /// 非圧縮の公開鍵の点（65 バイト）。JWKS の模擬（#65）と試験側の署名の確認に使う。
@@ -253,8 +258,8 @@ pub struct HubAssertionCaller {
 impl HubAssertionCaller {
     pub fn new(config: &HubStubConfig, target: AssertionTarget, key: AssertionSigningKey) -> Self {
         Self {
-            client_id: config.client_id.clone(),
-            max_lifetime_secs: config.assertion_max_lifetime.as_secs(),
+            client_id: config.client_id.get().clone(),
+            max_lifetime_secs: config.assertion_max_lifetime.get().as_secs(),
             target,
             key,
             rng: SystemRandom::new(),

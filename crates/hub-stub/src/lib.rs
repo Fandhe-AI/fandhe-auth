@@ -11,17 +11,27 @@
 //!
 //! 設定: Hub の値は設定で受ける（[`config::HubStubConfig`]）。数値の正本は Hub の ID で、ここには
 //! 書かない。本番の値として扱わない（A-2026-10-28-1）。環境変数・ファイルは読まない（DPOL-32）。
+//! 各値は [`config::StubValue`] と [`config::ValueMark`] で「仮置き」の印を必ず持ち、
+//! [`config::HubStubConfig::provisional_record`] で記録に残す（#67）。
 //!
 //! 本人トークンの提示の受け口: [`presentation::IdentityTokenReceiver`]（#60）。
 //! `private_key_jwt` の assertion で口を呼ぶ模擬: [`assertion::HubAssertionCaller`]（#61）。
 //! 失効の通知（`logout_token`）の受け口: [`logout::LogoutTokenReceiver`]（#62）。
+//! 変更のフィードの取得の模擬: [`feed::ChangeFeedFetcher`]（#63）。
+//! 生存確認の受け口: [`heartbeat::HeartbeatReceiver`]（#64）。
+//! Hub の JWKS を返す模擬: [`jwks::HubJwksEndpoint`]（#65）。
+//! Hub が `fandhe-auth` の JWKS を取得する模擬: [`jwks::AuthJwksFetcher`]（#65）。
+//! 応答の遅れ・拒否の注入: [`fault::HubFaultInjector`]（#66）。
+//!
+//! 実物との差は `docs/stubs/hub-stub.md` に書いた（#69）。
 
 #![forbid(unsafe_code)]
 
 pub mod assertion;
 pub mod config;
+pub mod fault;
+pub mod feed;
+pub mod heartbeat;
+pub mod jwks;
 pub mod logout;
 pub mod presentation;
-
-// TODO(TASK-7): 各模擬・受け口（#63〜#65）、遅れ・拒否の注入（#66）、仮置きの値の明示（#67）、
-// 単体試験（#68）、実物との差の文書（#69・#70）は後続の段で足す。

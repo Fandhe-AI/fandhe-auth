@@ -28,7 +28,7 @@ tools:
 | `lefthook.yml` | Git hooks の呼び出し定義 |
 | `.github/workflows/**` | CI・`ci-complete` の集約 |
 | `deny.toml` | cargo-deny の設定（advisories・bans・licenses・sources） |
-| ルート `Cargo.toml` | `[workspace]`・`[workspace.package]`・`[workspace.dependencies]`・`[profile]` |
+| ルート `Cargo.toml` | `[workspace]`・`[workspace.package]`・`[workspace.dependencies]`・`[profile]`。members は本体の段階 1（`core`・`secret`・`db-tests`・`client` と外部ログイン Plugin の OIDC 共通部品）に絞る（TASK-3。段階は〔提案〕で名前だけ決定済み。`LIB-14`・`DPOL-41`）。段階 2・Hub の担当の crate（`db-pg`・`db-fandhe`・`db-migrate`・`server` 等）は members に足さず、着手前に利用者へ確かめる |
 | `.cargo/**`・`rust-toolchain.toml` | ビルド設定（作る場合） |
 
 対象外: 各 crate のソースと crate ごとの `Cargo.toml` の中身（各 builder）、`.claude/`、`docs/spec/`。
@@ -51,10 +51,11 @@ tools:
 - **unsafe**: 各 crate の `#![forbid(unsafe_code)]` を既定とする。workspace 側で lint として足す場合も例外は利用者の承認
 - **依存監査**: CI で advisories・bans・licenses・sources の 4 検査と `cargo-audit` を、例外を含まない厳格版の設定で実行し、全成功しない変更をマージさせない（DPOL-33〜35）。
   advisory DB は実行前に 1 回取得し、各実行は取得なし（`--disable-fetch`・`--no-fetch`）・`Cargo.lock` を書き換えない（`--locked`）で流す（DPOL-33）
-- **deny.toml**: licenses 許可リスト（DPOL-22・DPOL-24）、bans の `rsa`・`openssl`・`native-tls`（DPOL-10〜13・DPOL-18・DPOL-46）、sources は crates.io のみ（DPOL-25）。
+- **deny.toml**: licenses 許可リスト（DPOL-22・DPOL-24）、bans の `rsa`・`openssl`・`native-tls`（DPOL-10・DPOL-11・DPOL-13・DPOL-18・DPOL-46。DPOL-12 は移管 → Hub `AOPS-2`。Hub の本番バイナリの検査は `AOPS-1`）、sources は crates.io のみ（DPOL-25）。
   TASK-2 の残り（`Cargo.toml` の license、`[licenses.private] ignore = false`）もここで扱う。例外の追加は理由・期限・範囲を付けた案に留め、承認は人（DPOL-20）
 - **feature・環境変数**: 検証を省く経路・試験用ログインを有効にする feature や環境変数を CI・scripts に置かない（DPOL-27〜32）
 - **CI の値**: 実行の周期・時間の予算などの値は未決（ACPT-33・`D-2026-10-17-62`）。決まっていない周期を断定しない
+- **backend への依存**: `docs/interim/README.md` の「backend の切り出しの記録」の `LIB-15` の判定 (1)〜(4) の 4 欄すべてに「満たす」という人の記入が無い間（「未記入」・「満たさない」を含む）は、ルートの `[workspace.dependencies]` や `crates/backend` に `fandhe-backend` への依存を足さず、止めて報告する（`D-2026-11-20-3`）
 - `--no-verify` や検査の無効化で通さない
 
 ## 手順

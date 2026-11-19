@@ -1,4 +1,5 @@
-//! TASK-7 #60: 本人トークンの提示の模擬が、試験用の鍵で署名したトークンで動くことの最小の確認（網羅は #68）。
+//! TASK-7 #60・#68: 本人トークンの提示の模擬が、試験用の鍵で署名したトークンで動くことの確認。
+//! #68 で `UnknownKey`・`Malformed` の各経路を足し、拒否の種類を一通り通した。
 //! 鍵は実行時に生成し、コミットしない。値は予約 TLD `.test` の仮の値。
 
 use base64::Engine as _;
@@ -167,4 +168,74 @@ fn rejection_output_does_not_contain_token() {
     let out = format!("{e} {e:?}");
     assert!(!out.contains(&t));
     assert!(t.split('.').all(|part| !out.contains(part)));
+}
+
+/// SIGN-16: kid が手元の鍵の一覧に無い・kid が無いトークンは `UnknownKey` で拒否する。
+#[test]
+fn rejects_unknown_or_missing_kid() {
+    let key = new_key();
+    let mut r = receiver(&key);
+    let h = json!({"alg": "ES256", "typ": "at+jwt", "kid": "other"});
+    assert_eq!(
+        r.present(&sign(&key, &h, &claims()), NOW),
+        Err(PresentationRejection::UnknownKey)
+    );
+    let h = json!({"alg": "ES256", "typ": "at+jwt"});
+    assert_eq!(
+        r.present(&sign(&key, &h, &claims()), NOW),
+        Err(PresentationRejection::UnknownKey)
+    );
+    assert!(r.received().is_empty());
+}
+
+/// SIGN-1: 部分の数・base64・JSON の崩れは `Malformed` で拒否し、記録を増やさない。
+#[test]
+fn rejects_malformed_tokens() {
+    let key = new_key();
+    let mut r = receiver(&key);
+    let ok = sign(&key, &header(), &claims());
+    let parts: Vec<&str> = ok.split('.').collect();
+    let not_json = URL_SAFE_NO_PAD.encode(b"not json");
+    let not_object = URL_SAFE_NO_PAD.encode(b"[1]");
+    let cases = [
+        "".to_owned(),
+        "a.b".to_owned(),
+        format!("{ok}.extra"),
+        format!("!!.{}.{}", parts[1], parts[2]),
+        format!("{}.!!.{}", parts[0], parts[2]),
+        format!("{}.{}.!!", parts[0], parts[1]),
+        format!("{not_json}.{}.{}", parts[1], parts[2]),
+        format!("{not_object}.{}.{}", parts[1], parts[2]),
+    ];
+    for (i, t) in cases.iter().enumerate() {
+        assert_eq!(
+            r.present(t, NOW),
+            Err(PresentationRejection::Malformed),
+            "case {i}"
+        );
+    }
+    assert!(r.received().is_empty());
+}
+
+/// SIGN-1: 署名が正しくてもペイロードが JSON のオブジェクトでなければ `Malformed`。
+#[test]
+fn rejects_signed_payload_that_is_not_an_object() {
+    let key = new_key();
+    let mut r = receiver(&key);
+    let t = sign(&key, &header(), &json!([1, 2]));
+    assert_eq!(r.present(&t, NOW), Err(PresentationRejection::Malformed));
+    assert!(r.received().is_empty());
+}
+
+/// CLM-1: 必須クレームの欠落は `MissingClaim`。
+#[test]
+fn rejects_missing_required_claim() {
+    let key = new_key();
+    let mut r = receiver(&key);
+    let mut c = claims();
+    c.as_object_mut().unwrap().remove("sid");
+    assert_eq!(
+        r.present(&sign(&key, &header(), &c), NOW),
+        Err(PresentationRejection::MissingClaim)
+    );
 }

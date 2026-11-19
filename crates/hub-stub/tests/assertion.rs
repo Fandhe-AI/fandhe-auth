@@ -1,4 +1,5 @@
-//! TASK-7 #61: Hub が `private_key_jwt` の assertion で口を呼ぶ模擬の最小の確認（網羅は #68）。
+//! TASK-7 #61・#68: Hub が `private_key_jwt` の assertion で口を呼ぶ模擬の確認。
+//! #68 で `aud` の作り分け・`params()` の並び・`jti()` を足した。
 //! 鍵は実行時に生成し、コミットしない。値は予約 TLD `.test` の仮の値。
 //!
 //! 偽の口（`FakePort`）は `fandhe-auth` の口の代わりで、本体の検証部（OCL-22〜28・SIGN-7）の代わりではない。
@@ -10,10 +11,11 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use fandhe_auth_hub_stub::assertion::{
-    AssertionClaims, AssertionRequest, AssertionSigningKey, AssertionTarget, AuthPort, CallOutcome,
-    CallRejected, CalledEndpoint, ClientAssertionType, HubAssertionCaller, PortResponse,
+    AssertionClaims, AssertionRequest, AssertionSigningKey, AssertionTarget, Audience, AuthPort,
+    CallOutcome, CallRejected, CalledEndpoint, ClientAssertionType, HubAssertionCaller,
+    PortResponse,
 };
-use fandhe_auth_hub_stub::config::HubStubConfig;
+use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
 use ring::signature::ECDSA_P256_SHA256_FIXED;
 use ring::signature::UnparsedPublicKey;
 use serde_json::{Value, json};
@@ -26,14 +28,17 @@ const JWT_BEARER: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer
 
 fn config() -> HubStubConfig {
     HubStubConfig {
-        client_id: CLIENT_ID.to_owned(),
-        public_host: "hub.example.test".to_owned(),
-        jwks_uri: "https://hub.example.test/jwks".to_owned(),
-        logout_receiver_uri: "https://hub.example.test/logout".to_owned(),
-        jwks_max_age: Duration::from_secs(1),
-        jwks_fetch_min_interval: Duration::from_secs(2),
-        jwks_cache_max: Duration::from_secs(3),
-        assertion_max_lifetime: Duration::from_secs(MAX),
+        client_id: StubValue::test(CLIENT_ID.to_owned()),
+        public_host: StubValue::test("hub.example.test".to_owned()),
+        jwks_uri: StubValue::test("https://hub.example.test/jwks".to_owned()),
+        logout_receiver_uri: StubValue::test("https://hub.example.test/logout".to_owned()),
+        jwks_max_age: StubValue::test(Duration::from_secs(1)),
+        jwks_fetch_min_interval: StubValue::test(Duration::from_secs(2)),
+        jwks_cache_max: StubValue::test(Duration::from_secs(3)),
+        jwks_stale_max: StubValue::test(Duration::from_secs(6)),
+        assertion_max_lifetime: StubValue::test(Duration::from_secs(MAX)),
+        feed_fetch_min_interval: StubValue::test(Duration::from_secs(5)),
+        heartbeat_loss_threshold: StubValue::test(Duration::from_secs(10)),
     }
 }
 
@@ -293,4 +298,99 @@ fn extra_values_never_appear_in_request_debug() {
     let out = format!("{r:?}");
     assert!(!out.contains("extra-secret-value"));
     assert_eq!(r.param("token"), Some("extra-secret-value"));
+}
+
+/// OCL-22: `aud` は `Single` なら文字列、`List` なら配列で署名され、`nbf` を載せたときだけ出る。
+#[test]
+fn audience_forms_and_optional_claims_are_signed_as_given() {
+    let (c, _) = caller();
+    let payload = |claims: &AssertionClaims| -> Value {
+        let a = c.sign(claims).unwrap();
+        let parts: Vec<&str> = a.expose_compact().split('.').collect();
+        serde_json::from_slice(&decode(parts[1])).unwrap()
+    };
+
+    let mut claims = c.conforming_claims("jti-a", NOW);
+    assert_eq!(claims.aud, Audience::Single(ISS.to_owned()));
+    let p = payload(&claims);
+    assert_eq!(p["aud"], json!(ISS));
+    assert!(p.get("nbf").is_none());
+
+    claims.aud = Audience::List(vec![
+        ISS.to_owned(),
+        "https://other.example.test".to_owned(),
+    ]);
+    claims.nbf = Some(NOW - 1);
+    let p = payload(&claims);
+    assert_eq!(p["aud"], json!([ISS, "https://other.example.test"]));
+    assert_eq!(p["nbf"], json!(NOW - 1));
+
+    // OCL-25・OCL-27: iat・exp・jti の欠けは欄ごと出ない。
+    claims.iat = None;
+    claims.exp = None;
+    claims.jti = None;
+    let p = payload(&claims);
+    for name in ["iat", "exp", "jti"] {
+        assert!(p.get(name).is_none(), "{name}");
+    }
+}
+
+/// OCL-30: `params()` は名前の並びと順序を保つ。`client_id` を含めない形・`extra` の追加も作れる。
+#[test]
+fn params_keep_order_and_names() {
+    let (c, _) = caller();
+    let a = c.sign(&c.conforming_claims("jti-p", NOW)).unwrap();
+    let with = c.request(
+        CalledEndpoint::Token,
+        &a,
+        ClientAssertionType::JwtBearer,
+        true,
+        vec![("grant_type".to_owned(), "x".to_owned())],
+    );
+    let names: Vec<&str> = with.params().map(|(k, _)| k).collect();
+    assert_eq!(
+        names,
+        [
+            "client_assertion_type",
+            "client_assertion",
+            "client_id",
+            "grant_type"
+        ]
+    );
+    let without = c.request(
+        CalledEndpoint::Token,
+        &a,
+        ClientAssertionType::Omitted,
+        false,
+        vec![],
+    );
+    let names: Vec<&str> = without.params().map(|(k, _)| k).collect();
+    assert_eq!(names, ["client_assertion"]);
+    assert_eq!(without.param("client_id"), None);
+}
+
+/// OCL-27: 要求の `jti()` は assertion の `jti` の写しで、`jti` の無い assertion では `None`。
+#[test]
+fn request_jti_mirrors_assertion_jti() {
+    let (c, _) = caller();
+    let a = c.sign(&c.conforming_claims("jti-q", NOW)).unwrap();
+    let r = c.request(
+        CalledEndpoint::Token,
+        &a,
+        ClientAssertionType::JwtBearer,
+        true,
+        vec![],
+    );
+    assert_eq!(r.jti(), Some("jti-q"));
+    let mut claims = c.conforming_claims("jti-r", NOW);
+    claims.jti = None;
+    let a = c.sign(&claims).unwrap();
+    let r = c.request(
+        CalledEndpoint::Token,
+        &a,
+        ClientAssertionType::JwtBearer,
+        true,
+        vec![],
+    );
+    assert_eq!(r.jti(), None);
 }
