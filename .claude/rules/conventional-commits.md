@@ -53,7 +53,7 @@ PR タイトルも CI の `pr-title` ジョブで同じスクリプトに通す�
   段階 2 は `backend` `frontend` `webauthn-wasm`。位置が未定のものは `webauthn` `provider` `keys` `db-contract` `types`。
   SAML 等の外部ログイン Plugin（段階 2）の crate の scope は、名前の決定後に足す（未定。決める人は利用者。追跡先の TASK・Q は spec に無い）。
   Hub の担当の crate（`db-pg` `db-migrate` `db-fandhe` `server`）は作らない前提のため通常は使わない（scope 名は残す）
-  試験専用の stub は `hub-stub` `console-stub`（仮称。TASK-7・TASK-8）
+  試験専用の stub は `hub-stub` `console-stub`（仮称。TASK-7・TASK-8）、結合試験のハーネスは `it-harness`（仮称。TASK-10）
 - 既存の scope 名は消さない。作る前の crate の scope は、その crate を作る変更の中で足す
 - それ以外: `skills`（外部取得スキルの更新）・`claude`（`.claude/` の agents・rules 等）・`ci`・`hooks`
   （`lefthook.yml`・`scripts/hooks/`）・`deps`（依存の更新）
