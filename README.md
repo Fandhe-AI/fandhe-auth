@@ -1,8 +1,10 @@
 # fandhe-auth
 
 Keycloak を使わない Rust 製の共通認証基盤の実装リポジトリです。
+Hub が組み込むライブラリ（本体）として、型・判定・拡張契約・ストレージ契約・安全条件を提供します（`D-2026-10-30-1`）。
 passkey・認証セッション・失効・復旧・登録済み自社クライアント向けの OIDC・ローカルエージェント認可を担い、
 `fandhe-service-hub` と今後の自社サービスで共通して使うことを目指します。
+HTTP の受付・Cookie の発行・DB の実装と migration・配送などの実行と運用は Hub の担当です。
 
 開発基盤は [Fandhe-AI/template-dev](https://github.com/Fandhe-AI/template-dev) から作成しています。
 言語固有の設定・実装は、実装着手の指示後にタスクに沿って追加します。
@@ -50,6 +52,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `docs/security-review/` | 人のセキュリティレビュー（`TASK-83`）の資料・記録票（`TASK-82`）。範囲の各行と対応ビヘイビア ID の表など |
 | `docs/records/` | TASK ごとの確認・走査の記録（判定は人が記録する） |
 | `docs/interim/` | 暫定の実装の置き場と差し替え対象の台帳（`TASK-9`） |
+| `docs/stubs/` | 検証用 stub（`TASK-7`・`TASK-8`）の振る舞いと実物との差の文書 |
 | `.gitmodules` | submodule 定義（`docs/spec` を `update = none` で登録） |
 | `LICENSE-MIT`・`LICENSE-APACHE` | ライセンス（前述の「ライセンス」） |
 | `.github/workflows/` | CI・AI PR レビュー・外部ソース自動追従（後述の「CI」） |
@@ -93,12 +96,16 @@ worktree はそれぞれ別の `target/` を持つため、不要になった wo
 
 前提は Rust toolchain（cargo・rustfmt・clippy）です。版・MSRV・edition は暫定で、TASK-4 で人が決めます。
 
-workspace の members は段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）で、
-ルートの `Cargo.toml` に明示して並べています（glob にしません）。段階 2 の crate（`backend`・`frontend`・`webauthn-wasm`）と、
-Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）は置きません（`LIB-14`・`LIB-15`）。
-これとは別に、試験専用の `hub-stub`（Hub の検証用 stub。`TASK-7`）を members に足しています。段階 1 のリリースの
-メンバーではなく、どの crate からも依存しません。名前と置き場は仮称・暫定で、人が確定します。
-同様に試験専用の `console-stub`（console の検証用 stub。`TASK-8`）も members に足しています。扱いは `hub-stub` と同じです。
+workspace の members は 8 crate で、ルートの `Cargo.toml` に明示して並べています（glob にしません）。
+段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）に、次の 3 つを足しています。
+段階 2 の `frontend`・`webauthn-wasm` と、Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）は
+置きません（`LIB-14`・`LIB-15`）。
+
+- `backend`（`fandhe-auth-backend`）: `TASK-9` の暫定の置き場として残しています（`D-2026-11-20-1`）。spec 上は段階 2 で、
+  `LIB-15` の判定の記録までは中身を足しません（`D-2026-11-20-3`）。最初のリリースから除く仕組みは未決です（`Q-2026-11-20-1`）。
+- `hub-stub`（Hub の検証用 stub。`TASK-7`）: 試験専用で、段階 1 のリリースのメンバーではなく、どの crate からも依存しません。
+  名前と置き場は仮称・暫定で、人が確定します。
+- `console-stub`（console の検証用 stub。`TASK-8`）: 試験専用で、扱いは `hub-stub` と同じです。
 
 手順は次の順です。直接実行する場合のコマンドも併記します。
 
@@ -116,7 +123,7 @@ Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）�
 - `--all-features` でビルド・試験をしません（`DPOL-31`）
 - crate を足すときは次の 3 つを同じ変更で行い、いずれも利用者の確認を経ます。`Cargo.toml` の members、
   `scripts/check-crate-deps.sh` の許可表、`LIB-15` の基準の記録。許可表に無い member があると検査は失敗します（fail-closed）
-- `make build`・`make test`・`make lint` の CI への搭載は TASK-6 で、まだです
+- `make build`・`make test` は CI の `build-test` ジョブで流します。`make lint` の CI への搭載は TASK-6 で、まだです
 - ターゲット名 `build`・`test` は暫定で、人が確定します
 
 確認した結果は `docs/records/task-3-build-check.md` に残しています（判定は人が記録します）。
@@ -166,7 +173,7 @@ Linux・macOS（標準の bash 3.2 を含む）について実行します。`sc
 
 | ワークフロー | 内容 |
 |---|---|
-| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`ci-complete`: 全ジョブ結果の集約 |
+| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`build-test`: `make build` と `make test`（Rust の workspace のビルドと試験。ubuntu-latest）。`ci-complete`: 全ジョブ結果の集約 |
 | `ai-review.yml` | Fandhe-AI/actions の ai-review（codex）による PR 自動レビュー。Actions variable `CODEX_HOME_DIR` が未設定の間は skip される |
 | `update-external.yml` | エージェントスキル（`skills-lock.json`）と submodule（`.gitmodules`）の日次自動追従 PR。secrets は org の `SUBMODULE_PAT` を使う（`SKILLS_PAT` 未登録時は共通側が `SUBMODULE_PAT` へフォールバック）。作成する PR には `dependencies` / `automated` ラベルが付く |
 

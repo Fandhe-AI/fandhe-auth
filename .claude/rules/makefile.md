@@ -57,8 +57,8 @@ description: >
 | `setup` | `scripts/setup.sh` | 冪等（再実行しても安全）。`lefthook install` と `.env` 雛形の配置のみで、既存の `.env` は上書きしない。ツール本体は導入しない |
 | `check` | `scripts/check.sh` | ソースを変更しない（自動修正しない）。editorconfig-checker + shellcheck。CI の `check` ジョブと同一 |
 | `test-hooks` | `scripts/hooks/test-hooks.sh` | 一時 git リポジトリで検証し作業ツリーを変更しない。依存は bash + git のみ。CI の `test-hooks` ジョブと同一 |
-| `build` | `cargo build --workspace --locked`（直書き） | ソースを変更しない。`--locked` で `Cargo.lock` の外を解決しない。`--all-features` は付けない（DPOL-31）。CI へは未搭載（TASK-6）。名前は暫定 |
-| `test` | `cargo test --workspace --locked`（直書き） | ソースを変更しない。`--locked`・`--all-features` なし。CI へは未搭載（TASK-6）。名前は暫定 |
+| `build` | `cargo build --workspace --locked`（直書き） | ソースを変更しない。`--locked` で `Cargo.lock` の外を解決しない。`--all-features` は付けない（DPOL-31）。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
+| `test` | `cargo test --workspace --locked`（直書き） | ソースを変更しない。`--locked`・`--all-features` なし。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
 | `fmt` | `cargo fmt --all`（直書き） | rustfmt を適用する（ソースを書き換える唯一の make ターゲット） |
 | `lint` | `scripts/lint.sh` | 検査のみ。`cargo fmt --check`・clippy `-D warnings`・`crate-deps`。CI へは未搭載（TASK-6） |
 | `crate-deps` | `scripts/check-crate-deps.sh` | 検査のみ。crate 間の依存の向きを許可表と照合する。表に無い member・辺は失敗（fail-closed） |

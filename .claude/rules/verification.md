@@ -34,13 +34,13 @@ implement-review・implement-review-pr・create-pr 等）。サブエージェ�
 | 全般（文書・ルール・scripts を含む） | `make check` | editorconfig-checker + shellcheck（CI の `check` ジョブと同一） |
 | `scripts/hooks/`・`lefthook.yml` | `make test-hooks` | フックスクリプト自体の回帰テスト（CI の `test-hooks` ジョブと同一） |
 | Rust のソース・`Cargo.toml` | `make lint` | `cargo fmt --check`・clippy `-D warnings`・crate 間の依存の向き（CI へは未搭載。TASK-6） |
-| Rust のソース・crate の構成 | `make build`・`make test` | `cargo build`・`cargo test`（`--workspace --locked`。CI へは未搭載。TASK-6。名前は暫定） |
+| Rust のソース・crate の構成 | `make build`・`make test` | `cargo build`・`cargo test`（`--workspace --locked`。CI の `build-test` ジョブと同一。TASK-6。名前は暫定） |
 | crate 間の依存 | `make crate-deps` | 許可表との照合（`scripts/check-crate-deps.sh`） |
 | `lefthook.yml`・`scripts/hooks/` の時間予算 | `time lefthook run pre-commit --all-files` | `./git-hooks.md` の時間予算の確認 |
 | `Makefile`・`scripts/*.sh` | `make help` と `scripts/help.sh` の一致 | `./makefile.md` の手順 5 |
 | `.github/workflows/` | `actionlint`・PR 上での実際の CI の実行 | `./github-actions.md` |
 
-Cargo の導入後（TASK-3 の雛形で make ターゲット化し、TASK-6 で CI に載せる予定。ターゲット名は未定）:
+Cargo の導入後（TASK-3 の雛形で make ターゲット化し、build・test は CI に搭載済み、lint・deny は TASK-6 で載せる予定。ターゲット名は未定）:
 
 - fmt・clippy は `make lint` に入った（上の表）
 - `cargo test` は `make test` に入った（上の表）
@@ -64,7 +64,7 @@ make ターゲットができた後は、上の個別コマンドではなく ma
 - サブエージェントの報告だけを根拠にした完了の宣言（報告が出力の引用を含む場合を除く）
 - 終了コードを確認せずに成功と判断すること
 - 試験が存在しないまま「試験が通る」と主張すること
-- 失敗を通すために検査・試験の期待を緩めること（AUDB-6・AUDB-69）、フックを迂回すること（`./git-hooks.md`）
+- 失敗を通すために検査・試験の期待を緩めること（AUDB-6。同趣旨の AUDB-69 は → Hub `ASTORE-2`）、フックを迂回すること（`./git-hooks.md`）
 
 ## 完了の書き方
 

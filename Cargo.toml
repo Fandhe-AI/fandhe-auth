@@ -1,12 +1,16 @@
 # fandhe-auth の workspace ルート（virtual workspace）。
-# TASK-3 (1/6): 段階 1 の crate だけを並べる（LIB-14・LIB-15、D-2026-10-27-8）。
-# メンバーは glob にせず明示列挙する。段階 2 のうち webauthn-wasm・frontend 等、Hub が担当する
-# crate（db-pg・db-fandhe・db-migrate・server）は含めない。
-# TASK-9 (2/8): crates/backend は fandhe-backend の差し替え点の枠として置く。spec 上は段階 2（LIB-14）で、
-# LIB-15 の判定の記録は未作成（人が判定する）。採用は .claude/rules/coding-rust.md の記述による。
+# TASK-3 (1/6): 段階 1 の crate（core・secret・db-tests・client・plugin-oidc）を並べる（LIB-14・LIB-15、
+# D-2026-10-27-8）。ほかに試験専用の stub 2 つ（hub-stub・console-stub）と、暫定の置き場の backend を
+# メンバーに含める（下の注記）。メンバーは glob にせず明示列挙する。段階 2 のうち webauthn-wasm・frontend 等、
+# Hub が担当する crate（db-pg・db-fandhe・db-migrate・server）は含めない。
+# TASK-9 (2/8): crates/backend は TASK-9 の暫定の置き場（D-2026-11-20-1）。spec 上は段階 2（LIB-14）。
+# interim に最初の中身を足す前、または fandhe-backend への依存を足す前の早い方で、LIB-15 の判定を記録する
+# （D-2026-11-20-3）。判定の記録は docs/interim/README.md の「backend の切り出しの記録」の判定の欄
+# （判定 (1)〜(4)）にあり、人が記入する。この注記は判定の根拠ではない。
+# 最初のリリースから除く仕組みは未決（Q-2026-11-20-1）。
 # TASK-3 (4/6): 同梱 Plugin（外部ログイン Plugin の OIDC 共通部品）は段階 1 のメンバーとして
 # crates/plugin-oidc に置く。本体には含めない（LIB-14・PLG-26）。名前 fandhe-auth-plugin-oidc は
-# D-2026-10-27-8 の付け方に合わせた仮称で、spec 上は未決。暫定。人が確定する。
+# D-2026-11-20-2 で決まった。crates.io の空きは未照会で、公開するかは別に決める（同決定）。
 # TASK-7 (1/12): crates/hub-stub は Hub の検証用 stub で、試験専用。段階 1 のリリースのメンバーではない
 # （LIB-14・LIB-15）。どの crate からも依存しない。名前・置き場は仮称で、人が確定する。
 # TASK-8 (1/8): crates/console-stub は console の検証用 stub で、試験専用。段階 1 のリリースのメンバーではない

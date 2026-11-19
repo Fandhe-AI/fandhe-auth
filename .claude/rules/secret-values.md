@@ -6,7 +6,7 @@ description: >
   秘密値（セッション値・refresh・認可コード・デバイスコード・招待トークン・復旧コード・client secret・署名鍵・KEK・
   DB パスワード等）を扱う Rust コードの規約。秘密値の型は fandhe-auth-secret の 1 つだけ（SECR-31）、Debug/Display/
   Serialize の出力、expose() 以外で取り出さないこと、置き場所（公開 crate）、保存時のハッシュの種類（SECR-34 ほか）、
-  ログ・応答・ダンプ・試験記録に出さないこと（SECR-23〜27・AAUD-30）を定める。
+  ログ・応答・ダンプ・試験記録に出さないこと（SECR-23・24・26・27・AAUD-30。前段のログの SECR-25 は → Hub `ARUN-78`）を定める。
 ---
 
 # 秘密値の扱い（コーディング規約）
@@ -18,7 +18,7 @@ description: >
 
 - 秘密値の型の実装は `fandhe-auth-secret`（`crates/secret`）に 1 つだけ置く（SECR-31・SECR-15）。
   PoC の 3 実装（PoC-1・PoC-11 の `Secret`、Hub の複製の `Token`）を写さない。新しい秘密値の型を別 crate に作らない。
-- `fandhe-auth-secret` は HTTP・DB・非同期ランタイムに依存しない小さな crate にする（DPOL-41）。
+- `fandhe-auth-secret` は HTTP・DB・非同期ランタイムに依存しない小さな crate にする（DPOL-41。段階 1 の crate。`./library-boundary.md`）。
 - 秘密値を持つ全ての型（設定の型・入れ物の型・試験の入れ物を含む）が対象（SECR-10・SECR-29）。生の `String`・`Vec<u8>`・`[u8; N]` の
   フィールドに秘密値を持たせず、専用の秘密値の型で包む（SECR-30・SECR-21・SECR-33）。
 - 対象の型の一覧（SECR-10・SECR-29）を保つ。CI の構文木の走査で秘密値らしい欄を持つ型を見つけ、その型が一覧に無い、または欄が
@@ -57,16 +57,17 @@ description: >
 | KEK・DB パスワード | 認証 DB の表に入れない | SECR-6 |
 
 - 平文・可逆な形で保存する列を作らない。復旧コードは 1 コード 1 行（SECR-3）。
-- 暗号・ハッシュは既存の crate を使い、自前で実装しない（DPOL-4・DPOL-47。`.claude/rules/dependency-policy.md`）。
-- 秘密の保管先の具体の構成は持ち越し（SECR-9）。決まるまで保管先を推測で固定しない。
+- 暗号・ハッシュは既存の crate を使い、自前で実装しない（DPOL-4・DPOL-47。`./dependency-policy.md`）。
+- 秘密の保管先の具体の構成は持ち越し（SECR-9。保管と更新は組込み先の担当で、本体は `SecretProvider`〔仮称。HOST-3〕で受ける。Hub 側は `AOPS-68`）。決まるまで保管先を推測で固定しない。
 
 ## 出してはいけない場所
 
-次の場所に秘密値（JWT の形の文字列を含む）が出る件数を 0 にする（SECR-23〜27・AAUD-30）。
+次の場所に秘密値（JWT の形の文字列を含む）が出る件数を 0 にする（SECR-23・SECR-24・SECR-26・SECR-27・AAUD-30）。
+本体が他へ渡すデータに秘密値を入れない範囲が本体の規則で、走査・バックアップの実行は Hub（SECR-23 は `AOPS-73`、SECR-24 のバックアップは `ASTORE-40`）。
 
 - ログ・誤りの応答・監査の記録・DB のダンプ・バックアップ・結果のファイル・stub の記録・console のコーパス（SECR-23・SECR-24・SECR-26・SECR-27・AAUD-30）
-- 前段のリバースプロキシのアクセスログ・URL のクエリ・転送先のログ・エラーページ（SECR-25。検討中。出る場合は `POST`・ヘッダ・
-  一度だけの短期限の経路か、前段のログの除外設定で防ぐ）
+- 前段のリバースプロキシのアクセスログ・URL のクエリ・転送先のログ・エラーページ（SECR-25 → Hub `ARUN-78`。本体の規則から外れた。
+  本体は URL のクエリに秘密値を載せる設計を作らない〔`POST`・ヘッダ・一度だけの短期限の経路を使う〕）
 
 走査は生・base64・base64url・16 進の形でも一致を探す（AAUD-30）。
 
@@ -74,11 +75,12 @@ description: >
 
 - 誤り型のメッセージ・`panic!`・`expect()` のメッセージ・構造化ログのフィールドにも出さない（ログの部品は TASK-4 で選ぶ）。
 - 新しい出力先を足したら走査の対象に加える。
-- Git・サンプル・試験の記録・フィクスチャへの混入防止は `.claude/rules/security.md`（05-tasks.md の方針）に従う。試験は実行時に
+- Git・サンプル・試験の記録・フィクスチャへの混入防止は `./security.md`（05-tasks.md の方針）に従う。試験は実行時に
   生成した値を使い、コミットしない。
 
 ## 関連 rule
 
-- crate 構成・誤り応答: `.claude/rules/coding-rust.md`
-- DB の列と SQL: `.claude/rules/db-layer.md`
-- Git・PR・Issue への秘密情報の混入防止: `.claude/rules/security.md`
+- crate 構成・誤り応答: `./coding-rust.md`
+- DB の列と SQL: `./db-layer.md`
+- Git・PR・Issue への秘密情報の混入防止: `./security.md`
+- 境界（本体と組込み先の分担）: `./library-boundary.md`
