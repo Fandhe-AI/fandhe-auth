@@ -63,3 +63,4 @@
   この確認は `TASK-83` で人が行う。
 - 後続の資料（`TASK-82` の 2/4）・判定の記録票の様式（3/4）・欠けの点検（4/4）は、本表と同じ `docs/security-review/` に足す。
 - 範囲の各行の参照先と確認の観点は [review-material.md](review-material.md)（2/4）にある。
+- 判定の記録票の様式は [record-form.md](record-form.md)（3/4）にある。
