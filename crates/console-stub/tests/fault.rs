@@ -328,3 +328,20 @@ fn debug_output_has_no_secret_values() {
     let s = format!("{d:?}");
     assert!(!s.contains(TOKEN) && !s.contains("opaque-sid-0002"));
 }
+
+#[test]
+fn call_window_first_zero_behaves_like_first_one() {
+    let zero = CallWindow {
+        first: 0,
+        last: Some(1),
+    };
+    let one = CallWindow {
+        first: 1,
+        last: Some(1),
+    };
+    for n in 0..=2 {
+        assert_eq!(zero.contains(n), one.contains(n), "n = {n}");
+    }
+    assert!(!zero.contains(0));
+    assert!(zero.contains(1));
+}

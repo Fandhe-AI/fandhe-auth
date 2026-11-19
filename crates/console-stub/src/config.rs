@@ -53,7 +53,7 @@ pub struct CallWindow {
 impl CallWindow {
     /// `n` 回目（1 始まり）の呼び出しが範囲に入るか。
     pub fn contains(&self, n: u32) -> bool {
-        n >= self.first && self.last.is_none_or(|l| n <= l)
+        n >= self.first.max(1) && self.last.is_none_or(|l| n <= l)
     }
 }
 
