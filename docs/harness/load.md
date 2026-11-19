@@ -110,14 +110,14 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 
 - 形式の識別子は `fandhe-auth-load-record/1`。形式を変えたら末尾の版を上げる（`fandhe-auth-it-run-record/1`・`fandhe-auth-it-fault-record/1` と同じ流儀）。
 - UTF-8・LF・1 行 1 項目の `key: value`。キーは ASCII 固定で、値の中のトークンは半角空白 1 つで区切る。
-- 時刻は UTC・RFC 3339（秒）。実行の記録（`./integration.md` の「実行の記録の形式」）の `started_at` とは、この記録の `run_started_at` で結ぶ。
+- 時刻は UTC・RFC 3339（秒）。実行の記録（`./integration.md` の「実行の記録の形式」）とは、この記録の `run_record_file`（実行の記録のファイル名。`it-run-<起動時刻の秒>-<pid>-<通し番号>.txt` の形で、pid と通し番号を含み同じ秒に起動した複数のハーネスも区別できる）で一意に結ぶ。`run_started_at`（`started_at` と同じ値）は補助で、秒精度のため単独では結ばない。
 - 出力先は呼び出し元が渡し、追跡ツリーの外に置く（試験では `CARGO_TARGET_TMPDIR`）。既存のファイルは上書きしない。
   ファイル名の形は `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。
 
 ### 2. 区分（値の区別）の表し方
 
 区分は値を持つ各行に `class=<トークン>` と `refs=<…>` で明示する。キーから暗黙に決めない（「値の区別」の規則 1）。
-適用除外は値を持たないメタデータの行だけ（`format:`・`run_started_at:`・`recorded_at:`・`note:`・`judgment:`）。下の 3〜5 の各行の形式は、すべて `class=`・`refs=` を含む。
+適用除外は値を持たないメタデータの行だけ（`format:`・`run_record_file:`・`run_started_at:`・`recorded_at:`・`note:`・`judgment:`）。下の 3〜5 の各行の形式は、すべて `class=`・`refs=` を含む。
 
 | トークン | 区分 |
 | --- | --- |
@@ -176,13 +176,19 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 - 構成は `condition_component: <種類> started real|started stub|not_started class=test_condition refs=harness_config` の形にし、語彙と 4 種は実行の記録の `component` 行と同じにする。
   stub を含むときは、stub の合格を実物の合格に数えない旨の `note:` を出す（`A-2026-10-28-9`・`ACPT-7`）。
 - `condition_loop: closed|open|undecided class=test_condition refs=harness_config`（5/10 が決めるまでは `undecided` を許す）。並行数は 4 の `stage` 行に書く。
-- 版の情報（revision・rustc の版）は実行の記録側にあり、`run_started_at` で結ぶ。この記録には重複して持たない。
+- 版の情報（revision・rustc の版）は実行の記録側にあり、`run_record_file` で結ぶ。この記録には重複して持たない。
 
 ### 6. 差し込み対策（出してはいけないものと守り方）
 
-- 名前（区間名・種類名・値の名前）は ASCII の `[a-z0-9_]`・1〜64 文字。
+- 許可する文字と語彙はフィールドの種類ごとに分ける。
+  - 名前（区間名・値の名前・キー）: ASCII の `[a-z0-9_]`・1〜64 文字。
+  - 構成要素名（`condition_component` の種類名）: 実行の記録の `component` 行と同じ固定語彙（`Database`・`Host`・`HubStub`・`ConsoleStub`）だけ。大文字を含み、上の名前の規則は適用しない。
+  - 固定列挙値（`unknown`・`none`・`vm`・`release`・`closed`・`open`・`undecided`・`started`・`not_started`・`real`・`stub` 等）: フィールドごとに定めた語彙の完全一致だけ。語彙外は誤りにする。
+  - 数値フィールド（`value=`・`*_ns`・`n=` 等）: 整数だけ。値を持たないときの `none` と、未取得の `unknown` は、定めたフィールドにだけ許す。
+  - 利用者指定の名前: 作らない（自由文の欄を作らない）。必要になったら 1 つずつ人が語彙と文字を決める。
+  - `run_record_file`: `it-run-<秒>-<pid>-<通し番号>.txt` の形（ASCII の英数字・`-`・`.` だけ・1〜64 文字）。
 - 出典の ID は ASCII の英数字・`-`・`_`だけ・1〜64 文字。1 行に並べる数の上限を置く（仮置きで 8）。
-- 値は整数か `none` だけで、自由文の欄を作らない。
+- 自由文の欄を作らない（値はすべて上のフィールド別の規則で検証する）。
 - 改行・制御文字・行区切り（U+2028・U+2029）を含む入力は、記録を作る時点で誤りにする（fail-closed）。黙って省かない。
 - 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない。誤りの文言は英語（`D-2026-11-20-13`）。
 - 設定の値・接続情報・ポート・パス・ホスト名・パスワードは記録に入れない（`SECR-11`・`SECR-23`・`SECR-26`）。環境変数・設定ファイルは読まない（`DPOL-32`）。
@@ -194,6 +200,7 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 
 ```text
 format: fandhe-auth-load-record/1
+run_record_file: it-run-0-1-1.txt
 run_started_at: 1970-01-01T00:00:00Z
 recorded_at: 1970-01-01T00:01:00Z
 condition_machine: cpu_count unknown class=test_condition refs=harness_config
@@ -238,4 +245,4 @@ judgment:
 - `test_condition`・`measured` の出典を固定の印で表すこと
 - 失敗の時間の分布（`failure_metric`）の扱いと、同じ値が並んだときの最悪の回の選び方
 - 閉ループのときの並行数の不変条件（5/10 の決定に依る）
-- 版の情報を実行の記録側に寄せ、`run_started_at` で結ぶこと
+- 版の情報を実行の記録側に寄せ、`run_record_file` で結ぶこと
