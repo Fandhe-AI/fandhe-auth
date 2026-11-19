@@ -3,91 +3,104 @@ paths:
   - "crates/**"
   - "**/*.rs"
 description: >
-  fandhe-auth の Rust コードを書くときの規約。workspace と crate 名の表（crates/<名前>）、crate 間の依存の向き
-  （DPOL-1・3・7・39・40）、時刻・乱数・ID の注入、#![forbid(unsafe_code)] の既定と例外手順、MSRV・edition が
-  未定であること、試験用の分岐を feature・環境変数で作らないこと（DPOL-27〜32）、誤り応答の形と列挙防止
-  （THRT-25・27 ほか）、本番に持ち込まない PoC 由来物を定める。秘密値・DB・依存・Web のセキュリティ要求は別 rule を参照する。
+  fandhe-auth（Hub が組み込むライブラリの本体）の Rust コードを書くときの規約。workspace と crate の表（段階 1・段階 2・Hub の担当・位置が未定。
+  crates/<名前>）、crate 間の依存の向き（DPOL-1・3・7・39・40）、時刻・乱数・ID の注入、#![forbid(unsafe_code)] の既定と例外手順、
+  MSRV・edition が未定であること、試験用の分岐を feature・環境変数で作らないこと（DPOL-27〜32）、本体の判定が返す誤りの種類と列挙防止
+  （THRT-25・27 ほか。応答の出力は Hub）、本番に持ち込まない PoC 由来物を定める。境界は library-boundary.md、
+  秘密値・DB・依存・Web のセキュリティ要求は別 rule を参照する。
 ---
 
 # Rust コーディング規約（fandhe-auth）
 
 根拠は `docs/spec/04-behavior/` の ID。引く ID の多くは「検討中」（本番の crate が無いため）だが、守る規則として扱う。
-spec の読み方は `.claude/rules/spec-reference.md`。
+spec の読み方は `./spec-reference.md`。この repo は Hub が組み込むライブラリの本体で、HTTP の受付・DB の実装・配備は Hub が持つ（`./library-boundary.md`）。
 
 ## workspace と crate
 
-全 crate を repo ルートの 1 つの workspace に置く（DPOL-36・DPOL-41）。crate 名は接頭辞 `fandhe-auth-` 付き、
-ディレクトリは接頭辞を除いた `crates/<名前>`（`D-2026-10-27-8`・`D-2026-10-28-1`）。
+本体の crate は repo ルートの 1 つの workspace に置く（DPOL-37・DPOL-41・LIB-14）。crate 名は接頭辞 `fandhe-auth-` 付き、
+ディレクトリは接頭辞を除いた `crates/<名前>`（`D-2026-10-27-8`・`D-2026-10-28-1`・`D-2026-10-29-2`）。
 
-| crate | ディレクトリ | 役割 |
-| --- | --- | --- |
-| `fandhe-auth-core` | `crates/core` | 認証コア（I/O なしのドメイン・状態遷移） |
-| `fandhe-auth-webauthn` | `crates/webauthn` | WebAuthn アダプタ |
-| `fandhe-auth-provider` | `crates/provider` | OIDC/OAuth Provider 層 |
-| `fandhe-auth-keys` | `crates/keys` | 鍵管理 |
-| `fandhe-auth-db-contract` / `-db-tests` / `-db-pg` / `-db-migrate`（bin） | `crates/db-*` | 認証 DB の層（`.claude/rules/db-layer.md`） |
-| `fandhe-auth-db-fandhe` | `crates/db-fandhe` | fandhe-db 向け実装。移行の判定のときに足す（今は作らない） |
-| `fandhe-auth-client` | `crates/client` | RP（ログインを使う側）向け |
-| `fandhe-auth-secret` | `crates/secret` | 秘密値の型（`.claude/rules/secret-values.md`） |
-| `fandhe-auth-types` | `crates/types` | サーバー・ブラウザ共有型 |
-| `fandhe-auth-frontend` | `crates/frontend` | 画面（fandhe-frontend に依存） |
-| `fandhe-auth-webauthn-wasm` | `crates/webauthn-wasm` | ブラウザ側 WebAuthn モジュール |
-| `fandhe-auth-backend` | `crates/backend` | `fandhe-backend` に依る HTTP 層（lib。下記） |
-| `fandhe-auth-server` | `crates/server` | 認証サーバーの bin（組み立てのみ） |
+名前は利用者の決定で、段階（下の区分）は spec 上〔提案〕である（`LIB-14`・`A-2026-10-30-9`。`LIB-14` は検討中）。
+TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれている（`05-tasks.md`・`D-2026-11-04-6`）。段階を確定した構成として書かない。
 
-- `fandhe-auth-backend`（`crates/backend`）: `D-2026-10-29-1` (5) の案を採用（利用者の決定 2026-11-13。spec への記録〔DPOL-41 の表・`D-`〕は未反映で、spec repo への PR は利用者の指示を待つ）。
-  `fandhe-backend` に依る部分（ハンドラ・ルーティング・Cookie/CSRF の配線・外向き HTTP・outbox）を持つ lib で、`-server` は組み立てだけにする。
-  `backend` は設定・秘密値を引数で受け取り、環境変数・秘密値の読み込み・待ち受けは `-server` だけが行う（DPOL-31・DPOL-32）。
-  ルーターは試験から組み立てられる形にし、全経路を回す試験（CSRF-7・CSRF-32・CSRF-51 など）に使う。
-- 表に無い crate を足すときは、作る前に利用者に確かめる。
+| 区分 | crate（ディレクトリ） | 役割 | 扱い |
+| --- | --- | --- | --- |
+| 段階 1 | `fandhe-auth-core`（`crates/core`） | 型・判定・プロトコル処理・ストレージ契約の trait（I/O なし） | 作る前提 |
+| 段階 1 | `fandhe-auth-secret`（`crates/secret`） | 秘密値の型（`./secret-values.md`） | 作る前提 |
+| 段階 1 | `fandhe-auth-db-tests`（`crates/db-tests`） | 契約テスト（`./db-layer.md`） | 作る前提 |
+| 段階 1 | `fandhe-auth-client`（`crates/client`） | RP（ログインを使う側）向け。同じ repo の別 crate とする案（`Q-2026-10-30-7` の推奨） | 作る前提 |
+| 段階 1 | 外部ログイン Plugin の OIDC 共通部品 | 同梱の Plugin（本体に含めない。PLG-26） | 名前は未決（TASK-3・TASK-4） |
+| 段階 2 | `-backend`（`crates/backend`） | `fandhe-backend` の HTTP の型との接続の部品（任意。下記） | `LIB-15` の基準を満たしたとき。作る前に利用者に確かめる |
+| 段階 2 | `-webauthn-wasm`・`-frontend` | ブラウザ側 WebAuthn モジュール・画面部品（任意） | 同上 |
+| 段階 2 | SAML・ID トークンを使わない SNS の OAuth の Plugin | 外部ログイン Plugin | 同上。名前は未決 |
+| Hub の担当 | `-db-pg`・`-db-fandhe`・`-db-migrate`・`-server` | DB の実装・migration・認証サーバーの bin | 本体の workspace に含めない。作らない |
+| 位置が未定 | `-db-contract`・`-types`・`-webauthn`・`-provider`・`-keys` | 契約 trait・共有型・WebAuthn アダプタ・Provider 層・鍵管理 | 独立 crate か `-core` の中かは未定（TASK-3・TASK-4 で決める。`DPOL-41` の追記は `LIB-15` の基準で決めるとする） |
+
+- 「Hub の担当」の crate の名前は、将来の切り出し候補として spec に残るだけで、本体の最初のリリースに含まれない（LIB-14）。
+- `fandhe-auth-backend`（`crates/backend`）: 名前の採用は `D-2026-10-29-2` で spec に記録済み（`D-2026-11-06-6`）。役割は spec に合わせ、
+  段階 2 の任意の接続部品とする（利用者の決定 2026-11-19）。`fandhe-auth-server`・outbox の配送・CSRF Gate の登録は Hub で、この repo では作らない
+  （LIB-14・AUDB-22 の行内分割〔配送は Hub の AEVT〕・`csrf-ssr.md` の適用範囲）。当初の役割（ハンドラ・outbox を持つ lib）は 2026-10-29 時点の記録で、書き換えない。
+- 利用者の決定 2026-11-13（spec に記録なし）: `#![forbid(unsafe_code)]` を各 crate に置く（下記）。
+- 表に無い crate を足すとき、段階 2・Hub の crate を作るときは、作る前に利用者に確かめる。
 
 ## 依存の向き
 
 - `core` は非同期ランタイム・DB ドライバ・HTTP サーバー・`fandhe-backend`・`fandhe-frontend`・`web-sys` に依存しない（DPOL-1）。
 - `core` は現在時刻・乱数・ファイル・ネットワークを直接読まない（DPOL-1）。時刻・乱数・ID は引数（または注入する trait）で受け、
   同じ入力で同じ出力にする。property test で確かめる（DPOL-3）。`SystemTime::now()`・`Uuid::new_v4()`・`rand::thread_rng()` を
-  `core` に書かない。呼ぶのは組み立て側（server 等）。
+  `core` に書かない。値を渡すのは組込み先（Hub。暗号論的な乱数の供給元の義務は Hub の `ARUN-11`）で、受ける側が本体（DPOL-3・HOST-1・HOST-2）。
 - `client`・`types`・`frontend` は `fandhe-auth-db*` に依存しない（DPOL-7）。
 - `types` は I/O なし・`wasm32` でビルドできる依存だけ（DPOL-39）。
-- サーバーのビルドに `web-sys` を入れない。画面部品と WebAuthn の wasm は別 crate（DPOL-40）。
-- 運用・検査用の `Ops` は `-db-migrate` と試験ビルドだけが依存する別 crate か feature に置き、認証サーバーの bin から到達させない（DPOL-38 の (イ)）。
-- 判定・承認の経路に LLM・検索のクライアントを入れない（HAPR-1・SECR-28。詳細は `.claude/rules/security.md`）。
-- 依存の向きの機械的な検査は TASK-3 で作る。依存を足す手順は `.claude/rules/dependency-policy.md`。
+- サーバー側のビルドに `web-sys` を入れない。画面部品と WebAuthn の wasm は別 crate（DPOL-40。段階 2 のブラウザ側モジュールに絞られた。サーバーのビルドの確認は Hub のビルドにも課される〔Hub の `ARUN-16`〕）。
+- 本体の範囲は契約 trait・契約テストまで（DPOL-38 の改訂）。運用・検査用の `Ops`・`-db-migrate` は Hub の担当で、HTTP の経路から `Ops` へ到達できないことの確認も Hub（→ Hub `ASTORE-5`）。
+- 本体から Plugin・組込み先への依存を作らない（LIB-2・LIB-4。`./library-boundary.md`）。
+- `iss` は設定の型で受け、固定値を置かない（DPOL-48）。
+- 判定・承認の経路に LLM・検索のクライアントを入れない（HAPR-1・SECR-28。詳細は `./security.md`）。
+- 依存の向きの機械的な検査は TASK-3 で作る（TASK-3 は段階 1 に絞られた）。依存を足す手順は `./dependency-policy.md`。
 
 ## unsafe・MSRV・edition・整形
 
-- 各 crate のルート（`lib.rs`・`main.rs`）に `#![forbid(unsafe_code)]` を置く（利用者決定 2026-11-13）。
+- 各 crate のルート（`lib.rs`・`main.rs`）に `#![forbid(unsafe_code)]` を置く（利用者の決定 2026-11-13。spec に記録なし）。
 - 例外が要るときは、外す crate・理由・代替案を書いて利用者の承認を待つ。AI の判断で外さない・`deny` に緩めない。
 - MSRV・edition・toolchain は **未定**（TASK-3・TASK-4 で決める）。決まるまで `rust-version`・`edition` の値を推測で書かない。
 - rustfmt・clippy の設定とビルド手順は TASK-3 で決まる。決まるまで独自の lint 設定を足さない。
-- Cargo のプロファイルは `.claude/rules/rust-build-profile.md`。
+- Cargo のプロファイルは `./rust-build-profile.md`。
 
 ## 試験用の分岐を作らない
 
 - 試験用のログイン・ログインを省く分岐・検証（CSRF・署名・PKCE・redirect URI・TLS）を外す分岐を、cargo feature・`cfg(feature …)`・
   環境変数・設定ファイル・引数・要求ヘッダのどれでも作らない（DPOL-28・DPOL-30・DPOL-32、HAPR-2、CSRF-7）。
-  適合性テストは通常のログイン画面をブラウザ自動操作で通す（DPOL-27）。
+  適合性テストは Provider を変更せず、本体に試験用のコードを入れない（DPOL-27。ブラウザの自動操作を伴う実行環境は → Hub `ARUN-20`）。
 - 検証を外す意味の設定・分岐を作らない。`disable`・`skip_`・`bypass`・`no_csrf`・`insecure`・`allow_all`・`without_gate`・
   `no_gate`・`unchecked` の語は CI の走査が数える（DPOL-30）。検証と無関係な用途で使うときも、走査に掛かる前提で名前を選ぶ。
-- 例外として許すのは契約テストの変異スイッチだけ。既定で無効の feature か別 crate に閉じ、環境変数だけで有効になる経路は 0 件（DPOL-31）。
-- 環境変数で読むのは接続先・待ち受け・ログの置き場などの設定値だけ。読む変数の一覧を残す（DPOL-32）。
+- 本番に現れない例外は、契約テストの変異スイッチ（DPOL-31）とメモリの代替アダプター（LIB-6）の 2 つだけ。条件は `./dependency-policy.md` の feature の節に従う。
+- 本体の設定は引数（設定の型）で受け、検査関数で検証する（LIB-1）。`fandhe-auth-core` は環境変数・ファイルを直接読まない（HOST-22）。
+  他の crate が環境変数を読むなら、接続先・待ち受け・ログの置き場などの設定値だけで、読む変数の一覧を残す（DPOL-32）。
+  環境変数・秘密値の読み込みと待ち受けは組込み先の担当。
 - 相手側が未決の値は設定で受け、試験用の仮の値で実装する。本番の値を推測で置かない（`A-2026-10-28-1`〜`14`）。
 
 ## 誤り応答と列挙防止
 
-- レート制限は検証の前に 429・本文 `{"error":"rate_limited"}`（THRT-1）。トークンエンドポイントの発動中は 429・`Retry-After`・
-  `error` は `invalid_client`（THRT-21）。入口ごとの形は rate-limit.md の原文を確かめる。
-- CSRF の拒否は 403・本文なし（CSRF-1）。本文の上限超過は 413（CSRF-37。デコードの誤りと分けるかは CSRF-39 で検討中）。
-- fail-closed（DB 不達など）は 503・`Cache-Control: no-store`・本文空・`Retry-After`（AVLB-22。入口ごとの差は原文を確かめる）。
+判定の意味・種類は本体、応答（状態コード・本文・ヘッダ）の出力は組込み先（Hub）が行う（`rate-limit.md`・`csrf-ssr.md` の適用範囲）。
+要求値は緩めない（`D-2026-10-30-1`）。本体の契約が要求する応答の形は次のとおり（出力の実行は Hub）。
+
+| 本体の判定が返す種類 | 組込み先が出す形（本体の要求。実行は Hub） | 根拠 |
+| --- | --- | --- |
+| レート制限の発動 | 検証の前に 429・本文 `{"error":"rate_limited"}`。トークンエンドポイントは 429・`Retry-After`・`error` は `invalid_client`。入口ごとの形は rate-limit.md の原文を確かめる | THRT-1・THRT-21 |
+| CSRF の拒否 | 403・本文なし（Gate の登録と実行は Hub の `ARUN-39`） | CSRF-1 |
+| 本文の上限超過 | 413（→ Hub `ARUN-46`・`ARUN-47`。旧 CSRF-37・CSRF-39） | 移管済み |
+| fail-closed（DB 不達など） | 503・`Cache-Control: no-store`・本文空・`Retry-After`（入口ごとの差は原文を確かめる） | AVLB-22 |
+
 - 外に出す失敗理由は 1 種類に統一する（`login_failed`・`recovery_failed`・`invite_invalid`）。登録済み・未登録で本文と状態コードの差 0（THRT-25）。
 - 存在しないハンドルにも同形の challenge を返す。偽の credential ID を作る鍵は永続化する（THRT-27）。
-- 画面・応答にスタックトレースや DB の状態などの内部の事情を出さない（LGUI-14）。
-- 誤り型の `Display`・`Debug` に秘密値や SQLSTATE を載せない（`.claude/rules/secret-values.md`・AUDB-5）。
+- 画面・応答にスタックトレースや DB の状態などの内部の事情を出さない（LGUI-14。画面の安全条件は `ui-safety.md`）。
+- 誤り型の `Display`・`Debug` に秘密値や SQLSTATE を載せない（`./secret-values.md`・AUDB-5）。
 
 ## ログ
 
 - 構造化ログ・計測の部品は **未選定**（TASK-4）。決まるまで部品を固定する依存を足さない。
-- 監査は業務トランザクションの ROLLBACK の後に書く（AUDB-26）。ログに秘密値を出さない（SECR-23〜27）。
+- 監査は業務トランザクションの ROLLBACK の後に書く（AUDB-26）。
+  本体が他へ渡すデータに秘密値を出さない（SECR-23・SECR-24・SECR-26・SECR-27。前段のログの `SECR-25` は → Hub `ARUN-78`）。
 
 ## 本番に持ち込まない PoC 由来物
 
@@ -98,5 +111,6 @@ spec の読み方は `.claude/rules/spec-reference.md`。
 
 ## 関連 rule
 
-- 秘密値: `.claude/rules/secret-values.md` / DB 層: `.claude/rules/db-layer.md`
-- 依存: `.claude/rules/dependency-policy.md` / Web のセキュリティ要求: `.claude/rules/security.md`
+- 境界・段階: `./library-boundary.md` / spec の読み方: `./spec-reference.md`
+- 秘密値: `./secret-values.md` / DB 層: `./db-layer.md`
+- 依存: `./dependency-policy.md` / Web のセキュリティ要求: `./security.md`

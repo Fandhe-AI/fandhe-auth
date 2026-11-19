@@ -49,8 +49,11 @@ PR タイトルも CI の `pr-title` ジョブで同じスクリプトに通す�
 
 ## scope の候補（慣習。フックは検証しない）
 
-- crate のディレクトリ名: `core` `webauthn` `provider` `keys` `db-contract` `db-pg` `db-migrate` `client`
-  `secret` `types` `frontend` `webauthn-wasm` `backend` `server`
+- crate のディレクトリ名（段階は〔提案〕で、`./coding-rust.md` の表が正）: 段階 1 は `core` `secret` `db-tests` `client`。
+  段階 2 は `backend` `frontend` `webauthn-wasm`。位置が未定のものは `webauthn` `provider` `keys` `db-contract` `types`。
+  外部ログイン Plugin の crate の scope は名前の決定後に足す（未定。TASK-3・TASK-4 で決める）。
+  Hub の担当の crate（`db-pg` `db-migrate` `db-fandhe` `server`）は作らない前提のため通常は使わない（scope 名は残す）
+- 既存の scope 名は消さない。作る前の crate の scope は、その crate を作る変更の中で足す
 - それ以外: `skills`（外部取得スキルの更新）・`claude`（`.claude/` の agents・rules 等）・`ci`・`hooks`
   （`lefthook.yml`・`scripts/hooks/`）・`deps`（依存の更新）
 - 複数 crate にまたがる場合は scope を省略する。新しい crate を足したら同じ変更で本リストに足す

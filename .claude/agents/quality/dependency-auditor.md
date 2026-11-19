@@ -22,7 +22,7 @@ tools:
 | 区分 | 内容 |
 |------|------|
 | ✅ 読む | `Cargo.toml`・`Cargo.lock`・`deny.toml`・`crates/*/Cargo.toml` |
-| ✅ 実行 | `cargo deny fetch`・`cargo audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ）・`cargo deny --locked check <検査> --disable-fetch`・`cargo audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked -p fandhe-auth-server -e normal,build --features "$SERVER_FEATURES" -i web-sys`・`git diff --exit-code Cargo.lock`・`ls ~/.cargo/advisory-dbs`・`git -C ~/.cargo/advisory-db log -1 --format='%H %cI'`・`git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'`・`cargo deny --version`・`cargo audit --version` |
+| ✅ 実行 | `cargo deny fetch`・`cargo audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ）・`cargo deny --locked check <検査> --disable-fetch`・`cargo audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`git diff --exit-code Cargo.lock`・`ls ~/.cargo/advisory-dbs`・`git -C ~/.cargo/advisory-db log -1 --format='%H %cI'`・`git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'`・`cargo deny --version`・`cargo audit --version` |
 | ❌ 禁止 | `cargo update`・`cargo add` / `remove`・`cargo install`・ファイルの編集・例外の追加・`cargo deny` / `cargo tree` を `--locked` なしで流すこと・`cargo tree` に `--all-features` を付けること |
 
 ## 遵守する規約
@@ -39,7 +39,7 @@ tools:
 `Cargo.lock` と `deny.toml` の有無を確かめる。どちらかが無いときは監査を流さず「前提なし（`Cargo.lock` は TASK-3 の雛形、本番の `deny.toml` は TASK-668 待ち）」と報告して止まる。
 `cargo deny` / `cargo audit` が未導入なら、その旨を報告して止まる（導入はしない）。
 本番のビルドで有効にする feature を呼び出し元から受け取り、`PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り）と
-`SERVER_FEATURES`（`fandhe-auth-server` の feature だけ）に置く。受け取れなければ空（既定の feature だけ）で流し、その旨を報告に書く。
+`SERVER_FEATURES`（本体の workspace のうち、サーバー側のビルドに入る crate の feature だけ。`--workspace` と併用するため `<crate>/<feature>` のカンマ区切りで渡す。`fandhe-auth-server` は Hub の担当で本体の workspace に無い）に置く。受け取れなければ空（既定の feature だけ）で流し、その旨を報告に書く。
 コマンドは 1 つずつ別の shell で流すため、変数は使わず値を直接書いて流す。
 `--all-features` は DPOL-31 の変異スイッチなど試験用の feature も有効にするため使わない（`../../rules/dependency-policy.md`）。
 
@@ -108,14 +108,14 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 ```
 
 ```bash
-cargo tree --locked -p fandhe-auth-server -e normal,build --features "$SERVER_FEATURES" -i web-sys
+cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys
 ```
 
-`web-sys` はサーバーのビルドだけを見る（DPOL-40）。`fandhe-auth-server` が無い間（TASK-3 の前）はサーバー側の crate ごとに `-p` で見る。
+`web-sys` は、持てる 1 crate（段階 2 のブラウザ側 WebAuthn モジュール `fandhe-auth-webauthn-wasm`）を `--exclude` で除いた workspace 全体で調べる（DPOL-40）。サーバー側の crate の選定を判断に任せない。`--exclude` の crate が workspace に無い（段階 2 の前）と cargo が誤りで止まる場合は、`--exclude` を外して同じコマンドを流す（除く対象が無いので全 crate が対象になる）。それでも `web-sys` が出たら検出ありとして書く。Hub の本番バイナリのビルドでの確認は Hub の担当（`ARUN-16`）で、この Agent は扱わない。
 
 一致が無いと `did not match any packages` の誤りで非 0 終了する。これは 0 件を意味するため、終了コードでなく出力の文言で読む（`../../rules/dependency-policy.md`）。
-`openssl` は逆依存の根が webauthn-rs 系だけかを見る（DPOL-10〜13）。`rsa` は本番依存（RP 向け crate を含む）で 0 件か（DPOL-18・DPOL-21）、
-`native-tls` は 0 件か（DPOL-46）、`web-sys` はサーバーのビルドで 0 件か（DPOL-40）を見る。`-e normal,build` は build-dependencies を含め、dev-dependencies を除く（`-e normal` だけでは build-dependencies が抜ける）。
+`openssl` は逆依存の根が webauthn-rs 系だけかを見る（DPOL-10・DPOL-11・DPOL-13。DPOL-12 は移管 → Hub `AOPS-2`）。`rsa` は本番依存（RP 向け crate を含む）で 0 件か（DPOL-18・DPOL-21）、
+`native-tls` は 0 件か（DPOL-46）、`web-sys` はサーバー側のビルドに入る crate で 0 件か（DPOL-40）を見る。`-e normal,build` は build-dependencies を含め、dev-dependencies を除く（`-e normal` だけでは build-dependencies が抜ける）。
 試験だけの依存は呼び出し元が求めたときに `-e dev` で別に見る。
 
 ### Step 5: 照合する
@@ -154,9 +154,9 @@ cargo tree --locked -p fandhe-auth-server -e normal,build --features "$SERVER_FE
 | crate | 逆依存の有無 | 経路（直下の依存元） | 関係する DPOL |
 |-------|------------|-------------------|--------------|
 | rsa | | | DPOL-18・DPOL-21 |
-| openssl | | | DPOL-10〜13 |
+| openssl | | | DPOL-10・DPOL-11・DPOL-13 |
 | native-tls | | | DPOL-46 |
-| web-sys（`-p fandhe-auth-server`） | | | DPOL-40 |
+| web-sys（`--workspace --exclude fandhe-auth-webauthn-wasm`） | | | DPOL-40 |
 
 ### deny.toml の例外
 | 例外 | 理由 | 期限 | 範囲 | 期限切れ |

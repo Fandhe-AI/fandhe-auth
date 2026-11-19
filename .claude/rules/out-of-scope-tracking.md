@@ -17,7 +17,8 @@ description: >
 - 追跡の正は spec の `05-tasks.md` の `TASK-N` と `06-roadmap.md` の MS（`D-2026-10-28-4`）
 - GitHub Issue は TASK-N の実施単位として扱う。Issue の本文に対応する `TASK-N`（複数可）と対象の振る舞い ID を書く
 - 1 つの TASK を複数 Issue に分けてよい。Issue に対応する TASK が無い事項は、TASK の追加が要る（下記）
-- 2026-11-15 に全 TASK を Issue ツリー（ルート #8、Phase N = MS-N、TASK の下に 2h ごとの sub-issue）として起票済み。
+- 2026-11-15 に、起票時点の spec で全 TASK を Issue ツリー（ルート #8、Phase N = MS-N、TASK の下に 2h ごとの sub-issue）として起票した。
+  2026-11-18〜19 に最新の spec（`1df12ad`）に合わせて再同期した。移管・置き換えの TASK は not planned で閉じた。
   追跡先は、まずこのツリーで `TASK-N` を含むタイトル（`TASK-N: …`・`TASK-N (k/n): …`）の issue を探す
 - この repo は public、spec repo は private。Issue の本文には spec の本文を写さず、`TASK-N`・振る舞い ID・
   決定 ID で引く（`./spec-reference.md`）。秘密値・実機の名前・内部のアドレスを書かない
