@@ -28,6 +28,15 @@ impl ComponentKind {
         ComponentKind::ConsoleStub,
     ];
 
+    /// stub（実物ではない構成要素）か。`HubStub`・`ConsoleStub` が `true`（A-2026-10-28-9・ACPT-7）。
+    /// 網羅の `match` で書くので、種類を足して判定を書き忘れるとコンパイルできない。
+    pub fn is_stub(self) -> bool {
+        match self {
+            ComponentKind::HubStub | ComponentKind::ConsoleStub => true,
+            ComponentKind::Database | ComponentKind::Host => false,
+        }
+    }
+
     /// 起動順の位置。
     pub(crate) fn rank(self) -> usize {
         Self::START_ORDER
@@ -40,7 +49,8 @@ impl ComponentKind {
 /// 構成要素の起動・停止の契約。誤りに秘密値・接続文字列を載せない（SECR-11・SECR-23）。
 ///
 /// Database の実体は 2/6（#91）で [`crate::database::Database`] に置いた。
-/// TODO(TASK-10): Hub stub は 3/6（#92）、console stub は 4/6（#93）が置く。
+/// Hub stub の実体は 3/6（#92）で [`crate::hub_stub::HubStubComponent`] に置いた。
+/// TODO(TASK-10): console stub は 4/6（#93）が置く。
 /// TODO(TASK-716): Host の実体は最小の組込み先の完成後に置く（2/6 では置かない）。
 pub trait Component {
     /// 種類。

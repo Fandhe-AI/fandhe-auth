@@ -70,6 +70,38 @@ impl HarnessConfig {
     }
 }
 
+/// 構成の記録の 1 項目。種類と、stub（実物ではない）かの印だけを持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositionEntry {
+    pub kind: ComponentKind,
+    /// stub なら `true`。stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）。
+    pub stub: bool,
+}
+
+/// 起動した構成の記録（起動順）。設定の値・接続情報・鍵を載せない（SECR-11・SECR-23）。
+/// ファイルへの出力・版・日時は 5/6（#94）の範囲で、ここでは持たない。文言は仮置きで人が確認する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositionRecord {
+    pub entries: Vec<CompositionEntry>,
+}
+
+impl fmt::Display for CompositionRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "結合試験の構成（stub の合格を実物の合格に数えない。A-2026-10-28-9・ACPT-7）"
+        )?;
+        for e in &self.entries {
+            if e.stub {
+                writeln!(f, "{:?}: stub（実物ではない）", e.kind)?;
+            } else {
+                writeln!(f, "{:?}: 構成要素", e.kind)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 起動の入口。
 pub struct Harness;
 
@@ -110,6 +142,20 @@ impl RunningHarness {
     /// 起動している構成要素の種類（起動順）。
     pub fn kinds(&self) -> Vec<ComponentKind> {
         self.components.iter().map(|c| c.kind()).collect()
+    }
+
+    /// 起動した構成の記録（起動順）。stub は `stub == true` の印で残る（A-2026-10-28-9・ACPT-7）。
+    pub fn composition_record(&self) -> CompositionRecord {
+        CompositionRecord {
+            entries: self
+                .components
+                .iter()
+                .map(|c| CompositionEntry {
+                    kind: c.kind(),
+                    stub: c.kind().is_stub(),
+                })
+                .collect(),
+        }
     }
 
     /// 逆順に停止する。最初の失敗を返しつつ、残りも停止を試みる。
