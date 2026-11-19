@@ -58,6 +58,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fandhe-auth-it-harness"
+version = "0.0.0"
+
+[[package]]
 name = "fandhe-auth-plugin-oidc"
 version = "0.0.0"
 

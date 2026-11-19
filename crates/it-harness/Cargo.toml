@@ -1,0 +1,15 @@
+[package]
+name = "fandhe-auth-it-harness"
+description = "結合試験のハーネスの枠（試験専用。実物ではない）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# 依存なし（TASK-10 (1/6)）。workspace 内の依存は stub・minimal-host の段（2/6〜4/6）で足し、
+# 足すときに scripts/check-crate-deps.sh の許可表を人に確かめる。
+[dependencies]

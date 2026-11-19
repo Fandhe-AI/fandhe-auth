@@ -1,0 +1,139 @@
+//! 構成要素の組み立て・起動・停止の入口。
+//!
+//! 呼び出し元は結合試験。起動に失敗したら起動済みを逆順に停止してから誤りを返す（fail-closed の後始末）。
+//! 環境変数・ファイルは読まない（接続情報の受け方は 2/6 で決める。DPOL-32）。
+
+use std::fmt;
+
+use crate::component::{Component, ComponentKind};
+
+/// 誤りの種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessErrorKind {
+    /// 同じ種類の構成要素が 2 つ以上渡された（複数インスタンスを作らない）。
+    Duplicate,
+    /// 起動に失敗した。
+    StartFailed,
+    /// 停止に失敗した。
+    StopFailed,
+}
+
+/// ハーネスの誤り。種類と構成要素の種類だけを持ち、秘密値・接続文字列を載せない（SECR-11・SECR-23）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessError {
+    kind: HarnessErrorKind,
+    component: ComponentKind,
+}
+
+impl HarnessError {
+    /// 誤りを作る。
+    pub fn new(kind: HarnessErrorKind, component: ComponentKind) -> Self {
+        Self { kind, component }
+    }
+
+    /// 誤りの種類。
+    pub fn kind(&self) -> HarnessErrorKind {
+        self.kind
+    }
+
+    /// 対象の構成要素の種類。
+    pub fn component(&self) -> ComponentKind {
+        self.component
+    }
+}
+
+impl fmt::Display for HarnessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "harness error: {:?} ({:?})", self.kind, self.component)
+    }
+}
+
+impl std::error::Error for HarnessError {}
+
+/// 起動する構成要素の並び。既定で構成要素を足さない。
+#[derive(Default)]
+pub struct HarnessConfig {
+    components: Vec<Box<dyn Component>>,
+}
+
+impl HarnessConfig {
+    /// 空の構成。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 構成要素を足す。順序は渡した順ではなく [`ComponentKind::START_ORDER`] で決まる。
+    #[must_use]
+    pub fn with(mut self, component: Box<dyn Component>) -> Self {
+        self.components.push(component);
+        self
+    }
+}
+
+/// 起動の入口。
+pub struct Harness;
+
+impl Harness {
+    /// 決まった順で起動する。重複は起動前に拒否し、途中で失敗したら起動済みを逆順に停止してから誤りを返す。
+    pub fn start(config: HarnessConfig) -> Result<RunningHarness, HarnessError> {
+        let mut components = config.components;
+        for (i, c) in components.iter().enumerate() {
+            if components[..i].iter().any(|p| p.kind() == c.kind()) {
+                return Err(HarnessError::new(HarnessErrorKind::Duplicate, c.kind()));
+            }
+        }
+        components.sort_by_key(|c| c.kind().rank());
+
+        let mut running = RunningHarness {
+            components: Vec::new(),
+            stopped: false,
+        };
+        for mut c in components {
+            if let Err(e) = c.start() {
+                // 失敗した要素は起動済みに数えない。後始末の失敗より起動の誤りを返す。
+                let _ = running.stop_all();
+                return Err(e);
+            }
+            running.components.push(c);
+        }
+        Ok(running)
+    }
+}
+
+/// 起動済みのハーネス。`Drop` でも停止を試みる（試験の panic で取り残さない）。
+pub struct RunningHarness {
+    components: Vec<Box<dyn Component>>,
+    stopped: bool,
+}
+
+impl RunningHarness {
+    /// 起動している構成要素の種類（起動順）。
+    pub fn kinds(&self) -> Vec<ComponentKind> {
+        self.components.iter().map(|c| c.kind()).collect()
+    }
+
+    /// 逆順に停止する。最初の失敗を返しつつ、残りも停止を試みる。
+    pub fn stop(mut self) -> Result<(), HarnessError> {
+        self.stop_all()
+    }
+
+    fn stop_all(&mut self) -> Result<(), HarnessError> {
+        if self.stopped {
+            return Ok(());
+        }
+        self.stopped = true;
+        let mut first = None;
+        for c in self.components.iter_mut().rev() {
+            if let Err(e) = c.stop() {
+                first.get_or_insert(e);
+            }
+        }
+        first.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for RunningHarness {
+    fn drop(&mut self) {
+        let _ = self.stop_all();
+    }
+}

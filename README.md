@@ -96,8 +96,8 @@ worktree はそれぞれ別の `target/` を持つため、不要になった wo
 
 前提は Rust toolchain（cargo・rustfmt・clippy）です。版・MSRV・edition は暫定で、TASK-4 で人が決めます。
 
-workspace の members は 8 crate で、ルートの `Cargo.toml` に明示して並べています（glob にしません）。
-段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）に、次の 3 つを足しています。
+workspace の members は 9 crate で、ルートの `Cargo.toml` に明示して並べています（glob にしません）。
+段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）に、次の 4 つを足しています。
 段階 2 の `frontend`・`webauthn-wasm` と、Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）は
 置きません（`LIB-14`・`LIB-15`）。
 
@@ -106,6 +106,7 @@ workspace の members は 8 crate で、ルートの `Cargo.toml` に明示し�
 - `hub-stub`（Hub の検証用 stub。`TASK-7`）: 試験専用で、段階 1 のリリースのメンバーではなく、どの crate からも依存しません。
   名前と置き場は仮称・暫定で、人が確定します。
 - `console-stub`（console の検証用 stub。`TASK-8`）: 試験専用で、扱いは `hub-stub` と同じです。
+- `it-harness`（結合試験のハーネスの枠。`TASK-10`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/integration.md` です。
 
 手順は次の順です。直接実行する場合のコマンドも併記します。
 
