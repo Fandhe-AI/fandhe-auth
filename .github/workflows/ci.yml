@@ -2,8 +2,8 @@
 #
 # ローカル（`make check`）・Git hooks（lefthook.yml）・CI が同じコマンド契約を共有する。
 # CI 側で独自のチェックを定義せず、scripts/ の実体を呼ぶ（make スキルの「入口は複数でも
-# 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブで流す（TASK-6）。言語固有の
-# ジョブを足すときは、必ず ci-complete の needs にも追加すること。
+# 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブで流す（TASK-6）。
+# 言語固有のジョブを足すときは、必ず ci-complete の needs にも追加すること。
 # ジョブ・発火条件の追加・変更時は .claude/rules/github-actions.md に従う。
 #
 # runner: public リポジトリのため GitHub ホステッド（ubuntu-latest）を使う。
@@ -143,6 +143,33 @@ jobs:
       - name: make test
         run: make test
 
+  # Rust の整形の差分検査と lint（TASK-6）。ローカルの `make lint` と同じ契約で、rustfmt の差分・
+  # clippy の警告（-D warnings）・crate 間の依存の向きの検査のどれかが非 0 なら失敗する。
+  # --all-features は付けない（DPOL-31。crate 間の依存の列挙だけは check-crate-deps.sh の方針に従う）。
+  # toolchain は runner 既定の rustup の stable（暫定。版・MSRV は TASK-4 で人が決める）。
+  # キャッシュは未導入。build-test とは needs を張らず並列に流す。
+  lint:
+    name: "make lint (rustfmt + clippy + crate-deps)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain versions
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          cargo -V
+          cargo fmt --version
+          cargo clippy --version
+
+      - name: make lint
+        run: make lint
+
   # squash merge では PR タイトルがそのままコミット件名になるため、commit-msg フックと
   # 同じスクリプトで Conventional Commits 形式を検証する（フックの CI 側の対）。
   # PR タイトルは任意文字列のため、${{ }} を run へ直接展開せず env 経由でファイルへ書き出す
@@ -181,6 +208,7 @@ jobs:
       - check
       - test-hooks
       - build-test
+      - lint
       - pr-title
     steps:
       - name: 全ジョブ結果の検証
