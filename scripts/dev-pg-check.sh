@@ -118,11 +118,11 @@ tcp_psql() { # <role> <pwvar> <sslmode> ...psql args
 # 認証の方式: TLS の成功だけでは scram の証拠にならない（hostssl が trust でも通る）ので、実効ルールを見る。
 # 実効ルールは pg_hba_file_rules。host 系は scram-sha-256 か reject だけで、両方が存在すること。
 expect "pg_hba: no host rule other than scram-sha-256/reject" \
-  "$(admin_env -c "select count(*) from pg_hba_file_rules where error is null and type like 'host%' and auth_method not in ('scram-sha-256','reject')")" "0"
+  "$(echo "select count(*) from pg_hba_file_rules where error is null and type like 'host%' and auth_method not in ('scram-sha-256','reject')" | admin_env)" "0"
 expect "pg_hba: hostssl is scram-sha-256" \
-  "$(admin_env -c "select count(*) > 0 from pg_hba_file_rules where error is null and type = 'hostssl' and auth_method = 'scram-sha-256'")" "t"
+  "$(echo "select count(*) > 0 from pg_hba_file_rules where error is null and type = 'hostssl' and auth_method = 'scram-sha-256'" | admin_env)" "t"
 expect "pg_hba: hostnossl is reject" \
-  "$(admin_env -c "select count(*) > 0 from pg_hba_file_rules where error is null and type = 'hostnossl' and auth_method = 'reject'")" "t"
+  "$(echo "select count(*) > 0 from pg_hba_file_rules where error is null and type = 'hostnossl' and auth_method = 'reject'" | admin_env)" "t"
 
 # 平文の拒否（pg_hba の拒否であること）・誤ったパスワードの拒否・正しい資格情報での TLS ログインを別々に判定する。
 plain="$(tcp_psql "${FA_APP}" FA_APP_PW disable -c 'select 1' 2>&1 || true)"
