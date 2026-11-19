@@ -22,7 +22,7 @@ use crate::introspection::{
     IntrospectionHttpResponse, IntrospectionRequest, TransportFailure,
 };
 
-// TODO(TASK-8): ② ③ の口の本文の形は Hub が正本（Hub ARUN-60 等）。抽象の型で受けた点を #77 で仮定の契約として印を付け、
+// TODO(TASK-8): ② ③ の口の本文の形は Hub が正本（Hub ARUN-60 等）。抽象の型で受けた点は [`crate::contract`] で仮定の印を付けた。
 // 静的な確認を持たない点・① の拒否理由を 1 種類にまとめた点・③ の口の URL を設定に持たない点を #79 に書く。
 
 /// 有効性の照会の応答。理由を持たない（ADLG-29・ADLG-31）。
