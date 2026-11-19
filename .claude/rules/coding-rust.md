@@ -34,6 +34,8 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 | 段階 2 | `-webauthn-wasm`・`-frontend` | ブラウザ側 WebAuthn モジュール・画面部品（任意） | 同上 |
 | 段階 2 | SAML・ID トークンを使わない SNS の OAuth の Plugin | 外部ログイン Plugin | 同上。名前は未決 |
 | Hub の担当 | `-db-pg`・`-db-fandhe`・`-db-migrate`・`-server` | DB の実装・migration・認証サーバーの bin | 本体の workspace に含めない。作らない |
+| 試験専用 | `fandhe-auth-hub-stub`（`crates/hub-stub`） | Hub の検証用 stub（仮称・TASK-7。どの crate からも依存しない） | 段階 1 のリリースに含めない |
+| 試験専用 | `fandhe-auth-console-stub`（`crates/console-stub`） | console の検証用 stub（仮称・TASK-8。どの crate からも依存しない） | 同上 |
 | 位置が未定 | `-db-contract`・`-types`・`-webauthn`・`-provider`・`-keys` | 契約 trait・共有型・WebAuthn アダプタ・Provider 層・鍵管理 | 独立 crate か `-core` の中かは未定（TASK-3・TASK-4 で決める。`DPOL-41` の追記は `LIB-15` の基準で決めるとする） |
 
 - 「Hub の担当」の crate の名前は、将来の切り出し候補として spec に残るだけで、本体の最初のリリースに含まれない（LIB-14）。

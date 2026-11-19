@@ -1,0 +1,45 @@
+# fandhe-auth の workspace ルート（virtual workspace）。
+# TASK-3 (1/6): 段階 1 の crate だけを並べる（LIB-14・LIB-15、D-2026-10-27-8）。
+# メンバーは glob にせず明示列挙する。段階 2 のうち webauthn-wasm・frontend 等、Hub が担当する
+# crate（db-pg・db-fandhe・db-migrate・server）は含めない。
+# TASK-9 (2/8): crates/backend は fandhe-backend の差し替え点の枠として置く。spec 上は段階 2（LIB-14）で、
+# LIB-15 の判定の記録は未作成（人が判定する）。採用は .claude/rules/coding-rust.md の記述による。
+# TASK-3 (4/6): 同梱 Plugin（外部ログイン Plugin の OIDC 共通部品）は段階 1 のメンバーとして
+# crates/plugin-oidc に置く。本体には含めない（LIB-14・PLG-26）。名前 fandhe-auth-plugin-oidc は
+# D-2026-10-27-8 の付け方に合わせた仮称で、spec 上は未決。暫定。人が確定する。
+# TASK-7 (1/12): crates/hub-stub は Hub の検証用 stub で、試験専用。段階 1 のリリースのメンバーではない
+# （LIB-14・LIB-15）。どの crate からも依存しない。名前・置き場は仮称で、人が確定する。
+# TASK-8 (1/8): crates/console-stub は console の検証用 stub で、試験専用。段階 1 のリリースのメンバーではない
+# （LIB-14・LIB-15）。どの crate からも依存しない。名前・置き場は仮称で、人が確定する。
+[workspace]
+resolver = "3" # 暫定。人が確定する。
+members = [
+  "crates/core",
+  "crates/secret",
+  "crates/db-tests",
+  "crates/client",
+  "crates/plugin-oidc",
+  "crates/hub-stub",
+  "crates/console-stub",
+  "crates/backend",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024" # 暫定。MSRV・edition は TASK-3・TASK-4 で人が確定する。
+license = "MIT OR Apache-2.0" # DPOL-26
+repository = "https://github.com/Fandhe-AI/fandhe-auth"
+# crates.io へ公開するかは別に決める（D-2026-10-27-8）。決まるまで誤公開を防ぐ。
+publish = false
+
+# lint の設定（TASK-3 (5/6)）。各 crate が [lints] workspace = true で取り込む。
+# unsafe_code の forbid は利用者の決定（2026-11-13）。各 crate の lib.rs の
+# #![forbid(unsafe_code)] と二重に守る。それ以外の lint の値は人が決める。暫定。
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# 依存クレート（workspace メンバー以外）のデバッグ情報を行番号のみにする。
+# panic 位置・バックトレース・プロファイラの行番号は残り、失うのはデバッガで依存の
+# 変数・型を見る機能だけ。自分たちのクレートは full debuginfo のまま。
+[profile.dev.package."*"]
+debug = "line-tables-only"

@@ -26,7 +26,7 @@ description: >
 
 | 対象 | subagent_type | model | 適用ルール |
 | --- | --- | --- | --- |
-| 段階 1: `crates/core`・`secret`・`client`（外部ログイン Plugin の OIDC 共通部品も、名前の決定後に同じ builder）。位置が未定の `webauthn`・`provider`・`keys`・`types` | `core-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./secret-values.md`・`./security.md` |
+| 段階 1: `crates/core`・`secret`・`client`（外部ログイン Plugin の OIDC 共通部品も、名前の決定後に同じ builder）。位置が未定の `webauthn`・`provider`・`keys`・`types`。試験専用の `hub-stub`・`console-stub` | `core-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./secret-values.md`・`./security.md` |
 | 段階 1: `crates/db-tests`。位置が未定の `db-contract`（契約 trait。`-core` の中なら `core-builder` と調整） | `db-builder` | sonnet | `./db-layer.md`・`./coding-rust.md`・`./secret-values.md` |
 | 段階 2: `crates/backend`（任意の接続部品） | `backend-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./security.md`・`./secret-values.md` |
 | 段階 2: `crates/frontend`・`webauthn-wasm`（任意の部品） | `frontend-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./security.md` |

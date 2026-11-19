@@ -1,0 +1,19 @@
+[package]
+name = "fandhe-auth-hub-stub"
+description = "Hub の検証用 stub（試験専用。実物ではない）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# 暫定: repo で初めての外部依存（TASK-7 #60）。署名の確認は ring に任せ自前の暗号は書かない（DPOL-4・DPOL-47）。
+# 暗号 backend の統一は TASK-32、版の固定方針と deny.toml は TASK-668 で決める。
+[dependencies]
+fandhe-auth-secret = { path = "../secret" }
+base64 = "0.22.1"
+ring = "0.17.14"
+serde_json = "1"

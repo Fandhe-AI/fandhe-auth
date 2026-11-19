@@ -1,0 +1,15 @@
+[package]
+name = "fandhe-auth-console-stub"
+description = "console の検証用 stub（試験専用。実物ではない）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# 暫定: introspection の応答（JSON）の解析に使う。lockfile 既存の版。版の固定方針と deny.toml は TASK-668 で決める。
+[dependencies]
+serde_json = "1"

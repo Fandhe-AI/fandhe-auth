@@ -18,6 +18,12 @@ cat <<'EOF'
   setup       scripts/setup.sh               Git hooks 有効化と .env 雛形の配置（再実行しても安全）
   check       scripts/check.sh               editorconfig-checker + shellcheck（ソースは変更しない）
   test-hooks  scripts/hooks/test-hooks.sh    フックスクリプト自体の回帰テスト（bash + git のみ）
+  build       cargo build --workspace --locked   workspace 全体をビルドする（--locked。--all-features は使わない）
+  test        cargo test --workspace --locked    workspace 全体の試験を流す
+  fmt         cargo fmt --all                rustfmt で整形を適用する（ソースを書き換える）
+  lint        scripts/lint.sh                rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向き
+  crate-deps  scripts/check-crate-deps.sh    crate 間の依存の向きの検査（許可表との照合）
+  pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
 
 Git hooks（lefthook.yml から呼ばれる。直接実行も可）:
 

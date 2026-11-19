@@ -18,6 +18,9 @@
 # Claude Code の個人設定（共有設定は .claude/settings.json に置く）
 /.claude/settings.local.json
 
+# Rust のビルド成果物
+/target
+
 # OS
 .DS_Store
 Thumbs.db
@@ -29,3 +32,6 @@ Thumbs.db
 !/.vscode/settings.json
 *.swp
 *~
+
+# 開発・検証用 PostgreSQL の compose が自動で読む .env
+/dev/postgres/.env
