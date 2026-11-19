@@ -7,6 +7,8 @@
 # D-2026-10-27-8 の付け方に合わせた仮称で、spec 上は未決。暫定。人が確定する。
 # TASK-7 (1/12): crates/hub-stub は Hub の検証用 stub で、試験専用。段階 1 のリリースのメンバーではない
 # （LIB-14・LIB-15）。どの crate からも依存しない。名前・置き場は仮称で、人が確定する。
+# TASK-8 (1/8): crates/console-stub は console の検証用 stub で、試験専用。段階 1 のリリースのメンバーではない
+# （LIB-14・LIB-15）。どの crate からも依存しない。名前・置き場は仮称で、人が確定する。
 [workspace]
 resolver = "3" # 暫定。人が確定する。
 members = [
@@ -16,6 +18,7 @@ members = [
   "crates/client",
   "crates/plugin-oidc",
   "crates/hub-stub",
+  "crates/console-stub",
 ]
 
 [workspace.package]
