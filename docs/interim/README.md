@@ -269,7 +269,7 @@ commit の欄は、公開された版の識別のためだけに置く。リポ�
 | `make check` | 終了コード 0（editorconfig-checker・shellcheck） |
 | `make lint` | 終了コード 0（`cargo fmt --check`・`cargo clippy --workspace --all-targets --locked -- -D warnings`・crate 間の依存の検査） |
 | `make build` と `make test` | 終了コード 0、失敗 0（`--locked`） |
-| `git grep -nE 'fandhe_backend\|fandhe_frontend' -- 'crates/' ':!crates/*/src/interim/'` | 一致なし（境界の外から直接使っていない） |
+| `git grep -n -e 'fandhe_backend' -e 'fandhe_frontend' -- 'crates/' ':!crates/*/src/interim/'` | 一致なし（境界の外から直接使っていない） |
 | `cargo tree --locked --workspace -e normal,build --target all -i <提供元の crate>` | 逆依存の根が、境界を持つ crate だけ |
 | `git diff origin/main -- '*.toml'` と `git grep -nE 'cfg\(feature' -- 'crates/'` | 暫定と提供の切り替えの feature が足されていないことを目視 |
 
