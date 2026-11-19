@@ -14,7 +14,7 @@
 //! - 切り替えられるのは相手側の応答の値だけ。確認を省く設定・分岐は作らない（DPOL-30・DPOL-32）。
 //! - token は引数で借りて ① の口へ渡すだけで、構造体・誤り・出力に保持しない（SECR-23〜27）。
 //! - 判定しないもの: 静的な確認（署名・DPoP の proof・ローカルの `exp`。呼び出し元が済ませた前提。#79）、
-//!   遅延・拒否の注入（#76）、呼び出しの記録（#75）、窓（`t_done − t_commit`）の計測と上限（TASK-451・TASK-30）。
+//!   遅延・拒否の注入（#76）、呼び出しの記録（[`crate::record::RecordingDeliveryPorts`]）、窓（`t_done − t_commit`）の計測と上限（TASK-451・TASK-30）。
 
 use crate::config::ConsoleStubConfig;
 use crate::introspection::{
@@ -233,7 +233,7 @@ pub struct DeliveryScript {
     pub hub: ValidityAnswer,
 }
 
-/// 口ごとの呼び出し回数。要求の中身・token は保持しない（記録は #75）。
+/// 口ごとの呼び出し回数。要求の中身・token は保持しない（順序つきの記録は [`crate::record::RecordingDeliveryPorts`]）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CallCounts {
     pub introspect: u32,

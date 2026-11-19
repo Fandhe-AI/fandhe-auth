@@ -23,5 +23,22 @@ pub struct ConsoleStubConfig {
     pub delivery_window_max: Duration,
 }
 
+/// エージェントの資格情報の発行・失効の呼び出しを模す側が受ける設定（#75）。
+/// 全項目必須・既定値なし・秘密値なし。口の URL は取得せず、記述として口へ渡すだけ。
+/// 経路名は最終でなく（D-2026-10-17-84）、登録の失効の口は Hub が正本（Hub ARUN-58）のため、パスは写さず受ける。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCredentialConfig {
+    /// エージェントの公開クライアントの `client_id`（AGCR-1・AGCR-2）。試験用の仮の値。
+    pub client_id: String,
+    /// Device Authorization の開始の口の URL（DGRT-1）。
+    pub device_authorization_endpoint: String,
+    /// `device_code` grant の交換の口の URL（DGRT-7・DGRT-8）。
+    pub token_endpoint: String,
+    /// RFC 7009 の失効の口の URL（AGCR-43・OPRV-53）。
+    pub revocation_endpoint: String,
+    /// エージェントの登録の失効の口の URL（AGCR-35・AGCR-36。受付の正本は Hub ARUN-58）。
+    pub registration_revocation_endpoint: String,
+}
+
 // TODO(TASK-8): 仮定の契約の印（#77）を足す。
 // TODO(TASK-8): 秘密値（private_key_jwt の鍵等）を足す段で fandhe-auth-secret の型を使い、許可表を見直す。
