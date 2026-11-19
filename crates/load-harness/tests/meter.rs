@@ -257,6 +257,48 @@ fn concurrent_trials_keep_counts() {
 }
 
 #[test]
+fn timeout_midway_discards_open_interval_and_counts() {
+    let c = FakeClock::new();
+    let m = meter(&c, &["a", "b"]);
+    let mut t = m.begin_trial().unwrap();
+    t.measure(&iv("a"), || c.advance(7)).unwrap();
+    t.start(&iv("b")).unwrap();
+    t.finish(Outcome::Timeout).unwrap();
+    let s = m.finish().unwrap();
+    assert_eq!((s.executed, s.timeout, s.failure), (1, 1, 0));
+    assert!(s.failure_kinds.is_empty());
+    assert!(s.success_samples.is_empty() && s.failure_samples.is_empty());
+}
+
+#[test]
+fn snapshot_is_consistent_under_concurrency() {
+    let c = FakeClock::new();
+    let m = meter(&c, &["a"]);
+    let a = iv("a");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        let worker = sc.spawn(|| {
+            for _ in 0..2000 {
+                let mut t = m.begin_trial().unwrap();
+                t.measure(&a, || ()).unwrap();
+                t.finish(Outcome::Success).unwrap();
+            }
+            stop.store(true, Ordering::SeqCst);
+        });
+        while !stop.load(Ordering::SeqCst) {
+            match m.snapshot() {
+                Err(e) => assert_eq!(e, MeterError::TrialsInFlight),
+                // 成功のあるスナップショットは、必ず最大同時実行が 1 以上（件数だけ先に見えない）。
+                Ok(s) => assert_eq!(s.executed > 0, s.max_in_flight > 0),
+            }
+        }
+        worker.join().unwrap();
+    });
+    let s = m.finish().unwrap();
+    assert_eq!((s.executed, s.max_in_flight), (2000, 1));
+}
+
+#[test]
 fn std_clock_is_monotonic() {
     let c = StdMonotonicClock::new();
     let a = c.now_ns().unwrap();

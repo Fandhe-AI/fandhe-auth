@@ -196,14 +196,21 @@ fn bump(c: &mut u64) -> Result<(), MeterError> {
     Ok(())
 }
 
-/// 1 回の「回」の計測。`Send + Sync`。共有の状態のロックは試行を締めるときだけ取り、測る区間の中では取らない。
+/// ロックの中で持つ状態。件数・同時実行の数・最大を 1 つの `Mutex` で直列化し、`snapshot` が
+/// 一貫した組み合わせだけを見るようにする。
+#[derive(Default)]
+struct State {
+    samples: RunSamples,
+    in_flight: u64,
+}
+
+/// 1 回の「回」の計測。`Send + Sync`。共有の状態のロックは試行の開始・終了の短い更新だけで取り、
+/// 測る区間の中では取らない。
 pub struct RunMeter {
     clock: Box<dyn MonotonicClock>,
     intervals: BTreeSet<IntervalName>,
     next_trial: AtomicU64,
-    in_flight: AtomicU64,
-    max_in_flight: AtomicU64,
-    state: Mutex<RunSamples>,
+    state: Mutex<State>,
 }
 
 impl RunMeter {
@@ -223,9 +230,7 @@ impl RunMeter {
             clock,
             intervals: set,
             next_trial: AtomicU64::new(0),
-            in_flight: AtomicU64::new(0),
-            max_in_flight: AtomicU64::new(0),
-            state: Mutex::new(RunSamples::default()),
+            state: Mutex::new(State::default()),
         })
     }
 
@@ -239,12 +244,15 @@ impl RunMeter {
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1))
             .map_err(|_| MeterError::CounterOverflow)?;
         let id = prev.checked_add(1).ok_or(MeterError::CounterOverflow)?;
-        let prev_in = self
-            .in_flight
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1))
-            .map_err(|_| MeterError::CounterOverflow)?;
-        let now = prev_in.checked_add(1).ok_or(MeterError::CounterOverflow)?;
-        self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        {
+            let mut st = self.lock()?;
+            let now = st
+                .in_flight
+                .checked_add(1)
+                .ok_or(MeterError::CounterOverflow)?;
+            st.in_flight = now;
+            st.samples.max_in_flight = st.samples.max_in_flight.max(now);
+        }
         Ok(Trial {
             meter: self,
             id,
@@ -253,7 +261,7 @@ impl RunMeter {
         })
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, RunSamples>, MeterError> {
+    fn lock(&self) -> Result<MutexGuard<'_, State>, MeterError> {
         self.state.lock().map_err(|_| MeterError::StatePoisoned)
     }
 
@@ -263,11 +271,14 @@ impl RunMeter {
     /// 試行が残っていれば [`MeterError::TrialsInFlight`]、不変条件を満たさなければ
     /// [`MeterError::InvariantViolated`]。
     pub fn snapshot(&self) -> Result<RunSamples, MeterError> {
-        if self.in_flight.load(Ordering::SeqCst) != 0 {
-            return Err(MeterError::TrialsInFlight);
-        }
-        let mut out = self.lock()?.clone();
-        out.max_in_flight = self.max_in_flight.load(Ordering::SeqCst);
+        // 同時実行の数の確認・件数・最大の複製を 1 回のロックの中で行い、一貫した状態だけを返す。
+        let out = {
+            let st = self.lock()?;
+            if st.in_flight != 0 {
+                return Err(MeterError::TrialsInFlight);
+            }
+            st.samples.clone()
+        };
         check_invariants(&out)?;
         Ok(out)
     }
@@ -399,14 +410,19 @@ impl Trial<'_> {
     /// # Errors
     /// 開いたままの区間、成功なのに測っていない区間は [`MeterError::IncompleteIntervals`]。
     pub fn finish(mut self, outcome: Outcome) -> Result<(), MeterError> {
-        if self.slots.values().any(|s| s.ns.is_none()) {
-            return Err(MeterError::IncompleteIntervals);
-        }
-        if matches!(outcome, Outcome::Success) && self.slots.len() != self.meter.intervals.len() {
-            return Err(MeterError::IncompleteIntervals);
+        // 時間切れは計測の途中でも締められる。開いた区間は破棄し、件数だけを数える。
+        if !matches!(outcome, Outcome::Timeout) {
+            if self.slots.values().any(|s| s.ns.is_none()) {
+                return Err(MeterError::IncompleteIntervals);
+            }
+            if matches!(outcome, Outcome::Success) && self.slots.len() != self.meter.intervals.len()
+            {
+                return Err(MeterError::IncompleteIntervals);
+            }
         }
         let id = self.id;
-        let mut s = self.meter.lock()?;
+        let mut st = self.meter.lock()?;
+        let s = &mut st.samples;
         match outcome {
             Outcome::Success => {
                 bump(&mut s.executed)?;
@@ -425,7 +441,9 @@ impl Trial<'_> {
             }
             Outcome::Excluded => bump(&mut s.excluded)?,
         }
-        drop(s);
+        // 件数の加算と同時実行の数の減算を同じロックの中で行う。
+        st.in_flight = st.in_flight.saturating_sub(1);
+        drop(st);
         self.done = true;
         Ok(())
     }
@@ -435,13 +453,13 @@ impl Drop for Trial<'_> {
     fn drop(&mut self) {
         if !self.done {
             // 締めずに捨てた試行は失敗 `unfinished` として数える。ロックが汚染されていても数える。
-            let mut s = self.meter.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut st = self.meter.state.lock().unwrap_or_else(|e| e.into_inner());
             let kind = FailureKind(UNFINISHED_KIND.to_owned());
             // 溢れたときは取り出しの不変条件の検査で誤りになる。
-            let _ = bump(&mut s.executed);
-            let _ = bump(&mut s.failure);
-            let _ = bump(s.failure_kinds.entry(kind).or_insert(0));
+            let _ = bump(&mut st.samples.executed);
+            let _ = bump(&mut st.samples.failure);
+            let _ = bump(st.samples.failure_kinds.entry(kind).or_insert(0));
+            st.in_flight = st.in_flight.saturating_sub(1);
         }
-        self.meter.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
