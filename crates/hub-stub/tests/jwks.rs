@@ -1,4 +1,5 @@
-//! TASK-7 #65: JWKS の取得の模擬の最小の確認（網羅は #68）。
+//! TASK-7 #65・#68: JWKS の配信と取得の模擬の確認。
+//! #68 で取得の成功の記録（契機・件数）と `max-age` の無い応答を足した。
 //! 鍵は実行時に生成し、コミットしない。値は予約 TLD `.test` の仮の値で、秒数も任意の小さな値。
 
 use std::time::Duration;
@@ -332,4 +333,41 @@ fn sub_second_stale_max_is_not_rounded_up() {
     f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();
     assert_eq!(f.keys(T0).len(), 1);
     assert!(f.keys(T0 + 1).is_empty());
+}
+
+/// SIGN-45: 成功した取得は契機・件数つきで記録に残り、`max-age` の無い応答では `None` になる。
+#[test]
+fn fetch_records_trigger_and_counts_and_missing_max_age() {
+    let k = AssertionSigningKey::generate("k1").unwrap();
+    let mut f = AuthJwksFetcher::new(&config_b(1, 100));
+    let mut port = FakeJwksPort::new(vec![
+        ok(body_of(&[&k])),
+        AuthJwksResponse::Ok {
+            body: body_of(&[&k]),
+            max_age: None,
+        },
+    ]);
+    f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();
+    assert_eq!(f.last_max_age(), Some(9));
+    f.fetch(&mut port, JwksFetchTrigger::UnknownKid, T0 + 1)
+        .unwrap();
+    assert_eq!(f.last_max_age(), None);
+    assert_eq!(f.last_success_at(), Some(T0 + 1));
+    assert_eq!(f.last_attempt_at(), Some(T0 + 1));
+    let got: Vec<_> = f
+        .records()
+        .iter()
+        .map(|r| (r.at, r.trigger, r.outcome))
+        .collect();
+    let fetched = JwksFetchOutcome::Fetched {
+        keys: 1,
+        skipped: 0,
+    };
+    assert_eq!(
+        got,
+        [
+            (T0, JwksFetchTrigger::Periodic, fetched),
+            (T0 + 1, JwksFetchTrigger::UnknownKid, fetched)
+        ]
+    );
 }

@@ -106,3 +106,14 @@ fn get_returns_the_given_value() {
         Duration::from_secs(9)
     );
 }
+
+/// A-2026-10-28-1: `StubValue::mark()` は作り方ごとの印を返し、どちらも「仮置き」と読める。
+#[test]
+fn mark_accessor_returns_the_mark_given_at_construction() {
+    let t = StubValue::test(Duration::from_secs(1));
+    assert_eq!(*t.mark(), ValueMark::TestProvisional);
+    let p = StubValue::poc(Duration::from_secs(1), "PoC-3");
+    assert_eq!(*p.mark(), ValueMark::PocProvisional { poc: "PoC-3" });
+    assert_eq!(t.mark().label(), "仮置き");
+    assert_eq!(p.mark().label(), "仮置き");
+}

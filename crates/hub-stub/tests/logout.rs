@@ -1,4 +1,5 @@
-//! TASK-7 #62: 失効の通知の受け口の模擬が、試験用の鍵で署名した Logout Token で動くことの最小の確認（網羅は #68）。
+//! TASK-7 #62・#68: 失効の通知の受け口の模擬が、試験用の鍵で署名した Logout Token で動くことの確認。
+//! #68 で `UnknownKey` を足し、拒否の種類を一通り通した。
 //! 鍵は実行時に生成し、コミットしない。値は予約 TLD `.test` の仮の値。
 
 use base64::Engine as _;
@@ -252,5 +253,23 @@ fn rejects_invalid_issued_at() {
             Err(LogoutRejection::InvalidIssuedAt)
         );
     }
+    assert!(r.received().is_empty());
+}
+
+/// SIGN-16: kid が手元の鍵の一覧に無い・kid が無い通知は `UnknownKey` で拒否し、記録を変えない。
+#[test]
+fn rejects_unknown_or_missing_kid() {
+    let key = new_key();
+    let mut r = receiver(&key);
+    let h = json!({"alg": "ES256", "typ": "logout+jwt", "kid": "other"});
+    assert_eq!(
+        r.receive(&sign(&key, &h, &claims("j1", "sid-1")), NOW),
+        Err(LogoutRejection::UnknownKey)
+    );
+    let h = json!({"alg": "ES256", "typ": "logout+jwt"});
+    assert_eq!(
+        r.receive(&sign(&key, &h, &claims("j2", "sid-1")), NOW),
+        Err(LogoutRejection::UnknownKey)
+    );
     assert!(r.received().is_empty());
 }
