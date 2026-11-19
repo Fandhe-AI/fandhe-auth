@@ -1,8 +1,8 @@
 //! 外部ログイン Plugin の OIDC 共通部品を置く同梱 Plugin の crate。
 //!
 //! 置き場の根拠は `LIB-14`（段階 1 の同梱 Plugin）と `PLG-26`。本体（`core`・`secret`・`db-tests`・
-//! `client`）には含めず、`plugin-` 接頭辞のディレクトリで区別する。crate 名は仮称で、spec 上は未決
-//! （暫定。人が確定する）。
+//! `client`）には含めず、`plugin-` 接頭辞のディレクトリで区別する。crate 名 `fandhe-auth-plugin-oidc` は
+//! `D-2026-11-20-2` で決定済み。crates.io の空きは未照会で、公開するかは別に決める（同決定）。
 //!
 //! 依存の向き: Plugin から本体の公開 API へ向ける一方向だけ。本体からこの crate へ依存させない
 //! （`PLG-26`・`LIB-2`）。

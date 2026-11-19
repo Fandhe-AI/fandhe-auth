@@ -1,18 +1,28 @@
 //! `fandhe-backend` の部品の差し替え点を 1 か所に集める境界。
 //!
-//! 対象は `docs/interim/README.md` の台帳の行 1〜6。この crate の他の module は、これらの部品をこの module の
-//! 子 module からだけ参照し、`fandhe-backend` の該当部品を直接 `use` しない。差し替えで書き換える箇所を、
-//! 下の子 module に限るためである。
+//! 対象は `docs/interim/README.md` の台帳の行 1〜4。行 5（フォームの上限）・行 6（信頼するプロキシ）の枠は
+//! 本体で作らない移管分のため外した（`D-2026-11-20-3` の (イ)）。
+//! この crate の他の module は、これらの部品をこの module の子 module からだけ参照し、
+//! `fandhe-backend` の該当部品を直接 `use` しない。差し替えで書き換える箇所を、下の子 module に限るためである。
 //!
 //! 暫定版と提供版を feature・環境変数・設定で実行時に切り替える経路は作らない（DPOL-30〜32・CSRF-7）。
 //! 差し替えはコードの変更と版の固定だけで行い、前に再試験を流す（CG-6）。手順は #86、版の固定の記録の形式は
 //! #85、空の実装での動作確認は #88 で作る。検査を通してしまう既定の実装は、本番のコードに持たない。
 //!
-//! 各子 module は枠だけで、中身は `TASK-523` ほか各 TASK が作る。シグネチャは中身の TASK で決める。
+//! 各子 module は枠だけで、中身は持たない。中身を足す前、または `fandhe-backend` への依存を足す前の早い方に、
+//! 人が `LIB-15` の判定を記録する
+//! （`docs/interim/README.md` の「backend の切り出しの記録」。`D-2026-11-20-3` の (ア)）。
+//! シグネチャは中身を足すときに決める。
+//!
+//! 移管の部分は本体で作らない。`CSRF-40`〜`42`・`CSRF-47`（自前の accept ループ）は Hub `ARUN-43`、
+//! `CSRF-44` は Hub `ARUN-44` が持つ。
+//! 下の `TODO(TASK-535)`・`TODO(TASK-536)` は本体の部分で、`trusted_proxy` の枠（外した）の外で作る。
+//! 置き場は未決で、`LIB-1` の判定のときに利用者が決める（`D-2026-11-20-3`）。
+//
+// TODO(TASK-535): `CSRF-43`・`CSRF-52` の本体の部分（`AttemptKey`。行内分割）を作る。
+// TODO(TASK-536): `CSRF-45`・`CSRF-46` の本体の部分（行内分割）を作る。
 
 pub mod csrf_gate;
-pub mod form_limit;
 pub mod local_redirect;
 pub mod no_store;
 pub mod set_cookie;
-pub mod trusted_proxy;
