@@ -129,9 +129,10 @@ fn baseline_timeline_rejects_injection_and_does_not_inject() {
         Err(DbFaultError::Record(FaultRecordError::EventsInBaseline))
     );
     let mut c = connect(p.listen_port());
-    let t = Instant::now();
     assert!(roundtrip(&mut c, b"z").is_some());
-    assert!(t.elapsed() < Duration::from_millis(500));
+    // 時間の上限は見ない。遮断されず（refused 0）転送された（accepted 1）ことで確かめる。
+    assert_eq!(p.refused_count(), 0);
+    assert_eq!(p.accepted_count(), 1);
 }
 
 #[test]

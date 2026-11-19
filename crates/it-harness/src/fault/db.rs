@@ -18,6 +18,8 @@
 //! - 環境変数・設定ファイル・feature で注入を切り替える経路を作らない（DPOL-30〜32）。
 //! - 遮断は既存の接続を切り、新しい接続を直ちに閉じる。解除しても切れた接続は戻らないので、client は
 //!   解除の後につなぎ直す。遅延は応答（上流から client）の向きの塊ごとに足す。
+//! - 接続の確立（上流への connect。上限 5 秒）は accept のスレッドで同期に行う。上流は `127.0.0.1` で
+//!   通常は即座に結果が出るが、固まると後続の accept がその間止まる（試験専用の制約として受け入れる）。
 //! - 刻みの値（accept 5 ms・待ちの刻み 10 ms・上流への接続の上限 5 秒・遅延の上限）は開発の値で要件の値ではない
 //!   （THRT-29）。
 //!
@@ -108,6 +110,19 @@ impl Shared {
         for (_, s) in g.drain(..) {
             let _ = s.shutdown(Shutdown::Both);
         }
+    }
+
+    /// 1 つの接続の両側を切って複製を外す（転送のスレッドを作れなかったときの片付け）。
+    fn sever_conn(&self, id: u64) {
+        let mut g = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        g.retain(|(i, s)| {
+            if *i == id {
+                let _ = s.shutdown(Shutdown::Both);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// 終わった接続の複製を外し、fd を `stop` まで抱えないようにする。
@@ -366,7 +381,6 @@ fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
         shared.sever_all();
         return refuse(&client, shared);
     }
-    shared.accepted.fetch_add(1, Ordering::SeqCst);
     let s1 = Arc::clone(shared);
     let s2 = Arc::clone(shared);
     let w1 = thread::Builder::new()
@@ -381,6 +395,13 @@ fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
             pump(up, client, true, &s2);
             finish_pump(&s2, id, &r2);
         });
+    if w1.is_err() || w2.is_err() {
+        // 片方向だけ動く接続を残さない。生きている側も両側を切って終わらせる。
+        shared.sever_conn(id);
+        shared.refused.fetch_add(1, Ordering::SeqCst);
+    } else {
+        shared.accepted.fetch_add(1, Ordering::SeqCst);
+    }
     let mut g = shared
         .workers
         .lock()
