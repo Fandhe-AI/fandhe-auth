@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use fandhe_auth_hub_stub::config::HubStubConfig;
+use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
 use fandhe_auth_hub_stub::heartbeat::{DbState, Heartbeat, HeartbeatReceiver, Liveness};
 
 const TH: u64 = 10;
@@ -10,17 +10,17 @@ const T0: u64 = 1_000;
 
 fn config(threshold: Duration) -> HubStubConfig {
     HubStubConfig {
-        client_id: "hub-client.test".to_owned(),
-        public_host: "hub.example.test".to_owned(),
-        jwks_uri: "https://hub.example.test/jwks".to_owned(),
-        logout_receiver_uri: "https://hub.example.test/logout".to_owned(),
-        jwks_max_age: Duration::from_secs(1),
-        jwks_fetch_min_interval: Duration::from_secs(2),
-        jwks_cache_max: Duration::from_secs(3),
-        jwks_stale_max: Duration::from_secs(6),
-        assertion_max_lifetime: Duration::from_secs(300),
-        feed_fetch_min_interval: Duration::from_secs(5),
-        heartbeat_loss_threshold: threshold,
+        client_id: StubValue::test("hub-client.test".to_owned()),
+        public_host: StubValue::test("hub.example.test".to_owned()),
+        jwks_uri: StubValue::test("https://hub.example.test/jwks".to_owned()),
+        logout_receiver_uri: StubValue::test("https://hub.example.test/logout".to_owned()),
+        jwks_max_age: StubValue::test(Duration::from_secs(1)),
+        jwks_fetch_min_interval: StubValue::test(Duration::from_secs(2)),
+        jwks_cache_max: StubValue::test(Duration::from_secs(3)),
+        jwks_stale_max: StubValue::test(Duration::from_secs(6)),
+        assertion_max_lifetime: StubValue::test(Duration::from_secs(300)),
+        feed_fetch_min_interval: StubValue::test(Duration::from_secs(5)),
+        heartbeat_loss_threshold: StubValue::test(threshold),
     }
 }
 
