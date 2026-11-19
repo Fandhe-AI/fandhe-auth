@@ -1,4 +1,5 @@
-//! TASK-7 #64: 生存確認の受け口の模擬の最小の確認（網羅は #68）。値は試験の中だけの仮の値。
+//! TASK-7 #64・#68: 生存確認の受け口の模擬の確認（`Liveness` の 3 種・`DbState`・`any_alive`・`all_alive`）。
+//! 値は試験の中だけの仮の値。
 
 use std::time::Duration;
 

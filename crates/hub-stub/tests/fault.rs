@@ -1,4 +1,5 @@
-//! TASK-7 #66: 遅れと拒否の注入の最小の確認（網羅は #68）。
+//! TASK-7 #66・#68: 遅れと拒否の注入の確認。
+//! #68 で提示の口の素通し・遅れと拒否の順序・`CallWindow` の境界・規則の選び方・記録の照合を足した。
 //! 鍵は実行時に生成し、コミットしない。値は予約 TLD `.test` の仮の値で、秒数も任意の小さな値。
 
 use std::cell::RefCell;
@@ -17,7 +18,7 @@ use fandhe_auth_hub_stub::heartbeat::{DbState, Heartbeat, HeartbeatReceiver, Liv
 use fandhe_auth_hub_stub::jwks::HubJwksEndpoint;
 use fandhe_auth_hub_stub::logout::{LogoutExpectations, LogoutTokenReceiver};
 use fandhe_auth_hub_stub::presentation::{
-    IdentityTokenReceiver, PresentationExpectations, VerificationKey,
+    IdentityTokenReceiver, PresentationExpectations, PresentationRejection, VerificationKey,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
@@ -277,4 +278,241 @@ fn debug_and_log_do_not_contain_values() {
     let text = format!("{inj:?} {:?}", inj.log());
     assert!(!text.contains(&t));
     assert!(!text.contains(TOKEN_MARK));
+}
+
+fn presentation_receiver(key: &EcdsaKeyPair) -> IdentityTokenReceiver {
+    IdentityTokenReceiver::new(
+        vec![VerificationKey::es256("k1", key.public_key().as_ref())],
+        PresentationExpectations {
+            issuer: ISS.to_owned(),
+            audience: AUD.to_owned(),
+        },
+    )
+}
+
+fn identity_token(key: &EcdsaKeyPair, typ: &str) -> String {
+    let enc = |v: &Value| URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap());
+    let header = json!({"alg": "ES256", "typ": typ, "kid": "k1"});
+    let claims = json!({
+        "iss": ISS, "sub": "user-1", "aud": AUD, "iat": 900, "exp": 1_900,
+        "jti": "jti-1", "sid": "sid-1", "client_id": "client-1", "scope": "openid"
+    });
+    let input = format!("{}.{}", enc(&header), enc(&claims));
+    let sig = key.sign(&SystemRandom::new(), input.as_bytes()).unwrap();
+    format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()))
+}
+
+/// AVLB-22: 提示の口は素通しで、受理は内側が行い、内側の拒否は注入の失敗にならずそのまま返る。
+#[test]
+fn presentation_passes_through_and_inner_rejection_is_returned_as_is() {
+    let key = new_key();
+    let mut rcv = presentation_receiver(&key);
+    let mut inj = HubFaultInjector::new(HubFaultConfig::baseline(), noop());
+    let ok = inj
+        .present(&mut rcv, &identity_token(&key, "at+jwt"), NOW)
+        .unwrap();
+    assert!(ok.is_ok());
+    assert_eq!(rcv.received().len(), 1);
+    let bad = inj
+        .present(&mut rcv, &identity_token(&key, "JWT"), NOW)
+        .unwrap();
+    assert_eq!(bad, Err(PresentationRejection::HeaderMismatch));
+    assert_eq!(rcv.received().len(), 1);
+    let kinds: Vec<_> = inj.log().records().iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds,
+        [HubCallKind::Presentation, HubCallKind::Presentation]
+    );
+}
+
+/// 提示の口の遅れだけの規則は受理したうえで遅れを渡し、遅れと拒否の規則は内側を呼ばない。
+#[test]
+fn presentation_delay_only_and_delay_with_refusal() {
+    let key = new_key();
+    let mut rcv = presentation_receiver(&key);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    let d1 = Duration::from_millis(3);
+    let d2 = Duration::from_millis(5);
+    let mut faults = HubFaultConfig::baseline();
+    faults
+        .presentation
+        .push(rule::<Refusal>(1, Some(1), Some(d1), None));
+    faults
+        .presentation
+        .push(rule(2, Some(2), Some(d2), Some(Refusal::Unreachable)));
+    let mut inj = HubFaultInjector::new(faults, move |x| sink.borrow_mut().push(x));
+    let t = identity_token(&key, "at+jwt");
+    assert!(inj.present(&mut rcv, &t, NOW).unwrap().is_ok());
+    assert_eq!(*seen.borrow(), vec![d1]);
+    assert_eq!(
+        inj.present(&mut rcv, &t, NOW).unwrap_err(),
+        InjectedRefusal::Unreachable
+    );
+    assert_eq!(*seen.borrow(), vec![d1, d2]);
+    // 拒否の回は内側の記録を増やさない。
+    assert_eq!(rcv.received().len(), 1);
+}
+
+/// 遅れと拒否の両方を持つ規則では、`Wait` が拒否の返却より先に呼ばれる。
+#[test]
+fn wait_is_called_before_refusal_is_returned() {
+    let order = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&order);
+    let mut faults = HubFaultConfig::baseline();
+    faults.heartbeat.push(rule(
+        1,
+        None,
+        Some(Duration::from_millis(2)),
+        Some(Refusal::Status(502)),
+    ));
+    let mut inj = HubFaultInjector::new(faults, move |_| sink.borrow_mut().push("wait"));
+    let mut hbr = HeartbeatReceiver::new(&config());
+    let r = inj.receive_heartbeat(&mut hbr, &hb(), NOW);
+    order.borrow_mut().push("returned");
+    assert_eq!(r, Err(InjectedRefusal::Status(502)));
+    assert_eq!(*order.borrow(), vec!["wait", "returned"]);
+    assert!(hbr.records().is_empty());
+}
+
+/// `CallWindow::contains`: 両端を含み、`last: None` は以降すべて、`first == 0` は 1 と同じ。
+#[test]
+fn call_window_boundaries() {
+    let w = CallWindow {
+        first: 2,
+        last: Some(4),
+    };
+    let got: Vec<bool> = (0..=6).map(|n| w.contains(n)).collect();
+    assert_eq!(got, [false, false, true, true, true, false, false]);
+    let open = CallWindow {
+        first: 3,
+        last: None,
+    };
+    assert!(!open.contains(2));
+    assert!(open.contains(3));
+    assert!(open.contains(u32::MAX));
+    let zero = CallWindow {
+        first: 0,
+        last: Some(1),
+    };
+    assert!(!zero.contains(0));
+    assert!(zero.contains(1));
+    assert!(!zero.contains(2));
+}
+
+/// `first == 0` の規則は 1 回目から当たる（1 と同じ扱い）。
+#[test]
+fn rule_with_first_zero_applies_from_first_call() {
+    let mut faults = HubFaultConfig::baseline();
+    faults
+        .heartbeat
+        .push(rule(0, Some(1), None, Some(Refusal::Status(500))));
+    let mut inj = HubFaultInjector::new(faults, noop());
+    let mut hbr = HeartbeatReceiver::new(&config());
+    assert_eq!(
+        inj.receive_heartbeat(&mut hbr, &hb(), NOW).unwrap_err(),
+        InjectedRefusal::Status(500)
+    );
+    assert!(inj.receive_heartbeat(&mut hbr, &hb(), NOW).is_ok());
+}
+
+/// 規則は先頭から見て最初に当たった 1 件だけを使い、後ろの規則の遅れ・拒否を足さない。
+#[test]
+fn only_first_matching_rule_is_used() {
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    let first_delay = Duration::from_millis(1);
+    let mut faults = HubFaultConfig::baseline();
+    faults
+        .heartbeat
+        .push(rule::<Refusal>(1, None, Some(first_delay), None));
+    faults.heartbeat.push(rule(
+        1,
+        None,
+        Some(Duration::from_millis(9)),
+        Some(Refusal::Status(500)),
+    ));
+    let mut inj = HubFaultInjector::new(faults, move |x| sink.borrow_mut().push(x));
+    let mut hbr = HeartbeatReceiver::new(&config());
+    inj.receive_heartbeat(&mut hbr, &hb(), NOW).unwrap();
+    assert_eq!(*seen.borrow(), vec![first_delay]);
+    assert_eq!(hbr.records().len(), 1);
+    let fault = inj.log().records()[0].injected.unwrap();
+    assert_eq!(fault.delay, Some(first_delay));
+    assert_eq!(fault.refusal, None);
+}
+
+/// 記録は口ごとの通算の回数を持ち、種別・拒否の種類を `Presentation`・`Unreachable`・`Status` まで写す。
+#[test]
+fn log_records_kind_index_and_refusal_for_every_door() {
+    let key = new_key();
+    let mut faults = HubFaultConfig::baseline();
+    faults
+        .presentation
+        .push(rule(1, Some(1), None, Some(Refusal::Unreachable)));
+    faults
+        .logout
+        .push(rule(1, Some(1), None, Some(Refusal::Status(429))));
+    faults
+        .heartbeat
+        .push(rule(1, Some(1), None, Some(Refusal::Status(503))));
+    faults
+        .jwks
+        .push(rule(1, Some(1), None, Some(JwksRefusal::Status(500))));
+    let mut inj = HubFaultInjector::new(faults, noop());
+    let mut rcv = presentation_receiver(&key);
+    let mut logout = logout_receiver(&key);
+    let mut hbr = HeartbeatReceiver::new(&config());
+    let mut jwks = HubJwksEndpoint::new(&config());
+    let t = identity_token(&key, "at+jwt");
+    let lt = logout_token(&key, "j1");
+    assert!(inj.present(&mut rcv, &t, NOW).is_err());
+    assert!(inj.receive_logout(&mut logout, &lt, NOW + 1).is_err());
+    assert!(inj.receive_heartbeat(&mut hbr, &hb(), NOW + 2).is_err());
+    assert!(inj.serve_jwks(&mut jwks, NOW + 3).is_err());
+    // 2 回目は規則の外で、口ごとに通算が 2 になる。
+    assert!(inj.present(&mut rcv, &t, NOW + 4).unwrap().is_ok());
+    let got: Vec<_> = inj
+        .log()
+        .records()
+        .iter()
+        .map(|r| {
+            (
+                r.kind,
+                r.call_index,
+                r.at,
+                r.injected.and_then(|f| f.refusal),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                HubCallKind::Presentation,
+                1,
+                NOW,
+                Some(RefusalRecord::Unreachable)
+            ),
+            (
+                HubCallKind::Logout,
+                1,
+                NOW + 1,
+                Some(RefusalRecord::Status(429))
+            ),
+            (
+                HubCallKind::Heartbeat,
+                1,
+                NOW + 2,
+                Some(RefusalRecord::Status(503))
+            ),
+            (
+                HubCallKind::Jwks,
+                1,
+                NOW + 3,
+                Some(RefusalRecord::Status(500))
+            ),
+            (HubCallKind::Presentation, 2, NOW + 4, None),
+        ]
+    );
 }

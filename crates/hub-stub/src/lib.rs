@@ -34,4 +34,4 @@ pub mod jwks;
 pub mod logout;
 pub mod presentation;
 
-// TODO(TASK-7): 単体試験（#68）、実物との差の文書（#69・#70）は後続の段で足す。
+// TODO(TASK-7): 実物との差の文書（#69・#70）は後続の段で足す。

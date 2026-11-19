@@ -1,4 +1,5 @@
-//! TASK-7 #63: 変更のフィードの取得の模擬の最小の確認（網羅は #68）。
+//! TASK-7 #63・#68: 変更のフィードの取得の模擬の確認。
+//! #68 で本人単位の項目（RVPG-41）・成功の記録・組の一覧の項目・カーソルの据え置きを足した。
 //! 鍵は実行時に生成し、コミットしない。値は予約 TLD `.test` の仮の値。
 //!
 //! 偽の口（`FakePort`）は `fandhe-auth` の口の代わりで、本体の検証部の代わりではない。
@@ -289,4 +290,114 @@ fn applied_jtis_across_merges_push_and_feed() {
     )]);
     f.fetch(&c, &mut p, "a1", T0).unwrap();
     assert_eq!(applied_jtis_across(&r, &f), vec!["j1", "j2"]);
+}
+
+/// RVPG-41: `sid` も組の一覧も持たない項目は本人単位の項目として保持し、`jti` の有無で重複を数える。
+#[test]
+fn principal_entry_is_kept_without_session_fields() {
+    let c = caller();
+    let mut f = ChangeFeedFetcher::new(&config());
+    let principal = json!({"sub": "user-1", "kind": "principal-change"});
+    let mut p = FakePort::new(vec![items(
+        vec![
+            principal.clone(),
+            principal.clone(),
+            session_item("j1", "s1"),
+        ],
+        "c1",
+    )]);
+    let got = f.fetch(&c, &mut p, "a1", T0).unwrap();
+    // `jti` の無い項目は重複と数えず、3 件とも新規になる。
+    assert_eq!((got.items, got.new_entries), (3, 3));
+    assert_eq!(f.entries()[0].kind, FeedEntryKind::Principal);
+    assert_eq!(f.entries()[0].jti, None);
+    assert_eq!(f.entries()[0].claims.get("sub"), Some(&json!("user-1")));
+    assert!(!f.entries()[1].duplicate);
+    // 失効の適用に数えるのは `jti` を持つ項目だけ。
+    assert_eq!(f.applied_jtis(), vec!["j1"]);
+}
+
+/// RVPG-38: 成功した取得は件数つきで記録に残り、assertion の `jti` を写す。
+#[test]
+fn successful_fetch_is_recorded_with_counts() {
+    let c = caller();
+    let mut f = ChangeFeedFetcher::new(&config());
+    let mut p = FakePort::new(vec![
+        items(vec![session_item("j1", "s1")], "c1"),
+        items(
+            vec![session_item("j1", "s1"), session_item("j2", "s2")],
+            "c2",
+        ),
+    ]);
+    f.fetch(&c, &mut p, "a1", T0).unwrap();
+    f.fetch(&c, &mut p, "a2", T0 + MIN).unwrap();
+    let r = f.records();
+    assert_eq!(r.len(), 2);
+    assert_eq!(
+        (r[0].at, r[0].assertion_jti.as_str(), r[0].outcome),
+        (
+            T0,
+            "a1",
+            FetchOutcome::Fetched {
+                items: 1,
+                new_entries: 1
+            }
+        )
+    );
+    assert_eq!(
+        (r[1].at, r[1].assertion_jti.as_str(), r[1].outcome),
+        (
+            T0 + MIN,
+            "a2",
+            FetchOutcome::Fetched {
+                items: 2,
+                new_entries: 1
+            }
+        )
+    );
+    assert_eq!(f.last_attempt_at(), Some(T0 + MIN));
+}
+
+/// RVPG-38: 組の一覧の項目は `pairs` を持つ失効として取り込み、`jti` を欠く失効の項目は全体を拒否する。
+#[test]
+fn grouped_pairs_entry_is_session_and_session_without_jti_is_malformed() {
+    let c = caller();
+    let mut f = ChangeFeedFetcher::new(&config());
+    let grouped = json!({
+        "jti": "j9",
+        "session_pairs": [{"client_id": "c-a", "sid": "s-a"}, {"client_id": "c-b", "sid": "s-b"}]
+    });
+    let mut p = FakePort::new(vec![items(vec![grouped], "c1")]);
+    f.fetch(&c, &mut p, "a1", T0).unwrap();
+    match &f.entries()[0].kind {
+        FeedEntryKind::Session { sid, pairs } => {
+            assert!(sid.is_none());
+            assert_eq!(pairs.len(), 2);
+        }
+        FeedEntryKind::Principal => panic!("expected a session entry"),
+    }
+    let mut p = FakePort::new(vec![items(vec![json!({"sid": "s1"})], "c2")]);
+    assert_eq!(
+        f.fetch(&c, &mut p, "a2", T0 + MIN),
+        Err(FetchError::Malformed)
+    );
+    assert_eq!(f.entries().len(), 1);
+    assert_eq!(f.cursor(), Some("c1"));
+}
+
+/// RVPG-42: 応答が次のカーソルを持たないときは、前回のカーソルを保つ。
+#[test]
+fn missing_next_cursor_keeps_previous_cursor() {
+    let c = caller();
+    let mut f = ChangeFeedFetcher::new(&config());
+    let mut p = FakePort::new(vec![
+        items(vec![], "c1"),
+        FeedResponse::Items {
+            items: vec![],
+            next_cursor: None,
+        },
+    ]);
+    f.fetch(&c, &mut p, "a1", T0).unwrap();
+    f.fetch(&c, &mut p, "a2", T0 + MIN).unwrap();
+    assert_eq!(f.cursor(), Some("c1"));
 }
