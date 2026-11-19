@@ -100,9 +100,7 @@ Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）�
 |---|---|---|---|
 | 1 | `make build` | `cargo build --workspace --locked` | workspace 全体をビルドする |
 | 2 | `make test` | `cargo test --workspace --locked` | 試験を流す（現時点で試験は 0 件） |
-| 3 | `make build` | `cargo build --workspace --locked` | workspace 全体をビルドする |
-| `make test` | `cargo test --workspace --locked` | workspace 全体の試験を流す（CI への搭載は TASK-6） |
-| `make fmt` | `cargo fmt --all` | 整形を適用する（ソースを書き換える） |
+| 3 | `make fmt` | `cargo fmt --all` | 整形を適用する（ソースを書き換える） |
 | 4 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査・clippy `-D warnings`・crate 間の依存の向き |
 | 5 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きだけを許可表と照合する |
 
