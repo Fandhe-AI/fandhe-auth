@@ -16,7 +16,7 @@
 //! - 署名は `ring` の ES256（r‖s の 64 バイト）だけ（OCL-23・DPOL-4・DPOL-47）。`alg` はコードに固定し、
 //!   設定や入力から導かない（SIGN-1・SIGN-6）。`jku`・`x5u`・`jwk`・`x5c` は出さない（SIGN-16・SIGN-56）。
 //! - `typ` は付けない。spec（OCL-21〜28）に定めが無く、推測で足さない。実物との差は
-//!   `docs/stubs/hub-stub.md` に書いた（#69）。Hub `AUTHC-39` との照合は #70。
+//!   `docs/stubs/hub-stub.md` に書いた（#69）。Hub `AUTHC-39` との照合は同文書の §5 の該当行で受ける（Hub の原文との照合は人の確認待ち）。
 //! - 資格情報は POST の form の本文だけで渡す（OCL-30）。ここは名前と値の並びまでを作り、
 //!   `application/x-www-form-urlencoded` への符号化は口の実装側が行う。
 //! - assertion の文字列は `Debug`・誤り・記録に出さない（SECR-23〜27）。
