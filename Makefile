@@ -43,6 +43,7 @@ test: ## workspace 全体の試験を流す（CI の build-test ジョブと同�
 fmt: ## rustfmt で整形を適用する（ソースを書き換える）。直接: cargo fmt --all
 	@cargo fmt --all
 
+# CI の lint ジョブがこれを呼ぶ（TASK-6）。clippy の警告・整形の差分は非 0 で失敗する。
 lint: ## rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向き（ソースは変更しない）。直接: scripts/lint.sh
 	@scripts/lint.sh
 
