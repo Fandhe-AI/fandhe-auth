@@ -22,6 +22,7 @@
 //! - 口に届いた要求は、拒否されても間隔の計数に入れる。
 //! - 項目が `sid` も [`GROUPED_CLAIM`] も持たなければ、本人単位の項目（RVPG-41）として中身を保持するだけにする。
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -35,7 +36,7 @@ use crate::logout::{GROUPED_CLAIM, LogoutTokenReceiver};
 const CURSOR_PARAM: &str = "cursor";
 
 /// 口が返した結果。項目は検討中の形のまま JSON で受ける（RVPG-38・RVPG-41）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum FeedResponse {
     Items {
         items: Vec<Value>,
@@ -46,13 +47,29 @@ pub enum FeedResponse {
     },
 }
 
+impl std::fmt::Debug for FeedResponse {
+    /// 項目・カーソルの値は出さず、件数と有無だけを出す（SECR-23〜27）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Items { items, next_cursor } => f
+                .debug_struct("Items")
+                .field("items", &items.len())
+                .field("next_cursor", &next_cursor.as_ref().map(|_| "<redacted>"))
+                .finish(),
+            Self::Rejected { status } => {
+                f.debug_struct("Rejected").field("status", status).finish()
+            }
+        }
+    }
+}
+
 /// `fandhe-auth` のフィードの口を表す注入点。本段では試験側の偽の口が実装する。
 pub trait ChangeFeedPort {
     fn fetch(&mut self, request: &AssertionRequest) -> FeedResponse;
 }
 
 /// 項目の種別。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum FeedEntryKind {
     /// 認証セッションの失効。`sid` か組の一覧のどちらか一方（RVPG-38）。
     Session {
@@ -63,8 +80,22 @@ pub enum FeedEntryKind {
     Principal,
 }
 
+impl std::fmt::Debug for FeedEntryKind {
+    /// `sid`・組の値は出さない（SECR-23〜27）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Session { sid, pairs } => f
+                .debug_struct("Session")
+                .field("sid", &sid.as_ref().map(|_| "<redacted>"))
+                .field("pairs", &pairs.len())
+                .finish(),
+            Self::Principal => f.write_str("Principal"),
+        }
+    }
+}
+
 /// 取り込んだ項目。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct FeedEntry {
     pub jti: Option<String>,
     pub kind: FeedEntryKind,
@@ -73,12 +104,33 @@ pub struct FeedEntry {
     pub duplicate: bool,
 }
 
+impl std::fmt::Debug for FeedEntry {
+    /// `jti`・クレームの値は出さない（SECR-23〜27）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeedEntry")
+            .field("jti", &self.jti.as_ref().map(|_| "<redacted>"))
+            .field("kind", &self.kind)
+            .field("claims", &"<redacted>")
+            .field("duplicate", &self.duplicate)
+            .finish()
+    }
+}
+
 /// 取得の結果の記録。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchOutcome {
     TooSoon,
-    Rejected { status: u16 },
-    Fetched { items: usize, new_entries: usize },
+    Rejected {
+        status: u16,
+    },
+    /// assertion の署名に失敗した。口は呼ばれず、間隔の計数にも入らない。
+    SigningFailed,
+    /// 応答の形が誤っていた。口は呼ばれており、間隔の計数に入る。
+    Malformed,
+    Fetched {
+        items: usize,
+        new_entries: usize,
+    },
 }
 
 /// 取得の記録。assertion の文字列は持たない（SECR-23〜27）。
@@ -119,13 +171,27 @@ impl std::fmt::Display for FetchError {
 impl std::error::Error for FetchError {}
 
 /// Hub がフィードを取得して項目を取り込む模擬の入口。
-#[derive(Debug)]
 pub struct ChangeFeedFetcher {
     min_interval: Duration,
     cursor: Option<String>,
     last_attempt_at: Option<u64>,
     entries: Vec<FeedEntry>,
+    /// 取り込み済みの `jti`（重複判定用）。
+    seen_jtis: HashSet<String>,
     records: Vec<FetchRecord>,
+}
+
+impl std::fmt::Debug for ChangeFeedFetcher {
+    /// カーソル・項目の値は出さず、件数だけを出す（SECR-23〜27）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChangeFeedFetcher")
+            .field("min_interval", &self.min_interval)
+            .field("cursor", &self.cursor.as_ref().map(|_| "<redacted>"))
+            .field("last_attempt_at", &self.last_attempt_at)
+            .field("entries", &self.entries.len())
+            .field("records", &self.records.len())
+            .finish()
+    }
 }
 
 impl ChangeFeedFetcher {
@@ -135,6 +201,7 @@ impl ChangeFeedFetcher {
             cursor: None,
             last_attempt_at: None,
             entries: Vec::new(),
+            seen_jtis: HashSet::new(),
             records: Vec::new(),
         }
     }
@@ -188,7 +255,13 @@ impl ChangeFeedFetcher {
             }
         }
         let claims = caller.conforming_claims(assertion_jti, now);
-        let assertion = caller.sign(&claims).map_err(|_| FetchError::Signing)?;
+        let assertion = match caller.sign(&claims) {
+            Ok(a) => a,
+            Err(_) => {
+                self.records.push(record(FetchOutcome::SigningFailed));
+                return Err(FetchError::Signing);
+            }
+        };
         let extra = match &self.cursor {
             Some(c) => vec![(CURSOR_PARAM.to_owned(), c.clone())],
             None => Vec::new(),
@@ -211,7 +284,10 @@ impl ChangeFeedFetcher {
                 for item in &items {
                     match parse_entry(item) {
                         Some(e) => parsed.push(e),
-                        None => return Err(FetchError::Malformed),
+                        None => {
+                            self.records.push(record(FetchOutcome::Malformed));
+                            return Err(FetchError::Malformed);
+                        }
                     }
                 }
                 let total = parsed.len();
@@ -220,7 +296,7 @@ impl ChangeFeedFetcher {
                     e.duplicate = e
                         .jti
                         .as_ref()
-                        .is_some_and(|j| self.entries.iter().any(|x| x.jti.as_ref() == Some(j)));
+                        .is_some_and(|j| !self.seen_jtis.insert(j.clone()));
                     if !e.duplicate {
                         new_entries += 1;
                     }

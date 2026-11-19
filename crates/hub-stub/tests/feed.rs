@@ -230,6 +230,26 @@ fn malformed_item_rejects_whole_response() {
         ),
         Err(FetchError::Malformed)
     );
+    // 形の誤りも記録に残る。
+    assert_eq!(f.records().last().unwrap().outcome, FetchOutcome::Malformed);
+}
+
+/// SECR-11・SECR-13・SECR-23〜27: Debug に項目・カーソルの値が出ない。
+#[test]
+fn debug_output_does_not_contain_items_or_cursor() {
+    let c = caller();
+    let mut f = ChangeFeedFetcher::new(&config());
+    let resp = items(
+        vec![session_item("jti-marker-1", "sid-marker-1")],
+        "cursor-marker-1",
+    );
+    let resp_dbg = format!("{resp:?}");
+    let mut p = FakePort::new(vec![resp]);
+    f.fetch(&c, &mut p, "a1", T0).unwrap();
+    let all = format!("{resp_dbg} {f:?} {:?}", f.entries());
+    for marker in ["jti-marker-1", "sid-marker-1", "cursor-marker-1"] {
+        assert!(!all.contains(marker), "{marker} leaked");
+    }
 }
 
 /// RVPG-38: push とフィードの両方で届いた失効を jti で 1 回にまとめる。
