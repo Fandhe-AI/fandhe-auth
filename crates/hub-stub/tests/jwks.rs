@@ -288,3 +288,48 @@ fn keys_are_dropped_after_stale_max() {
         assert!(f.keys(T0 - 1).is_empty());
     }
 }
+
+#[test]
+fn keys_with_non_verify_use_or_key_ops_are_skipped() {
+    let k = AssertionSigningKey::generate("k1").unwrap();
+    let base: Value = serde_json::from_str(&body_of(&[&k])).unwrap();
+    let template = base["keys"][0].clone();
+    let cases = [
+        ("use", serde_json::json!("enc")),
+        ("key_ops", serde_json::json!(["sign"])),
+    ];
+    for (name, val) in cases {
+        let mut bad = template.clone();
+        bad["kid"] = serde_json::json!("bad");
+        bad[name] = val;
+        let mut v = base.clone();
+        v["keys"].as_array_mut().unwrap().push(bad);
+        let mut f = AuthJwksFetcher::new(&config_b(1, 100));
+        let mut port = FakeJwksPort::new(vec![ok(v.to_string())]);
+        let s = f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();
+        assert_eq!((s.keys, s.skipped), (1, 1), "{name}");
+        assert_eq!(f.keys(T0), vec![expected(&k)]);
+    }
+    // use=sig・key_ops に verify を含む鍵は受ける
+    let mut ok_key = template.clone();
+    ok_key["use"] = serde_json::json!("sig");
+    ok_key["key_ops"] = serde_json::json!(["verify"]);
+    let mut v = base.clone();
+    v["keys"] = serde_json::json!([ok_key]);
+    let mut f = AuthJwksFetcher::new(&config_b(1, 100));
+    let mut port = FakeJwksPort::new(vec![ok(v.to_string())]);
+    let s = f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();
+    assert_eq!((s.keys, s.skipped), (1, 0));
+}
+
+#[test]
+fn sub_second_stale_max_is_not_rounded_up() {
+    let k = AssertionSigningKey::generate("k1").unwrap();
+    let mut c = config_b(1, 0);
+    c.jwks_stale_max = Duration::from_millis(500);
+    let mut f = AuthJwksFetcher::new(&c);
+    let mut port = FakeJwksPort::new(vec![ok(body_of(&[&k]))]);
+    f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();
+    assert_eq!(f.keys(T0).len(), 1);
+    assert!(f.keys(T0 + 1).is_empty());
+}

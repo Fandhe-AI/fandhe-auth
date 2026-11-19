@@ -302,6 +302,26 @@ fn parse_es256_jwk(v: &Value) -> JwkParse {
     if o.get("alg").is_some_and(|a| a.as_str() != Some("ES256")) {
         return JwkParse::Invalid;
     }
+    // 用途の制限: use があれば "sig" のみ、key_ops があれば "verify" を含むものだけを検証鍵にする。
+    // 署名検証以外の用途（enc・sign のみ等）の鍵は検証用集合から除外する（型が不正なら Invalid）。
+    if let Some(u) = o.get("use") {
+        match u.as_str() {
+            Some("sig") => {}
+            Some(_) => return JwkParse::Skipped,
+            None => return JwkParse::Invalid,
+        }
+    }
+    if let Some(ops) = o.get("key_ops") {
+        let Some(ops) = ops.as_array() else {
+            return JwkParse::Invalid;
+        };
+        if ops.iter().any(|v| !v.is_string()) {
+            return JwkParse::Invalid;
+        }
+        if !ops.iter().any(|v| v.as_str() == Some("verify")) {
+            return JwkParse::Skipped;
+        }
+    }
     let (Some("P-256"), Some(kid)) = (
         o.get("crv").and_then(Value::as_str),
         o.get("kid").and_then(Value::as_str),
@@ -438,7 +458,9 @@ impl AuthJwksFetcher {
     /// `now` で使ってよい鍵の集合。最後の成功から U 以内ならその集合、超過・未取得・時計の巻き戻りは空（fail-closed）。
     pub fn keys(&self, now: u64) -> Vec<VerificationKey> {
         match self.last_success_at {
-            Some(t) if now >= t && now - t <= ceil_secs(self.stale_max) => self.keys.clone(),
+            Some(t) if now >= t && Duration::from_secs(now - t) <= self.stale_max => {
+                self.keys.clone()
+            }
             _ => Vec::new(),
         }
     }
