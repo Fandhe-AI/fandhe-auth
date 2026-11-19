@@ -26,7 +26,7 @@
 use std::fmt;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -96,17 +96,24 @@ struct Shared {
     delay_ms: AtomicU64,
     accepted: AtomicU64,
     refused: AtomicU64,
-    /// 両側を切るための複製。
-    conns: Mutex<Vec<TcpStream>>,
+    /// 両側を切るための複製（接続 ID と組）。両方向の転送が終わった接続の分は外す。
+    conns: Mutex<Vec<(u64, TcpStream)>>,
+    next_conn_id: AtomicU64,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl Shared {
     fn sever_all(&self) {
         let mut g = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
-        for s in g.drain(..) {
+        for (_, s) in g.drain(..) {
             let _ = s.shutdown(Shutdown::Both);
         }
+    }
+
+    /// 終わった接続の複製を外し、fd を `stop` まで抱えないようにする。
+    fn forget_conn(&self, id: u64) {
+        let mut g = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        g.retain(|(i, _)| *i != id);
     }
 
     fn halted(&self) -> bool {
@@ -163,6 +170,7 @@ impl DbFaultProxy {
             accepted: AtomicU64::new(0),
             refused: AtomicU64::new(0),
             conns: Mutex::new(Vec::new()),
+            next_conn_id: AtomicU64::new(0),
             workers: Mutex::new(Vec::new()),
         });
         let accept = {
@@ -344,11 +352,15 @@ fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
     ) else {
         return refuse(&client, shared);
     };
+    let id = shared.next_conn_id.fetch_add(1, Ordering::SeqCst);
     {
         let mut g = shared.conns.lock().unwrap_or_else(PoisonError::into_inner);
-        g.push(c_kill);
-        g.push(u_kill);
+        g.push((id, c_kill));
+        g.push((id, u_kill));
     }
+    // 両方向の転送が終わった側が複製を外す（半閉じの間は遮断で切れるよう残す）。
+    let remaining = Arc::new(AtomicUsize::new(2));
+    let (r1, r2) = (Arc::clone(&remaining), remaining);
     // 登録の間に遮断が入った場合に取りこぼさない。
     if shared.halted() {
         shared.sever_all();
@@ -359,16 +371,29 @@ fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
     let s2 = Arc::clone(shared);
     let w1 = thread::Builder::new()
         .name("it-db-fault-up".into())
-        .spawn(move || pump(c_read, u_write, false, &s1));
+        .spawn(move || {
+            pump(c_read, u_write, false, &s1);
+            finish_pump(&s1, id, &r1);
+        });
     let w2 = thread::Builder::new()
         .name("it-db-fault-down".into())
-        .spawn(move || pump(up, client, true, &s2));
+        .spawn(move || {
+            pump(up, client, true, &s2);
+            finish_pump(&s2, id, &r2);
+        });
     let mut g = shared
         .workers
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     g.retain(|h| !h.is_finished());
     g.extend([w1, w2].into_iter().flatten());
+}
+
+/// 転送が 1 方向終わるごとに呼ぶ。最後の 1 方向が終わったら接続の複製を外す。
+fn finish_pump(shared: &Shared, id: u64, remaining: &AtomicUsize) {
+    if remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+        shared.forget_conn(id);
+    }
 }
 
 /// `from` から読んで `to` へ書く。`delay` が真のとき（応答の向き）は書く前に現在の遅延だけ待つ。
