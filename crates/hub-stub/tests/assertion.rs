@@ -35,6 +35,7 @@ fn config() -> HubStubConfig {
         jwks_cache_max: Duration::from_secs(3),
         assertion_max_lifetime: Duration::from_secs(MAX),
         feed_fetch_min_interval: Duration::from_secs(5),
+        heartbeat_loss_threshold: Duration::from_secs(10),
     }
 }
 
