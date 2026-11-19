@@ -62,7 +62,7 @@ description: >
 | `fmt` | `cargo fmt --all`（直書き） | rustfmt を適用する（ソースを書き換える唯一の make ターゲット） |
 | `lint` | `scripts/lint.sh` | 検査のみ。`cargo fmt --check`・clippy `-D warnings`・`crate-deps`。CI へは未搭載（TASK-6） |
 | `crate-deps` | `scripts/check-crate-deps.sh` | 検査のみ。crate 間の依存の向きを許可表と照合する。表に無い member・辺は失敗（fail-closed） |
-| `pg-check` | `scripts/dev-pg-check.sh` | 起動中の開発・検証用 PostgreSQL を読む確かめ。起動・停止はしない。一時のロールと DB を作り終了時に消す。`FANDHE_AUTH_DEV_PG_PASSWORD` が必須で docker・openssl が要る。CI へは載せない（runner に DB が無い。TASK-6）。名前は暫定で人が確定する |
+| `pg-check` | `scripts/dev-pg-check.sh` | 起動中の開発・検証用 PostgreSQL の起動の確かめ。起動・停止はしない。CI へは載せない（TASK-6）。名前は暫定。手順の正は `dev/postgres/README.md` |
 
 派生リポジトリでターゲットを足す場合の契約:
 
