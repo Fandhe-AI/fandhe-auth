@@ -243,3 +243,19 @@ fn release_delay_ends_in_flight_wait() {
     assert_eq!(&buf, b"ping");
     assert!(start.elapsed() < Duration::from_secs(5));
 }
+
+#[test]
+fn delay_applies_to_open_connection_with_traffic_in_flight() {
+    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let mut tl = timeline();
+    let mut c = connect(p.listen_port());
+    // 通信が流れ続ける接続に遅延を適用し、適用後の応答に遅延が掛かることを確かめる。
+    for _ in 0..20 {
+        assert!(roundtrip(&mut c, b"a").is_some());
+    }
+    p.delay(&mut tl, Duration::from_millis(300)).unwrap();
+    let t = Instant::now();
+    assert!(roundtrip(&mut c, b"b").is_some());
+    assert!(t.elapsed() >= Duration::from_millis(250));
+    p.release_delay(&mut tl).unwrap();
+}

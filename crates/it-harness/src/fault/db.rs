@@ -96,7 +96,7 @@ struct Shared {
     stop: AtomicBool,
     blocked: AtomicBool,
     delay_ms: AtomicU64,
-    /// 遅延の注入・解除のたびに進める世代。処理中の待ちが古い遅延を引きずらないために見る。
+    /// 遅延の解除のたびに進める世代。処理中の待ちが古い遅延を引きずらないために見る。
     delay_gen: AtomicU64,
     /// 遮断のたびに進める世代。上流への接続の確立中に遮断が入ったかを見る。
     block_gen: AtomicU64,
@@ -287,8 +287,9 @@ impl DbFaultProxy {
         timeline
             .record_now(kind, FaultPhase::Applied)
             .map_err(DbFaultError::Record)?;
+        // 適用では世代を進めない。二重適用は AlreadyActive で防がれ、直前は解除済み（delay_ms == 0）なので
+        // 取り消す古い遅延が無い。ここで進めると、新しい値を読んだ待ちが中断され遅延が漏れる。
         self.shared.delay_ms.store(delay_ms, Ordering::SeqCst);
-        self.shared.delay_gen.fetch_add(1, Ordering::SeqCst);
         self.delay_active = Some(kind);
         Ok(())
     }
@@ -464,7 +465,7 @@ fn pump(mut from: TcpStream, mut to: TcpStream, delay: bool, shared: &Shared) {
     let _ = to.shutdown(Shutdown::Both);
 }
 
-/// 現在の遅延だけ刻んで眠る。停止・遮断・遅延の解除と再注入（世代の変化）が入ったら抜ける。
+/// 現在の遅延だけ刻んで眠る。停止・遮断・遅延の解除（世代の変化）が入ったら抜ける。
 fn wait_delay(shared: &Shared) {
     let generation = shared.delay_gen.load(Ordering::SeqCst);
     let ms = shared.delay_ms.load(Ordering::SeqCst);
@@ -472,7 +473,7 @@ fn wait_delay(shared: &Shared) {
         return;
     }
     let deadline = Instant::now() + Duration::from_millis(ms);
-    // 解除・再注入で世代が変わったら古い待ちを直ちに終える。
+    // 解除で世代が変わったら古い待ちを直ちに終える。
     while !shared.halted() && shared.delay_gen.load(Ordering::SeqCst) == generation {
         let now = Instant::now();
         if now >= deadline {
