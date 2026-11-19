@@ -20,10 +20,12 @@ E2E のハーネス。2026-11-04 の追随で、画面の E2E は Hub の `ASCR`
 
 | 種類（`E2eComponentKind`） | 担当の段 | 実体 | 待ち |
 | --- | --- | --- | --- |
-| `BrowserDriver` | 2/6（Chrome）・3/6（Firefox） | chromedriver・geckodriver（外部プロセス） | 外部依存の選定 |
+| `BrowserDriver` | 2/6（Chrome）・3/6（Firefox） | chromedriver・geckodriver（外部プロセス）。2/6 で Chrome の実体 `chrome::ChromeDriverComponent` を置いた | Firefox は 3/6 |
 | `RelyingParty` | 未定 | options を出し応答を検証する側 | `TASK-716` と PKEY の実装タスク |
 
-1/6 では実体を 1 つも置かない。
+2/6 で置いた実体は Chrome の `BrowserDriver` だけ。RelyingParty の実体は 0 件。操作は起動前に取る `ChromeHandle`
+（it-harness の handle と同じ形）で行い、起動前・停止後は `NotRunning`。WebDriver のクライアントは std だけの自前
+（loopback 限定・同期・応答の上限あり・chunked は拒否）で、外部の HTTP クライアントと非同期ランタイムは足していない。
 
 ## 起動と停止の契約
 
@@ -37,7 +39,18 @@ E2E のハーネス。2026-11-04 の追随で、画面の E2E は Hub の `ASCR`
 
 - `Evidence` は `Virtual` だけで、`counts_as_real_device`・`counts_as_safari` は常に `false`（`ACPT-7`・`ACPT-8`）。
 - `Browser` に Safari の変種を置かない。Safari の結果はこのハーネスの型に入る経路が無い。
-- 仮想 authenticator の options の値（protocol・transport・resident key・UV）は 2/6 で決める。PoC の値を要件の値として置かない。
+- 仮想 authenticator の options は `VirtualAuthenticatorOptions`（`Default` なし）で受け、値は試験が明示で渡す。
+  2/6 の試験の値（`ctap2`・`internal`・resident key あり・UV あり・UV 成功）は PoC の値（QP-1）で、要件の値ではない。
+  `AuthenticatorKind::WebDriverVirtual` に対応し、結果は〔仮想〕。
+
+## 登録 1 件の定義（2/6）
+
+`register_once` が次を満たすことを「登録 1 件が通る」とする。サーバー側の登録応答の検証（`webauthn-rs`）は
+RelyingParty の実体（`TASK-716`）待ちで含めない。PKEY の振る舞いを満たしたとは主張しない。
+
+1. 試験用 origin で `navigator.credentials.create()` が resolve し、`type` が `public-key`、attestation が空でない
+2. `clientDataJSON` の `type`・`origin`・`challenge` が期待と一致（ページ内で比べ、真偽と長さだけを返す）
+3. 仮想 authenticator の credential がちょうど 1 件で、`rpId` が `localhost`
 
 ## 試験用ページと origin の置き場（人が決める）
 
@@ -47,9 +60,16 @@ E2E のハーネス。2026-11-04 の追随で、画面の E2E は Hub の `ASCR`
 - (b) E2E のハーネスの試験コードの中にだけ置く試験用ページ。本番の画面には持ち込まない。
 - (c) Hub の試験へ寄せる。
 
+2/6 は暫定で (b) を採り、`crates/e2e-harness/tests/support/` に置いた（loopback のみ・`GET /` のみ・`Host` が
+`localhost:<port>` 以外は 400）。本番の画面・本体の crate には何も足していない。origin は `http://localhost:<port>`、
+`rp.id` は `localhost`（PoC-2 の開発・`localhost` の構成を ID で引く）。採否は人の確認待ち。
+
 WebAuthn の secure context と RP ID は PoC-2 の結果を ID で引き、試験用の仮の値で受ける（`A-2026-10-28-1`〜`14`）。
 
 ## ドライバの入手と CI（2/6 以降の案）
+
+2/6 の入口は暫定の `make e2e-chrome`（`scripts/e2e-chrome.sh`。`#[ignore]` の `chrome_registration` を流す。CI 外）。
+chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless=new` だけで、`--disable-*`・`--no-sandbox` は足さない。
 
 - chromedriver・geckodriver は外部の実行ファイル。`#[ignore]` と明示の make ターゲット（`it-db` と同じ形）で CI の外に置く案。
 - 環境の有無で自動に飛ばす分岐は作らない（`DPOL-30`〜`32`）。ブラウザの起動 flag（`--disable-*` 等）は `DPOL-30` の走査語に掛かる。
@@ -71,8 +91,10 @@ WebAuthn の secure context と RP ID は PoC-2 の結果を ID で引き、試�
 
 - crate の追加・名前 `fandhe-auth-e2e-harness`・置き場 `crates/e2e-harness`・許可表の行
 - `LIB-14`・`LIB-15` との関係（段階 1 のリリースのメンバーに含めない扱い）
-- 外部依存の選定（WebDriver のクライアント・HTTP の受付・非同期ランタイム。`dependency-policy.md` の手順）
-- 試験用ページと origin の置き場（上の (a)〜(c)）
-- 仮想 authenticator の options の値
-- ブラウザの起動 flag と `DPOL-30` の走査語の扱い
+- `serde_json` の暫定採用（Cargo.lock に既存。hub-stub・console-stub と同じ）と、std の自前の WebDriver クライアント
+  （外部の WebDriver クライアント crate・非同期ランタイムを足さない判断。`dependency-policy.md`）
+- 試験用ページと origin の置き場（上の (a)〜(c)。2/6 は (b) を暫定採用）
+- 仮想 authenticator の options の値（2/6 の値は PoC の値）
+- make ターゲット名 `e2e-chrome`
+- Chrome の起動 flag は `--headless=new` だけ（`DPOL-30` の走査語に掛かる flag は足していない）
 - it-harness・最小の組込み先への辺（足す段で許可表を人に確かめる）

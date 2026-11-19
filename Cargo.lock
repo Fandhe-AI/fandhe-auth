@@ -50,6 +50,9 @@ version = "0.0.0"
 [[package]]
 name = "fandhe-auth-e2e-harness"
 version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "fandhe-auth-hub-stub"
