@@ -28,6 +28,10 @@ pub struct HubStubConfig {
     pub jwks_cache_max: Duration,
     /// assertion の有効期限の上限 M（OCL-25・Hub AUTHC-39）。
     pub assertion_max_lifetime: Duration,
+    /// 変更のフィードを読む間隔の下限。フィードを読む周期は Hub が正本を持ち、spec 上は未決（Hub AUTHC-35、
+    /// Hub TASK-14 待ち）。JWKS の `jwks_fetch_min_interval`（Hub D-2026-10-20-2）とは別の値で、
+    /// 数値は写さず試験用の仮の値で受ける（A-2026-10-28-1）。
+    pub feed_fetch_min_interval: Duration,
 }
 
 // TODO(TASK-7): 仮置きの値の明示の仕組み（#67）で、各値に仮置きかどうかの印を足す。
