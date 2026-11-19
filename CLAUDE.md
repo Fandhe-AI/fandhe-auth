@@ -14,9 +14,10 @@ passkey・認証セッション・失効・復旧・登録済み自社クライ�
   2026-11-04 に着手判定（`D-2026-11-04-6`）。マイルストーンは MS-1〜MS-12（MS-12 はトークン交換の延期。`D-2026-11-06-4`）。
   次は `06-roadmap.md` の MS-1「決定と土台」（TASK-3 雛形・TASK-4 技術選定・TASK-5 契約テスト用 DB）。
   `Cargo.toml`・crate はまだ無い。実装の着手は利用者の指示を待つ
-- Issue: 2026-11-15 に、起票時点の spec の全 712 TASK を Issue ツリーとして起票済み。ルートは #8、Phase N = MS-N（11 Phase）。
-  各 TASK の下に 2h ごとの sub-issue があり、合計 5,134 件。担当が人間の TASK には `owner:human`、共同の TASK には
-  `owner:joint` のラベルが付いている
+- Issue: 2026-11-15 に spec の全 712 TASK を Issue ツリーとして起票し、2026-11-18〜19 に最新の spec（`1df12ad`）へ再同期済み。
+  ルートは #8、Phase N = MS-N（12 Phase。Phase 12 は延期したトークン交換の MS-12）。有効な TASK は 680 件で、
+  各 TASK の下に 2h ごとの sub-issue があり合計 4,382 件（移管・置き換えの TASK は not planned で閉じてある）。
+  担当が人間の TASK には `owner:human`、共同の TASK には `owner:joint` のラベルが付いている
 - 利用者の指示で `implement-issue-tree` を回すときは、ルート #8 に `skipLabels: ["owner:human","owner:joint"]` を必ず付ける。
   sub-issue のタイトルと受け入れ条件は目安で、正は spec の原文
 - crate は repo ルートの 1 つの workspace に置く。crate 名は接頭辞 `fandhe-auth-` 付き、ディレクトリは接頭辞を除いた
