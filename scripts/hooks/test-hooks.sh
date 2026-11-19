@@ -92,6 +92,7 @@ leak_needles="${token}
 ${password_value}
 s3cr3tpass"
 
+last_out=""
 passed=0
 failed=0
 repo_seq=0
@@ -126,8 +127,10 @@ new_repo() {
 # cwd で secret-scan.sh を UTF-8 ロケールで実行し、終了コード・報告ファイル名・値の非出力を検証する。
 check_scan() {
   local desc="$1" want="$2" want_file="${3:-}" rc=0 out needle
-  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  # SCAN_ARG は空（staged モード）か `--tracked` など 1 語の引数
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" ${SCAN_ARG:+"${SCAN_ARG}"} > "${work_dir}/out" 2>&1 || rc=$?
   out="$(cat "${work_dir}/out")"
+  last_out="${out}"
   if [ "${rc}" -ne "${want}" ]; then
     fail "secret-scan: ${desc}" "expected exit ${want}, got ${rc}" "output: ${out}"
     return 0
@@ -143,6 +146,15 @@ check_scan() {
     fi
   done <<< "${leak_needles}"
   pass "secret-scan: ${desc}"
+}
+
+# expect_out <説明> <直前の check_scan の出力に含まれるべき文字列>（件数の行の確認）
+expect_out() {
+  if [[ "${last_out}" == *"$2"* ]]; then
+    pass "secret-scan: $1"
+  else
+    fail "secret-scan: $1" "expected output to contain: $2" "output: ${last_out}"
+  fi
 }
 
 # stage <path> <内容（printf の書式ではなくそのまま書き込む）>
@@ -263,6 +275,75 @@ check_scan "removing a leaked secret is allowed" 0
 
 new_repo; stage leaked.txt "x = ${token}"; git commit -q -m "chore: leak"; git rm -q leaked.txt
 check_scan "deleting a file with a secret is allowed" 0
+
+# ---- 規則表（TASK-6）: 規則ごとの検出・件数の出力
+jwt_value="eyJ""hbGciOiJFUzI1NiJ9.eyJ""zdWIiOiJ1c2VyMSJ9.abcdefghij"
+jwk_value="Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij"
+recovery_value="Abcd1234-Efgh5678-Ijkl9012"
+enc_key_line="${dash}BEGIN ENCRYPTED PRIVATE"" KEY${dash}"
+leak_needles="${leak_needles}
+${jwt_value}
+${jwk_value}
+${recovery_value}"
+
+new_repo; stage a.txt "x = ${jwt_value}"
+check_scan "jwt shape" 1 a.txt
+expect_out "jwt rule is counted" "secret-scan: jwt: 1 line(s)"
+
+new_repo; stage a.txt "{${q}d${q}: ${q}${jwk_value}${q}}"
+check_scan "jwk private component" 1 a.txt
+expect_out "jwk-private rule is counted" "secret-scan: jwk-private: 1 line(s)"
+
+new_repo; stage a.txt "${enc_key_line}"
+check_scan "encrypted private key header" 1 a.txt
+expect_out "private-key rule is counted" "secret-scan: private-key: 1 line(s)"
+
+new_repo; stage a.txt "recovery_codes = ${q}${recovery_value}${q}"
+check_scan "recovery code assignment (base64url-like value)" 1 a.txt
+expect_out "assignment rule is counted" "secret-scan: assignment: 1 line(s)"
+
+new_repo; stage a.txt "passphrase: ${q}abc_DEF+ghi/JKL=mno-pqr${q}"
+check_scan "passphrase assignment" 1 a.txt
+
+new_repo; stage a.txt "x = ${token}"; stage b.txt "${password_line}"; stage c.txt "y = ${token}"
+check_scan "multiple rules and files" 1 a.txt
+expect_out "per-rule count" "secret-scan: vendor-token: 2 line(s)"
+expect_out "password counted under assignment" "secret-scan: assignment: 1 line(s)"
+expect_out "total count" "secret-scan: total: 3 finding(s) in 3 file(s)"
+
+new_repo; stage a.txt "sha256: $(printf 'ab%.0s' {1..32})"; stage b.txt "token = ${q}short${q}"
+check_scan "hex digest and short value are allowed" 0
+
+# ---- --tracked
+SCAN_ARG=--tracked
+new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
+check_scan "(tracked) clean repository" 0
+expect_out "(tracked) zero count line" "secret-scan: total: 0 finding(s) (1 tracked file(s) checked)"
+
+new_repo; stage app.txt "x = ${token}"; git commit -q -m "chore: leak"
+check_scan "(tracked) committed secret" 1 app.txt
+expect_out "(tracked) count line" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
+new_repo; stage .env "A=1"; git commit -q -m "chore: env"
+check_scan "(tracked) committed .env" 1 .env
+expect_out "(tracked) env-file count" "secret-scan: env-file: 1 file(s)"
+
+new_repo; stage .agents/skills/x/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
+check_scan "(tracked) excluded paths" 0
+
+new_repo; printf 'x = %s\n\000' "${token}" > bin.dat; git add bin.dat; git commit -q -m "chore: bin"
+check_scan "(tracked) binary is not scanned" 0
+
+new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=hash-object check_scan "(e) (tracked) failure resolving the empty tree" 2
+new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=-U0 check_scan "(e) (tracked) failure reading diff" 2
+SCAN_ARG=
+
+SCAN_ARG=--bogus
+new_repo
+check_scan "unknown argument" 2
+SCAN_ARG=
 
 # ---------------------------------------------------------------- secret-scan: 検査エラー（fail-closed）
 # (e) git の失敗を「対象なし」として合格させない
