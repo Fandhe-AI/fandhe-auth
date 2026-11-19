@@ -1,0 +1,14 @@
+[package]
+name = "fandhe-auth-load-harness"
+description = "計測・負荷のハーネスの計測の部品（試験専用。測定値は要件の値でも合否の判定でもない）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# 試験専用・仮称（人が確定する）。どの crate からも依存しない。workspace 内の依存も外部の依存も 0（std だけ）。
+[dependencies]

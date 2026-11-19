@@ -21,6 +21,8 @@
 # （LIB-14・LIB-15）。どの crate からも依存しない。名前・置き場は仮称で、人が確定する。
 # TASK-11 (1/6): crates/e2e-harness は passkey の E2E ハーネスの枠で、試験専用。段階 1 のリリースのメンバーではない
 # （LIB-14・LIB-15）。どの crate からも依存しない。依存は 0。名前・置き場は仮称で、人が確定する。
+# TASK-12 (3/10): crates/load-harness は計測・負荷のハーネスの計測の部品で、試験専用。段階 1 のリリースのメンバー
+# ではない（LIB-14・LIB-15）。どの crate からも依存しない。依存は 0（std だけ）。名前・置き場は仮称で、人が確定する。
 [workspace]
 resolver = "3" # 暫定。人が確定する。
 members = [
@@ -33,6 +35,7 @@ members = [
   "crates/console-stub",
   "crates/it-harness",
   "crates/e2e-harness",
+  "crates/load-harness",
   "crates/backend",
 ]
 

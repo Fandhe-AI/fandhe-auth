@@ -29,6 +29,7 @@ cd "${ROOT_DIR}"
 # minimal-host への辺は後続の段で足し、足すときに確かめる）。
 # e2e-harness も試験専用で workspace 内の依存なし（TASK-11 (1/6)。どの crate からも依存されない。この行は人の確認待ち。
 # it-harness・minimal-host への辺は後続の段で足し、足すときに確かめる）。
+# load-harness も試験専用で workspace 内の依存なし（TASK-12 (3/10)。どの crate からも依存されない。この行は人の確認待ち）。
 # backend は差し替え点の枠だけで workspace 内の依存なし（TASK-9。辺を足すのは中身の TASK で、足すときに確かめる）。
 allowed_deps() {
   case "$1" in
@@ -41,6 +42,7 @@ allowed_deps() {
     fandhe-auth-console-stub) echo "" ;;
     fandhe-auth-it-harness) echo "fandhe-auth-secret fandhe-auth-hub-stub fandhe-auth-console-stub" ;;
     fandhe-auth-e2e-harness) echo "" ;;
+    fandhe-auth-load-harness) echo "" ;;
     fandhe-auth-backend) echo "" ;;
     *) return 1 ;;
   esac
