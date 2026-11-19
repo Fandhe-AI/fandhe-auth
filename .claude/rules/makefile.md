@@ -64,6 +64,7 @@ description: >
 | `lint` | `scripts/lint.sh` | 検査のみ。`cargo fmt --check`・clippy `-D warnings`・`crate-deps`。CI の `lint` ジョブと同一（TASK-6） |
 | `crate-deps` | `scripts/check-crate-deps.sh` | 検査のみ。crate 間の依存の向きを許可表と照合する。表に無い member・辺は失敗（fail-closed） |
 | `pg-check` | `scripts/dev-pg-check.sh` | 起動中の開発・検証用 PostgreSQL の起動の確かめ。起動・停止はしない。CI へは載せない（TASK-6）。名前は暫定。手順の正は `dev/postgres/README.md` |
+| `it-db` | `scripts/it-db.sh` | ハーネス（`crates/it-harness`）の Docker を使う結合試験（`#[ignore]`）の明示の入口。Docker 必須・CI 外（TASK-6）。パスワードは試験プロセスの中で生成する。名前は暫定 |
 
 派生リポジトリでターゲットを足す場合の契約:
 
