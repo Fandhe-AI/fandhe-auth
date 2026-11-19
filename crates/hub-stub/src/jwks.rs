@@ -13,7 +13,7 @@
 //! - 出す `alg` は ES256 に固定し、設定や入力から導かない（SIGN-1・SIGN-6）。JWKS に出すのは公開の欄だけで、
 //!   秘密鍵の欄（`d`）は型として持たない。点は長さと接頭辞を確かめてから x・y に分ける。
 //! - 数値は設定で受ける（[`HubStubConfig`]）。本番の値を置かない（A-2026-10-28-1）。
-//! - 本文は文字列で持つ。壊れた本文などの注入は #66 で足す。
+//! - 本文は文字列で持つ。遅れ・拒否・壊れた本文の注入は [`crate::fault`] が外側から包んで足す。
 //!
 //! 書き手の読み（spec に定めが無い。実物との差は #69・#70 で文書にする）:
 //! - 経過がちょうど C_max ならまだ保持する。1 秒未満の C_max は秒へ切り上げる。
@@ -175,7 +175,7 @@ impl HubJwksEndpoint {
     }
 
     /// `now` に JWKS を返す。C_max 以内のキャッシュがあればそれを返し、なければ origin を取り直す。
-    /// TODO(TASK-7): 応答の遅れ・拒否・壊れた本文の注入は #66 で足す。
+    /// 遅れ・拒否・壊れた本文の注入は [`crate::fault::HubFaultInjector::serve_jwks`] が外側で行い、この関数は変えない。
     pub fn serve(&mut self, now: u64) -> JwksResponse {
         let limit = ceil_secs(self.cache_max);
         let max_age = self.max_age.as_secs();
