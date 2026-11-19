@@ -14,13 +14,16 @@ status=0
 check_tool() {
   local level="$1" name="$2"
   shift 2
-  if command -v "${name}" >/dev/null 2>&1; then
-    echo "ok   ${name}: $("$@" 2>&1 | head -n1)"
+  local out=""
+  # rustup の shim は component が無くても PATH 上に在るため、version コマンドの終了コードで判定する。
+  # コマンド置換を echo の中に置かず代入に切り出す（bash 3.2 でも失敗を取りこぼさない）。
+  if command -v "${name}" >/dev/null 2>&1 && out="$("$@" 2>&1)"; then
+    echo "ok   ${name}: $(printf '%s\n' "${out}" | head -n1)"
   elif [ "${level}" = "required" ]; then
-    echo "miss ${name}: not found on PATH (required)"
+    echo "miss ${name}: not found or not runnable (required)"
     status=1
   else
-    echo "skip ${name}: not found on PATH (optional)"
+    echo "skip ${name}: not found or not runnable (optional)"
   fi
 }
 
@@ -30,6 +33,9 @@ check_tool required make make --version
 check_tool required lefthook lefthook version
 check_tool required editorconfig-checker editorconfig-checker --version
 check_tool required shellcheck sh -c 'shellcheck --version | grep "^version:"'
+check_tool required cargo cargo --version
+check_tool required cargo-fmt cargo fmt --version
+check_tool required cargo-clippy cargo clippy --version
 check_tool optional direnv direnv version
 
 if [ -f "${ROOT_DIR}/.env" ]; then

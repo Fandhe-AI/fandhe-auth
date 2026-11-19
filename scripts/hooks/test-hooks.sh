@@ -332,6 +332,26 @@ rc=0
 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${COMMIT_MSG_CHECK}" "${work_dir}/missing" > /dev/null 2>&1 || rc=$?
 if [ "${rc}" -eq 1 ]; then pass "commit-msg: NG: missing message file"; else fail "commit-msg: NG: missing message file" "expected exit 1, got ${rc}"; fi
 
+# ---------------------------------------------------------------- doctor: component 欠落（fail-closed）
+# rustup の shim は component が無くても PATH 上に在る。version コマンドが失敗したら必須ツールの欠落として扱う。
+doctor_stubs="${work_dir}/doctor-stubs"
+mkdir -p "${doctor_stubs}"
+for tool in git make lefthook editorconfig-checker shellcheck cargo-fmt cargo-clippy; do
+  printf '#!/bin/sh\necho "version: stub"\n' > "${doctor_stubs}/${tool}"
+  chmod +x "${doctor_stubs}/${tool}"
+done
+# cargo 本体は `cargo fmt` の呼び出しだけ失敗させる（rustfmt component 欠落の模擬）
+# shellcheck disable=SC2016 # スタブ内で展開させるため単引用符のままにする
+printf '#!/bin/sh\n[ "$1" = fmt ] && exit 1\necho "cargo stub"\n' > "${doctor_stubs}/cargo"
+chmod +x "${doctor_stubs}/cargo"
+rc=0
+doctor_out="$(PATH="${doctor_stubs}:${PATH}" "${HOOK_BASH}" "${HOOKS_DIR}/../doctor.sh" 2>&1)" || rc=$?
+if [ "${rc}" -ne 0 ] && [[ "${doctor_out}" == *"miss cargo-fmt"* ]]; then
+  pass "doctor: NG: cargo fmt --version failure is reported as missing"
+else
+  fail "doctor: NG: cargo fmt --version failure is reported as missing" "expected non-zero exit and 'miss cargo-fmt', got ${rc}"
+fi
+
 echo "# passed: ${passed}, failed: ${failed}"
 if [ "${failed}" -ne 0 ]; then
   exit 1

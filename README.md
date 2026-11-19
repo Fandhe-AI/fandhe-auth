@@ -36,7 +36,8 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `.claude/settings.json`・`.claude/hooks/` | Claude Code の hooks（SessionStart のリマインダー、編集した `.rs` への `rustfmt`） |
 | `.claude/workflows/` | `implement-issue-tree` の named workflow（スキル内スクリプトへの相対 symlink） |
 | `Makefile` | `scripts/` を呼ぶだけの薄い入口（`make help` で一覧） |
-| `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check`）。Make なしでも直接実行できる |
+| `rustfmt.toml` | rustfmt の設定（edition のみ。暫定） |
+| `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check` / `lint` / `check-crate-deps`）。Make なしでも直接実行できる |
 | `scripts/hooks/` | lefthook から呼ばれる Git hooks の実体 |
 | `lefthook.yml` | Git hooks 定義（pre-commit / commit-msg） |
 | `.editorconfig`・`.editorconfig-checker.json` | 文字コード・改行・インデントの宣言と、その検査の除外設定（ライセンス本文は除外） |
@@ -58,6 +59,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | [lefthook](https://lefthook.dev/) | Git hooks | ✓ |
 | [editorconfig-checker](https://github.com/editorconfig-checker/editorconfig-checker) | `.editorconfig` 準拠チェック | ✓ |
 | [ShellCheck](https://www.shellcheck.net/) | シェルスクリプトの lint | ✓ |
+| Rust toolchain（cargo・rustfmt・clippy） | `make fmt`・`make lint`（版は未定。TASK-4 で決める） | ✓ |
 | [direnv](https://direnv.net/) | `.env` の自動読み込み | 任意 |
 
 macOS（Homebrew）の例:
@@ -86,6 +88,9 @@ direnv allow  # direnv を使う場合のみ。.envrc の読み込みを許可�
 | `make doctor` | `scripts/doctor.sh` | 開発環境を診断する |
 | `make setup` | `scripts/setup.sh` | Git hooks 有効化と `.env` 雛形の配置 |
 | `make check` | `scripts/check.sh` | editorconfig-checker + shellcheck（ソースは変更しない） |
+| `make fmt` | `cargo fmt --all` | rustfmt で整形を適用する（ソースを書き換える） |
+| `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査（CI への搭載は TASK-6） |
+| `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
 | `make test-hooks` | `scripts/hooks/test-hooks.sh` | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
 
 ## Git hooks
