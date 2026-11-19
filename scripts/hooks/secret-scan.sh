@@ -141,18 +141,19 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 #   --src-prefix / --dst-prefix: diff.noprefix・diff.mnemonicPrefix でヘッダが `+++ b/` 以外になる
 # --tracked では空の tree と index の差分を取る。追跡ファイルの全行が追加行になるため、
 # 名前の検査・除外パス・解析ループ・規則の判定を staged モードと共用できる（解析の二重実装を作らない）。
-base_args=()
+# bash 3.2 は set -u 下で空配列の展開・長さ参照が unbound variable になるため、
+# 空になりうる配列を使わず mode で分岐し、tracked のときだけ empty_tree を渡す。
+empty_tree=""
 if [ "${mode}" = tracked ]; then
   if ! empty_tree="$(git hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
     echo "secret-scan: failed to resolve the empty tree; aborting" >&2
     exit 2
   fi
-  base_args=("${empty_tree}")
 fi
 scan_diff() {
-  if [ "${#base_args[@]}" -gt 0 ]; then
+  if [ "${mode}" = tracked ]; then
     git diff --cached --no-color --no-ext-diff --no-textconv --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "${base_args[@]}" "$@"
+      --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@"
   else
     git diff --cached --no-color --no-ext-diff --no-textconv --no-renames \
       --src-prefix=a/ --dst-prefix=b/ "$@"

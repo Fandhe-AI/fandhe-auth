@@ -345,6 +345,18 @@ new_repo
 check_scan "unknown argument" 2
 SCAN_ARG=
 
+# ---------------------------------------------------------------- secret-scan: bash 3.2 互換
+# bash 3.2 は set -u 下の空配列参照が unbound variable で停止する（引数なしの staged 経路が壊れる）。
+# 実行系が 3.2 でなくても検出できるよう、空になりうる配列を参照する形がスクリプトに無いことを静的に確かめる。
+if grep -Eq 'base_args' "${SECRET_SCAN}"; then
+  fail "secret-scan: (bash3.2) no empty-array reference under set -u" "base_args array is referenced in secret-scan.sh"
+else
+  pass "secret-scan: (bash3.2) no empty-array reference under set -u"
+fi
+# 引数なしの通常経路（staged）が差分検査まで到達して終了コード 0 になる
+new_repo; stage src/ok.txt "hello"
+check_scan "(bash3.2) no-argument staged path reaches diff scan" 0
+
 # ---------------------------------------------------------------- secret-scan: 検査エラー（fail-closed）
 # (e) git の失敗を「対象なし」として合格させない
 new_repo; stage .env "A=1"
