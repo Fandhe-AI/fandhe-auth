@@ -11,9 +11,15 @@ services:
       # 既定値は置かない。未設定なら起動に失敗する（trust に落とさない）。変数名は暫定で人が決める（雛形は .env.example と README の「接続設定」）。
       POSTGRES_PASSWORD: ${FANDHE_AUTH_DEV_PG_PASSWORD:?FANDHE_AUTH_DEV_PG_PASSWORD must be set}
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    # AUDB-82・ADB-11 の 64 並列の試験と、試験ごとのプールを収めるための開発の設定。
+    # 300 は PoC の起動の条件に由来し、要件の値ではない。人が決める。
+    command: ["postgres", "-c", "max_connections=300"]
     ports:
       # ループバックにだけ公開する。ポートは開発の設定で、要件の値ではない。
       - "127.0.0.1:${FANDHE_AUTH_DEV_PG_PORT:-55432}:5432"
+    volumes:
+      # TLS の自己署名の証明書を起動時に作る。鍵はコンテナの tmpfs の中だけに置き、コミットしない。
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     tmpfs:
       # 停止（down）でデータは消える。
       - /var/lib/postgresql/data:size=1g
