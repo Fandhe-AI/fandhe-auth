@@ -32,6 +32,10 @@ pub struct HubStubConfig {
     /// Hub TASK-14 待ち）。JWKS の `jwks_fetch_min_interval`（Hub D-2026-10-20-2）とは別の値で、
     /// 数値は写さず試験用の仮の値で受ける（A-2026-10-28-1）。
     pub feed_fetch_min_interval: Duration,
+    /// 生存確認の途絶と見なす閾値。経過がこれを超えたら途絶（Hub AUTHC-21）。閾値の正本は Hub が持つ
+    /// （Hub AUTHC-37・Hub D-2026-10-16-11・Hub D-2026-10-20-1・Hub AOPS-84）。数値は写さず、
+    /// 試験用の仮の値で受ける（A-2026-10-28-1）。
+    pub heartbeat_loss_threshold: Duration,
 }
 
 // TODO(TASK-7): 仮置きの値の明示の仕組み（#67）で、各値に仮置きかどうかの印を足す。

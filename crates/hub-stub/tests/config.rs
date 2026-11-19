@@ -17,6 +17,7 @@ fn config_carries_values_given_by_caller() {
         jwks_cache_max: Duration::from_secs(3),
         assertion_max_lifetime: Duration::from_secs(4),
         feed_fetch_min_interval: Duration::from_secs(5),
+        heartbeat_loss_threshold: Duration::from_secs(10),
     };
     assert_eq!(c.client_id, "hub-client.test");
     assert_eq!(c.public_host, "hub.example.test");
@@ -27,5 +28,6 @@ fn config_carries_values_given_by_caller() {
     assert_eq!(c.jwks_cache_max, Duration::from_secs(3));
     assert_eq!(c.assertion_max_lifetime, Duration::from_secs(4));
     assert_eq!(c.feed_fetch_min_interval, Duration::from_secs(5));
+    assert_eq!(c.heartbeat_loss_threshold, Duration::from_secs(10));
     assert_eq!(c.clone(), c);
 }
