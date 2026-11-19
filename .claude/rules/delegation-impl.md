@@ -11,9 +11,10 @@ paths:
   - ".claude/rules/**"
   - "CLAUDE.md"
   - "README.md"
+  - "AGENTS.md"
 description: >
   作成・編集フェーズの委譲ルール。crates/・Cargo 設定・scripts/・Makefile・.github/・.claude/agents|rules/・
-  CLAUDE.md・README.md を変更する際に適用する。crate ごとの委譲先、委譲プロンプトの必須項目、
+  CLAUDE.md・README.md・AGENTS.md を変更する際に適用する。段階ごとの crate の委譲先（Hub の担当の crate は委譲先なし）、委譲プロンプトの必須項目、
   実装後の流れ（試験 → 依存監査 → セキュリティ監査 → 完了ゲート）を規定する。
 ---
 
@@ -25,26 +26,28 @@ description: >
 
 | 対象 | subagent_type | model | 適用ルール |
 | --- | --- | --- | --- |
-| `crates/core`・`webauthn`・`provider`・`keys`・`secret`・`types`・`client`・`hub-stub`・`console-stub` | `core-builder` | sonnet | `./coding-rust.md`・`./secret-values.md`・`./security.md` |
-| `crates/db-contract`・`db-tests`・`db-pg`・`db-migrate`（`db-fandhe` は移行判定時）・`migrations/` | `db-builder` | sonnet | `./db-layer.md`・`./coding-rust.md`・`./secret-values.md` |
-| `crates/backend`（lib）・`crates/server`（bin） | `backend-builder` | sonnet | `./coding-rust.md`・`./security.md`・`./secret-values.md` |
-| `crates/frontend`・`webauthn-wasm` | `frontend-builder` | sonnet | `./coding-rust.md`・`./security.md` |
+| 段階 1: `crates/core`・`secret`・`client`（外部ログイン Plugin の OIDC 共通部品も、名前の決定後に同じ builder）。位置が未定の `webauthn`・`provider`・`keys`・`types`。試験専用の `hub-stub`・`console-stub` | `core-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./secret-values.md`・`./security.md` |
+| 段階 1: `crates/db-tests`。位置が未定の `db-contract`（契約 trait。`-core` の中なら `core-builder` と調整） | `db-builder` | sonnet | `./db-layer.md`・`./coding-rust.md`・`./secret-values.md` |
+| 段階 2: `crates/backend`（任意の接続部品） | `backend-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./security.md`・`./secret-values.md` |
+| 段階 2: `crates/frontend`・`webauthn-wasm`（任意の部品） | `frontend-builder` | sonnet | `./coding-rust.md`・`./library-boundary.md`・`./security.md` |
 | ルート `Cargo.toml`・`deny.toml`・`.cargo/`・`scripts/`・`Makefile`・`.github/`・`lefthook.yml` | `infra-builder` | sonnet | `./dependency-policy.md`・`./rust-build-profile.md`・`./makefile.md`・`./git-hooks.md`・`./github-actions.md` |
 | 試験（`#[cfg(test)]`・`crates/*/tests/`・`crates/db-tests` の試験ケース・property test・fuzz） | `test-writer` | sonnet | `./coding-rust.md`・`./db-layer.md`・`./verification.md` |
 | `.claude/agents/` | `agent-author` | sonnet | `./dotclaude-via-temp.md` |
 | `.claude/rules/` | `rules-author` | sonnet | `./dotclaude-via-temp.md` |
-| `CLAUDE.md`・`README.md` | `docs-writer` | sonnet | `./japanese-style.md` |
+| `CLAUDE.md`・`README.md`・`AGENTS.md` | `docs-writer` | sonnet | `./japanese-style.md` |
 
 適用の注意:
 
 - crate と委譲先の対応は暫定である。各 Agent の `description` と食い違う場合は Agent 側を確かめて本表を直す
+- crate の段階は spec 上〔提案〕で、名前だけが利用者の決定済み（`./coding-rust.md`）。段階 2 の crate は作る前に利用者に確かめてから委譲する
+- Hub の担当の crate（`db-pg`・`db-fandhe`・`db-migrate`・`server`）と migration は、この repo では作らない（`LIB-14`。`./library-boundary.md`）。委譲先は無い
 - `crates/db-tests` は crate の構成を `db-builder`、試験ケースの追加を `test-writer` が担う
-- `crates/backend`（ハンドラ・ルーティング・Cookie/CSRF の配線・外向き HTTP・outbox）は採用（利用者の決定 2026-11-13。spec への記録〔DPOL-41 の表・`D-`〕は未反映で、spec repo への PR は利用者の指示を待つ）
-  （`D-2026-10-29-1` (5)）。`crates/server` は組み立てだけにする（`./coding-rust.md`）
+- `crates/backend` は名前の採用が `D-2026-10-29-2` で spec に記録済み。役割は段階 2 の任意の接続部品で、`crates/server`・outbox の配送・Gate の登録は Hub が持つ
+  （利用者の決定 2026-11-19。`./coding-rust.md`）
 - crate の `Cargo.toml` の依存を足す・変える場合は、担当の builder が書き、`./dependency-policy.md` に従う
 - 複数 crate にまたがる変更は crate ごとに分けて委譲する。依存の向き（DPOL-1・DPOL-7・DPOL-39・DPOL-40）を
   変える設計判断は main が利用者と決めてから委譲する
-- 試験は実装と別の Agent（`test-writer`）に書かせる。契約テストを通すために期待を緩めない（AUDB-6・AUDB-69）
+- 試験は実装と別の Agent（`test-writer`）に書かせる。契約テストを通すために期待を緩めない（AUDB-6。同趣旨の AUDB-69 は → Hub `ASTORE-2`）
 - 依存を変更しない純粋な文書・ルールの変更では、下の「依存監査」の段は省いてよい
 
 ## 委譲プロンプトの必須項目
@@ -61,7 +64,7 @@ description: >
 subagent_type: core-builder
 prompt: |
   目的: TASK-3 の fandhe-auth-secret の雛形を作る
-  根拠: SECR-11・SECR-12・SECR-16・SECR-31。#![forbid(unsafe_code)]（利用者決定 2026-11-13）
+  根拠: SECR-11・SECR-12・SECR-16・SECR-31。#![forbid(unsafe_code)]（利用者の決定 2026-11-13。spec に記録なし）
   入力: docs/spec/04-behavior/secret-handling.md、ルートの Cargo.toml
   出力先: crates/secret/
   観点・適用ルール: ./coding-rust.md・./secret-values.md・./code-comment-style.md。完了確認は ./verification.md のコマンド

@@ -1,8 +1,10 @@
 # fandhe-auth
 
 Keycloak を使わない Rust 製の共通認証基盤の実装リポジトリです。
+Hub が組み込むライブラリ（本体）として、型・判定・拡張契約・ストレージ契約・安全条件を提供します（`D-2026-10-30-1`）。
 passkey・認証セッション・失効・復旧・登録済み自社クライアント向けの OIDC・ローカルエージェント認可を担い、
 `fandhe-service-hub` と今後の自社サービスで共通して使うことを目指します。
+HTTP の受付・Cookie の発行・DB の実装と migration・配送などの実行と運用は Hub の担当です。
 
 開発基盤は [Fandhe-AI/template-dev](https://github.com/Fandhe-AI/template-dev) から作成しています。
 言語固有の設定・実装は、実装着手の指示後にタスクに沿って追加します。

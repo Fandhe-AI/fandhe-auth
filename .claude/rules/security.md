@@ -1,36 +1,50 @@
 ---
 description: >
-  fandhe-auth（認証基盤）のセキュリティ規約。常に読み込む。OWASP Top 10 の観点は短く挙げ、認証基盤に固有の要求
-  （CSRF Gate・Cookie・CSP とヘッダ・エスケープ・リダイレクト・転送ヘッダ・レート制限・トークン署名・本人確認の判定に
-  LLM を通さないこと）を spec の ID 付きで定める。秘密情報を Git・ログ・PR・Issue に入れないこと、AI レビューの合格で
+  fandhe-auth（Hub が組み込むライブラリの本体）のセキュリティ規約。常に読み込む。OWASP Top 10 の観点は短く挙げ、認証基盤に固有の要求値
+  （CSRF Gate・Cookie・CSP とヘッダ・エスケープ・リダイレクト・レート制限・トークン署名・本人確認の判定に LLM を通さないこと）を
+  spec の ID 付きで定める。各項は「本体の要求値（契約）」と「実行は組込み先〔Hub〕」を分け、要求値は緩めない（D-2026-10-30-1）。秘密情報を Git・ログ・PR・Issue に入れないこと、AI レビューの合格で
   安全と確定しないこと（CG-2・TASK-83）、問題を見つけたときの扱いも定める。security-auditor Agent はこれを基準にする。
 ---
 
 # セキュリティ規約（fandhe-auth）
 
-正本は `docs/spec/04-behavior/`（主に `csrf-ssr.md`・`api-session.md`・`token-signing.md`・`rate-limit.md`・`human-approval.md`）。
-ここは実装・レビューのときに常に守る要点だけを持つ。秘密値の型と保存の形は `.claude/rules/secret-values.md`、
-誤り応答の形と列挙防止は `.claude/rules/coding-rust.md`、依存の bans は `.claude/rules/dependency-policy.md`。
+正本は `docs/spec/04-behavior/`（主に `csrf-ssr.md`・`api-session.md`・`token-signing.md`・`rate-limit.md`・`human-approval.md`・`ui-safety.md`）。
+ここは実装・レビューのときに常に守る要点だけを持つ。秘密値の型と保存の形は `./secret-values.md`、
+誤り応答の形と列挙防止は `./coding-rust.md`、依存の bans は `./dependency-policy.md`、境界は `./library-boundary.md`。
+
+## 主語の分け方（本体と組込み先）
+
+- 本体は HTTP を受けず、Cookie・ヘッダ・画面を出さない。本体が持つのは要求値・判定の規則・契約と、契約テストで確かめる安全条件である。
+  Gate の登録・`Set-Cookie`・ヘッダの付与・画面の描画の実行は組込み先（Hub）が行い、Hub の ID（`ARUN`・`ASCR` 等）で引く。Hub の値・本文は写さない。
+- 要求値を緩めない。本体の契約として残る条件は、実行が Hub に移っても同じ強さで保つ（`D-2026-10-30-1`）。
+- 本体の実装・レビューでは「契約と要求値を満たす型・試験があるか」を見る。Hub 側の実行の確認は Hub の repo で行う。
 
 ## OWASP Top 10 の観点（一般）
 
 - A01 アクセス制御: サーバー側で拒否する。画面の表示・非表示を守りにしない（IRUI-21）。
-- A02 暗号: 自前で実装しない（DPOL-47）。秘密値の保存は `.claude/rules/secret-values.md`。
-- A03 インジェクション: SQL は `$n` のパラメータだけ（AUDB-43）。HTML は下の「エスケープ」。シェルへ外部入力を展開しない。
+- A02 暗号: 自前で実装しない（DPOL-47）。秘密値の保存は `./secret-values.md`。
+- A03 インジェクション: SQL は DB の実装が書く（Hub の担当。`$n` のパラメータの規則 AUDB-43 は → Hub `ASTORE-91`）。この repo に SQL を書く箇所ができたら、`$n` のパラメータだけにする（要求値は緩めない）。HTML は下の「エスケープ」。シェルへ外部入力を展開しない。
 - A05 設定ミス: 検証を外す設定・feature を作らない（DPOL-30〜32・CSRF-7）。
 - A06 既知の脆弱な部品: `cargo deny`・`cargo audit`（DPOL-34）。
 - A07 認証・セッション: 下の「Cookie とセッション」「トークンの署名」。
-- A09 ログ: 失敗は記録し、秘密値は出さない（SECR-23〜27）。
-- A10 SSRF: 外向き HTTP は `reqwest` 1 つ・設定で渡した CA だけを信頼する・リダイレクトを追わない（DPOL-46）。
+- A09 ログ: 失敗は記録し、秘密値は出さない（SECR-23・SECR-24・SECR-26・SECR-27。前段のログの SECR-25 は → Hub `ARUN-78`）。
+- A10 SSRF: 外向き通信は契約で受け、設定で渡した CA だけを信頼する・リダイレクトを追わない・打ち切り時間を持つ（DPOL-46・HOST-7 の (1)〜(3)）。
+  Plugin の口は接続ごとの宛先の許可リストで絞り、ループバック・リンクローカル・私設・メタデータの宛先へ送らない（HOST-7 の (4)・HOST-8）。
+  失効の通知の送出の口は (1)〜(3) だけを共有し、宛先は登録済みと https で限る（RVPG-24・RVPG-26・RVPG-27）。Plugin は `OutboundHttp` を介さず直接通信しない（HOST-9・PLG-22）。実クライアントの選定は Hub の `ARUN-14`。
 
 ## CSRF とメソッド
+
+本体の要求（判定規則・例外規則・ソース走査）。Gate の登録と実行は Hub（`ARUN-39`）。
 
 - CSRF Gate を登録する箇所は 1 つ。Gate を外す feature・設定・環境変数は 0 件（CSRF-7）。拒否は 403・本文なし（CSRF-1）。
 - 状態を変える操作を `GET` で受けない（405。CSRF-4）。
 - ブラウザを通る経路の Gate の例外は `POST /authorize` の 1 パスだけ（完全一致。CSRF-14）。
 - バックチャネルの除外は 1 パス 1 件の完全一致で列挙する。前方一致・ワイルドカード不可（CSRF-20）。
+- 本文の上限超過の 413 は本体の規則から外れた（CSRF-37・CSRF-39 → Hub `ARUN-46`・`ARUN-47`）。
 
 ## Cookie とセッション
+
+本体の要求（`Set-Cookie` 値の組み立て・属性・値を返さない設計）。応答として出す実行は Hub（SESS-1・SESS-3 は `ARUN-36`、CSRF-49・CSRF-50 は `ARUN-38`、CSRF-24 は `ARUN-48`）。
 
 - 認証 Cookie は `__Host-` 接頭辞・`HttpOnly`・`Secure`・`SameSite=Lax`・`Path=/`・`Domain` なし（SESS-1）。
   他の Cookie も `__Host-`・`HttpOnly`・`Secure`・`Path=/`・`Domain` なしで、`SameSite` は項目ごとの原文に従う（CSRF-49・CSRF-50）。
@@ -39,6 +53,8 @@ description: >
 - セッションに依る応答は `Cache-Control: no-store` と `Vary: Cookie`（CSRF-24）。refresh は不透明値（`D-2026-10-17-80`）。
 
 ## CSP とヘッダ
+
+本体の要求値で、正本は `ui-safety.md`（UISF）。付与の実行は Hub（CSRF-28・CSRF-29・CSRF-51 は `ASCR-3`、CSRF-30〜32・CSRF-51 は `ASCR-4`）。
 
 - CSP: `script-src 'self'`・`form-action 'self'`・`frame-ancestors 'none'` を全画面に（CSRF-28・CSRF-51）。
   `default-src 'none'`・`base-uri 'none'` も付ける（CSRF-32）。
@@ -56,8 +72,8 @@ description: >
 
 - ログイン・ログアウトの戻り先は同一 origin のパスだけ。型を満たさない値は既定の遷移先に落とす。受け付けた値を再デコードして
   `Location` を作らない（CSRF-33〜35）。
-- 転送ヘッダは許可リストのプロキシから来たときだけ、右から読んで許可リスト外の最初のアドレスを採る（CSRF-40・CSRF-41）。
-- IPv6 の計数の単位は /64（CSRF-43）。レート制限は検証の前に判定し、判定と加算は 1 文（THRT-1・THRT-6・AUDB-27）。
+- 転送ヘッダ・接続元の取得は組込み先の担当で、本体の規則から外れた（CSRF-40・CSRF-41 → Hub `ARUN-43`）。
+- IPv6 の計数の単位は /64（CSRF-43。単位の規則は本体、接続元の取得は Hub の `ARUN-44`）。レート制限は検証の前に判定し、判定と加算は 1 文（THRT-1・THRT-6・AUDB-27）。
 - タイミング差の許容値は測って決める持ち越し（THRT-29）。推測で値を置かない。
 
 ## トークンの署名
@@ -74,7 +90,7 @@ description: >
 
 ## 秘密情報を外に出さない
 
-- トークン・鍵・パスワード・復旧コード・接続文字列を Git・サンプル・試験の記録・ログ・PR・Issue・コメントに入れない（05-tasks.md の方針、SECR-23〜27）。
+- トークン・鍵・パスワード・復旧コード・接続文字列を Git・サンプル・試験の記録・ログ・PR・Issue・コメントに入れない（05-tasks.md の方針、SECR-23・SECR-24・SECR-26・SECR-27）。
 - コミット前の秘密情報の検出は `create-commit` スキルの手順に従う。検出器の出力に値そのものを出さない（件数だけで判定する）。
 - 実機の名前・ホームのパス・内部のアドレスも書かない（04-behavior/README.md の (d)）。
 - `git commit --no-verify`・`git push --no-verify` でフックを迂回しない。
