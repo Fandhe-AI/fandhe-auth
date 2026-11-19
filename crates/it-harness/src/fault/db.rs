@@ -96,6 +96,10 @@ struct Shared {
     stop: AtomicBool,
     blocked: AtomicBool,
     delay_ms: AtomicU64,
+    /// 遅延の注入・解除のたびに進める世代。処理中の待ちが古い遅延を引きずらないために見る。
+    delay_gen: AtomicU64,
+    /// 遮断のたびに進める世代。上流への接続の確立中に遮断が入ったかを見る。
+    block_gen: AtomicU64,
     accepted: AtomicU64,
     refused: AtomicU64,
     /// 両側を切るための複製（接続 ID と組）。両方向の転送が終わった接続の分は外す。
@@ -182,6 +186,8 @@ impl DbFaultProxy {
             stop: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             delay_ms: AtomicU64::new(0),
+            delay_gen: AtomicU64::new(0),
+            block_gen: AtomicU64::new(0),
             accepted: AtomicU64::new(0),
             refused: AtomicU64::new(0),
             conns: Mutex::new(Vec::new()),
@@ -243,6 +249,7 @@ impl DbFaultProxy {
             .record_now(FaultKind::DbBlock, FaultPhase::Applied)
             .map_err(DbFaultError::Record)?;
         self.shared.blocked.store(true, Ordering::SeqCst);
+        self.shared.block_gen.fetch_add(1, Ordering::SeqCst);
         self.shared.sever_all();
         self.block_active = true;
         Ok(())
@@ -281,6 +288,7 @@ impl DbFaultProxy {
             .record_now(kind, FaultPhase::Applied)
             .map_err(DbFaultError::Record)?;
         self.shared.delay_ms.store(delay_ms, Ordering::SeqCst);
+        self.shared.delay_gen.fetch_add(1, Ordering::SeqCst);
         self.delay_active = Some(kind);
         Ok(())
     }
@@ -294,6 +302,7 @@ impl DbFaultProxy {
             .record_now(kind, FaultPhase::Released)
             .map_err(DbFaultError::Record)?;
         self.shared.delay_ms.store(0, Ordering::SeqCst);
+        self.shared.delay_gen.fetch_add(1, Ordering::SeqCst);
         self.delay_active = None;
         Ok(())
     }
@@ -348,6 +357,8 @@ fn refuse(client: &TcpStream, shared: &Shared) {
 }
 
 fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
+    // 遮断の世代を先に控える。確立中に遮断が入って解除されても、世代の差で見つける。
+    let block_gen = shared.block_gen.load(Ordering::SeqCst);
     // 受けた接続は blocking に戻す（listener の非 blocking を引き継ぐ環境がある）。
     if client.set_nonblocking(false).is_err() || shared.halted() {
         return refuse(&client, shared);
@@ -355,30 +366,41 @@ fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
     let Some(port) = upstream.port() else {
         return refuse(&client, shared);
     };
+    let (Ok(c_read), Ok(c_kill)) = (client.try_clone(), client.try_clone()) else {
+        return refuse(&client, shared);
+    };
+    // 上流への接続の前から client を遮断の対象にする（確立中の遮断を取りこぼさない）。
+    let id = shared.next_conn_id.fetch_add(1, Ordering::SeqCst);
+    shared
+        .conns
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push((id, c_kill));
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let Ok(up) = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT) else {
+        shared.sever_conn(id);
         return refuse(&client, shared);
     };
-    let (Ok(c_read), Ok(u_write), Ok(c_kill), Ok(u_kill)) = (
-        client.try_clone(),
-        up.try_clone(),
-        client.try_clone(),
-        up.try_clone(),
-    ) else {
+    let (Ok(u_write), Ok(u_kill)) = (up.try_clone(), up.try_clone()) else {
+        shared.sever_conn(id);
         return refuse(&client, shared);
     };
-    let id = shared.next_conn_id.fetch_add(1, Ordering::SeqCst);
-    {
-        let mut g = shared.conns.lock().unwrap_or_else(PoisonError::into_inner);
-        g.push((id, c_kill));
-        g.push((id, u_kill));
+    shared
+        .conns
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push((id, u_kill));
+    if shared.halted() || shared.block_gen.load(Ordering::SeqCst) != block_gen {
+        let _ = up.shutdown(Shutdown::Both);
+        shared.sever_conn(id);
+        return refuse(&client, shared);
     }
     // 両方向の転送が終わった側が複製を外す（半閉じの間は遮断で切れるよう残す）。
     let remaining = Arc::new(AtomicUsize::new(2));
     let (r1, r2) = (Arc::clone(&remaining), remaining);
     // 登録の間に遮断が入った場合に取りこぼさない。
-    if shared.halted() {
-        shared.sever_all();
+    if shared.halted() || shared.block_gen.load(Ordering::SeqCst) != block_gen {
+        shared.sever_conn(id);
         return refuse(&client, shared);
     }
     let s1 = Arc::clone(shared);
@@ -442,14 +464,16 @@ fn pump(mut from: TcpStream, mut to: TcpStream, delay: bool, shared: &Shared) {
     let _ = to.shutdown(Shutdown::Both);
 }
 
-/// 現在の遅延だけ刻んで眠る。停止と遮断が入ったら抜ける。
+/// 現在の遅延だけ刻んで眠る。停止・遮断・遅延の解除と再注入（世代の変化）が入ったら抜ける。
 fn wait_delay(shared: &Shared) {
+    let generation = shared.delay_gen.load(Ordering::SeqCst);
     let ms = shared.delay_ms.load(Ordering::SeqCst);
     if ms == 0 {
         return;
     }
     let deadline = Instant::now() + Duration::from_millis(ms);
-    while !shared.halted() {
+    // 解除・再注入で世代が変わったら古い待ちを直ちに終える。
+    while !shared.halted() && shared.delay_gen.load(Ordering::SeqCst) == generation {
         let now = Instant::now();
         if now >= deadline {
             return;

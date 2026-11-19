@@ -226,3 +226,20 @@ fn outputs_do_not_leak_ports_or_addresses() {
         }
     }
 }
+
+#[test]
+fn release_delay_ends_in_flight_wait() {
+    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let mut tl = timeline();
+    p.delay(&mut tl, Duration::from_secs(30)).unwrap();
+    let mut c = connect(p.listen_port());
+    c.write_all(b"ping").unwrap();
+    // 応答が遅延の待ちに入るのを待ってから解除する。
+    thread::sleep(Duration::from_millis(200));
+    let start = Instant::now();
+    p.release_delay(&mut tl).unwrap();
+    let mut buf = [0u8; 4];
+    c.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"ping");
+    assert!(start.elapsed() < Duration::from_secs(5));
+}
