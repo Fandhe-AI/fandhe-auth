@@ -2,8 +2,8 @@
 #
 # ローカル（`make check`）・Git hooks（lefthook.yml）・CI が同じコマンド契約を共有する。
 # CI 側で独自のチェックを定義せず、scripts/ の実体を呼ぶ（make スキルの「入口は複数でも
-# 実処理の定義は一つ」）。言語固有のジョブ（fmt / lint / test / build 等）は派生リポジトリで
-# 本ファイルへ追加し、必ず ci-complete の needs にも追加すること。
+# 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブで流す（TASK-6）。言語固有の
+# ジョブを足すときは、必ず ci-complete の needs にも追加すること。
 # ジョブ・発火条件の追加・変更時は .claude/rules/github-actions.md に従う。
 #
 # runner: public リポジトリのため GitHub ホステッド（ubuntu-latest）を使う。
@@ -116,6 +116,33 @@ jobs:
         if: runner.os == 'macOS'
         run: /bin/bash scripts/hooks/test-hooks.sh
 
+  # Rust の workspace のビルドと試験（TASK-6）。ローカルの `make build`・`make test` と同じ契約。
+  # --locked で Cargo.lock の外を解決しない。--all-features は付けない（DPOL-31）。
+  # toolchain は runner 既定の rustup の stable を使う（暫定。版・MSRV は TASK-4 で人が決め、
+  # rust-toolchain.toml が入ったら追随する）。キャッシュは未導入（効果を測ってから入れる）。
+  build-test:
+    name: "make build + make test"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain versions
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          cargo -V
+
+      - name: make build
+        run: make build
+
+      - name: make test
+        run: make test
+
   # squash merge では PR タイトルがそのままコミット件名になるため、commit-msg フックと
   # 同じスクリプトで Conventional Commits 形式を検証する（フックの CI 側の対）。
   # PR タイトルは任意文字列のため、${{ }} を run へ直接展開せず env 経由でファイルへ書き出す
@@ -153,6 +180,7 @@ jobs:
     needs:
       - check
       - test-hooks
+      - build-test
       - pr-title
     steps:
       - name: 全ジョブ結果の検証

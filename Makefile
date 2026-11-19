@@ -33,11 +33,11 @@ check: ## editorconfig-checker + shellcheck（ソースは変更しない）。�
 test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git のみ）。直接: scripts/hooks/test-hooks.sh
 	@scripts/hooks/test-hooks.sh
 
-# build・test は暫定の名前（人が確定する）。--all-features は付けない（DPOL-31）。
+# build・test は暫定の名前（人が確定する）。CI の build-test ジョブがこの 2 つを呼ぶ（TASK-6）。--all-features は付けない（DPOL-31）。
 build: ## workspace 全体をビルドする（Cargo.lock の外を解決しない）。直接: cargo build --workspace --locked
 	@cargo build --workspace --locked
 
-test: ## workspace 全体の試験を流す（CI への搭載は TASK-6）。直接: cargo test --workspace --locked
+test: ## workspace 全体の試験を流す（CI の build-test ジョブと同じ契約）。直接: cargo test --workspace --locked
 	@cargo test --workspace --locked
 
 fmt: ## rustfmt で整形を適用する（ソースを書き換える）。直接: cargo fmt --all
