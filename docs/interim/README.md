@@ -11,8 +11,8 @@ spec の本文・版の数値は写さず、ID で引く（`.claude/rules/spec-r
 ## 置き場の規則
 
 - 本ディレクトリは文書だけを置く。暫定の実装のコードは、その部品を使う crate の中に置き、下の台帳の行から引く。
-  `backend` の配置は `crates/backend`（利用者の決定 2026-11-13〔spec に記録なし〕。その後 `D-2026-11-20-1` で、`TASK-9` の暫定の置き場として
-  残すことになった。`.claude/rules/coding-rust.md`）。
+  `backend` の配置は `crates/backend`（`c2b3f67` の時点の規約〔`D-2026-11-20-3` の (1)〕。その後 `D-2026-11-20-1` で、
+  `TASK-9` の暫定の置き場として残すことになった）。
   それ以外のコードの具体のパスはここで決めない。
 - 暫定の実装と提供版を、feature・環境変数・設定で実行時に切り替える経路は作らない（DPOL-30〜32・CSRF-7）。
   差し替えはコードの変更と版の固定で行う。
@@ -38,8 +38,8 @@ spec の本文・版の数値は写さず、ID で引く（`.claude/rules/spec-r
 | 2 | `fandhe-backend` 安全な既定値の `SetCookie` | TASK-214（目安。認証 Cookie の発行・消去の TASK で、部品そのものの TASK ではない） | TASK-527 | `crates/backend/src/interim/set_cookie.rs`（枠は #82 で作成） | 同上（差し替えの実施は Hub の担当） |
 | 3 | `fandhe-backend` 同一オリジンのリダイレクト先 | TASK-533 | TASK-527 | `crates/backend/src/interim/local_redirect.rs`（枠は #82 で作成） | 同上（差し替えの実施は Hub の担当） |
 | 4 | `fandhe-backend` `no-store` の補助 | TASK-530 | TASK-527 | `crates/backend/src/interim/no_store.rs`（枠は #82 で作成） | 同上（差し替えの実施は Hub の担当） |
-| 5 | `fandhe-backend` フォームの上限 | TASK-534 | TASK-527 | 枠なし（`crates/backend/src/interim/form_limit.rs` は外した） | TASK-534・TASK-61 は移管（→ Hub `ARUN-46`・`ARUN-47`）。本体では作らない（`D-2026-11-20-3` の (イ)）。枠は別の PR で外した。`TODO(TASK-534)` は追跡先が本体に無いため移していない |
-| 6 | `fandhe-backend` 信頼するプロキシ | TASK-535・TASK-536 | TASK-527（提供された場合）。現時点は提供なし（`D-2026-10-27-2`） | 枠なし（`crates/backend/src/interim/trusted_proxy.rs` は外した） | 移管の部分（`CSRF-40`〜`42`・`44`・`47`、自前の accept ループ → Hub `ARUN-43`・`ARUN-44`）は本体では作らない（`D-2026-11-20-3` の (イ)）。本体の部分（`CSRF-43`・`CSRF-52` は TASK-535、`CSRF-45`・`CSRF-46` は TASK-536）は枠の外で作り、置き場は未決（`LIB-1` の判定で利用者が決める）。`TODO(TASK-535)`・`TODO(TASK-536)` は `crates/backend/src/interim/mod.rs` に移した。差し替えの実施は Hub の担当（TASK-527 は置き換え → Hub `ARUN-17`） |
+| 5 | `fandhe-backend` フォームの上限 | TASK-534 | TASK-527 | 枠なし（`crates/backend/src/interim/form_limit.rs` は外した） | TASK-534・TASK-61 は移管（→ Hub `ARUN-46`・`ARUN-47`）。本体では作らない（`D-2026-11-20-3` の (イ)）。枠は外した。`TODO(TASK-534)` は追跡先が本体に無いため移していない |
+| 6 | `fandhe-backend` 信頼するプロキシ | TASK-535・TASK-536 | TASK-527（提供された場合）。現時点は提供なし（`D-2026-10-27-2`） | 枠なし（`crates/backend/src/interim/trusted_proxy.rs` は外した） | 移管の部分（`CSRF-40`〜`42`・`CSRF-47`〔自前の accept ループ〕→ Hub `ARUN-43`、`CSRF-44` → Hub `ARUN-44`）は本体では作らない（`D-2026-11-20-3` の (イ)）。本体の部分（`CSRF-43`・`CSRF-52` は TASK-535、`CSRF-45`・`CSRF-46` は TASK-536）は枠の外で作り、置き場は未決（`LIB-1` の判定で利用者が決める）。`TODO(TASK-535)`・`TODO(TASK-536)` は `crates/backend/src/interim/mod.rs` に移した。差し替えの実施は Hub の担当（TASK-527 は置き換え → Hub `ARUN-17`） |
 | 7 | `fandhe-backend` 下流の JWT の検証（`REQ-16`） | TASK-370 | TASK-372（再試験 TASK-89） | `crates/client`（段階 1・既存） | 本 repo の範囲。#82 では触らない（中身は TASK-370） |
 | 8 | `fandhe-frontend` の builder（`REQ-17`） | TASK-532 | TASK-90（TASK-152 は移管 → `UISF-10`・`UISF-22`） | `crates/frontend/src/interim/builder.rs`（案。crate の作成は利用者の確認待ち。#83 で形だけ記録） | 画面は Hub。TASK-664 は移管（→ Hub `ASCR-1`・`ARUN-17`） |
 | 9 | `fandhe-db` | PostgreSQL の参照実装（`dev/postgres/`・TASK-5） | TASK-628（契約 trait は TASK-584） | 差し替えの境界は契約 trait（置き場は未定: DPOL-38・TASK-584・TASK-684）。契約テストは `crates/db-tests`。#84 で形だけ記録 | 本 repo は契約と契約テストまで（DPOL-37・DPOL-38）。`fandhe-db` 向けの実装は Hub の担当（LIB-14） |
