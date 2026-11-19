@@ -48,6 +48,7 @@ name = "fandhe-auth-hub-stub"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "fandhe-auth-secret",
  "ring",
  "serde_json",
 ]

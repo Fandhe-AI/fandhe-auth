@@ -13,11 +13,13 @@
 //! 書かない。本番の値として扱わない（A-2026-10-28-1）。環境変数・ファイルは読まない（DPOL-32）。
 //!
 //! 本人トークンの提示の受け口: [`presentation::IdentityTokenReceiver`]（#60）。
+//! `private_key_jwt` の assertion で口を呼ぶ模擬: [`assertion::HubAssertionCaller`]（#61）。
 
 #![forbid(unsafe_code)]
 
+pub mod assertion;
 pub mod config;
 pub mod presentation;
 
-// TODO(TASK-7): 各模擬・受け口（#61〜#65）、遅れ・拒否の注入（#66）、仮置きの値の明示（#67）、
+// TODO(TASK-7): 各模擬・受け口（#62〜#65）、遅れ・拒否の注入（#66）、仮置きの値の明示（#67）、
 // 単体試験（#68）、実物との差の文書（#69・#70）は後続の段で足す。
