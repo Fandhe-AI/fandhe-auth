@@ -1,0 +1,138 @@
+//! 枠の起動・停止の試験。前提・操作・期待の形。
+//!
+//! Fake は枠の順序と後始末を確かめるためのもので、E2E の合格に数えない（ACPT-7）。
+
+use std::sync::{Arc, Mutex};
+
+use fandhe_auth_e2e_harness::{
+    Browser, E2eComponent, E2eComponentKind, E2eConfig, E2eError, E2eErrorKind, E2eHarness,
+    PasskeyOperation,
+};
+
+type Log = Arc<Mutex<Vec<String>>>;
+
+const MARKER: &str = "MARKER-MUST-NOT-APPEAR";
+
+struct Fake {
+    kind: E2eComponentKind,
+    log: Log,
+    fail_start: bool,
+    /// 目印。誤りに出ないことを確かめる。
+    marker: &'static str,
+}
+
+impl Fake {
+    fn boxed(kind: E2eComponentKind, log: &Log, fail_start: bool) -> Box<dyn E2eComponent> {
+        Box::new(Fake {
+            kind,
+            log: Arc::clone(log),
+            fail_start,
+            marker: MARKER,
+        })
+    }
+}
+
+impl E2eComponent for Fake {
+    fn kind(&self) -> E2eComponentKind {
+        self.kind
+    }
+    fn start(&mut self) -> Result<(), E2eError> {
+        if self.fail_start {
+            let _ = self.marker;
+            return Err(E2eError::new(E2eErrorKind::StartFailed, self.kind));
+        }
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("start {:?}", self.kind));
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), E2eError> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("stop {:?}", self.kind));
+        Ok(())
+    }
+}
+
+fn config() -> E2eConfig {
+    E2eConfig::new(PasskeyOperation::Registration, Browser::Chrome)
+}
+
+fn entries(log: &Log) -> Vec<String> {
+    log.lock().unwrap().clone()
+}
+
+/// 渡した順に依らず RelyingParty → BrowserDriver で起動し、逆順で停止する。
+#[test]
+fn starts_in_fixed_order_and_stops_in_reverse() {
+    let log: Log = Log::default();
+    let cfg = config()
+        .with(Fake::boxed(E2eComponentKind::BrowserDriver, &log, false))
+        .with(Fake::boxed(E2eComponentKind::RelyingParty, &log, false));
+    let running = E2eHarness::start(cfg).unwrap();
+    assert_eq!(
+        running.kinds(),
+        vec![
+            E2eComponentKind::RelyingParty,
+            E2eComponentKind::BrowserDriver
+        ]
+    );
+    assert_eq!(running.operation(), PasskeyOperation::Registration);
+    assert_eq!(running.browser(), Browser::Chrome);
+    running.stop().unwrap();
+    assert_eq!(
+        entries(&log),
+        vec![
+            "start RelyingParty",
+            "start BrowserDriver",
+            "stop BrowserDriver",
+            "stop RelyingParty"
+        ]
+    );
+}
+
+/// 同じ種類の 2 つ目は起動前に誤りになり、どれも起動しない。
+#[test]
+fn duplicate_kind_is_rejected_before_any_start() {
+    let log: Log = Log::default();
+    let cfg = config()
+        .with(Fake::boxed(E2eComponentKind::RelyingParty, &log, false))
+        .with(Fake::boxed(E2eComponentKind::RelyingParty, &log, false));
+    let err = E2eHarness::start(cfg).err().unwrap();
+    assert_eq!(err.kind(), E2eErrorKind::Duplicate);
+    assert!(entries(&log).is_empty());
+}
+
+/// 後ろの起動が失敗すると、起動済みを停止してから誤りが返る。
+#[test]
+fn failed_start_stops_started_components() {
+    let log: Log = Log::default();
+    let cfg = config()
+        .with(Fake::boxed(E2eComponentKind::RelyingParty, &log, false))
+        .with(Fake::boxed(E2eComponentKind::BrowserDriver, &log, true));
+    let err = E2eHarness::start(cfg).err().unwrap();
+    assert_eq!(err.kind(), E2eErrorKind::StartFailed);
+    assert_eq!(
+        entries(&log),
+        vec!["start RelyingParty", "stop RelyingParty"]
+    );
+    // SECR-11・SECR-23: 誤りの表示に目印が出ない。
+    assert!(!format!("{err}").contains(MARKER));
+    assert!(!format!("{err:?}").contains(MARKER));
+}
+
+/// `Drop` でも停止が呼ばれる。
+#[test]
+fn drop_stops_components() {
+    let log: Log = Log::default();
+    {
+        let cfg = config().with(Fake::boxed(E2eComponentKind::RelyingParty, &log, false));
+        let _running = E2eHarness::start(cfg).unwrap();
+    }
+    assert_eq!(
+        entries(&log),
+        vec!["start RelyingParty", "stop RelyingParty"]
+    );
+}

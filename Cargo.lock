@@ -48,6 +48,10 @@ name = "fandhe-auth-db-tests"
 version = "0.0.0"
 
 [[package]]
+name = "fandhe-auth-e2e-harness"
+version = "0.0.0"
+
+[[package]]
 name = "fandhe-auth-hub-stub"
 version = "0.0.0"
 dependencies = [
