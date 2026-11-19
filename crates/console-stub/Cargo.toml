@@ -9,3 +9,7 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+# 暫定: introspection の応答（JSON）の解析に使う。lockfile 既存の版。版の固定方針と deny.toml は TASK-668 で決める。
+[dependencies]
+serde_json = "1"
