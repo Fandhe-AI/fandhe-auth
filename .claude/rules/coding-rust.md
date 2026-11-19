@@ -34,6 +34,7 @@ spec の読み方は `.claude/rules/spec-reference.md`。
 | `fandhe-auth-webauthn-wasm` | `crates/webauthn-wasm` | ブラウザ側 WebAuthn モジュール |
 | `fandhe-auth-backend` | `crates/backend` | `fandhe-backend` に依る HTTP 層（lib。下記） |
 | `fandhe-auth-server` | `crates/server` | 認証サーバーの bin（組み立てのみ） |
+| `fandhe-auth-hub-stub` | `crates/hub-stub` | Hub の検証用 stub（試験専用・仮称・TASK-7。どの crate からも依存しない） |
 
 - `fandhe-auth-backend`（`crates/backend`）: `D-2026-10-29-1` (5) の案を採用（利用者の決定 2026-11-13。spec への記録〔DPOL-41 の表・`D-`〕は未反映で、spec repo への PR は利用者の指示を待つ）。
   `fandhe-backend` に依る部分（ハンドラ・ルーティング・Cookie/CSRF の配線・外向き HTTP・outbox）を持つ lib で、`-server` は組み立てだけにする。

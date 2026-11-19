@@ -25,7 +25,7 @@ description: >
 
 | 対象 | subagent_type | model | 適用ルール |
 | --- | --- | --- | --- |
-| `crates/core`・`webauthn`・`provider`・`keys`・`secret`・`types`・`client` | `core-builder` | sonnet | `./coding-rust.md`・`./secret-values.md`・`./security.md` |
+| `crates/core`・`webauthn`・`provider`・`keys`・`secret`・`types`・`client`・`hub-stub` | `core-builder` | sonnet | `./coding-rust.md`・`./secret-values.md`・`./security.md` |
 | `crates/db-contract`・`db-tests`・`db-pg`・`db-migrate`（`db-fandhe` は移行判定時）・`migrations/` | `db-builder` | sonnet | `./db-layer.md`・`./coding-rust.md`・`./secret-values.md` |
 | `crates/backend`（lib）・`crates/server`（bin） | `backend-builder` | sonnet | `./coding-rust.md`・`./security.md`・`./secret-values.md` |
 | `crates/frontend`・`webauthn-wasm` | `frontend-builder` | sonnet | `./coding-rust.md`・`./security.md` |
