@@ -3,13 +3,17 @@
 //! 呼び出し元は stub を組み立てる試験側。値はすべて設定で渡す試験用の仮の値で、本番の値ではない。
 //! 既定値を持たせず、必須の値を落とすとコンパイルできない形にする。値の範囲の検査は本体側の
 //! 設定の検証（OCL-31・SIGN-47）の担当で、ここでは持たない。
-//! 秘密値は持たない。秘密値を足す段（#61）では `fandhe-auth-secret` の型を使い、許可表を見直す。
+//! 秘密値（署名鍵）は設定に持たず、`assertion::AssertionSigningKey` で受ける。
+//! TODO(TASK-511): 秘密値の型の実装後に `fandhe-auth-secret` の型へ置き換え、許可表を見直す（表の変更は利用者に確かめる）。
 
 use std::time::Duration;
 
 /// Hub の値を受ける設定。数値の正本は Hub の ID で引き、ここには写さない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubStubConfig {
+    /// Hub が `fandhe-auth` を呼ぶときの `client_id`。assertion の `iss`・`sub` になる（OCL-24・OCL-42、
+    /// Hub D-2026-10-22-2）。値は写さず、試験用の仮の値で受ける（A-2026-10-28-1）。
+    pub client_id: String,
     /// Hub の公開ホスト（A-2026-10-28-1、Hub TASK-527）。
     pub public_host: String,
     /// `jwks_uri` の URL（OCL-31・TASK-310）。文字列で受けるだけで取得しない。

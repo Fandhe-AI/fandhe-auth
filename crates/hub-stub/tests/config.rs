@@ -8,6 +8,7 @@ use fandhe_auth_hub_stub::config::HubStubConfig;
 #[test]
 fn config_carries_values_given_by_caller() {
     let c = HubStubConfig {
+        client_id: "hub-client.test".to_owned(),
         public_host: "hub.example.test".to_owned(),
         jwks_uri: "https://hub.example.test/jwks".to_owned(),
         logout_receiver_uri: "https://hub.example.test/logout".to_owned(),
@@ -16,6 +17,7 @@ fn config_carries_values_given_by_caller() {
         jwks_cache_max: Duration::from_secs(3),
         assertion_max_lifetime: Duration::from_secs(4),
     };
+    assert_eq!(c.client_id, "hub-client.test");
     assert_eq!(c.public_host, "hub.example.test");
     assert_eq!(c.jwks_uri, "https://hub.example.test/jwks");
     assert_eq!(c.logout_receiver_uri, "https://hub.example.test/logout");
