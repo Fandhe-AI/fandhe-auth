@@ -8,7 +8,7 @@ services:
     # 版は PoC-1（PostgreSQL 17）に由来する。版と digest の更新は人が決める（2026-11-19 に解決した値）。
     image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
     environment:
-      # 既定値は置かない。未設定なら起動に失敗する（trust に落とさない）。変数名は #38 で確定する。
+      # 既定値は置かない。未設定なら起動に失敗する（trust に落とさない）。変数名は暫定で人が決める（雛形は .env.example と README の「接続設定」）。
       POSTGRES_PASSWORD: ${FANDHE_AUTH_DEV_PG_PASSWORD:?FANDHE_AUTH_DEV_PG_PASSWORD must be set}
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     ports:
