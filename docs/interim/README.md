@@ -22,6 +22,8 @@ spec の本文・版の数値は写さず、ID で引く（`.claude/rules/spec-r
   暫定の実装の中身は未作成。module の構成は暫定で、人が確定する。
 - `frontend`（`fandhe-auth-frontend`・`crates/frontend`）の枠の形は #83 で本文書の末尾の節に案として記録した。
   crate は未作成で、作る前に利用者に確かめる（LIB-14・LIB-15）。`frontend` 以外の段階 2 の crate も同じ。
+- `db` の差し替え点の形は #84 で本文書の末尾の節に記録した。差し替えの境界は契約 trait で、置き場（独立 crate か
+  `fandhe-auth-core` の中か）は未定（DPOL-38・TASK-584・TASK-684）。この repo に crate は足していない。
 
 ## 差し替え対象の一覧
 
@@ -37,7 +39,7 @@ spec の本文・版の数値は写さず、ID で引く（`.claude/rules/spec-r
 | 6 | `fandhe-backend` 信頼するプロキシ | TASK-535・TASK-536 | TASK-527（提供された場合）。現時点は提供なし（`D-2026-10-27-2`） | `crates/backend/src/interim/trusted_proxy.rs`（枠は #82 で作成） | 提供されるまで自前の accept ループで代える（`D-2026-10-16-19` の (1)・`D-2026-10-27-2`）。差し替えの実施は Hub の担当（TASK-527 は置き換え → Hub `ARUN-17`） |
 | 7 | `fandhe-backend` 下流の JWT の検証（`REQ-16`） | TASK-370 | TASK-372（再試験 TASK-89） | `crates/client`（段階 1・既存） | 本 repo の範囲。#82 では触らない（中身は TASK-370） |
 | 8 | `fandhe-frontend` の builder（`REQ-17`） | TASK-532 | TASK-90（TASK-152 は移管 → `UISF-10`・`UISF-22`） | `crates/frontend/src/interim/builder.rs`（案。crate の作成は利用者の確認待ち。#83 で形だけ記録） | 画面は Hub。TASK-664 は移管（→ Hub `ASCR-1`・`ARUN-17`） |
-| 9 | `fandhe-db` | PostgreSQL の参照実装（`dev/postgres/`・TASK-5） | TASK-628（契約 trait は TASK-584） | 契約 trait の置き場は未定（TASK-584・TASK-684）。契約テストは `crates/db-tests` | 本 repo は契約と契約テストまで（DPOL-37・DPOL-38）。`fandhe-db` 向けの実装は Hub の担当（LIB-14） |
+| 9 | `fandhe-db` | PostgreSQL の参照実装（`dev/postgres/`・TASK-5） | TASK-628（契約 trait は TASK-584） | 差し替えの境界は契約 trait（置き場は未定: DPOL-38・TASK-584・TASK-684）。契約テストは `crates/db-tests`。#84 で形だけ記録 | 本 repo は契約と契約テストまで（DPOL-37・DPOL-38）。`fandhe-db` 向けの実装は Hub の担当（LIB-14） |
 
 ## この置き場に足すもの
 
@@ -58,7 +60,8 @@ TASK-9 の sub-issue で順に足す。文書は本ディレクトリに、コ�
 
 - `backend` の中の module の構成。#82 で暫定の形を置いた。確定は人
 - `frontend` の crate を作るか。中の置き場は #83 で案を置いた（末尾の節）。作るかは人が決める
-- 契約 trait の置き場（TASK-584・TASK-684 で決める）
+- 契約 trait の置き場（TASK-584・TASK-684 で決める）。独立 crate `fandhe-auth-db-contract` か `fandhe-auth-core` の中かは、
+  PoC-15 の後に LIB-15 の基準で人が決める（DPOL-38）
 - 固定する版の値（#85 と各差し替え TASK で決める。`A-2026-10-16-5`）
 
 ## backend の切り出しの記録（LIB-15。判定前の材料）
@@ -103,6 +106,56 @@ frontend に固有の制約: サーバーのビルドに `web-sys` を入れな�
 LIB-15 の判定前の材料。判定は人が行う（ACPT-7）。基準 (1)〜(4) は LIB-15 の番号で引く（本文は写さない）。
 
 - 材料（作成した場合の見込み）: workspace 内の依存 0・外部の依存 0。暗号の処理・I/O・環境変数の読み込みを持たない。
+- 判定 (1): 未記入（人が記入）
+- 判定 (2): 未記入（人が記入）
+- 判定 (3): 未記入（人が記入）
+- 判定 (4): 未記入（人が記入）
+
+## db の枠（作成前の形。#84）
+
+crate・trait は作っていない。契約 trait の置き場は DPOL-38 で未定（独立 crate か `fandhe-auth-core` の中か。
+PoC-15 の後に LIB-15 の基準で人が決める）で、中身は TASK-584、crate の分け方の検査は TASK-684 の範囲のため、
+先取りしない。下は差し替えの境界の考え方を文書で示すもので、trait の名前・シグネチャは定めない。
+
+差し替えの境界（案）:
+
+- 呼び出し側（`core`・将来の Hub 側のハンドラ）は契約 trait にだけ依存する。
+- DB の実装は契約 trait を実装する側に置く。差し替えは実装の入れ替えと版の固定（`A-2026-10-16-5`）で行う。
+- 契約 trait の置き場は DPOL-38 の 2 案のどちらでも成り立つように書く。どちらにするかはここで決めない。
+
+実装の側の扱い:
+
+- PostgreSQL の参照実装は台帳の行 9 のとおり（`dev/postgres/`・TASK-5）。
+- `fandhe-db` 向けの実装・`-db-pg`・`-db-fandhe`・`-db-migrate` は Hub の担当で、本体の workspace のメンバーにしない
+  （LIB-14・DPOL-38）。`fandhe-db` 向けの実装の枠と点検の記録の様式は TASK-628 の範囲で、ここでは作らない。
+
+境界の規則（backend・frontend と同じ）:
+
+- 実装を feature・環境変数・設定で実行時に切り替える経路は作らない（DPOL-30〜32）。
+- 差し替えの前に再試験を流す（CG-6）。手順は #86。
+- 契約 trait の置き場は SQL・ロック・誤りコードを持たない（DPOL-37・AUDB-3）。契約テストの本体は PostgreSQL の実装にも
+  `sqlx` にも依存しない（DPOL-37）。
+
+db に固有の安全条件:
+
+- `fandhe-db` への移行は ADB-1〜26 の実測まで行わない（CG-7）。
+- PostgreSQL での合格を `fandhe-db` が契約を満たす根拠にしない（TASK-628）。
+- 契約テストを通すために期待・安全条件を緩めない（AUDB-6・AUDB-69）。
+
+兄弟の範囲: 版の固定の記録の形式は #85、差し替えの手順は #86、契約テストを複数の DB 実装で同じ trait から流す枠は #87、
+空の実装での確認は #88。中身を先取りしない。
+
+作るときの手順（利用者の決定の後。この Issue では実行しない）:
+
+- 独立 crate に決まった場合: workspace の `members` への追加とコメント、`Cargo.lock` の更新、
+  `scripts/check-crate-deps.sh` の許可表に `fandhe-auth-db-contract` の行を足す（`fandhe-auth-db-tests` からの辺を含めるかは
+  そのとき確かめる）。
+- `fandhe-auth-core` の中に決まった場合: 許可表の変更は不要の見込み。
+- いずれも本文書の台帳の行 9 の「置き場は未定」の記述を直す。
+
+LIB-15 の判定前の材料（独立 crate にする場合だけ要る）。判定は人が行う（ACPT-7）。基準 (1)〜(4) は LIB-15 の番号で引く
+（本文は写さない）。
+
 - 判定 (1): 未記入（人が記入）
 - 判定 (2): 未記入（人が記入）
 - 判定 (3): 未記入（人が記入）
