@@ -42,7 +42,7 @@ tools:
 - `../../rules/secret-values.md` — ログ・誤り応答・監査に秘密値を出さない
 - `../../rules/library-boundary.md` — 本体と Hub の境界（LIB-1）
 - `../../rules/coding-rust.md`・`../../rules/code-comment-style.md`
-- `../../rules/dependency-policy.md` — `fandhe-backend` を入れるときの扱い（相手側の部品の版固定は Hub。CSRF-13 は置き換え → Hub `ARUN-17`）・`reqwest` の TLS 設定（DPOL-46）
+- `../../rules/dependency-policy.md` — `fandhe-backend` を入れるときの扱い（相手側の部品の版固定は Hub。CSRF-13 は置き換え → Hub `ARUN-17`）・外向き通信の契約（`OutboundHttp` で受け、実装は Hub。本体の依存に HTTP クライアントの具象 crate を持たない。DPOL-46・HOST-7・HOST-9）
 - `../../rules/spec-reference.md`・`../../rules/verification.md`
 - `../../rules/delegation-impl.md` — 担当の境界と実装後の流れ（試験 → 依存監査 → セキュリティ監査 → 完了ゲート）
 - `../../rules/out-of-scope-tracking.md` — 担当外・スコープ外の事項は直さず報告する（`TODO` には `TASK-N` を付ける）

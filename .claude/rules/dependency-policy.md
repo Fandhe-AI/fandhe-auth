@@ -9,7 +9,7 @@ description: >
   本体の依存 crate の追加・更新・feature 選択の規約。PoC で確かめた版と版の記録（相手側の部品の版の固定と照合は Hub の ARUN-17）、
   暗号の自前実装の禁止と JWT の backend（DPOL-4・17・47）、rsa・openssl・native-tls の bans（DPOL-10・11・13・18・21・46）、cargo-deny と
   cargo-audit の 5 検査とライセンスの許可リスト（DPOL-20〜25・33〜35）、試験用の feature を作らないこと、依存を足すときの
-  確認手順（cargo deny / cargo audit / cargo tree -i）を定める。プロファイルと target/ の掃除は rust-build-profile。
+  確認手順（cargo deny / cargo audit / cargo tree -i。rsa・native-tls・openssl・web-sys・HTTP クライアントの具象 crate の逆引き）を定める。プロファイルと target/ の掃除は rust-build-profile。
 ---
 
 # 依存の方針（Cargo）
@@ -29,7 +29,9 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 - 相手側（`fandhe-backend`・`fandhe-frontend`）の部品の版の固定と、固定した版での流し直しは Hub の担当（DPOL-9・CSRF-13 → Hub `ARUN-17`。`A-2026-10-16-5`）。
   本体に残るのは `Cargo.lock` のコミットと、`webauthn-rs` 0.5.5 の版の記録（PKEY-4。固定の根拠は DPOL-4・DPOL-10）。
 - 外向き通信は、本体が組込み先に要求する契約（信頼する CA は設定で渡されたものだけ・OS の信頼ストアを使わない・リダイレクトを追わない・打ち切り時間を持つ）を持つ
-  （DPOL-46・HOST-7）。実クライアント（`reqwest` の `rustls-tls-manual-roots` 等）の選定と本番の依存解決での検査は Hub の `ARUN-14`（DPOL-46 の行内分割）。
+  （DPOL-46・HOST-7）。契約は `OutboundHttp` で受け、実装は組込み先（Hub）が持つ。本体の依存に HTTP クライアントの具象 crate（`reqwest` 等）を持たない
+  （利用者の決定 2026-11-20。根拠は HOST-7 の期待欄。HOST-9 は依存に現れてよいのを組込み先の実装側に限る。いずれも検討中・〔提案〕）。
+  実クライアント（`reqwest` の `rustls-tls-manual-roots` 等）の選定と本番の依存解決での検査は Hub の `ARUN-14`（DPOL-46 の行内分割）。
 
 ## 暗号
 
@@ -75,7 +77,10 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
   - 契約テストの変異スイッチ。既定で無効（`default` に入れない）の feature か別 crate に閉じ、環境変数だけで有効にならない（DPOL-31）。
   - メモリの代替アダプター。試験用 feature の後ろに置き、本番の `cargo tree -e features` に現れない（LIB-6）。
   運用・検査用の `Ops` は Hub の担当（DPOL-38 の改訂 → Hub `ASTORE-5`）で、本体は作らない。
-- 外向き HTTP の crate を本体の workspace が依存に持つ場合（`reqwest` 等。持つかは未定）と `jsonwebtoken`（DPOL-17）は、決まった feature 以外が有効になっていないかを `cargo tree -e features` で確かめる。
+- `jsonwebtoken`（DPOL-17）は、決まった feature 以外が有効になっていないかを `cargo tree -e features` で確かめる。
+- HTTP クライアントの具象 crate（`reqwest` 等）は本体の依存に現れないことを `cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest` で確かめる（合格: 一致なし。HOST-7・HOST-9）。下の確認手順の bash ブロックにも入れてある。
+  限界: 機械の検査は `reqwest` の 1 名前だけを見る。他の具象 crate（`hyper` の client・`ureq` 等）はレビューで見る。
+  検査する名前の一覧と `deny.toml` の bans への追加は未定（TASK-668 で決める。利用者が決めるまで名前を bans に足さない）。
 
 ## 依存を足す・更新するときの確認手順
 
@@ -99,6 +104,7 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls  # 合格: 同上
 cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
 cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
 ```
 
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
