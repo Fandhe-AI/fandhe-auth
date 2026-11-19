@@ -1,4 +1,4 @@
-//! TASK-8・#73: introspection の呼び出しの模擬の最小の確認（網羅は #78）。
+//! TASK-8・#73・#78: introspection の呼び出しの模擬の試験。
 //! 値は試験の中だけの仮の値で、token は JWT 形でない試験用の不透明文字列。
 
 use std::cell::Cell;
@@ -189,5 +189,147 @@ fn outputs_do_not_contain_token() {
     ];
     for d in dumps {
         assert!(!d.contains(TOKEN), "{d}");
+    }
+}
+
+// ---- #78: 任意項目・形の誤り・境界の網羅 ----
+
+fn check_body(
+    body: &str,
+    requirement: &AuthorityRequirement,
+    now: u64,
+) -> Result<CurrentAuthority, IntrospectionFailure> {
+    introspector().check(TOKEN, requirement, now, |_, _| resp(200, body))
+}
+
+#[test]
+fn optional_fields_may_be_absent() {
+    // ADLG-15・AGCR-32: scope だけの有効な応答
+    let r = check_body(r#"{"active":true,"scope":"agent:test"}"#, &req(false), 1000).unwrap();
+    match r {
+        CurrentAuthority::Valid(g) => {
+            assert_eq!(g.scope, ["agent:test".to_owned()]);
+            assert_eq!(g.exp, None);
+            assert_eq!(g.cnf_jkt, None);
+            assert_eq!(g.client_id, None);
+            assert_eq!(g.token_type, None);
+        }
+        CurrentAuthority::Invalid => panic!("expected valid"),
+    }
+}
+
+#[test]
+fn empty_or_missing_scope_is_invalid() {
+    // OPRV-54: 要件の scope を含まない応答は理由なしの無効
+    for body in [r#"{"active":true,"scope":""}"#, r#"{"active":true}"#] {
+        assert_eq!(
+            check_body(body, &req(false), 1000),
+            Ok(CurrentAuthority::Invalid),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn wrong_shapes_are_malformed_never_valid() {
+    // AVLB-18・AVLB-22 の向き: 形の誤りは有効にならない
+    let bodies = [
+        r#"{"active":true,"scope":1}"#,
+        r#"{"active":true,"scope":"agent:test","exp":"2000"}"#,
+        r#"{"active":true,"scope":"agent:test","exp":-1}"#,
+        r#"{"active":true,"scope":"agent:test","cnf":"jkt-test"}"#,
+        r#"{"active":true,"scope":"agent:test","cnf":{"jkt":1}}"#,
+        r#"{"active":true,"scope":"agent:test","client_id":1}"#,
+        r#"{"active":true,"scope":"agent:test","token_type":1}"#,
+        r#"["active"]"#,
+        "null",
+        "not json",
+        "",
+    ];
+    for body in bodies {
+        assert_eq!(
+            check_body(body, &req(false), 1000),
+            Err(IntrospectionFailure::MalformedResponse),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn cnf_without_jkt_depends_on_binding_requirement() {
+    // AGCR-32・ADLG-15 ①
+    let body = r#"{"active":true,"scope":"agent:test","token_type":"DPoP","cnf":{}}"#;
+    assert!(matches!(
+        check_body(body, &req(false), 1000),
+        Ok(CurrentAuthority::Valid(g)) if g.cnf_jkt.is_none()
+    ));
+    assert_eq!(
+        check_body(body, &req(true), 1000),
+        Ok(CurrentAuthority::Invalid)
+    );
+}
+
+#[test]
+fn binding_requires_dpop_type_and_matching_jkt() {
+    // AGCR-32: token_type が DPoP でないものは jkt が一致しても結合を満たさない
+    let bearer =
+        r#"{"active":true,"scope":"agent:test","token_type":"Bearer","cnf":{"jkt":"jkt-test"}}"#;
+    assert_eq!(
+        check_body(bearer, &req(true), 1000),
+        Ok(CurrentAuthority::Invalid)
+    );
+    let no_type = r#"{"active":true,"scope":"agent:test","cnf":{"jkt":"jkt-test"}}"#;
+    assert_eq!(
+        check_body(no_type, &req(true), 1000),
+        Ok(CurrentAuthority::Invalid)
+    );
+    assert!(matches!(
+        check_body(bearer, &req(false), 1000),
+        Ok(CurrentAuthority::Valid(_))
+    ));
+}
+
+#[test]
+fn exp_boundary_follows_sign_17() {
+    // SIGN-17 の向き: exp > now は有効、exp == now・exp < now は無効
+    assert!(matches!(
+        check_body(ACTIVE, &req(true), 1999),
+        Ok(CurrentAuthority::Valid(_))
+    ));
+    assert_eq!(
+        check_body(ACTIVE, &req(true), 2000),
+        Ok(CurrentAuthority::Invalid)
+    );
+    assert_eq!(
+        check_body(ACTIVE, &req(true), 2001),
+        Ok(CurrentAuthority::Invalid)
+    );
+}
+
+#[test]
+fn failure_display_is_distinct() {
+    let all = [
+        IntrospectionFailure::ClientAuthRejected,
+        IntrospectionFailure::Unavailable,
+        IntrospectionFailure::UnexpectedStatus,
+        IntrospectionFailure::MalformedResponse,
+        IntrospectionFailure::TransportFailure,
+    ];
+    // 網羅の match: 値を足したらここが壊れる
+    for f in all {
+        match f {
+            IntrospectionFailure::ClientAuthRejected
+            | IntrospectionFailure::Unavailable
+            | IntrospectionFailure::UnexpectedStatus
+            | IntrospectionFailure::MalformedResponse
+            | IntrospectionFailure::TransportFailure => {}
+        }
+    }
+    let texts: Vec<String> = all.iter().map(|f| f.to_string()).collect();
+    for (i, a) in texts.iter().enumerate() {
+        assert!(a.starts_with("introspection: "), "{a}");
+        for b in &texts[i + 1..] {
+            assert_ne!(a, b);
+        }
     }
 }

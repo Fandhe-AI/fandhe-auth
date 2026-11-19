@@ -1,4 +1,4 @@
-//! TASK-8・#74: 配送の時点の確認の模擬の最小の確認（網羅は #78）。
+//! TASK-8・#74・#78: 配送の時点の確認の模擬の試験。
 //! 値は試験の中だけの仮の値で、token は JWT 形でない試験用の不透明文字列。
 
 use std::time::Duration;
@@ -224,4 +224,55 @@ fn token_not_in_debug_or_display() {
     let e = DeliveryFailure::Introspection(IntrospectionFailure::Unavailable);
     let out = format!("{c:?}{p:?}{d:?}{e:?}{e}{:?}", ctx());
     assert!(!out.contains(TOKEN));
+}
+
+// ---- #78: 文字列の表と Debug の網羅 ----
+
+#[test]
+fn delivery_failure_display_is_distinct() {
+    let all = [
+        DeliveryFailure::Introspection(IntrospectionFailure::Unavailable),
+        DeliveryFailure::DeciderValidityUnavailable,
+        DeliveryFailure::HubValidityUnavailable,
+    ];
+    let texts: Vec<String> = all.iter().map(|f| f.to_string()).collect();
+    for (i, a) in texts.iter().enumerate() {
+        assert!(a.starts_with("delivery check: "), "{a}");
+        for b in &texts[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
+}
+
+#[test]
+fn rejection_vocabulary_is_fixed() {
+    // ADLG-11・ADLG-12・ADLG-31: PoC-11 の語彙
+    assert_eq!(
+        DeliveryRejection::IntrospectInactive.as_str(),
+        "introspect_inactive"
+    );
+    assert_eq!(
+        DeliveryRejection::DeciderSessionInactive.as_str(),
+        "decider_session_inactive"
+    );
+    assert_eq!(DeliveryRejection::HubInvalid.as_str(), "hub_invalid");
+}
+
+#[test]
+fn validity_debug_hides_identifiers() {
+    // SECR-23〜27: sid・登録 ID は種別だけを出す
+    let reg = ValidityTarget::Registration {
+        registration_id: "reg-secret-test".to_owned(),
+    };
+    let sess = ValidityTarget::Session {
+        sid: "sid-secret-test".to_owned(),
+    };
+    let req = ValidityRequest {
+        endpoint: "https://console.example.test/validity".to_owned(),
+        client_id: "console-test-client".to_owned(),
+        target: reg.clone(),
+    };
+    let text = format!("{reg:?}{sess:?}{req:?}");
+    assert!(text.contains("Registration") && text.contains("Session"));
+    assert!(!text.contains("reg-secret-test") && !text.contains("sid-secret-test"));
 }

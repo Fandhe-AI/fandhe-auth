@@ -28,5 +28,4 @@ pub mod fault;
 pub mod introspection;
 pub mod record;
 
-// TODO(TASK-8): 単体試験（#78）、実物との差の文書（#79）は
-// 後続の段で足す。遅延・拒否の注入は本体の設定に持ち込まない。
+// TODO(TASK-8): 実物との差の文書（#79）は後続の段で足す。遅延・拒否の注入は本体の設定に持ち込まない。
