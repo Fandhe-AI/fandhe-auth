@@ -47,7 +47,10 @@ docker compose -f dev/postgres/compose.yaml exec postgres psql -U postgres -c 's
 | password | `FANDHE_AUTH_DEV_PG_PASSWORD` から注入する。値は書かない |
 
 - ルートの `.env`（`make setup` が作る）は、実行ディレクトリがルートのとき compose に自動で読まれうる。ポートを変えるときは
-  `export` するか、`docker compose --env-file .env -f dev/postgres/compose.yaml up` のように `--env-file` で読み込み元を明示する
+  `export` するか、`docker compose --env-file .env -f dev/postgres/compose.yaml up` のように `--env-file` で読み込み元を明示する。
+  `--env-file` で読んだ値は compose にだけ渡り、呼び出し元のシェルには `export` されない。ホストからの接続（下の `psql` 例）も
+  同じポートに揃えるため、起動と接続のどちらでも `FANDHE_AUTH_DEV_PG_PORT` を `export` する（`.env` を使うなら
+  `set -a; . ./.env; set +a` で読み込む）。揃えないと `psql` は既定の 55432 に接続する
 - ルートの `.env` にパスワードを書かない。起動時に生成して export する
 - ホストからの接続例。パスワードは環境変数で渡し、引数・URL に書かない
 
