@@ -12,8 +12,12 @@
 //!   `alg`・`typ`（`logout+jwt`）はコードに固定し、トークンや設定から導かない（SIGN-1・SIGN-6・SIGN-9・SIGN-10）。
 //!   `jku`・`x5u`・`jwk` は読まない（SIGN-16）。`exp == now` は拒否する（SIGN-17）。
 //! - 署名を確かめる前に、ペイロードの値を判定に使わない。
-//! - 必須クレームは `iss`・`aud`・`exp`・`iat`・`jti`・`sid`・`sub`、`events` は Back-Channel Logout のイベントを持つ。
+//! - 必須クレームは `iss`・`aud`・`exp`・`iat`・`jti`・`sub`、`events` は Back-Channel Logout のイベントを持つ。
+//!   失効の対象は次のどちらか 1 つだけで、両方・どちらも無いものは拒否する。
+//!   (1) クライアント別の `sid`（RVPG-7）。(2) `sid` を持たず、独自のクレーム（[`GROUPED_CLAIM`]）に
+//!   `{"client_id":…,"sid":…}` の組の一覧を持つ Hub の sector 向けの形（RVPG-14。`sub` は Hub 用 sector の `sub`）。
 //!   禁止は `nonce`・`scope`・`at_hash`・`client_id`（RVPG-7）。集合の正本は spec の RVPG-7・RVPG-14 で、ここは受け口の模擬。
+//!   `iat` が `now` より先、または `iat >= exp` の通知は拒否する。
 //! - 同じ `jti` の再受信（送信器の再送。RVPG-28）は拒否せず、重複の印を付けて記録する。適用は 1 回だけ数える。
 //! - トークンの文字列は保持せず、誤りの `Display`・`Debug` にも出さない（SECR-23〜27）。拒否は記録を変えない。
 //! - 判定しないもの: Hub が所有する値（`exp − iat` の上限など）。実物との差として #69・#70 で文書にする。
@@ -27,6 +31,10 @@ use serde_json::Value;
 
 /// Back-Channel Logout のイベント名（OpenID Connect Back-Channel Logout 1.0）。
 const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
+
+/// RVPG-14: 組の一覧を載せる独自のクレーム名。spec は名前を示していない（「独自のクレーム」）ため、試験用の仮置き。
+/// TODO(TASK-7): 本体側の送信器・Hub の実物のクレーム名が決まったら置き換える（#62）。
+pub const GROUPED_CLAIM: &str = "session_pairs";
 
 /// RVPG-7: Logout Token が持ってはならないクレーム。
 const FORBIDDEN_CLAIMS: [&str; 4] = ["nonce", "scope", "at_hash", "client_id"];
@@ -48,7 +56,10 @@ pub struct LogoutReceipt {
     pub iat: u64,
     pub exp: u64,
     pub jti: String,
-    pub sid: String,
+    /// クライアント別の `sid`（RVPG-7）。組の一覧の形（RVPG-14）では `None`。
+    pub sid: Option<String>,
+    /// `(client_id, sid)` の組の一覧（RVPG-14）。クライアント別の `sid` の形では空。
+    pub pairs: Vec<(String, String)>,
     /// 同じ `jti` を既に受けていたか（再送。RVPG-28）。`true` の通知は失効の適用に数えない。
     pub duplicate: bool,
 }
@@ -64,6 +75,7 @@ pub enum LogoutRejection {
     AudienceMismatch,
     Expired,
     MissingClaim,
+    InvalidIssuedAt,
     ForbiddenClaim,
     EventMismatch,
 }
@@ -79,6 +91,7 @@ impl std::fmt::Display for LogoutRejection {
             Self::AudienceMismatch => "logout rejected: audience mismatch",
             Self::Expired => "logout rejected: expired",
             Self::MissingClaim => "logout rejected: missing claim",
+            Self::InvalidIssuedAt => "logout rejected: invalid issued-at",
             Self::ForbiddenClaim => "logout rejected: forbidden claim",
             Self::EventMismatch => "logout rejected: event mismatch",
         })
@@ -112,6 +125,39 @@ impl LogoutTokenReceiver {
     /// 失効の適用として数える通知（重複でないもの）。
     pub fn applied(&self) -> impl Iterator<Item = &LogoutReceipt> {
         self.received.iter().filter(|r| !r.duplicate)
+    }
+
+    /// 失効が反映された `sid` の一覧（重複排除。クライアント別の `sid` の形と組の一覧の両方から集める。受理順）。
+    /// 同じ `sid` が別の通知・再送で届いても 1 回と数える（RVPG-14・RVPG-28）。
+    pub fn applied_sids(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for r in self.applied() {
+            let sids = r
+                .sid
+                .iter()
+                .map(String::as_str)
+                .chain(r.pairs.iter().map(|(_, s)| s.as_str()));
+            for sid in sids {
+                if !out.contains(&sid) {
+                    out.push(sid);
+                }
+            }
+        }
+        out
+    }
+
+    /// 失効が反映された `(client_id, sid)` の組（重複排除。受理順。RVPG-14）。
+    pub fn applied_pairs(&self) -> Vec<(&str, &str)> {
+        let mut out: Vec<(&str, &str)> = Vec::new();
+        for r in self.applied() {
+            for (c, s) in &r.pairs {
+                let pair = (c.as_str(), s.as_str());
+                if !out.contains(&pair) {
+                    out.push(pair);
+                }
+            }
+        }
+        out
     }
 
     /// Logout Token を受ける。受理したら記録に積んで返し、拒否したときは記録を変えない。
@@ -180,9 +226,26 @@ impl LogoutTokenReceiver {
             iat: num("iat")?,
             exp: num("exp")?,
             jti: st("jti")?,
-            sid: st("sid")?,
+            sid: None,
+            pairs: Vec::new(),
             duplicate: false,
         };
+        // RVPG-7 / RVPG-14: 失効の対象は sid か組の一覧のどちらか 1 つだけ。
+        match (claims.get("sid"), claims.get(GROUPED_CLAIM)) {
+            (Some(_), Some(_)) | (None, None) => return Err(R::MissingClaim),
+            (Some(Value::String(sid)), None) => receipt.sid = Some(sid.clone()),
+            (None, Some(Value::Array(list))) if !list.is_empty() => {
+                for item in list {
+                    let obj = item.as_object().ok_or(R::Malformed)?;
+                    let get = |k: &str| obj.get(k).and_then(Value::as_str).map(str::to_owned);
+                    match (obj.len(), get("client_id"), get("sid")) {
+                        (2, Some(c), Some(s)) => receipt.pairs.push((c, s)),
+                        _ => return Err(R::Malformed),
+                    }
+                }
+            }
+            _ => return Err(R::Malformed),
+        }
         // events は Back-Channel Logout のイベントをオブジェクトとして持つ。
         match claims.get("events") {
             Some(Value::Object(e))
@@ -195,6 +258,10 @@ impl LogoutTokenReceiver {
         }
         if !receipt.aud.contains(&self.expectations.audience) {
             return Err(R::AudienceMismatch);
+        }
+        // iat は未来であってはならず、exp より前でなければならない。
+        if receipt.iat > now || receipt.iat >= receipt.exp {
+            return Err(R::InvalidIssuedAt);
         }
         // SIGN-17: exp == now も拒否。
         if receipt.exp <= now {

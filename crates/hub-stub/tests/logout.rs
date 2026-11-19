@@ -3,7 +3,9 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use fandhe_auth_hub_stub::logout::{LogoutExpectations, LogoutRejection, LogoutTokenReceiver};
+use fandhe_auth_hub_stub::logout::{
+    GROUPED_CLAIM, LogoutExpectations, LogoutRejection, LogoutTokenReceiver,
+};
 use fandhe_auth_hub_stub::presentation::VerificationKey;
 use ring::rand::SystemRandom;
 use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
@@ -56,7 +58,10 @@ fn accepts_valid_logout_token_and_records() {
     let got = r
         .receive(&sign(&key, &header(), &claims("j1", "sid-1")), NOW)
         .unwrap();
-    assert_eq!((got.sid.as_str(), got.jti.as_str()), ("sid-1", "j1"));
+    assert_eq!(
+        (got.sid.as_deref().unwrap(), got.jti.as_str()),
+        ("sid-1", "j1")
+    );
     assert_eq!(got.aud, vec![AUD.to_owned()]);
     assert!(!got.duplicate);
     assert_eq!(r.received(), &[got]);
@@ -172,4 +177,80 @@ fn rejects_malformed_without_leaking() {
     let e = r.receive("secret-looking.token", NOW).unwrap_err();
     assert_eq!(e, LogoutRejection::Malformed);
     assert!(!e.to_string().contains("secret-looking"));
+}
+
+fn grouped_claims(jti: &str) -> Value {
+    json!({
+        "iss": ISS, "sub": "hub-sector-user", "aud": AUD, "iat": 900, "exp": 1_020,
+        "jti": jti, "events": {EVENT: {}},
+        GROUPED_CLAIM: [
+            {"client_id": "c1", "sid": "s1"},
+            {"client_id": "c2", "sid": "s2"},
+            {"client_id": "c3", "sid": "s3"}
+        ]
+    })
+}
+
+/// RVPG-14: sid を持たず組の一覧を持つ通知を受理し、全ての組が 1 回だけ反映される。再送 jti は反映 1 回。
+#[test]
+fn accepts_grouped_pairs_and_counts_each_pair_once() {
+    let key = new_key();
+    let mut r = receiver(&key);
+    let t = sign(&key, &header(), &grouped_claims("g1"));
+    let got = r.receive(&t, NOW).unwrap();
+    assert_eq!(got.sid, None);
+    assert_eq!(got.pairs.len(), 3);
+    for _ in 0..5 {
+        assert!(r.receive(&t, NOW).unwrap().duplicate);
+    }
+    assert_eq!(r.received().len(), 6);
+    assert_eq!(r.applied().count(), 1);
+    assert_eq!(
+        r.applied_pairs(),
+        vec![("c1", "s1"), ("c2", "s2"), ("c3", "s3")]
+    );
+    assert_eq!(r.applied_sids(), vec!["s1", "s2", "s3"]);
+}
+
+/// RVPG-14: sid と組の一覧の併存・どちらも無い・組の形の崩れ・空の一覧を拒否する。
+#[test]
+fn rejects_bad_grouped_shapes() {
+    let key = new_key();
+    let mut r = receiver(&key);
+    let mut both = grouped_claims("g1");
+    both["sid"] = json!("s");
+    let mut none = grouped_claims("g2");
+    none.as_object_mut().unwrap().remove(GROUPED_CLAIM);
+    let mut empty = grouped_claims("g3");
+    empty[GROUPED_CLAIM] = json!([]);
+    let mut extra = grouped_claims("g4");
+    extra[GROUPED_CLAIM] = json!([{"client_id": "c", "sid": "s", "x": 1}]);
+    let mut nonstr = grouped_claims("g5");
+    nonstr[GROUPED_CLAIM] = json!([{"client_id": "c", "sid": 1}]);
+    for (c, want) in [
+        (both, LogoutRejection::MissingClaim),
+        (none, LogoutRejection::MissingClaim),
+        (empty, LogoutRejection::Malformed),
+        (extra, LogoutRejection::Malformed),
+        (nonstr, LogoutRejection::Malformed),
+    ] {
+        assert_eq!(r.receive(&sign(&key, &header(), &c), NOW), Err(want));
+    }
+    assert!(r.received().is_empty());
+}
+
+/// iat が未来、または iat >= exp の通知を拒否する。
+#[test]
+fn rejects_invalid_issued_at() {
+    let key = new_key();
+    let mut r = receiver(&key);
+    for iat in [NOW + 1, 1_020, 1_030] {
+        let mut c = claims("j1", "s");
+        c["iat"] = json!(iat);
+        assert_eq!(
+            r.receive(&sign(&key, &header(), &c), NOW),
+            Err(LogoutRejection::InvalidIssuedAt)
+        );
+    }
+    assert!(r.received().is_empty());
 }
