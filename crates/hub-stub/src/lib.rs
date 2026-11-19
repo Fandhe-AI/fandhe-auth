@@ -19,16 +19,18 @@
 //! 生存確認の受け口: [`heartbeat::HeartbeatReceiver`]（#64）。
 //! Hub の JWKS を返す模擬: [`jwks::HubJwksEndpoint`]（#65）。
 //! Hub が `fandhe-auth` の JWKS を取得する模擬: [`jwks::AuthJwksFetcher`]（#65）。
+//! 応答の遅れ・拒否の注入: [`fault::HubFaultInjector`]（#66）。
 
 #![forbid(unsafe_code)]
 
 pub mod assertion;
 pub mod config;
+pub mod fault;
 pub mod feed;
 pub mod heartbeat;
 pub mod jwks;
 pub mod logout;
 pub mod presentation;
 
-// TODO(TASK-7): 遅れ・拒否の注入（#66）、仮置きの値の明示（#67）、
+// TODO(TASK-7): 仮置きの値の明示（#67）、
 // 単体試験（#68）、実物との差の文書（#69・#70）は後続の段で足す。
