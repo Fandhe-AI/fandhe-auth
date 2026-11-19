@@ -20,13 +20,13 @@
 //!   全て `Err` か非成功の値で、成功に数えない（AVLB-18・AVLB-22 の向き）。承認・拒否・期限切れは口の答え
 //!   （試験の設定値）として現れるだけで、本モジュールは承認を模さない。
 //! - 各呼び出しは結果に関わらず 1 件記録してから返す（[`crate::record`]）。
-//! - 判定しないもの: DPoP の proof の生成、遅延・拒否の注入（[`crate::fault`]。#76）、仮定の契約の印（#77）、実物との差（#79）。
+//! - 判定しないもの: DPoP の proof の生成、遅延・拒否の注入（[`crate::fault`]。#76）、仮定の契約の印（[`crate::contract`]）、実物との差（#79）。
 
 use crate::config::AgentCredentialConfig;
 use crate::introspection::TransportFailure;
 use crate::record::{CallKind, CallLog, CallOutcome};
 
-// TODO(TASK-8): 口の本文の形・経路名が仮定である点の印は #77、proof を生成しない点・型付きの答えで受け
+// TODO(TASK-8): proof を生成しない点・型付きの答えで受け
 // HTTP の本文を解釈しない点・refresh の grant を模さない点・登録の失効が人の画面操作の代わりである点は #79 に書く。
 // TODO(TASK-8): 鍵・proof を持たせる段で fandhe-auth-secret の型を使い、許可表を見直す。
 

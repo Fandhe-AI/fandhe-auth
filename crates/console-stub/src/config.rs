@@ -129,5 +129,5 @@ impl CredentialFaultConfig {
     }
 }
 
-// TODO(TASK-8): 仮定の契約の印（#77）を足す。
+// 契約の仮定の印と記録は [`crate::contract`]（#77・A-2026-10-28-12）。本 module の値の仮置きは A-2026-10-28-14。
 // TODO(TASK-8): 秘密値（private_key_jwt の鍵等）を足す段で fandhe-auth-secret の型を使い、許可表を見直す。
