@@ -12,7 +12,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use fandhe_auth_hub_stub::assertion::{
     AssertionRequest, AssertionSigningKey, AssertionTarget, CalledEndpoint, HubAssertionCaller,
 };
-use fandhe_auth_hub_stub::config::HubStubConfig;
+use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
 use fandhe_auth_hub_stub::feed::{
     ChangeFeedFetcher, ChangeFeedPort, FeedEntryKind, FeedResponse, FetchError, FetchOutcome,
     applied_jtis_across,
@@ -32,17 +32,17 @@ const T0: u64 = 1_000;
 
 fn config() -> HubStubConfig {
     HubStubConfig {
-        client_id: CLIENT_ID.to_owned(),
-        public_host: "hub.example.test".to_owned(),
-        jwks_uri: "https://hub.example.test/jwks".to_owned(),
-        logout_receiver_uri: "https://hub.example.test/logout".to_owned(),
-        jwks_max_age: Duration::from_secs(1),
-        jwks_fetch_min_interval: Duration::from_secs(2),
-        jwks_cache_max: Duration::from_secs(3),
-        jwks_stale_max: Duration::from_secs(6),
-        assertion_max_lifetime: Duration::from_secs(300),
-        feed_fetch_min_interval: Duration::from_secs(MIN),
-        heartbeat_loss_threshold: Duration::from_secs(10),
+        client_id: StubValue::test(CLIENT_ID.to_owned()),
+        public_host: StubValue::test("hub.example.test".to_owned()),
+        jwks_uri: StubValue::test("https://hub.example.test/jwks".to_owned()),
+        logout_receiver_uri: StubValue::test("https://hub.example.test/logout".to_owned()),
+        jwks_max_age: StubValue::test(Duration::from_secs(1)),
+        jwks_fetch_min_interval: StubValue::test(Duration::from_secs(2)),
+        jwks_cache_max: StubValue::test(Duration::from_secs(3)),
+        jwks_stale_max: StubValue::test(Duration::from_secs(6)),
+        assertion_max_lifetime: StubValue::test(Duration::from_secs(300)),
+        feed_fetch_min_interval: StubValue::test(Duration::from_secs(MIN)),
+        heartbeat_loss_threshold: StubValue::test(Duration::from_secs(10)),
     }
 }
 

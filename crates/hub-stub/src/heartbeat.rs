@@ -95,7 +95,7 @@ impl std::fmt::Debug for HeartbeatReceiver {
 impl HeartbeatReceiver {
     pub fn new(config: &HubStubConfig) -> Self {
         Self {
-            threshold: config.heartbeat_loss_threshold,
+            threshold: *config.heartbeat_loss_threshold.get(),
             last_received: HashMap::new(),
             records: Vec::new(),
         }

@@ -258,8 +258,8 @@ pub struct HubAssertionCaller {
 impl HubAssertionCaller {
     pub fn new(config: &HubStubConfig, target: AssertionTarget, key: AssertionSigningKey) -> Self {
         Self {
-            client_id: config.client_id.clone(),
-            max_lifetime_secs: config.assertion_max_lifetime.as_secs(),
+            client_id: config.client_id.get().clone(),
+            max_lifetime_secs: config.assertion_max_lifetime.get().as_secs(),
             target,
             key,
             rng: SystemRandom::new(),

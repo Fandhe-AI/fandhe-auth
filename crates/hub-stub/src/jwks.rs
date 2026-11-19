@@ -125,8 +125,8 @@ impl std::fmt::Debug for HubJwksEndpoint {
 impl HubJwksEndpoint {
     pub fn new(config: &HubStubConfig) -> Self {
         Self {
-            max_age: config.jwks_max_age,
-            cache_max: config.jwks_cache_max,
+            max_age: *config.jwks_max_age.get(),
+            cache_max: *config.jwks_cache_max.get(),
             keys: Vec::new(),
             version: 0,
             cache: None,
@@ -367,8 +367,8 @@ impl std::fmt::Debug for AuthJwksFetcher {
 impl AuthJwksFetcher {
     pub fn new(config: &HubStubConfig) -> Self {
         Self {
-            min_interval: config.jwks_fetch_min_interval,
-            stale_max: config.jwks_stale_max,
+            min_interval: *config.jwks_fetch_min_interval.get(),
+            stale_max: *config.jwks_stale_max.get(),
             keys: Vec::new(),
             last_attempt_at: None,
             last_success_at: None,

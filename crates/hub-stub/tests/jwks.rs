@@ -6,7 +6,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use fandhe_auth_hub_stub::assertion::AssertionSigningKey;
-use fandhe_auth_hub_stub::config::HubStubConfig;
+use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
 use fandhe_auth_hub_stub::jwks::HubJwksEndpoint;
 use serde_json::Value;
 
@@ -14,17 +14,17 @@ const T0: u64 = 1_000;
 
 fn config(max_age: u64, cache_max: u64) -> HubStubConfig {
     HubStubConfig {
-        client_id: "hub-client.test".to_owned(),
-        public_host: "hub.example.test".to_owned(),
-        jwks_uri: "https://hub.example.test/jwks".to_owned(),
-        logout_receiver_uri: "https://hub.example.test/logout".to_owned(),
-        jwks_max_age: Duration::from_secs(max_age),
-        jwks_fetch_min_interval: Duration::from_secs(2),
-        jwks_cache_max: Duration::from_secs(cache_max),
-        jwks_stale_max: Duration::from_secs(6),
-        assertion_max_lifetime: Duration::from_secs(300),
-        feed_fetch_min_interval: Duration::from_secs(5),
-        heartbeat_loss_threshold: Duration::from_secs(10),
+        client_id: StubValue::test("hub-client.test".to_owned()),
+        public_host: StubValue::test("hub.example.test".to_owned()),
+        jwks_uri: StubValue::test("https://hub.example.test/jwks".to_owned()),
+        logout_receiver_uri: StubValue::test("https://hub.example.test/logout".to_owned()),
+        jwks_max_age: StubValue::test(Duration::from_secs(max_age)),
+        jwks_fetch_min_interval: StubValue::test(Duration::from_secs(2)),
+        jwks_cache_max: StubValue::test(Duration::from_secs(cache_max)),
+        jwks_stale_max: StubValue::test(Duration::from_secs(6)),
+        assertion_max_lifetime: StubValue::test(Duration::from_secs(300)),
+        feed_fetch_min_interval: StubValue::test(Duration::from_secs(5)),
+        heartbeat_loss_threshold: StubValue::test(Duration::from_secs(10)),
     }
 }
 
@@ -150,8 +150,8 @@ use fandhe_auth_hub_stub::presentation::VerificationKey;
 
 fn config_b(min_interval: u64, stale_max: u64) -> HubStubConfig {
     let mut c = config(1, 0);
-    c.jwks_fetch_min_interval = Duration::from_secs(min_interval);
-    c.jwks_stale_max = Duration::from_secs(stale_max);
+    c.jwks_fetch_min_interval = StubValue::test(Duration::from_secs(min_interval));
+    c.jwks_stale_max = StubValue::test(Duration::from_secs(stale_max));
     c
 }
 
@@ -326,7 +326,7 @@ fn keys_with_non_verify_use_or_key_ops_are_skipped() {
 fn sub_second_stale_max_is_not_rounded_up() {
     let k = AssertionSigningKey::generate("k1").unwrap();
     let mut c = config_b(1, 0);
-    c.jwks_stale_max = Duration::from_millis(500);
+    c.jwks_stale_max = StubValue::test(Duration::from_millis(500));
     let mut f = AuthJwksFetcher::new(&c);
     let mut port = FakeJwksPort::new(vec![ok(body_of(&[&k]))]);
     f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();

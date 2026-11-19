@@ -11,6 +11,8 @@
 //!
 //! 設定: Hub の値は設定で受ける（[`config::HubStubConfig`]）。数値の正本は Hub の ID で、ここには
 //! 書かない。本番の値として扱わない（A-2026-10-28-1）。環境変数・ファイルは読まない（DPOL-32）。
+//! 各値は [`config::StubValue`] と [`config::ValueMark`] で「仮置き」の印を必ず持ち、
+//! [`config::HubStubConfig::provisional_record`] で記録に残す（#67）。
 //!
 //! 本人トークンの提示の受け口: [`presentation::IdentityTokenReceiver`]（#60）。
 //! `private_key_jwt` の assertion で口を呼ぶ模擬: [`assertion::HubAssertionCaller`]（#61）。
@@ -32,5 +34,4 @@ pub mod jwks;
 pub mod logout;
 pub mod presentation;
 
-// TODO(TASK-7): 仮置きの値の明示（#67）、
-// 単体試験（#68）、実物との差の文書（#69・#70）は後続の段で足す。
+// TODO(TASK-7): 単体試験（#68）、実物との差の文書（#69・#70）は後続の段で足す。
