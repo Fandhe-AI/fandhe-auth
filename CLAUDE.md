@@ -22,9 +22,11 @@ passkey・認証セッション・失効・復旧・登録済み自社クライ�
   sub-issue のタイトルと受け入れ条件は目安で、正は spec の原文
 - crate は repo ルートの 1 つの workspace に置く。crate 名は接頭辞 `fandhe-auth-` 付き、ディレクトリは接頭辞を除いた
   `crates/<名前>`（`D-2026-10-27-8`・`D-2026-10-28-1`）。作る範囲は段階 1（`core`・`secret`・`db-tests`・`client`、
-  OIDC 共通部品〔名前は未決〕）、段階 2（`backend`・`webauthn-wasm`・`frontend` 等）は作る前に利用者へ確かめる。
+  OIDC 共通部品 `plugin-oidc`〔`D-2026-11-20-2`〕）、段階 2（`backend`・`webauthn-wasm`・`frontend` 等）は作る前に利用者へ確かめる。
   `db-pg`・`db-fandhe`・`db-migrate`・`server` は Hub の担当で作らない。段階は〔提案〕で、決定済みなのは名前
   （`LIB-14`・`D-2026-10-29-2`）。詳細は `.claude/rules/coding-rust.md`・`.claude/rules/library-boundary.md`
+- `crates/backend` は TASK-9 の暫定の置き場（`D-2026-11-20-1`）。`interim` に最初の中身を足す前、または `fandhe-backend` への依存を足す前の
+  早い方で、人が `LIB-15` の判定を記録する（`D-2026-11-20-3`）。記録するまでは、`crates/backend` のどこにも（`interim` の外も含めて）中身を足さない。最初のリリースから除く仕組みは未決（`Q-2026-11-20-1`）
 - 判定・値の決定・例外の承認・「確定」への変更は人が行う。Claude Code は手順・仕組み・試験を作って流すところまで（ACPT-7）
 
 開発基盤（Makefile・lefthook・CI・ツール導入）の説明は [README.md](README.md) を参照する。

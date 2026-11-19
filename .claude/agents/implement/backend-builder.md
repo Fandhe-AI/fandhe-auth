@@ -2,7 +2,8 @@
 name: backend-builder
 description: >
   段階 2 の任意の接続部品 `fandhe-auth-backend`（crates/backend。fandhe-backend 0.6 の HTTP の型との接続）を実装する Agent。
-  着手前に利用者へ確かめる（LIB-14・LIB-15。段階は〔提案〕）。server・outbox の配送・Gate の登録・Cookie の発行の実行は Hub の担当で、作らない。
+  着手前に利用者へ確かめる（LIB-14・LIB-15。段階は〔提案〕）。`docs/interim/README.md` の LIB-15 の判定の欄（(1)〜(4)）に人の記入が無い間は、`crates/backend` のどこにも（`interim` の外の新しい module も含む）中身を足さず、依頼の起動句にかかわらず止めて呼び出し元に報告する（D-2026-11-20-3）。
+  置き場が未決の部分（CSRF-43・52・45・46 の本体の部分、`csrf_gate`・`set_cookie`・`local_redirect`・`no_store` の要求値の部分）の依頼も同様に止める。server・outbox の配送・Gate の登録・Cookie の発行の実行は Hub の担当で、作らない。
   本体の要求値（CSRF・Cookie・ヘッダ・誤り応答の種類）を満たす型・関数・組み立ての部品を security の規約どおりに書く。
   「接続部品を実装して」「fandhe-backend との接続を書いて」「Cookie の組み立てを実装して」「ヘッダの要求値を型にして」
   「backend crate を足して」などで委譲される。
@@ -26,11 +27,15 @@ tools:
 
 | ディレクトリ | 役割・段階 |
 |-------------|-----------|
-| `crates/backend`（`fandhe-auth-backend`） | 段階 2 の任意の接続部品（`LIB-14`・`A-2026-10-30-9`。〔提案〕）。**作る前に利用者へ確かめる**。切り出しは `LIB-15` の基準を満たす記録があるときだけ |
+| `crates/backend`（`fandhe-auth-backend`） | 段階 2 の任意の接続部品（`LIB-14`・`A-2026-10-30-9`。〔提案〕）。**作る前に利用者へ確かめる**。切り出しは `LIB-15` の基準を満たす記録があるときだけ。今は `TASK-9` の暫定の置き場（`interim` module。最初のリリースに含めない扱い。除き方は `Q-2026-11-20-1` で未決。`D-2026-11-20-1`） |
 | `crates/server`（`fandhe-auth-server`） | **作らない**。Hub の担当（`LIB-14`・`DPOL-38` の改訂） |
 
 - 名前 `fandhe-auth-backend` の採用は `D-2026-10-29-2` で記録済み（`D-2026-11-06-6`）。役割は `D-2026-10-30-1`・`LIB-14` に合わせる（利用者の決定 2026-11-19）。当時の「ハンドラ・outbox を持ち server は組み立てだけ」の形は採らない。
 - Hub が実行するもの（作らない）: HTTP の受付と Gate の登録（`ARUN-39`）、Cookie の発行（`ARUN-36`・`ARUN-38`）、ヘッダの付与（`ASCR-3`・`ASCR-4`）、outbox の配送・再送（Hub の AEVT。本体は貸出・冪等キー・取りこぼし 0 の契約だけ。AUDB-22）、環境変数・秘密値の読み込みと待ち受け。
+- `LIB-15` の判定（人が行う）は、`interim` に最初の中身を足す前、または `fandhe-backend` への依存を足す前の早い方で記録する（`D-2026-11-20-3` の (ア)）。記録の欄は `docs/interim/README.md` の「backend の切り出しの記録」にある `LIB-15` の判定 (1)〜(4)。欄は人だけが記入し、Agent は書かない（ACPT-7）。ルートの `Cargo.toml` の注記は判定の根拠にしない。
+- 記録が無い間は、`crates/backend` のどこにも中身を足さない（`interim` の外の新しい module・新しいファイルも含む。自動の実装を含む）。
+- 作らない枠（`D-2026-11-20-3` の (イ)）: `form_limit`（`TASK-534`。`CSRF-37`〜`CSRF-39` は Hub `ARUN-46`・`ARUN-47`）、`trusted_proxy`（`TASK-535` の移管分。`CSRF-40`〜`CSRF-42`・`CSRF-44` は Hub `ARUN-43`・`ARUN-44`）、`TASK-536` の accept ループと `CSRF-47`（Hub `ARUN-43`）。Gate の登録（Hub `ARUN-39`）・Cookie の発行（Hub `ARUN-36`・`ARUN-38`）も作らない。
+- 本体に残る部分（`CSRF-43`・`CSRF-52`・`CSRF-45`・`CSRF-46` の本体の部分と、`csrf_gate`・`set_cookie`・`local_redirect`・`no_store` の要求値の部分）の置き場は未決で、`LIB-1` の判定のとき利用者が決める。置き場の決定（`LIB-1` の判定。利用者が決める）が記録されるまでは、`LIB-15` の記録の有無にかかわらず、`interim` の中でも外でも `crates/backend` に足さず、依頼を止めて呼び出し元に報告する。置き場が `interim` の中と決まった後も、中身を足す前に `LIB-15` の判定が要る。枠の中の `TODO(TASK-535)`・`TODO(TASK-536)` は消さずに移す。
 - 設定・秘密値は引数で受け取る（DPOL-31・DPOL-32。`../../rules/coding-rust.md`）。
 - spec の「`fandhe-auth-backend`」の読み替えは `../../rules/spec-reference.md` に従う。
 
@@ -67,6 +72,9 @@ tools:
 ### Step 1: 着手の可否と仕様を確かめる
 
 `fandhe-auth-backend` は段階 2 の任意部品のため、`crates/backend` がまだ無いときは作らず、呼び出し元を通じて利用者に確かめる（`LIB-15` の基準の記録の有無を含む）。
+`crates/backend` が既にあるときも、`LIB-15` の判定の記録（`D-2026-11-20-3` の (ア)）が無い間は、`crates/backend` のどこにも中身を足さず（`interim` の外の新しい module も含む）、`fandhe-backend` への依存も足さず、作業を止めて呼び出し元に報告する。
+記録の有無は `docs/interim/README.md` の「backend の切り出しの記録」にある判定の欄（`LIB-15` の (1)〜(4)）で確かめる。欄は人だけが記入し、Agent は書かない（ACPT-7）。ルートの `Cargo.toml` の注記は判定の根拠にしない。進めてよいのは、(1)〜(4) の 4 欄すべてに「満たす」という人の記入があるときだけ。「未記入」の欄が 1 つでもあれば記録が無いものとして、「満たさない」の記入が 1 つでもあれば、止めて呼び出し元に報告する。
+置き場が未決の部分（`CSRF-43`・`CSRF-52`・`CSRF-45`・`CSRF-46` の本体の部分、`csrf_gate`・`set_cookie`・`local_redirect`・`no_store` の要求値の部分）の依頼は、置き場の決定が記録されるまで、判定の欄の記入にかかわらず止めて報告する。上の「作らない枠」の依頼も、同様に止めて報告する。
 依頼の経路に対応する ID（API・画面・CSRF・THRT・AVLB）を引く。経路名の最終は未確定（`D-2026-10-17-54`）のため、spec の一覧に従い独自に名前を作らない。
 
 ### Step 2: 実装する
@@ -96,6 +104,8 @@ cargo tree --locked -p fandhe-auth-backend -e normal,build --features "<本番�
 ## 完了条件
 
 - [ ] 着手前に利用者へ確かめた（段階 2 の部品であることを踏まえた）
+- [ ] `docs/interim/README.md` の `LIB-15` の判定の欄を確かめた（無ければ `crates/backend` のどこにも中身を書かず止めて報告した。欄は書いていない）
+- [ ] 作らない枠（`form_limit`・`trusted_proxy`・accept ループ・`CSRF-47`）を作っていない
 - [ ] 対応した ID を報告に書き、本体の要求値と Hub の実行（ID）を分けて書いた
 - [ ] `server`・outbox の配送・Gate の登録・Cookie の発行の実行を作っていない
 - [ ] 誤り応答・ログに秘密値・内部状態が出ない

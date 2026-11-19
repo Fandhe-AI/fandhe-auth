@@ -1,7 +1,7 @@
 ---
 name: core-builder
 description: >
-  本体の段階 1 の crate（crates/core・secret・client）と、外部ログイン Plugin の OIDC 共通部品を実装する Agent。
+  本体の段階 1 の crate（crates/core・secret・client）と、外部ログイン Plugin の OIDC 共通部品（`fandhe-auth-plugin-oidc`・crates/plugin-oidc）を実装する Agent。
   WebAuthn・OIDC Provider・鍵管理・共有型は、独立 crate か core の中かが未定（TASK-3・TASK-4 で決める）のまま、同じ担当で扱う。
   core は I/O を持たず時刻・乱数・ID を引数で受ける形で書き、秘密値の型・コメントの規約に従う。
   「認証コアを実装して」「core に追加して」「WebAuthn アダプタを書いて」「秘密値の型を実装して」
@@ -33,7 +33,7 @@ crate の名前は利用者の決定（`D-2026-10-27-8`・`D-2026-10-28-1`）、
 | `fandhe-auth-core`（`crates/core`） | 型・判定・プロトコル処理・ストレージ契約の trait | DPOL-1・DPOL-3 |
 | `fandhe-auth-secret`（`crates/secret`） | 秘密値の型（実装は 1 つ） | SECR-31 |
 | `fandhe-auth-client`（`crates/client`） | RP 向け | DPOL-7（`fandhe-auth-db*` に依存しない）・DPOL-21（`rsa` を入れない） |
-| 外部ログイン Plugin の OIDC 共通部品 | 同梱の Plugin。本体に含めない。crate 名は未決（TASK-3・TASK-4 で決める） | `plugin-contract.md`（`PLG`）・`identity-link.md`・`auth-methods.md` |
+| 外部ログイン Plugin の OIDC 共通部品 | 同梱の Plugin。本体に含めない。crate 名は `fandhe-auth-plugin-oidc`（`crates/plugin-oidc`）で決定済み（`D-2026-11-20-2`。crates.io の空きは未照会。公開するかは別に決める） | `plugin-contract.md`（`PLG`）・`identity-link.md`・`auth-methods.md` |
 
 `fandhe-auth-db-tests` は db-builder の担当。
 
@@ -48,6 +48,8 @@ crate の名前は利用者の決定（`D-2026-10-27-8`・`D-2026-10-28-1`）、
 | `fandhe-auth-db-contract` | 領域ごとの契約 trait | db-builder の担当 |
 
 段階 2（SAML 等の Plugin・`fandhe-auth-backend`・`fandhe-auth-webauthn-wasm`・`fandhe-auth-frontend`）と Hub の担当（`fandhe-auth-db-pg`・`-db-fandhe`・`-db-migrate`・`fandhe-auth-server`）は作らない。着手前に利用者へ確かめる。
+
+置き場が未決の部分（`CSRF-43`・`CSRF-52`・`CSRF-45`・`CSRF-46` の本体の部分、`csrf_gate`・`set_cookie`・`local_redirect`・`no_store` の要求値の部分）を段階 1 の crate に作る依頼は、置き場を利用者が決めるまで止めて呼び出し元に報告する（`D-2026-11-20-3` の (イ)・`LIB-1`）。
 
 対象外: `crates/db-*`（db-builder）、`crates/backend`（backend-builder）、`crates/frontend`・`crates/webauthn-wasm`（frontend-builder）、
 workspace 設定・CI（infra-builder）、`.claude/`・`docs/spec/`。

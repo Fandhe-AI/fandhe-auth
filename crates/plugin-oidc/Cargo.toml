@@ -1,4 +1,5 @@
-# 名前は仮称。spec 上は未決（LIB-14・PLG-26）。暫定。人が確定する。
+# 名前は D-2026-11-20-2 で決定済み。crates.io の空きは未照会で、公開するかは別に決める（同決定）。
+# 位置づけは LIB-14・PLG-26。
 [package]
 name = "fandhe-auth-plugin-oidc"
 description = "fandhe-auth の外部ログイン Plugin（OIDC 共通部品。同梱）"
