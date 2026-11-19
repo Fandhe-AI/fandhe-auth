@@ -14,6 +14,7 @@
 //! （SECR-11・SECR-23）。stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）。
 //!
 //! 5/6 で実行の記録（版・構成・日時。[`record`]）を置いた。
+//! 6/6 で使い方（`docs/harness/integration.md` の「使い方」）と、手順どおりのサンプル（`tests/sample.rs`）を置いた。
 //!
 //! 構成の下書きは `docs/harness/integration.md`。
 

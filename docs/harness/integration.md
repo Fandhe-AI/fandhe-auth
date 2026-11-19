@@ -1,6 +1,6 @@
 # 結合試験のハーネス: 構成の下書き
 
-`TASK-10`（結合試験のハーネス。MS-1）の構成の下書き。1/6（#90）で枠と起動・停止の入口を置いた。
+`TASK-10`（結合試験のハーネス。MS-1）の構成の下書き。1/6（#90）で枠と起動・停止の入口を置いた。6/6（#95）で使い方とサンプルを追記した。
 仕様は spec の `TASK-10` で引く（本文は写さない）。この文書は下書きで、crate の名前・置き場は仮称、人が確定する。
 
 ## 目的と範囲
@@ -124,7 +124,48 @@ UTF-8・LF の 1 行 1 項目 `key: value`。キーは ASCII 固定。
 
 ## 使い方
 
-未定。6/6（#95）で追記する。
+形式・名前・節立ては仮置きで、人が確認する。正本の見本は `crates/it-harness/tests/sample.rs`（そのまま実行できる）で、
+ここには手順の骨格だけを書く（値の詳細は見本を見る。ずれを防ぐため）。
+
+### 試験の置き場
+
+結合試験は `crates/it-harness/tests/*.rs` に置く。ハーネスは試験専用で、どの crate もこの crate に依存しない（`LIB-2`・`LIB-4`）。
+他の crate からの辺を足すときは、許可表（`scripts/check-crate-deps.sh`）の人の確認が要る。
+
+### 組み立ての手順（見本の「手順 N」と対応）
+
+1. 試験ごとの設定を引数の型で組む。Hub の stub は `HubStubConfig`（各欄 `StubValue::test`）、console の stub は
+    `ConsoleStubConfig` と `AgentCredentialConfig`（両方必須）、DB は `DatabaseConfig`（`with_port`・`with_wait_timeout`・`with_compose_file`）。
+    環境変数・ファイルは読まない（`DPOL-32`）。本番の値を推測で置かない（`A-2026-10-28-1`〜`14`）。
+2. 構成要素を作り、`Box` に入れる前に `handle()` を取る。
+3. `HarnessConfig::new().with(..)` で渡し、`Harness::start` で起動する。起動順は渡した順に依らない。
+    失敗時は起動済みを逆順に停止し、`Drop` でも停止する。
+4. `running.kinds()` で起動した種類を確かめる。
+5. `handle.with(|s| ..)` で起動中の stub を呼ぶ。
+6. 相手側の口の偽物（`Scripted*Ports`）は試験が渡す。
+7. `running.run_record(VersionInfo::detect()?)` で記録を作り、`with_hub_stub_record`・`with_console_contract` で stub の記録を
+    取り込み、`write_new(CARGO_TARGET_TMPDIR 配下)` で書く。
+8. 設定の値が記録・`Debug` に出ないことを確かめる。
+9. `running.stop()` で停止する。
+
+### 実行の方法
+
+- `make test`: Docker 不要。サンプルを含む。CI の build-test ジョブと同じ契約。
+- `make it-db`: Docker 必須。`#[ignore]` の試験を流す。CI の外。
+- Docker の有無で自動に飛ばす仕組みは作らない（`DPOL-30`〜`DPOL-32`）。
+
+### 守ること
+
+- 記録の出力先は追跡ツリーの外にする。
+- 設定の値・接続情報・パスワードを記録・誤り・ログに出さない（`SECR-11`・`SECR-23`・`SECR-26`）。
+- stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）。記録は事実の出力で、合否の判定でも「確定」でもない。
+
+### この段で使えないもの
+
+- Host: `TASK-716` の完了待ち。記録では常に `not_started`。Fake の Host は置かない。
+- 障害注入: `TASK-13`。
+- 複数インスタンス・前段のリバースプロキシ・TLS の終端: Hub の `ARUN` の担当。本番の前段: `TASK-97`。
+  どれも種類を足して作らない。同じ種類の 2 つ目の拒否は見本の 2 本目の試験と `tests/lifecycle.rs` で確かめる。
 
 ## 未決・人の確認待ち
 
@@ -147,4 +188,7 @@ UTF-8・LF の 1 行 1 項目 `key: value`。キーは ASCII 固定。
 - 5/6 の設計: `git`・`rustc` を子プロセスで呼ぶことが `DPOL-32` の読みに沿うか
 - 5/6 の未対応: 記録の出力先を秘密値の走査の対象に入れる扱い（本段は目印の文字列の試験で代える）。
   Docker 越しの記録（Database を含む）の試験は未追加で、Docker を使える環境で `make it-db` の対象に足す。Host の行は `TASK-716` まで常に `not_started`
+- 6/6 の追加（すべて仮置き。人が確認する）: サンプルの試験のファイル名 `tests/sample.rs`・試験名・使い方の節立て
+- 6/6 の未対応: Database を含むサンプルは未追加（実装の環境で `make it-db` を流せなかったため）。Host の結線は残り（`TASK-716`）で、
+  TASK-10 は Host の結線が済むまで未達の部分を持つ
 - `LIB-14`・`LIB-15` との関係（段階 1 のリリースのメンバーに含めない扱い）
