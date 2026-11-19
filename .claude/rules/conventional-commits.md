@@ -50,7 +50,7 @@ PR タイトルも CI の `pr-title` ジョブで同じスクリプトに通す�
 ## scope の候補（慣習。フックは検証しない）
 
 - crate のディレクトリ名: `core` `webauthn` `provider` `keys` `db-contract` `db-pg` `db-migrate` `client`
-  `secret` `types` `frontend` `webauthn-wasm` `backend` `server`
+  `secret` `types` `frontend` `webauthn-wasm` `backend` `server` `hub-stub`
 - それ以外: `skills`（外部取得スキルの更新）・`claude`（`.claude/` の agents・rules 等）・`ci`・`hooks`
   （`lefthook.yml`・`scripts/hooks/`）・`deps`（依存の更新）
 - 複数 crate にまたがる場合は scope を省略する。新しい crate を足したら同じ変更で本リストに足す
