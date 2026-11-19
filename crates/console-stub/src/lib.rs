@@ -15,6 +15,8 @@
 //! 応答の遅れと拒否の注入は [`fault`]（#76）、
 //! 仮定の契約の印と記録は [`contract`]（#77）。
 //!
+//! 実物との差・差し替え先の TASK は `docs/stubs/console-stub.md` に書いた（#79）。
+//!
 //! 設定: console の値は設定で受ける（[`config::ConsoleStubConfig`]）。環境変数・ファイルは読まない
 //! （DPOL-32）。
 
@@ -28,4 +30,4 @@ pub mod fault;
 pub mod introspection;
 pub mod record;
 
-// TODO(TASK-8): 実物との差の文書（#79）は後続の段で足す。遅延・拒否の注入は本体の設定に持ち込まない。
+// 実物との差は `docs/stubs/console-stub.md` に書いた（#79）。遅延・拒否の注入は本体の設定に持ち込まない。

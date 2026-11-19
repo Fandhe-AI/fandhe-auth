@@ -29,7 +29,8 @@ pub struct IntrospectionRequest {
     pub token_type_hint: &'static str,
 }
 
-// TODO(TASK-8): private_key_jwt の assertion は鍵を足す段で fandhe-auth-secret の型を使い、許可表を見直してから足す。
+// 実物との差は `docs/stubs/console-stub.md` の 3.1 に書いた（#79）。
+// TODO(TASK-511): private_key_jwt の assertion は鍵を足す段で fandhe-auth-secret の型を使い、許可表を見直してから足す。
 
 /// 送る口が返す応答。本文は秘密値ではないが、`Debug` は状態コードだけを出す。
 #[derive(Clone, PartialEq, Eq)]
