@@ -1,0 +1,9 @@
+# 名前は仮称。spec 上は未決（LIB-14・PLG-26）。暫定。人が確定する。
+[package]
+name = "fandhe-auth-plugin-oidc"
+description = "fandhe-auth の外部ログイン Plugin（OIDC 共通部品。同梱）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true

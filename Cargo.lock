@@ -15,5 +15,9 @@ name = "fandhe-auth-db-tests"
 version = "0.0.0"
 
 [[package]]
+name = "fandhe-auth-plugin-oidc"
+version = "0.0.0"
+
+[[package]]
 name = "fandhe-auth-secret"
 version = "0.0.0"
