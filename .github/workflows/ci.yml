@@ -121,8 +121,9 @@ jobs:
 
   # Rust の workspace のビルドと試験（TASK-6）。ローカルの `make build`・`make test` と同じ契約。
   # --locked で Cargo.lock の外を解決しない。--all-features は付けない（DPOL-31）。
-  # toolchain は runner 既定の rustup の stable を使う（暫定。版・MSRV は TASK-4 で人が決め、
-  # rust-toolchain.toml が入ったら追随する）。キャッシュは未導入（効果を測ってから入れる）。
+  # toolchain は MSRV の版（Cargo.toml の rust-version）を rustup で入れて使う。MSRV の値は D-2026-11-20-12、
+  # CI を MSRV で流すのは利用者の指示（2026-11-20）。新しい stable での検査はしていない（足すかは未定）。
+  # rust-toolchain.toml の有無は未定（決める TASK は spec に無い）。キャッシュは未導入（効果を測ってから入れる）。
   build-test:
     name: "make build + make test"
     runs-on: ubuntu-latest
@@ -132,6 +133,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install MSRV toolchain
+        # MSRV（Cargo.toml の rust-version。値は D-2026-11-20-12）の版を入れて既定にする。CI を MSRV で流すのは
+        # 利用者の指示（2026-11-20）で、新しい stable での検査はしていない（足すかは未定）。版の文字列は
+        # scripts/msrv.sh が Cargo.toml から読み、ここに書かない。外部 action は使わず rustup で入れる。
+        # build・test は rustfmt・clippy を使わないため component は入れない。
+        run: |
+          set -euo pipefail
+          msrv="$(scripts/msrv.sh)"
+          rustup toolchain install "${msrv}" --profile minimal
+          rustup default "${msrv}"
 
       - name: Show Rust toolchain versions
         run: |
@@ -149,7 +161,8 @@ jobs:
   # Rust の整形の差分検査と lint（TASK-6）。ローカルの `make lint` と同じ契約で、rustfmt の差分・
   # clippy の警告（-D warnings）・crate 間の依存の向きの検査のどれかが非 0 なら失敗する。
   # --all-features は付けない（DPOL-31。crate 間の依存の列挙だけは check-crate-deps.sh の方針に従う）。
-  # toolchain は runner 既定の rustup の stable（暫定。版・MSRV は TASK-4 で人が決める）。
+  # toolchain は MSRV の版（Cargo.toml の rust-version）を rustup で入れて使う。MSRV の値は D-2026-11-20-12、
+  # CI を MSRV で流すのは利用者の指示（2026-11-20）。新しい stable での検査はしていない（足すかは未定）。
   # キャッシュは未導入。build-test とは needs を張らず並列に流す。
   lint:
     name: "make lint (rustfmt + clippy + crate-deps)"
@@ -160,6 +173,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install MSRV toolchain
+        # MSRV（Cargo.toml の rust-version。値は D-2026-11-20-12）の版を入れて既定にする。CI を MSRV で流すのは
+        # 利用者の指示（2026-11-20）で、新しい stable での検査はしていない（足すかは未定）。版の文字列は
+        # scripts/msrv.sh が Cargo.toml から読み、ここに書かない。外部 action は使わず rustup で入れる。
+        run: |
+          set -euo pipefail
+          msrv="$(scripts/msrv.sh)"
+          rustup toolchain install "${msrv}" --profile minimal --component rustfmt,clippy
+          rustup default "${msrv}"
 
       - name: Show Rust toolchain versions
         run: |

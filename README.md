@@ -94,7 +94,7 @@ worktree はそれぞれ別の `target/` を持つため、不要になった wo
 
 ## ビルド
 
-前提は Rust toolchain（cargo・rustfmt・clippy）です。MSRV は 1.100、edition は 2024 と決まっています（`D-2026-11-20-12`）。そのため stable の 1.100 以上が要ります。ルートの `Cargo.toml` の `rust-version` は、まだ入っていません。
+前提は Rust toolchain（cargo・rustfmt・clippy）です。MSRV は 1.100、edition は 2024 と決まっています（`D-2026-11-20-12`）。そのため stable の 1.100 以上が要ります。ルートの `Cargo.toml` の `rust-version` で 1.100 を指定し、CI も 1.100 で検査します。
 
 workspace の members は 9 crate で、ルートの `Cargo.toml` に明示して並べています（glob にしません）。
 段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）に、次の 4 つを足しています。

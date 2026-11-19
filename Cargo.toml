@@ -33,7 +33,10 @@ members = [
 
 [workspace.package]
 version = "0.0.0"
-edition = "2024" # 暫定。MSRV・edition は TASK-3・TASK-4 で人が確定する。
+# MSRV は 1.100、edition は 2024（利用者の決定 D-2026-11-20-12）。MSRV の値は CI も読む
+# （scripts/msrv.sh。.github/workflows/ci.yml の build-test・lint）ので、変えるときはここだけを直す。
+edition = "2024"
+rust-version = "1.100"
 license = "MIT OR Apache-2.0" # DPOL-26
 repository = "https://github.com/Fandhe-AI/fandhe-auth"
 # crates.io へ公開するかは別に決める（D-2026-10-27-8）。決まるまで誤公開を防ぐ。
