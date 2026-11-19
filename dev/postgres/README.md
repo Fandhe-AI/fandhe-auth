@@ -31,6 +31,26 @@ docker compose -f dev/postgres/compose.yaml up -d --wait
 docker compose -f dev/postgres/compose.yaml exec postgres psql -U postgres -c 'select version()'
 ```
 
+## 接続設定
+
+資格情報はリポジトリに入れず、環境から注入する（`TASK-5`・`SECR-6`）。変数名は開発用の暫定で、人が決める。
+雛形は `.env.example`（秘密でないポートだけ）。
+
+| 項目 | 値 |
+| --- | --- |
+| host | `127.0.0.1` |
+| port | `FANDHE_AUTH_DEV_PG_PORT`（既定 55432） |
+| user | `postgres` |
+| dbname | `postgres` |
+| password | `FANDHE_AUTH_DEV_PG_PASSWORD` から注入する。値は書かない |
+
+- ルートの `.env`（`make setup` が作る）にパスワードを書かない。起動時に生成して export する
+- ホストからの接続例。パスワードは環境変数で渡し、引数・URL に書かない
+
+```bash
+PGPASSWORD="${FANDHE_AUTH_DEV_PG_PASSWORD}" psql "host=127.0.0.1 port=${FANDHE_AUTH_DEV_PG_PORT:-55432} user=postgres dbname=postgres" -c 'select 1'
+```
+
 ## 停止
 
 ```bash
@@ -47,5 +67,4 @@ docker compose -f dev/postgres/compose.yaml down
 ## 持ち越し
 
 - TLS・ロール・`max_connections`: #39
-- `.env.example` と接続設定の雛形: #38
 - 手順のまとめとルート README への反映: #40
