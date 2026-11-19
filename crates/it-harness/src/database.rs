@@ -140,9 +140,9 @@ impl EndpointHandle {
 }
 
 /// compose の呼び出しを組み立てる。パスワードは環境変数にだけ載せ、argv に載せない（SECR-6）。
-/// 試験（Docker なし）から argv を確かめるために公開している。
-#[doc(hidden)]
-pub fn compose_command(
+/// 環境変数に秘密値を載せた `Command` を返すため、モジュール内に閉じる（SECR-11・SECR-16）。
+/// argv の確認はこのモジュールの試験で行う。
+fn compose_command(
     compose_file: &Path,
     project: &str,
     port: u16,
@@ -367,5 +367,27 @@ mod tests {
         assert!(db.stop().is_err());
         assert!(db.running.is_some());
         // Drop が再び down を試みても落ちない。
+    }
+
+    // SECR-6: パスワードは argv に載らず、環境変数にだけ載る。
+    #[test]
+    fn password_is_not_in_argv() {
+        let pw = SecretString::new("0123456789abcdef0123456789abcdef");
+        let cmd = compose_command(
+            Path::new("compose.yaml"),
+            "fa-it-test",
+            40000,
+            &pw,
+            &["up", "-d", "--wait"],
+        );
+        for a in cmd.get_args() {
+            assert!(!a.to_string_lossy().contains(pw.expose()));
+        }
+        let keys: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert!(keys.contains(&PASSWORD_ENV.to_string()));
+        assert!(keys.contains(&PORT_ENV.to_string()));
     }
 }

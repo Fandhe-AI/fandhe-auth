@@ -3,7 +3,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use fandhe_auth_it_harness::database::compose_command;
 use fandhe_auth_it_harness::{Database, DatabaseConfig, DatabaseEndpoint, EndpointHandle};
 use fandhe_auth_secret::SecretString;
 
@@ -45,28 +44,6 @@ fn project_names_are_unique() {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
         );
     }
-}
-
-// SECR-6: パスワードは argv に載らず、環境変数にだけ載る。
-#[test]
-fn password_is_not_in_argv() {
-    let pw = SecretString::new("0123456789abcdef0123456789abcdef");
-    let cmd = compose_command(
-        Path::new("compose.yaml"),
-        "fa-it-test",
-        40000,
-        &pw,
-        &["up", "-d", "--wait"],
-    );
-    for a in cmd.get_args() {
-        assert!(!a.to_string_lossy().contains(pw.expose()));
-    }
-    let keys: Vec<_> = cmd
-        .get_envs()
-        .map(|(k, _)| k.to_string_lossy().into_owned())
-        .collect();
-    assert!(keys.contains(&"FANDHE_AUTH_DEV_PG_PASSWORD".to_string()));
-    assert!(keys.contains(&"FANDHE_AUTH_DEV_PG_PORT".to_string()));
 }
 
 // SECR-11・SECR-13: Debug（通常・整形）にパスワードが出ない。
