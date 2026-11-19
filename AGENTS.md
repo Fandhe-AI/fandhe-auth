@@ -13,8 +13,8 @@ Hub が組み込むライブラリ（本体）で、型・判定・拡張契約�
   spec に由来する指摘について判断するのは次の 2 点に限る。
   - 根拠の ID（`SECR-11`・`TASK-3`・`D-2026-10-29-1` 等）の有無と書式
   - `.claude/rules/` に書かれた要点との整合
-- 現時点で `Cargo.toml`・crate は無い（MS-1 前）。「Rust の観点」は crate を足す PR から適用する。
-  今ある対象（文書・rules・scripts・workflow・Makefile・フック）の観点は今から適用する。
+- ルートの `Cargo.toml`・`crates/` は既にある（MS-1 の雛形）。「Rust の観点」は今の PR から適用する。
+  文書・rules・scripts・workflow・Makefile・フックの観点も同じく適用する。
 - 新しい基準はマージ後の次の PR から効く（ai-review は base コミットの本書を読む）。
 
 ## 重大度
