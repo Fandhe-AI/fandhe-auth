@@ -18,6 +18,7 @@
 //! 変更のフィードの取得の模擬: [`feed::ChangeFeedFetcher`]（#63）。
 //! 生存確認の受け口: [`heartbeat::HeartbeatReceiver`]（#64）。
 //! Hub の JWKS を返す模擬: [`jwks::HubJwksEndpoint`]（#65）。
+//! Hub が `fandhe-auth` の JWKS を取得する模擬: [`jwks::AuthJwksFetcher`]（#65）。
 
 #![forbid(unsafe_code)]
 

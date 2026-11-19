@@ -3,7 +3,9 @@
 //! 役割: Hub と `fandhe-auth` の間の JWKS の流れは 2 方向ある（書き手の読み。人の確認を待つ）。
 //! - [`HubJwksEndpoint`]: `fandhe-auth` が Hub の JWKS（assertion の検証用の鍵）を取得する側の相手。
 //!   Hub の JWKS を返し、前段の中間キャッシュの上限（C_max）を模す（OCL-31〜37・Hub D-2026-10-22-1）。
-//! - 逆方向（Hub が `fandhe-auth` の JWKS を取得する側）は後続のコミットで足す。
+//! - [`AuthJwksFetcher`]: Hub が `fandhe-auth` の JWKS を取得して鍵の集合を保つ側（SIGN-39・SIGN-45・SIGN-47、
+//!   Hub D-2026-10-20-2・Hub D-2026-10-16-17）。取得の下限は `jwks_fetch_min_interval`、保持の上限 U は
+//!   `jwks_stale_max` で受け、U を超えたら鍵を返さない（fail-closed）。呼び出し先は [`AuthJwksPort`]。
 //!
 //! 設計上の約束:
 //! - sans-IO・同期。時刻 `now`（UNIX 秒）は引数で受け、時計・環境変数・ファイルは読まない（DPOL-32）。
@@ -27,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::assertion::AssertionSigningKey;
 use crate::config::HubStubConfig;
+use crate::presentation::VerificationKey;
 
 /// 公開鍵の点が非圧縮の P-256（0x04 ‖ x ‖ y の 65 バイト）でなかった。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,5 +210,254 @@ impl HubJwksEndpoint {
             version,
             from_cache,
         }
+    }
+}
+
+/// 口が返した JWKS の応答。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthJwksResponse {
+    Ok { body: String, max_age: Option<u64> },
+    Rejected { status: u16 },
+}
+
+/// `fandhe-auth` の JWKS の口を表す注入点。実物の配線は後続のタスクで行い、本段では試験側の偽の口が実装する。
+pub trait AuthJwksPort {
+    fn fetch_jwks(&mut self) -> AuthJwksResponse;
+}
+
+/// 取得の契機。記録にだけ使い、どちらも同じ下限に従う（SIGN-45 の (3)）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JwksFetchTrigger {
+    Periodic,
+    UnknownKid,
+}
+
+/// 取得の失敗。値・本文は載せない（SECR-23〜27）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JwksFetchError {
+    TooSoon,
+    Rejected { status: u16 },
+    Malformed,
+    DuplicateKid,
+    NoUsableKey,
+}
+
+impl std::fmt::Display for JwksFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TooSoon => "jwks fetch refused: below minimum interval",
+            Self::Rejected { .. } => "jwks fetch rejected by port",
+            Self::Malformed => "jwks body malformed",
+            Self::DuplicateKid => "jwks body has duplicate kid",
+            Self::NoUsableKey => "jwks body has no usable key",
+        })
+    }
+}
+
+impl std::error::Error for JwksFetchError {}
+
+/// 取得に成功した鍵の件数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeySetSummary {
+    pub keys: usize,
+    /// ES256 以外で数えるだけにした件数（受け口は ES256 だけを扱う）。
+    pub skipped: usize,
+}
+
+/// 取得の結果の記録。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JwksFetchOutcome {
+    TooSoon,
+    Rejected { status: u16 },
+    Malformed,
+    DuplicateKid,
+    NoUsableKey,
+    Fetched { keys: usize, skipped: usize },
+}
+
+/// 取得の記録。本文は持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JwksFetchRecord {
+    pub at: u64,
+    pub trigger: JwksFetchTrigger,
+    pub outcome: JwksFetchOutcome,
+}
+
+enum JwkParse {
+    Usable(VerificationKey),
+    Skipped,
+    Invalid,
+}
+
+fn parse_es256_jwk(v: &Value) -> JwkParse {
+    let Some(o) = v.as_object() else {
+        return JwkParse::Invalid;
+    };
+    match o.get("kty").and_then(Value::as_str) {
+        Some("EC") => {}
+        Some(_) => return JwkParse::Skipped,
+        None => return JwkParse::Invalid,
+    }
+    // SIGN-1・SIGN-6: alg は無いか ES256 のときだけ受ける。
+    if o.get("alg").is_some_and(|a| a.as_str() != Some("ES256")) {
+        return JwkParse::Invalid;
+    }
+    let (Some("P-256"), Some(kid)) = (
+        o.get("crv").and_then(Value::as_str),
+        o.get("kid").and_then(Value::as_str),
+    ) else {
+        return JwkParse::Invalid;
+    };
+    let dec = |name: &str| {
+        o.get(name)
+            .and_then(Value::as_str)
+            .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
+            .filter(|b| b.len() == 32)
+    };
+    let (Some(x), Some(y)) = (dec("x"), dec("y")) else {
+        return JwkParse::Invalid;
+    };
+    let mut point = vec![0x04];
+    point.extend(x);
+    point.extend(y);
+    JwkParse::Usable(VerificationKey::es256(kid, point))
+}
+
+/// Hub が `fandhe-auth` の JWKS を取得して鍵の集合を保つ側の模擬。
+pub struct AuthJwksFetcher {
+    min_interval: Duration,
+    stale_max: Duration,
+    keys: Vec<VerificationKey>,
+    last_attempt_at: Option<u64>,
+    last_success_at: Option<u64>,
+    last_max_age: Option<u64>,
+    records: Vec<JwksFetchRecord>,
+}
+
+impl std::fmt::Debug for AuthJwksFetcher {
+    /// 鍵の数と記録の件数だけを出す。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthJwksFetcher")
+            .field("keys", &self.keys.len())
+            .field("records", &self.records.len())
+            .finish()
+    }
+}
+
+impl AuthJwksFetcher {
+    pub fn new(config: &HubStubConfig) -> Self {
+        Self {
+            min_interval: config.jwks_fetch_min_interval,
+            stale_max: config.jwks_stale_max,
+            keys: Vec::new(),
+            last_attempt_at: None,
+            last_success_at: None,
+            last_max_age: None,
+            records: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, at: u64, trigger: JwksFetchTrigger, outcome: JwksFetchOutcome) {
+        self.records.push(JwksFetchRecord {
+            at,
+            trigger,
+            outcome,
+        });
+    }
+
+    /// 口から JWKS を取得する。下限より前は口を呼ばず `TooSoon`。
+    /// 検査に落ちた本文は全体を捨て、直前の鍵の集合を保つ（部分的に取り込まない）。
+    pub fn fetch<P: AuthJwksPort>(
+        &mut self,
+        port: &mut P,
+        trigger: JwksFetchTrigger,
+        now: u64,
+    ) -> Result<KeySetSummary, JwksFetchError> {
+        if let Some(last) = self.last_attempt_at
+            && (now < last || now - last < ceil_secs(self.min_interval))
+        {
+            self.record(now, trigger, JwksFetchOutcome::TooSoon);
+            return Err(JwksFetchError::TooSoon);
+        }
+        // 口に届いた要求は失敗でも間隔の計数に入れる。
+        self.last_attempt_at = Some(now);
+        let (body, max_age) = match port.fetch_jwks() {
+            AuthJwksResponse::Ok { body, max_age } => (body, max_age),
+            AuthJwksResponse::Rejected { status } => {
+                self.record(now, trigger, JwksFetchOutcome::Rejected { status });
+                return Err(JwksFetchError::Rejected { status });
+            }
+        };
+        match Self::parse_body(&body) {
+            Ok((keys, skipped)) => {
+                let n = keys.len();
+                self.keys = keys;
+                self.last_success_at = Some(now);
+                self.last_max_age = max_age;
+                self.record(now, trigger, JwksFetchOutcome::Fetched { keys: n, skipped });
+                Ok(KeySetSummary { keys: n, skipped })
+            }
+            Err(e) => {
+                let outcome = match e {
+                    JwksFetchError::DuplicateKid => JwksFetchOutcome::DuplicateKid,
+                    JwksFetchError::NoUsableKey => JwksFetchOutcome::NoUsableKey,
+                    _ => JwksFetchOutcome::Malformed,
+                };
+                self.record(now, trigger, outcome);
+                Err(e)
+            }
+        }
+    }
+
+    fn parse_body(body: &str) -> Result<(Vec<VerificationKey>, usize), JwksFetchError> {
+        let v: Value = serde_json::from_str(body).map_err(|_| JwksFetchError::Malformed)?;
+        let arr = v
+            .get("keys")
+            .and_then(Value::as_array)
+            .ok_or(JwksFetchError::Malformed)?;
+        let mut keys = Vec::new();
+        let mut skipped = 0;
+        for e in arr {
+            match parse_es256_jwk(e) {
+                JwkParse::Usable(k) => keys.push(k),
+                JwkParse::Skipped => skipped += 1,
+                JwkParse::Invalid => return Err(JwksFetchError::Malformed),
+            }
+        }
+        // OCL-35 と同じ向き: kid の重複は全体を失敗にする。
+        let mut seen = std::collections::HashSet::new();
+        if !keys.iter().all(|k| seen.insert(k.kid.as_str())) {
+            return Err(JwksFetchError::DuplicateKid);
+        }
+        if keys.is_empty() {
+            return Err(JwksFetchError::NoUsableKey);
+        }
+        Ok((keys, skipped))
+    }
+
+    /// `now` で使ってよい鍵の集合。最後の成功から U 以内ならその集合、超過・未取得・時計の巻き戻りは空（fail-closed）。
+    pub fn keys(&self, now: u64) -> Vec<VerificationKey> {
+        match self.last_success_at {
+            Some(t) if now >= t && now - t <= ceil_secs(self.stale_max) => self.keys.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// 最後に成功した応答の `max-age`。定期の取得の周期は計算せず、試験が組み立てる。
+    pub fn last_max_age(&self) -> Option<u64> {
+        self.last_max_age
+    }
+
+    pub fn last_success_at(&self) -> Option<u64> {
+        self.last_success_at
+    }
+
+    pub fn last_attempt_at(&self) -> Option<u64> {
+        self.last_attempt_at
+    }
+
+    /// 取得の記録（試行順）。
+    pub fn records(&self) -> &[JwksFetchRecord] {
+        &self.records
     }
 }

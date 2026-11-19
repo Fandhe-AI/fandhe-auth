@@ -21,6 +21,7 @@ fn config(max_age: u64, cache_max: u64) -> HubStubConfig {
         jwks_max_age: Duration::from_secs(max_age),
         jwks_fetch_min_interval: Duration::from_secs(2),
         jwks_cache_max: Duration::from_secs(cache_max),
+        jwks_stale_max: Duration::from_secs(6),
         assertion_max_lifetime: Duration::from_secs(300),
         feed_fetch_min_interval: Duration::from_secs(5),
         heartbeat_loss_threshold: Duration::from_secs(10),
@@ -135,4 +136,155 @@ fn invalid_points_are_rejected() {
     bad_prefix[0] = 0x02;
     assert!(ep.publish_es256("k", &bad_prefix).is_err());
     assert_eq!(ep.current_version(), 0);
+}
+
+// ---- Hub が fandhe-auth の JWKS を取得する模擬（AuthJwksFetcher） ----
+
+use std::collections::VecDeque;
+
+use fandhe_auth_hub_stub::jwks::{
+    AuthJwksFetcher, AuthJwksPort, AuthJwksResponse, JwksFetchError, JwksFetchOutcome,
+    JwksFetchTrigger,
+};
+use fandhe_auth_hub_stub::presentation::VerificationKey;
+
+fn config_b(min_interval: u64, stale_max: u64) -> HubStubConfig {
+    let mut c = config(1, 0);
+    c.jwks_fetch_min_interval = Duration::from_secs(min_interval);
+    c.jwks_stale_max = Duration::from_secs(stale_max);
+    c
+}
+
+/// 決めた応答を順に返し、口に届いた回数を数える偽の口。
+struct FakeJwksPort {
+    responses: VecDeque<AuthJwksResponse>,
+    calls: usize,
+}
+
+impl FakeJwksPort {
+    fn new(responses: Vec<AuthJwksResponse>) -> Self {
+        Self {
+            responses: responses.into(),
+            calls: 0,
+        }
+    }
+}
+
+impl AuthJwksPort for FakeJwksPort {
+    fn fetch_jwks(&mut self) -> AuthJwksResponse {
+        self.calls += 1;
+        self.responses.pop_front().unwrap()
+    }
+}
+
+fn ok(body: String) -> AuthJwksResponse {
+    AuthJwksResponse::Ok {
+        body,
+        max_age: Some(9),
+    }
+}
+
+/// HubJwksEndpoint を origin として使い、本文を組み立てる。
+fn body_of(keys: &[&AssertionSigningKey]) -> String {
+    let mut ep = HubJwksEndpoint::new(&config(1, 0));
+    for k in keys {
+        ep.publish(k);
+    }
+    ep.serve(T0).body
+}
+
+fn expected(k: &AssertionSigningKey) -> VerificationKey {
+    VerificationKey::es256(k.kid(), k.public_key())
+}
+
+#[test]
+fn fetch_success_returns_keys_and_respects_min_interval() {
+    let k = AssertionSigningKey::generate("k1").unwrap();
+    let mut f = AuthJwksFetcher::new(&config_b(4, 100));
+    let mut port = FakeJwksPort::new(vec![ok(body_of(&[&k])), ok(body_of(&[&k]))]);
+    let s = f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();
+    assert_eq!((s.keys, s.skipped), (1, 0));
+    assert_eq!(f.keys(T0), vec![expected(&k)]);
+    assert_eq!(f.last_max_age(), Some(9));
+    // 下限より前は口に届かない。
+    assert_eq!(
+        f.fetch(&mut port, JwksFetchTrigger::UnknownKid, T0 + 3),
+        Err(JwksFetchError::TooSoon)
+    );
+    assert_eq!(port.calls, 1);
+    // ちょうど下限なら取得する。
+    assert!(
+        f.fetch(&mut port, JwksFetchTrigger::Periodic, T0 + 4)
+            .is_ok()
+    );
+    assert_eq!(port.calls, 2);
+    // 時計の巻き戻りは TooSoon。
+    assert_eq!(
+        f.fetch(&mut port, JwksFetchTrigger::Periodic, T0),
+        Err(JwksFetchError::TooSoon)
+    );
+    assert_eq!(f.records()[1].outcome, JwksFetchOutcome::TooSoon);
+}
+
+#[test]
+fn bad_bodies_keep_previous_key_set() {
+    let k = AssertionSigningKey::generate("k1").unwrap();
+    let dup_a = AssertionSigningKey::generate("dup").unwrap();
+    let dup_b = AssertionSigningKey::generate("dup").unwrap();
+    let mut f = AuthJwksFetcher::new(&config_b(1, 100));
+    let mut port = FakeJwksPort::new(vec![
+        ok(body_of(&[&k])),
+        ok(body_of(&[&dup_a, &dup_b])),
+        ok("{not json".to_owned()),
+        ok(r#"{"keys":[]}"#.to_owned()),
+        AuthJwksResponse::Rejected { status: 503 },
+    ]);
+    f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();
+    let errs = [
+        JwksFetchError::DuplicateKid,
+        JwksFetchError::Malformed,
+        JwksFetchError::NoUsableKey,
+        JwksFetchError::Rejected { status: 503 },
+    ];
+    for (i, want) in errs.iter().enumerate() {
+        let now = T0 + 1 + i as u64;
+        assert_eq!(
+            f.fetch(&mut port, JwksFetchTrigger::Periodic, now),
+            Err(*want)
+        );
+        assert_eq!(f.keys(now), vec![expected(&k)]);
+    }
+    assert_eq!(f.last_success_at(), Some(T0));
+    let outcomes: Vec<_> = f.records().iter().map(|r| r.outcome).collect();
+    assert_eq!(outcomes[1], JwksFetchOutcome::DuplicateKid);
+    assert_eq!(outcomes[2], JwksFetchOutcome::Malformed);
+    assert_eq!(outcomes[3], JwksFetchOutcome::NoUsableKey);
+    assert_eq!(outcomes[4], JwksFetchOutcome::Rejected { status: 503 });
+}
+
+#[test]
+fn non_es256_keys_are_skipped_not_failed() {
+    let k = AssertionSigningKey::generate("k1").unwrap();
+    let mut v: Value = serde_json::from_str(&body_of(&[&k])).unwrap();
+    v["keys"].as_array_mut().unwrap().push(serde_json::json!({
+        "kty": "RSA", "kid": "r1", "alg": "RS256", "n": "AQAB", "e": "AQAB"
+    }));
+    let mut f = AuthJwksFetcher::new(&config_b(1, 100));
+    let mut port = FakeJwksPort::new(vec![ok(v.to_string())]);
+    let s = f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();
+    assert_eq!((s.keys, s.skipped), (1, 1));
+}
+
+#[test]
+fn keys_are_dropped_after_stale_max() {
+    for u in [3_u64, 8] {
+        let k = AssertionSigningKey::generate("k1").unwrap();
+        let mut f = AuthJwksFetcher::new(&config_b(1, u));
+        assert!(f.keys(T0).is_empty());
+        let mut port = FakeJwksPort::new(vec![ok(body_of(&[&k]))]);
+        f.fetch(&mut port, JwksFetchTrigger::Periodic, T0).unwrap();
+        assert_eq!(f.keys(T0 + u).len(), 1);
+        assert!(f.keys(T0 + u + 1).is_empty());
+        assert!(f.keys(T0 - 1).is_empty());
+    }
 }
