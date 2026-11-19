@@ -3,7 +3,22 @@
 
 use std::time::Duration;
 
-use fandhe_auth_console_stub::config::ConsoleStubConfig;
+use fandhe_auth_console_stub::config::{AgentCredentialConfig, ConsoleStubConfig};
+
+#[test]
+fn agent_credential_config_carries_values_given_by_caller() {
+    // #75
+    let c = AgentCredentialConfig {
+        client_id: "agent-test-client".to_owned(),
+        device_authorization_endpoint: "https://auth.example.test/device".to_owned(),
+        token_endpoint: "https://auth.example.test/token".to_owned(),
+        revocation_endpoint: "https://auth.example.test/revoke".to_owned(),
+        registration_revocation_endpoint: "https://hub.example.test/revoke".to_owned(),
+    };
+    assert_eq!(c.client_id, "agent-test-client");
+    assert_eq!(c.token_endpoint, "https://auth.example.test/token");
+    assert_eq!(c.clone(), c);
+}
 
 #[test]
 fn config_carries_values_given_by_caller() {

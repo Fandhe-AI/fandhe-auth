@@ -10,7 +10,8 @@
 //! - 段階 1 のリリースのメンバーではない（LIB-14・LIB-15）。名前・置き場は仮称で、人が確定する。
 //! - 本番で console の `aud` を登録しない方針は変えない（OCL-58）。
 //!
-//! 受け口: introspection の呼び出しの模擬は [`introspection`]（#73）、配送の時点の確認の模擬は [`delivery`]（#74）。
+//! 受け口: introspection の呼び出しの模擬は [`introspection`]（#73）、配送の時点の確認の模擬は [`delivery`]（#74）、
+//! エージェントの資格情報の発行・失効の呼び出しの模擬は [`credential`]、呼び出しの記録は [`record`]（#75）。
 //!
 //! 設定: console の値は設定で受ける（[`config::ConsoleStubConfig`]）。環境変数・ファイルは読まない
 //! （DPOL-32）。
@@ -18,9 +19,10 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod credential;
 pub mod delivery;
 pub mod introspection;
+pub mod record;
 
-// TODO(TASK-8): エージェントの
-// 資格情報の発行・失効と呼び出しの記録（#75）、遅延・拒否の注入（#76）、仮定の契約の記録（#77）、
-// 単体試験（#78）、実物との差の文書（#79）は後続の段で足す。遅延・拒否の注入は本体の設定に持ち込まない。
+// TODO(TASK-8): 遅延・拒否の注入（#76）、仮定の契約の記録（#77）、単体試験（#78）、実物との差の文書（#79）は
+// 後続の段で足す。遅延・拒否の注入は本体の設定に持ち込まない。
