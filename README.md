@@ -96,8 +96,8 @@ worktree はそれぞれ別の `target/` を持つため、不要になった wo
 
 前提は Rust toolchain（cargo・rustfmt・clippy）です。MSRV は 1.100、edition は 2024 と決まっています（`D-2026-11-20-12`）。そのため stable の 1.100 以上が要ります。ルートの `Cargo.toml` の `rust-version` は、まだ入っていません。
 
-workspace の members は 10 crate で、ルートの `Cargo.toml` に明示して並べています（glob にしません）。
-段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）に、次の 5 つを足しています。
+workspace の members は 11 crate で、ルートの `Cargo.toml` に明示して並べています（glob にしません）。
+段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）に、次の 6 つを足しています。
 段階 2 の `frontend`・`webauthn-wasm` と、Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）は
 置きません（`LIB-14`・`LIB-15`）。
 
@@ -108,6 +108,7 @@ workspace の members は 10 crate で、ルートの `Cargo.toml` に明示し�
 - `console-stub`（console の検証用 stub。`TASK-8`）: 試験専用で、扱いは `hub-stub` と同じです。
 - `it-harness`（結合試験のハーネスの枠。`TASK-10`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/integration.md` です。
 - `e2e-harness`（passkey の E2E のハーネスの枠。`TASK-11`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/e2e.md` です。
+- `load-harness`（計測・負荷のハーネスの計測の部品。`TASK-12`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/load.md` です。
 
 手順は次の順です。直接実行する場合のコマンドも併記します。
 
