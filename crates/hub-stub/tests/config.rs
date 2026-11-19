@@ -15,6 +15,7 @@ fn config_carries_values_given_by_caller() {
         jwks_max_age: Duration::from_secs(1),
         jwks_fetch_min_interval: Duration::from_secs(2),
         jwks_cache_max: Duration::from_secs(3),
+        jwks_stale_max: Duration::from_secs(6),
         assertion_max_lifetime: Duration::from_secs(4),
         feed_fetch_min_interval: Duration::from_secs(5),
         heartbeat_loss_threshold: Duration::from_secs(10),
@@ -26,6 +27,7 @@ fn config_carries_values_given_by_caller() {
     assert_eq!(c.jwks_max_age, Duration::from_secs(1));
     assert_eq!(c.jwks_fetch_min_interval, Duration::from_secs(2));
     assert_eq!(c.jwks_cache_max, Duration::from_secs(3));
+    assert_eq!(c.jwks_stale_max, Duration::from_secs(6));
     assert_eq!(c.assertion_max_lifetime, Duration::from_secs(4));
     assert_eq!(c.feed_fetch_min_interval, Duration::from_secs(5));
     assert_eq!(c.heartbeat_loss_threshold, Duration::from_secs(10));

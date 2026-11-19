@@ -66,6 +66,11 @@ impl AssertionSigningKey {
         Self::from_pkcs8(kid, pkcs8.as_ref())
     }
 
+    /// 鍵の識別子。JWKS の `kid` に使う（#65）。
+    pub fn kid(&self) -> &str {
+        &self.kid
+    }
+
     /// 非圧縮の公開鍵の点（65 バイト）。JWKS の模擬（#65）と試験側の署名の確認に使う。
     pub fn public_key(&self) -> &[u8] {
         self.key_pair.public_key().as_ref()

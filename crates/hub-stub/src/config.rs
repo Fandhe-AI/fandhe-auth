@@ -20,12 +20,16 @@ pub struct HubStubConfig {
     pub jwks_uri: String,
     /// Logout Token の受け口の URL（OCL-42）。
     pub logout_receiver_uri: String,
-    /// JWKS の `max-age`（Hub D-2026-10-20-2・Hub D-2026-10-22-1・SIGN-47）。
+    /// JWKS の `max-age`（Hub D-2026-10-20-2・Hub D-2026-10-22-1・SIGN-47）。Hub の JWKS の配信（`jwks::HubJwksEndpoint`）で使う。
     pub jwks_max_age: Duration,
-    /// JWKS の取得の間隔の下限（Hub D-2026-10-20-2・SIGN-47）。
+    /// JWKS の取得の間隔の下限（Hub D-2026-10-20-2・SIGN-47）。Hub が `fandhe-auth` の JWKS を取得する模擬（`jwks::AuthJwksFetcher`）で使う。
     pub jwks_fetch_min_interval: Duration,
-    /// キャッシュの上限 C_max（Hub D-2026-10-22-1・OCL-37）。
+    /// キャッシュの上限 C_max（Hub D-2026-10-22-1・OCL-37）。Hub の JWKS の配信（`jwks::HubJwksEndpoint`）で使い、U には流用しない。
     pub jwks_cache_max: Duration,
+    /// Hub が `fandhe-auth` の JWKS を最後に取得できた鍵の集合で使い続ける上限 U（Hub D-2026-10-16-17・
+    /// Hub D-2026-10-20-2・SIGN-39 → Hub AOPS-42）。OCL-34 の T（`fandhe-auth` 側の値）とは別。
+    /// 欄の名前は仮置き。数値は写さず試験用の仮の値で受ける（A-2026-10-28-1）。
+    pub jwks_stale_max: Duration,
     /// assertion の有効期限の上限 M（OCL-25・Hub AUTHC-39）。
     pub assertion_max_lifetime: Duration,
     /// 変更のフィードを読む間隔の下限。フィードを読む周期は Hub が正本を持ち、spec 上は未決（Hub AUTHC-35、
