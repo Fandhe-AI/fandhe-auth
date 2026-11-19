@@ -91,11 +91,11 @@ CREATE ROLE ${other} LOGIN PASSWORD '${other_pw}';
 CREATE DATABASE ${db};
 SQL
 
-# コンテナ内の TCP 接続。パスワードは変数名だけ渡し、値は引数に出さない。
+# コンテナ内の TCP 接続。パスワードはホストの環境変数に置き、docker へは名前だけ渡す（-e PGPASSWORD。値は argv に出ない）。
 tcp_psql() { # <role> <pwvar> <sslmode> ...psql args
   local role="$1" pwvar="$2" mode="$3"
   shift 3
-  dc exec -T -e PGPASSWORD="${!pwvar}" postgres \
+  PGPASSWORD="${!pwvar}" dc exec -T -e PGPASSWORD postgres \
     psql "host=127.0.0.1 port=5432 user=${role} dbname=${db} sslmode=${mode}" -v ON_ERROR_STOP=1 -qAt "$@"
 }
 
@@ -125,7 +125,7 @@ case "${denied}" in
 esac
 
 # AUDB-82 の前提だけ: 64 本の同時接続が収まる（40P01 の吸収の試験は TASK-799）。
-ok_count="$(dc exec -T -e PGPASSWORD="${app_pw}" postgres bash -s <<SCRIPT 2>/dev/null || true
+ok_count="$(PGPASSWORD="${app_pw}" dc exec -T -e PGPASSWORD postgres bash -s <<SCRIPT 2>/dev/null || true
 for i in \$(seq 1 64); do
   ( psql "host=127.0.0.1 port=5432 user=${app} dbname=${db} sslmode=require" -qAt -c 'select pg_sleep(1)' >/dev/null 2>&1 && echo ok ) &
 done | wc -l
