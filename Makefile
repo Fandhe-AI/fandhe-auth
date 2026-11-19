@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks
+.PHONY: help doctor setup check test-hooks fmt lint crate-deps
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-10s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -32,3 +32,12 @@ check: ## editorconfig-checker + shellcheck（ソースは変更しない）。�
 
 test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git のみ）。直接: scripts/hooks/test-hooks.sh
 	@scripts/hooks/test-hooks.sh
+
+fmt: ## rustfmt で整形を適用する（ソースを書き換える）。直接: cargo fmt --all
+	@cargo fmt --all
+
+lint: ## rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向き（ソースは変更しない）。直接: scripts/lint.sh
+	@scripts/lint.sh
+
+crate-deps: ## crate 間の依存の向きの検査（許可表との照合）。直接: scripts/check-crate-deps.sh
+	@scripts/check-crate-deps.sh

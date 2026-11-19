@@ -23,6 +23,12 @@ repository = "https://github.com/Fandhe-AI/fandhe-auth"
 # crates.io へ公開するかは別に決める（D-2026-10-27-8）。決まるまで誤公開を防ぐ。
 publish = false
 
+# lint の設定（TASK-3 (5/6)）。各 crate が [lints] workspace = true で取り込む。
+# unsafe_code の forbid は利用者の決定（2026-11-13）。各 crate の lib.rs の
+# #![forbid(unsafe_code)] と二重に守る。それ以外の lint の値は人が決める。暫定。
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 # 依存クレート（workspace メンバー以外）のデバッグ情報を行番号のみにする。
 # panic 位置・バックトレース・プロファイラの行番号は残り、失うのはデバッガで依存の
 # 変数・型を見る機能だけ。自分たちのクレートは full debuginfo のまま。
