@@ -35,6 +35,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `.claude/agents/`・`.claude/rules/` | サブエージェント定義（research / implement / testing / quality / author）とルール（委譲・セキュリティ・spec の参照・Rust の規約・秘密値・DB 層・依存方針・既存の hooks / Makefile / Actions / Rust ビルド設定など）。一覧は各ディレクトリの実体を正とし、スキルは `skills-lock.json`（実体は `.agents/skills/`、`.claude/skills/` は symlink）。`.claude/` 配下は `_/dotclaude/` で作成してから `mv` で配置する（`dotclaude-via-temp.md`） |
 | `.claude/settings.json`・`.claude/hooks/` | Claude Code の hooks（SessionStart のリマインダー、編集した `.rs` への `rustfmt`） |
 | `.claude/workflows/` | `implement-issue-tree` の named workflow（スキル内スクリプトへの相対 symlink） |
+| `Cargo.toml`・`Cargo.lock`・`crates/` | Cargo の workspace（virtual workspace）と段階 1 の crate 雛形（`crates/<名前>`、crate 名は `fandhe-auth-<名前>`）。members は明示列挙する（後述の「ビルド」） |
 | `Makefile` | `scripts/` を呼ぶだけの薄い入口（`make help` で一覧） |
 | `rustfmt.toml` | rustfmt の設定（edition のみ。暫定） |
 | `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check` / `lint` / `check-crate-deps`）。Make なしでも直接実行できる |
@@ -79,6 +80,42 @@ direnv allow  # direnv を使う場合のみ。.envrc の読み込みを許可�
 ```
 
 `make setup` は何度実行しても安全です（既存の `.env` は上書きしません）。
+
+`target/` は放置すると数十 GB になります。14 日以上使っていないビルド成果物は
+`cargo sweep --time 14` で削除してください（導入: `cargo install cargo-sweep`）。
+worktree はそれぞれ別の `target/` を持つため、不要になった worktree は `git worktree remove` で
+`target/` ごと消し、残している worktree は `cargo sweep -r --time 14 .claude/worktrees` でまとめて掃除します。
+
+## ビルド
+
+前提は Rust toolchain（cargo・rustfmt・clippy）です。版・MSRV・edition は暫定で、TASK-4 で人が決めます。
+
+workspace の members は段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）で、
+ルートの `Cargo.toml` に明示して並べています（glob にしません）。段階 2 の crate（`backend`・`frontend`・`webauthn-wasm`）と、
+Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）は置きません（`LIB-14`・`LIB-15`）。
+
+手順は次の順です。直接実行する場合のコマンドも併記します。
+
+| 順 | `make` | 直接実行 | 内容 |
+|---|---|---|---|
+| 1 | `make build` | `cargo build --workspace --locked` | workspace 全体をビルドする |
+| 2 | `make test` | `cargo test --workspace --locked` | 試験を流す（現時点で試験は 0 件） |
+| 3 | `make build` | `cargo build --workspace --locked` | workspace 全体をビルドする |
+| `make test` | `cargo test --workspace --locked` | workspace 全体の試験を流す（CI への搭載は TASK-6） |
+| `make fmt` | `cargo fmt --all` | 整形を適用する（ソースを書き換える） |
+| 4 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査・clippy `-D warnings`・crate 間の依存の向き |
+| 5 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きだけを許可表と照合する |
+
+約束:
+
+- `--locked` を付け、`Cargo.lock` の外を解決しません
+- `--all-features` でビルド・試験をしません（`DPOL-31`）
+- crate を足すときは次の 3 つを同じ変更で行い、いずれも利用者の確認を経ます。`Cargo.toml` の members、
+  `scripts/check-crate-deps.sh` の許可表、`LIB-15` の基準の記録。許可表に無い member があると検査は失敗します（fail-closed）
+- `make build`・`make test`・`make lint` の CI への搭載は TASK-6 で、まだです
+- ターゲット名 `build`・`test` は暫定で、人が確定します
+
+確認した結果は `docs/records/task-3-build-check.md` に残しています（判定は人が記録します）。
 
 ## コマンド
 

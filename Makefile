@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks fmt lint crate-deps
+.PHONY: help doctor setup check test-hooks build test fmt lint crate-deps
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-10s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -32,6 +32,13 @@ check: ## editorconfig-checker + shellcheck（ソースは変更しない）。�
 
 test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git のみ）。直接: scripts/hooks/test-hooks.sh
 	@scripts/hooks/test-hooks.sh
+
+# build・test は暫定の名前（人が確定する）。--all-features は付けない（DPOL-31）。
+build: ## workspace 全体をビルドする（Cargo.lock の外を解決しない）。直接: cargo build --workspace --locked
+	@cargo build --workspace --locked
+
+test: ## workspace 全体の試験を流す（CI への搭載は TASK-6）。直接: cargo test --workspace --locked
+	@cargo test --workspace --locked
 
 fmt: ## rustfmt で整形を適用する（ソースを書き換える）。直接: cargo fmt --all
 	@cargo fmt --all
