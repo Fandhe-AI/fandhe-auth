@@ -52,6 +52,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `docs/security-review/` | 人のセキュリティレビュー（`TASK-83`）の資料・記録票（`TASK-82`）。範囲の各行と対応ビヘイビア ID の表など |
 | `docs/records/` | TASK ごとの確認・走査の記録（判定は人が記録する） |
 | `docs/interim/` | 暫定の実装の置き場と差し替え対象の台帳（`TASK-9`） |
+| `docs/stubs/` | 検証用 stub（`TASK-7`・`TASK-8`）の振る舞いと実物との差の文書 |
 | `.gitmodules` | submodule 定義（`docs/spec` を `update = none` で登録） |
 | `LICENSE-MIT`・`LICENSE-APACHE` | ライセンス（前述の「ライセンス」） |
 | `.github/workflows/` | CI・AI PR レビュー・外部ソース自動追従（後述の「CI」） |

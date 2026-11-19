@@ -22,6 +22,8 @@
 //! Hub の JWKS を返す模擬: [`jwks::HubJwksEndpoint`]（#65）。
 //! Hub が `fandhe-auth` の JWKS を取得する模擬: [`jwks::AuthJwksFetcher`]（#65）。
 //! 応答の遅れ・拒否の注入: [`fault::HubFaultInjector`]（#66）。
+//!
+//! 実物との差は `docs/stubs/hub-stub.md` に書いた（#69）。
 
 #![forbid(unsafe_code)]
 
@@ -34,4 +36,4 @@ pub mod jwks;
 pub mod logout;
 pub mod presentation;
 
-// TODO(TASK-7): 実物との差の文書（#69・#70）は後続の段で足す。
+// TODO(TASK-7): 模擬の項目と Hub の ID の照合の表は #70 で `docs/stubs/hub-stub.md` へ足す。

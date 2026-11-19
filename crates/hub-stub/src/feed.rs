@@ -16,7 +16,7 @@
 //! 判定しないもの: 項目の形は `fandhe-auth` が正本を持ち検討中（RVPG-38・RVPG-41、Hub AUTHC-35）。
 //! 種別と版による適用の順序（RVPG-22・RVPG-23）は Hub 側の担当で、ここでは判定しない。
 //!
-//! 書き手の読み（spec に定めが無い。実物との差は #69・#70 で文書にする）:
+//! 書き手の読み（spec に定めが無い。実物との差は `docs/stubs/hub-stub.md` に書いた〔#69〕）:
 //! - 経過がちょうど下限なら取得してよい。`now < last_attempt_at`（時計の巻き戻り）は安全側に倒して拒む。
 //!   `now` は秒単位なので、1 秒未満の下限は切り上げて扱う。
 //! - 口に届いた要求は、拒否されても間隔の計数に入れる。
@@ -32,7 +32,7 @@ use crate::config::HubStubConfig;
 use crate::logout::{GROUPED_CLAIM, LogoutTokenReceiver};
 
 /// カーソルを運ぶ form の名前。spec に定めが無い仮置き。
-/// TODO(TASK-7): 本体の `ChangeFeed::read_since`（仮称。RVPG-42）の形が決まったら置き換える（#69・#70）。
+/// TODO(TASK-7): 本体の `ChangeFeed::read_since`（仮称。RVPG-42）の形が決まったら置き換える（#70）。
 const CURSOR_PARAM: &str = "cursor";
 
 /// 口が返した結果。項目は検討中の形のまま JSON で受ける（RVPG-38・RVPG-41）。
