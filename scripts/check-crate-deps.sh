@@ -34,7 +34,9 @@ allowed_deps() {
 }
 
 TREE_EDGES="normal,build,dev"
-TREE_ARGS=(--locked --prefix none --format '{p}' -e "${TREE_EDGES}" --target all)
+# --all-features は依存の列挙だけに使う（ビルド・clippy には使わない。DPOL-31）。optional 依存を feature の
+# 後ろに置いても逆向きの依存を見逃さない（LIB-16・DPOL-7）。
+TREE_ARGS=(--locked --all-features --prefix none --format '{p}' -e "${TREE_EDGES}" --target all)
 
 members_out="$(cargo tree "${TREE_ARGS[@]}" --workspace --depth 0)"
 members=()
