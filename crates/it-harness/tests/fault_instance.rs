@@ -23,12 +23,20 @@ fn finish(tl: FaultTimeline) -> Result<FaultRecord, FaultRecordError> {
     tl.finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
 }
 
+/// SIGTERM は固定パスの /bin/kill で送る。無い環境（最小コンテナ等）ではその試験を飛ばす。
+fn kill_available() -> bool {
+    std::path::Path::new("/bin/kill").exists()
+}
+
 fn sleeper() -> InstanceFaultHandle {
     InstanceFaultHandle::spawn(Command::new("sleep").arg("30")).unwrap()
 }
 
 #[test]
 fn sigterm_stops_and_records() {
+    if !kill_available() {
+        return;
+    }
     let mut h = sleeper();
     let mut tl = timeline();
     h.sigterm(&mut tl).unwrap();
@@ -49,8 +57,13 @@ fn sigkill_stops_and_records() {
 
 #[test]
 fn ignored_sigterm_does_not_block_and_sigkill_follows() {
+    if !kill_available() {
+        return;
+    }
     // trap の設定完了の合図は準備完了ファイルの作成（固定の待ちに頼らない）
-    let ready = std::env::temp_dir().join(format!("fandhe-it-ready-{}", std::process::id()));
+    // 共有の /tmp を使わず、試験専用の領域に置く（CWE-377）
+    let ready = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("fandhe-it-ready-{}", std::process::id()));
     let _ = std::fs::remove_file(&ready);
     let mut h = InstanceFaultHandle::spawn(
         Command::new("sh")
