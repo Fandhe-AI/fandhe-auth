@@ -30,7 +30,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
   本体に残るのは `Cargo.lock` のコミットと、`webauthn-rs` 0.5.5 の版の記録（PKEY-4。固定の根拠は DPOL-4・DPOL-10）。
 - 外向き通信は、本体が組込み先に要求する契約（信頼する CA は設定で渡されたものだけ・OS の信頼ストアを使わない・リダイレクトを追わない・打ち切り時間を持つ）を持つ
   （DPOL-46・HOST-7）。契約は `OutboundHttp` で受け、実装は組込み先（Hub）が持つ。本体の依存に HTTP クライアントの具象 crate（`reqwest` 等）を持たない
-  （利用者の決定 2026-11-20。根拠は HOST-7 の期待欄。HOST-9 は依存に現れてよいのを組込み先の実装側に限る。いずれも検討中・〔提案〕）。
+  （利用者の決定 `D-2026-11-20-4`。根拠は HOST-7 の期待欄。HOST-9 は依存に現れてよいのを組込み先の実装側に限る。HOST-7・HOST-9 はいずれも検討中・〔提案〕。`D-2026-11-20-4` 自体は利用者の決定）。
   実クライアント（`reqwest` の `rustls-tls-manual-roots` 等）の選定と本番の依存解決での検査は Hub の `ARUN-14`（DPOL-46 の行内分割）。
 
 ## 暗号
@@ -114,7 +114,8 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 - `--all-features` は DPOL-31 の変異スイッチなど試験用の feature も有効にし、本番のビルドの木と変わるので使わない。
   feature を明示しないと既定の feature だけを見る。
 - `web-sys` の確認は、`fandhe-auth-webauthn-wasm` を `--exclude` で除いた workspace 全体に `--target all` を付けて行う（crate ごとの `-p` は使わない）。`--exclude` の crate が workspace に無い間（段階 2 の前）は `--exclude` を外して流す。Hub の本番のバイナリでの確認は Hub が持つ（`ARUN-16`）。
-- 新しい依存の要否は、TASK-4 の選定対象（メール送信・構文木の走査・property test と fuzz・構造化ログ）なら選定の記録を待つ。
+- 新しい依存の要否は、TASK-4 の選定対象（構文木の走査・property test と fuzz・構造化ログと計測の口）なら選定の記録（spec の `D-`。`D-2026-11-20-6`）を待つ。
+  メール送信と外向き HTTP クライアントは選定の対象から外れた。本体は口と契約テストだけを持ち、具象は組込み先が選ぶ（`D-2026-11-20-4`・`HOST-7`・`AMTH-14`・`AAUD-40`・`DPOL-46`）ので、本体の依存に足さない。
 
 ## 関連 rule
 

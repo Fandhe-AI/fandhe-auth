@@ -119,7 +119,7 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 
 一致が無いと `did not match any packages` の誤りで非 0 終了する。これは 0 件を意味するため、終了コードでなく出力の文言で読む（`../../rules/dependency-policy.md`）。
 `openssl` は逆依存の根が webauthn-rs 系だけかを見る（DPOL-10・DPOL-11・DPOL-13。DPOL-12 は移管 → Hub `AOPS-2`）。`rsa` は本番依存（RP 向け crate を含む）で 0 件か（DPOL-18・DPOL-21）、
-`native-tls` は 0 件か（DPOL-46）、`reqwest` は本体の依存で 0 件か（HOST-7・HOST-9。利用者の決定 2026-11-20（spec に D- の記録なし、根拠は HOST-7 の期待欄）で HTTP クライアントの具象 crate は本体の依存に持たない。検討中・〔提案〕）、`web-sys` はサーバー側のビルドに入る crate で 0 件か（DPOL-40）を見る。`-e normal,build` は build-dependencies を含め、dev-dependencies を除く（`-e normal` だけでは build-dependencies が抜ける）。
+`native-tls` は 0 件か（DPOL-46）、`reqwest` は本体の依存で 0 件か（HOST-7・HOST-9。`D-2026-11-20-4`（根拠は HOST-7 の期待欄）で HTTP クライアントの具象 crate は本体の依存に持たない。検討中・〔提案〕）、`web-sys` はサーバー側のビルドに入る crate で 0 件か（DPOL-40）を見る。`-e normal,build` は build-dependencies を含め、dev-dependencies を除く（`-e normal` だけでは build-dependencies が抜ける）。
 試験だけの依存は呼び出し元が求めたときに `-e dev` で別に見る。
 機械の検査は `reqwest` の名前だけで、他の具象 crate（`hyper` の client・`ureq` 等）はレビューで見る（名前の一覧は TASK-668 まで無い）。検査する名前の一覧は未定（TASK-668 で決める。`deny.toml` の bans へ足すかは利用者が決める）。
 

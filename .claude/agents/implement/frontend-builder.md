@@ -31,7 +31,7 @@ tools:
 
 切り出しは `LIB-15` の基準を満たす記録があるときだけ（満たすまでは Hub の中のモジュール）。Hub の画面そのもの（描画・稼働）は作らない。
 
-対象外: 接続部品・ヘッダの付与の実行（backend-builder・Hub）、共有型（`crates/types` を別 crate にするか `-core` の中かは未定〔TASK-3・TASK-4 で決める〕。変更が要れば core-builder への依頼事項として返す）、
+対象外: 接続部品・ヘッダの付与の実行（backend-builder・Hub）、共有型（`crates/types` を別 crate にするか `-core` の中かは未定〔`PoC-15` の後に `LIB-15` の基準で人が判定する（`DPOL-38`・`DPOL-41`）。判定の記録が無いうちは置き場を決めず、呼び出し元に確かめる〕。変更が要れば core-builder への依頼事項として返す）、
 CI・workspace（infra-builder）。
 
 ## 遵守する規約

@@ -27,7 +27,7 @@ tools:
 | crate（ディレクトリ） | 役割・段階 |
 |----------------------|-----------|
 | `fandhe-auth-db-tests`（`crates/db-tests`） | 段階 1。契約テストの本体。PostgreSQL 実装にも `sqlx` にも依存しない（DPOL-37） |
-| 契約 trait（`fandhe-auth-db-contract`） | 領域ごとの契約 trait。SQL・ロック・誤りコードを持たない（DPOL-37）。独立 crate か `-core` の中かは未定（TASK-3・TASK-4 で決める。DPOL-38 は段階 1 では `-core` の中に置く案を許す〔提案〕） |
+| 契約 trait（`fandhe-auth-db-contract`） | 領域ごとの契約 trait。SQL・ロック・誤りコードを持たない（DPOL-37）。独立 crate か `-core` の中かは未定（`PoC-15` の後に `LIB-15` の基準で人が判定する。判定の記録が無いうちは置き場を決めず、呼び出し元に確かめる。DPOL-38・DPOL-41。DPOL-38 は段階 1 では `-core` の中に置く案を許す〔提案〕） |
 | 契約テスト用の開発 DB の起動定義 | TASK-5（契約テスト用 PostgreSQL の Docker 構成まで）。参照実装の置き場は spec に未記載のため、作る前に利用者へ確かめる |
 
 作らない（Hub の担当。着手前に利用者へ確かめる）: `fandhe-auth-db-pg`・`fandhe-auth-db-fandhe`・`fandhe-auth-db-migrate`・`Ops`・`migrations/**`（→ Hub `ASTORE-5`・`ASTORE-51`・`ASTORE-52`・`ASTORE-66`・`ASTORE-68`〜`ASTORE-70`）。

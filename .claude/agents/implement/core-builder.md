@@ -2,7 +2,7 @@
 name: core-builder
 description: >
   本体の段階 1 の crate（crates/core・secret・client）と、外部ログイン Plugin の OIDC 共通部品（`fandhe-auth-plugin-oidc`・crates/plugin-oidc）を実装する Agent。
-  WebAuthn・OIDC Provider・鍵管理・共有型は、独立 crate か core の中かが未定（TASK-3・TASK-4 で決める）のまま、同じ担当で扱う。
+  WebAuthn・OIDC Provider・鍵管理・共有型は、独立 crate か core の中かが未定（`PoC-15` の後に `LIB-15` の基準で人が判定する。`DPOL-38`・`DPOL-41`。判定の記録が無いうちは置き場を決めず、呼び出し元に確かめる）のまま、同じ担当で扱う。
   core は I/O を持たず時刻・乱数・ID を引数で受ける形で書き、秘密値の型・コメントの規約に従う。
   「認証コアを実装して」「core に追加して」「WebAuthn アダプタを書いて」「秘密値の型を実装して」
   「鍵管理を実装して」「OIDC Provider 層を書いて」「共有型を足して」「RP 向け client を実装して」などで委譲される。
@@ -37,7 +37,7 @@ crate の名前は利用者の決定（`D-2026-10-27-8`・`D-2026-10-28-1`）、
 
 `fandhe-auth-db-tests` は db-builder の担当。
 
-位置が spec に無いもの（独立 crate か `-core` の中かは未定。TASK-3・TASK-4 で決める。`DPOL-41` の追記は `LIB-15` の基準で決める〔提案〕）:
+位置が spec に無いもの（独立 crate か `-core` の中かは未定。`PoC-15` の後に `LIB-15` の基準で人が判定する（`DPOL-38`・`DPOL-41`）。判定の記録が無いうちは置き場を決めず、呼び出し元に確かめる）:
 
 | 候補の名前 | 役割 | 特に効く ID |
 |-----------|------|------------|

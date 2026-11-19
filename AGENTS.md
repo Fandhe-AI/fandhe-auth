@@ -136,7 +136,7 @@ Hub が組み込むライブラリ（本体）で、型・判定・拡張契約�
 | P1 | `cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` を通さない。make ターゲットができた後は make を正とする | `verification.md` |
 | P1 | `Cargo.lock` をコミットしない、版の固定が方針と異なる（本体は `Cargo.lock` のコミットと `webauthn-rs` 等の版の記録。相手側の部品の版固定は Hub の担当） | DPOL-4・DPOL-10・PKEY-4（`DPOL-9`・`CSRF-13` は → Hub `ARUN-17`） |
 | P1 | 自身の crate に `license = "MIT OR Apache-2.0"` が無い。git 依存・crates.io 以外の registry | DPOL-25・26 |
-| P1 | MSRV・edition・構造化ログの部品など未定の値を決まったものとして書く（未定は「未定（TASK-n で決める）」と書く） | `coding-rust.md`・`spec-reference.md` |
+| P1 | MSRV・edition・構造化ログの口（本体が選ぶのは出す口だけ。`D-2026-11-20-5`）など未定の値を決まったものとして書く（未定は「未定（TASK-n で決める）」と書く） | `coding-rust.md`・`spec-reference.md` |
 
 ## 指摘の書き方
 
