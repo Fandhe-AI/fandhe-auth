@@ -19,7 +19,8 @@ use crate::webauthn_error::WebAuthnErrorName;
 use crate::webdriver::CredentialRef;
 
 /// 認証のスクリプト。`arguments[0]` が RP ID、`[1]` が期待する origin、`[2]` が credential ID（base64url）。
-/// 10 秒の期限はページ内の `AbortController` で明示的に設ける（`publicKey.timeout` はブラウザが調整し得るヒントで、
+/// 10 秒の期限はページ内の `AbortController` で明示的に設ける。`publicKey.timeout` は 15 秒とし、ブラウザ側の
+/// 期限（`NotAllowed`・UV 拒否と同じ名前）がハーネスの期限より先に発火しないようにする（ブラウザが調整し得るヒントで、
 /// 打ち切りの保証にならない）。期限切れは `HarnessTimeout`（`NotAllowed` とは別の名前）で返し、試験側の script timeout
 /// （20 秒）より先に結果として観測する。値はハーネスの安全上の値で、要件の値ではない。
 const AUTHENTICATE_SCRIPT: &str = r#"
@@ -49,7 +50,7 @@ const credB64u = arguments[2];
             rpId,
             allowCredentials: [{ type: 'public-key', id: unb64u(credB64u) }],
             userVerification: 'required',
-            timeout: 10000
+            timeout: 15000
         }});
         clearTimeout(timer);
         const cd = JSON.parse(new TextDecoder().decode(cred.response.clientDataJSON));
@@ -193,6 +194,18 @@ mod tests {
         let shown = format!("{o:?} {:?}", o.error_name());
         assert!(!shown.contains("leaky-value-123"), "{shown}");
         assert_eq!(o.error_name(), Some(WebAuthnErrorName::Other));
+        assert!(!o.succeeded());
+    }
+
+    #[test]
+    fn harness_timeout_is_distinct_from_not_allowed() {
+        // 期限切れは UV 拒否（NotAllowed）の期待を満たさない。
+        let o = AuthenticationOutcome::from_value(
+            &json!({ "ok": false, "errorName": "HarnessTimeout" }),
+        )
+        .unwrap();
+        assert_eq!(o.error_name(), Some(WebAuthnErrorName::HarnessTimeout));
+        assert_ne!(o.error_name(), Some(WebAuthnErrorName::NotAllowed));
         assert!(!o.succeeded());
     }
 

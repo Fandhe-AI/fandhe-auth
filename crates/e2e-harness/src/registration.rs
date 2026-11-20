@@ -62,7 +62,8 @@ const expectedOrigin = arguments[1];
 /// 登録の失敗の名前（認証と共通の列挙の別名。既存の公開名を保つ）。
 pub use crate::webauthn_error::WebAuthnErrorName as RegistrationErrorName;
 
-/// 登録 1 件の結果。真偽と長さだけで、credential の値を持たない。
+/// 登録 1 件の結果。真偽と長さに加え、成功時は不透明な [`CredentialRef`] を保持する（後続の認証で使う）。
+/// `Debug` は `CredentialRef` の固定表示（`<redacted>`）だけを出し、credential ID の生値は出さない（SECR-11・SECR-23）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationOutcome {
     created: bool,

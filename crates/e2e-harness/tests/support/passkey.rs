@@ -58,8 +58,9 @@ pub fn register(
 /// 仮想 authenticator の credential がちょうど 1 件で、RP ID が `localhost` であることを確かめる。
 pub fn assert_one_localhost_credential(handle: &DriverHandle, aid: &AuthenticatorId) {
     let creds = handle.credentials(aid).expect("credentials");
-    assert_eq!(creds.len(), 1);
-    assert_eq!(creds[0].rp_id, "localhost");
+    assert!(creds.len() == 1, "credential count mismatch");
+    // SECR-23: ドライバ応答の生値を失敗メッセージに出さない。真偽だけを検査する。
+    assert!(creds[0].rp_id == "localhost", "credential rp_id mismatch");
 }
 
 pub enum Verdict {

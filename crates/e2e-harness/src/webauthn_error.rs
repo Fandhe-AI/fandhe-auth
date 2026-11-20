@@ -23,6 +23,8 @@ pub enum WebAuthnErrorName {
     Type,
     /// 呼び出しの前の確認で、ページの origin が試験用の origin と違った（ハーネス自身の固定の名前）。
     OriginMismatch,
+    /// ハーネス自身の期限（ページ内の `AbortController`）が先に切れた。ブラウザの `NotAllowed` とは別（ハーネス自身の固定の名前）。
+    HarnessTimeout,
     /// 既知の名前に当たらない値。
     Other,
 }
@@ -43,6 +45,7 @@ impl WebAuthnErrorName {
             "UnknownError" => Self::Unknown,
             "TypeError" => Self::Type,
             "OriginMismatch" => Self::OriginMismatch,
+            "HarnessTimeout" => Self::HarnessTimeout,
             _ => Self::Other,
         }
     }
