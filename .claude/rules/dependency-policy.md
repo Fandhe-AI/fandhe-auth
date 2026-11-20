@@ -98,6 +98,11 @@ cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sou
 cargo audit --no-fetch --file Cargo.lock    # cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
 git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換えが無いこと（依存を足した変更では差分を目視で確かめる）
 
+# fuzz の別 workspace（ルートの exclude。独自の Cargo.lock を持つ）。ルートの上の 2 行は libfuzzer-sys とその推移依存を見ないので別に流す（DPOL-33・DPOL-34）
+cargo deny --locked --manifest-path crates/trial-deps/fuzz/Cargo.toml check --disable-fetch advisories bans licenses sources
+cargo audit --no-fetch --file crates/trial-deps/fuzz/Cargo.lock
+git diff --exit-code crates/trial-deps/fuzz/Cargo.lock   # fuzz 側の Cargo.lock の書き換えが無いこと
+
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
 # SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形。無ければ空）
 cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 合格: 「did not match any packages」（一致なし）
@@ -124,6 +129,9 @@ cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build
   - 最小の試し実装（TASK-4 の成果物）は `crates/trial-deps`（#35）に実施した。normal は `fandhe-auth-secret`・`tracing`・`metrics`、
     dev は `tracing-subscriber`・`proptest`・`syn`（`default-features = false`、`full`・`parsing`）。fuzz は別 workspace の `crates/trial-deps/fuzz/`（ルートの `exclude`）で、nightly を使い CI には載せていない。
     口の feature の選び・K11 の閾値・`deny.toml` の形は **未定**（K11 を記入して人が決める）
+    fuzz の workspace はルートの `cargo deny`・`cargo audit --file Cargo.lock` の対象に入らない（`libfuzzer-sys` とその推移依存を見ない）ので、
+    上の確認手順の bash ブロックにある fuzz 側の 3 行（`--manifest-path crates/trial-deps/fuzz/Cargo.toml` と `crates/trial-deps/fuzz/Cargo.lock`）も流す（DPOL-33・DPOL-34）。
+    `deny.toml` が無い間の扱いはルートと同じで、ルートの手順と同じ形で流す。`--config` で厳格版を渡すときは `check` の後ろに置く（`--manifest-path` と同じ階層には置けない）。
     この crate は workspace のメンバーで、`tracing`・`metrics` とその推移依存を normal に持つ。本番向けの確認（上の `cargo tree --workspace`）に根として混ざらないよう、
     `--exclude fandhe-auth-trial-deps` で明示して除く（K7・`D-2026-11-20-7`。DPOL-34）。試験用の依存の確認は別に
     `cargo tree --locked -p fandhe-auth-trial-deps -e normal,build,dev --target all` で行う。
