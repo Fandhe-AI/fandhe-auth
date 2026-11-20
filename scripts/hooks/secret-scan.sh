@@ -8,7 +8,8 @@
 #                             上記と同じ走査で、出力から該当ファイル名を除く（規則 ID・件数だけ。公開ログ用。
 #                             パスに値が含まれ得る・改行を含むパスが出力行を偽装し得るため。SECR-23）。
 #                             CI は scripts/secret-scan-ci.sh 経由でこの形だけを使う
-#   それ以外の引数は usage を出して終了コード 2。検査を外す引数・環境変数・除外リストは置かない。
+#   それ以外の引数は usage を出して終了コード 2。検査を外す引数・環境変数は置かない。
+#   本文の走査の除外は下の「除外」の 1 種類だけで、引数・環境変数で足す手段は無い。
 #
 # 規則表（規則 ID は暫定。確定は人が行う）:
 #   env-file         .env 系ファイル（.env.example / .sample / .template は雛形として除外）
@@ -29,8 +30,15 @@
 # 本文は `git diff --text` で受けるため、.gitattributes の binary・-diff 属性や NUL を含むファイルも走査する。
 # NUL は取り除いた版と空白へ置き換えた版の両方で照合する。照合できるのは上の規則表の形式（行内の文字列）だけで、
 # 圧縮・エンコード（base64 等）・複数行に分割された値・規則に無い形の値は検出できない。
-# .agents/skills/・.claude/skills/・*.lock は本文の走査（規則 assignment 等）の対象外（skills-lock.json 管理の外部取得物・ハッシュ列）。
-# ただし env-file の名前の検査は除外より前に全パスへ掛かる（除外は本文の走査にだけ効く。fail-closed）。
+# 除外（本文の走査だけに効く。env-file の名前の検査は除外より前に全パスへ掛かる。fail-closed）:
+#   このスクリプトのある repo の skills-lock.json（<このファイル>/../../skills-lock.json）に登録された名前の
+#   `.agents/skills/<名前>/` の下だけを本文の走査から外す（外部取得物の参考文書）。
+#   一覧は検出器の側だけから読み、走査対象（staged・追跡ファイル・PR の head）の skills-lock.json は読まない。
+#   PR が自分の変更で一覧に名前を足して検査を免れる経路を作らないため（CI は保護された main の検出器を使う。
+#   #51・#6000）。パスの形（*.lock・.claude/skills/・未登録の .agents/skills/ の下）では除外しない。
+#   名前は `[a-z0-9-]` の規則に合うものだけを通し、literal の pathspec にする（glob・`..`・`/` を持ち込ませない）。
+#   skills-lock.json が無ければ除外なしで全部走査する。読めない・形が想定と違う場合は終了コード 2（fail-closed）。
+#   残る限界: 登録済みの skill のディレクトリへ新しく置いたファイルは、今も本文の走査から外れる。
 # 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
 # 本文のバイト列は照合するが、圧縮・エンコードの展開と、複数行に分かれた値の復元はしない。
 # 保守的なヒューリスティックであり網羅的なスキャナの代替ではない。AAUD-30 の実行時の登録簿による走査とも別物。
@@ -82,6 +90,19 @@ esac
 if [ "${summary}" -eq 1 ]; then
   exec 2> /dev/null
 fi
+
+# 除外の一覧の読み元は、このスクリプト自身の場所から決める（走査対象の repo ではない）。
+# 呼び出しは相対パスのことがあるため、cd の前に絶対パスへ解決する。末尾の改行は番兵（x）で保つ。
+if ! script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P && printf x)"; then
+  echo "secret-scan: cannot resolve the detector location; aborting" >&4
+  exit 2
+fi
+script_dir="${script_dir%x}"
+script_dir="${script_dir%$'\n'}"
+detector_lock="${script_dir}/../../skills-lock.json"
+
+# 呼び出し側の環境変数で pathspec の解釈（literal・glob・大文字小文字無視）が変わると、除外の範囲がずれる。
+unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 
 # 行に対する規則（bash 3.2 互換のため添字配列を並べる）。nocase_from 以降は大文字小文字を区別しない。
 rule_ids=(vendor-token private-key jwt jwk-private credential-url assignment)
@@ -183,6 +204,74 @@ if ! tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")" || [ -z "${tmp_
 fi
 trap 'rm -rf "${tmp_dir}"' EXIT
 
+# 本文の走査から外す名前を、検出器の skills-lock.json から読む。形は
+#   { "version": 2, "skills": { "<名前>": { ... }, ... } }
+# を 1 行ずつ読み、{ } の深さで追う（jq・python に依存しない）。診断には名前・パスを出さない（SECR-23）。
+skill_names=()
+lock_fail() {
+  echo "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting" >&4
+  exit 2
+}
+load_skill_names() {
+  local line depth=0 opens closes t version_ok=0 skills_seen=0 name n name_count=0
+  if [ ! -e "${detector_lock}" ] && [ ! -L "${detector_lock}" ]; then
+    return 0
+  fi
+  if [ ! -f "${detector_lock}" ] || [ ! -r "${detector_lock}" ]; then
+    lock_fail
+  fi
+  while IFS= read -r line || [ -n "${line}" ]; do
+    t="${line//[^\{]/}"
+    opens="${#t}"
+    t="${line//[^\}]/}"
+    closes="${#t}"
+    if [[ "${line}" =~ ^[[:space:]]*$ ]]; then
+      continue
+    fi
+    case "${depth}" in
+      0)
+        [[ "${line}" =~ ^[[:space:]]*\{[[:space:]]*$ ]] || lock_fail
+        ;;
+      1)
+        if [[ "${line}" =~ ^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*2[[:space:]]*,?[[:space:]]*$ ]]; then
+          version_ok=1
+        elif [[ "${line}" =~ ^[[:space:]]*\"skills\"[[:space:]]*:[[:space:]]*\{[[:space:]]*$ ]]; then
+          [ "${skills_seen}" -eq 0 ] || lock_fail
+          skills_seen=1
+        elif ! [[ "${line}" =~ ^[[:space:]]*\}[[:space:]]*$ ]]; then
+          lock_fail
+        fi
+        ;;
+      2)
+        if [[ "${line}" =~ ^[[:space:]]*\"([^\"]*)\"[[:space:]]*:[[:space:]]*\{[[:space:]]*$ ]]; then
+          name="${BASH_REMATCH[1]}"
+          [[ "${name}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || lock_fail
+          for n in ${skill_names[@]+"${skill_names[@]}"}; do
+            [ "${n}" != "${name}" ] || lock_fail
+          done
+          skill_names+=("${name}")
+          name_count=$((name_count + 1))
+        elif ! [[ "${line}" =~ ^[[:space:]]*\},?[[:space:]]*$ ]]; then
+          lock_fail
+        fi
+        ;;
+    esac
+    depth=$((depth + opens - closes))
+    [ "${depth}" -ge 0 ] || lock_fail
+  done < "${detector_lock}"
+  if [ "${depth}" -ne 0 ] || [ "${version_ok}" -ne 1 ] || [ "${skills_seen}" -ne 1 ] || [ "${name_count}" -eq 0 ]; then
+    lock_fail
+  fi
+}
+load_skill_names
+
+# 本文の走査の pathspec。`-- .` で始めて空にしない（bash 3.2 は set -u で空配列を展開できない）。
+# 名前ごとに literal・top・末尾 `/`（名前ちょうどの blob・前方一致の別名は外さない）で外す。
+body_pathspec=(-- .)
+for name in ${skill_names[@]+"${skill_names[@]}"}; do
+  body_pathspec+=(":(exclude,literal,top).agents/skills/${name}/")
+done
+
 # 利用者の git 設定で出力形式が変わると追加行・ファイル名を取りこぼすため固定する。
 #   --no-color: color.diff / color.ui = always で行頭に色コードが付き `+` 行を検出できなくなる
 #   --no-ext-diff / --no-textconv: diff.external・textconv ドライバが本文を差し替える
@@ -259,9 +348,7 @@ if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
 fi
 
 # 2. 追加行のみを走査する（削除行を対象にすると漏洩済み値の除去コミットを妨げる）
-if ! scan_diff -U0 --diff-filter=ACMR -- . \
-  ':(exclude).agents/skills/**' ':(exclude).claude/skills/**' ':(exclude)*.lock' \
-  > "${tmp_dir}/diff"; then
+if ! scan_diff -U0 --diff-filter=ACMR "${body_pathspec[@]}" > "${tmp_dir}/diff"; then
   echo "secret-scan: failed to read diff; aborting" >&4
   exit 2
 fi

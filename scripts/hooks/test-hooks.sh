@@ -131,7 +131,7 @@ new_repo() {
 check_scan() {
   local desc="$1" want="$2" want_file="${3:-}" rc=0 out needle
   # SCAN_ARG は空（staged モード）か `--tracked` など 1 語の引数
-  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" ${SCAN_ARG:+"${SCAN_ARG}"} > "${work_dir}/out" 2>&1 || rc=$?
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SCAN_BIN:-${SECRET_SCAN}}" ${SCAN_ARG:+"${SCAN_ARG}"} > "${work_dir}/out" 2>&1 || rc=$?
   out="$(cat "${work_dir}/out")"
   last_out="${out}"
   if [ "${rc}" -ne "${want}" ]; then
@@ -166,6 +166,36 @@ stage() {
   printf '%s\n' "$2" > "$1"
   git add -- "$1"
 }
+
+# make_detector <名前> [skills-lock.json の内容]: 検出器の複製を ${work_dir}/det-<名前>/ に作り、
+# スクリプトのパスを det_bin に入れる。内容を省くと skills-lock.json を置かない（除外なし）。
+# 除外の一覧は検出器の repo の skills-lock.json から読む（走査対象の repo のものは読まない。#6000）。
+det_bin=""
+make_detector() {
+  local d="${work_dir}/det-$1"
+  mkdir -p "${d}/scripts/hooks"
+  cp "${SECRET_SCAN}" "${d}/scripts/hooks/secret-scan.sh"
+  if [ "$#" -ge 2 ]; then
+    printf '%s\n' "$2" > "${d}/skills-lock.json"
+  fi
+  det_bin="${d}/scripts/hooks/secret-scan.sh"
+}
+lock_ok='{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "example/skills",
+      "skillPath": "skills/vendored-a/SKILL.md"
+    },
+    "vendored-b": {
+      "source": "example/skills"
+    }
+  }
+}'
+make_detector ok "${lock_ok}"
+det_ok="${det_bin}"
+make_detector nolock
+det_nolock="${det_bin}"
 
 echo "# hooks under test run with: ${HOOK_BASH} (${BASH_VERSION}), locale ${utf8_locale}"
 
@@ -204,9 +234,9 @@ check_scan "file name with spaces is reported correctly" 1 "dir with space/app.t
 new_repo; stage src/app.txt "x = ${token}"; mkdir -p sub/dir; cd sub/dir
 check_scan "run from a subdirectory scans the whole index" 1 src/app.txt
 
-new_repo; mkdir -p .agents/skills/x; stage .agents/skills/x/doc.md "x = ${token}"
-git commit -q -m "chore: vendored"; mkdir -p src; git mv .agents/skills/x/doc.md src/doc.md
-check_scan "file moved out of an excluded path" 1 src/doc.md
+new_repo; mkdir -p .agents/skills/vendored-a; stage .agents/skills/vendored-a/doc.md "x = ${token}"
+git commit -q -m "chore: vendored"; mkdir -p src; git mv .agents/skills/vendored-a/doc.md src/doc.md
+SCAN_BIN="${det_ok}" check_scan "file moved out of an excluded path" 1 src/doc.md
 
 # (b) 非 UTF-8 のバイトと同じ行にあるトークン
 new_repo; stage latin1.txt "caf"$'\xe9'" ${token}"
@@ -245,10 +275,10 @@ check_scan "(d) diff.noprefix keeps file attribution" 1 app.txt
 new_repo; git config diff.mnemonicPrefix true; stage app.txt "x = ${token}"
 check_scan "(d) diff.mnemonicPrefix keeps file attribution" 1 app.txt
 
-new_repo; git config diff.renames copies; mkdir -p .claude/skills/x
-stage .claude/skills/x/doc.md "x = ${token}"; git commit -q -m "chore: vendored"
-cp .claude/skills/x/doc.md copy.md; git add copy.md
-check_scan "(d) diff.renames=copies does not hide a copied file" 1 copy.md
+new_repo; git config diff.renames copies; mkdir -p .agents/skills/vendored-a
+stage .agents/skills/vendored-a/doc.md "x = ${token}"; git commit -q -m "chore: vendored"
+cp .agents/skills/vendored-a/doc.md copy.md; git add copy.md
+SCAN_BIN="${det_ok}" check_scan "(d) diff.renames=copies does not hide a copied file" 1 copy.md
 
 # ---------------------------------------------------------------- secret-scan: 許可
 new_repo
@@ -268,9 +298,141 @@ check_scan "env var placeholder" 0
 new_repo; stage README.md "see https://example.com/path and user${at}example.com"
 check_scan "URL without credentials" 0
 
-new_repo; stage .agents/skills/x/SKILL.md "x = ${token}"; stage .claude/skills/y/SKILL.md "${dsn_line}"
-stage deps.lock "x = ${token}"
-check_scan "excluded paths (.agents/skills, .claude/skills, *.lock)" 0
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"; stage .agents/skills/vendored-b/sub/n.md "${dsn_line}"
+SCAN_BIN="${det_ok}" check_scan "paths registered in the detector's skills-lock.json are excluded" 0
+
+# 除外は検出器の skills-lock.json に登録された .agents/skills/<名前>/ の下だけ。パスの形では決めない（#6000）
+new_repo; stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "unregistered .agents/skills directory is scanned" 1 .agents/skills/other/SKILL.md
+
+new_repo; stage .agents/skills/vendored-a-evil/x.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "name prefix match does not exclude a sibling directory" 1 .agents/skills/vendored-a-evil/x.md
+
+new_repo; stage .agents/skills/vendored-a "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "a file named exactly like a registered skill is scanned" 1 .agents/skills/vendored-a
+
+new_repo; stage .agents/skills/loose.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "a file directly under .agents/skills is scanned" 1 .agents/skills/loose.md
+
+new_repo; stage .agents/skills/VENDORED-A/x.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "case-changed skill name is scanned" 1 .agents/skills/VENDORED-A/x.md
+GIT_ICASE_PATHSPECS=1 SCAN_BIN="${det_ok}" check_scan "case-changed skill name is scanned (GIT_ICASE_PATHSPECS=1)" 1 .agents/skills/VENDORED-A/x.md
+
+new_repo; stage nested/.agents/skills/vendored-a/x.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "nested .agents/skills path is scanned" 1 nested/.agents/skills/vendored-a/x.md
+
+new_repo; stage deps.lock "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "*.lock at the root is scanned" 1 deps.lock
+
+new_repo; stage a/b/foo.lock "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "nested *.lock is scanned" 1 a/b/foo.lock
+
+new_repo; stage .claude/skills/y/SKILL.md "${dsn_line}"
+SCAN_BIN="${det_ok}" check_scan ".claude/skills real directory is scanned" 1 .claude/skills/y/SKILL.md
+
+# 走査対象の repo が自分の skills-lock.json に名前を足しても、除外にならない（中心のケース）
+new_repo
+printf '%s\n' '{' '  "version": 2,' '  "skills": {' '    "other": {' '      "source": "x"' '    }' '  }' '}' > skills-lock.json
+git add skills-lock.json; stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "the scanned repo's own skills-lock.json does not add exclusions" 1 .agents/skills/other/SKILL.md
+
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_nolock}" check_scan "detector without skills-lock.json excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# 除外にかからないパスのダミーは検出される（陰性対照。#6000 の受け入れ条件）
+new_repo; stage src/app.txt "${dsn_line}"
+SCAN_BIN="${det_ok}" check_scan "dummy under a non-excluded path is detected" 1 src/app.txt
+
+# 検出器の skills-lock.json が壊れていれば検査不能（fail-closed）。診断に名前・パスを出さない
+bad_n=0
+check_bad_lock() {
+  local desc="$1" content="$2" rc=0
+  bad_n=$((bad_n + 1))
+  make_detector "bad${bad_n}" "${content}"
+  new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_bin}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting" "${work_dir}/out" \
+    && ! grep -q "vendored\|det-bad\|/" "${work_dir}/out"; then
+    pass "secret-scan: ${desc}"
+  else
+    fail "secret-scan: ${desc}" "expected exit 2 with a fixed message, got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+}
+check_bad_lock "skills-lock.json with version 3 is rejected" '{
+  "version": 3,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json without skills is rejected" '{
+  "version": 2
+}'
+check_bad_lock "skills-lock.json with an empty skills map is rejected" '{
+  "version": 2,
+  "skills": {
+  }
+}'
+check_bad_lock "skills-lock.json name with a slash is rejected" '{
+  "version": 2,
+  "skills": {
+    "a/b": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json name with dot-dot is rejected" '{
+  "version": 2,
+  "skills": {
+    "..": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json name with a glob character is rejected" '{
+  "version": 2,
+  "skills": {
+    "a*": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json name with a space is rejected" '{
+  "version": 2,
+  "skills": {
+    "a b": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with unbalanced braces is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }'
+check_bad_lock "skills-lock.json with a duplicate name is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    },
+    "vendored-a": {
+      "source": "y"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with an unexpected top-level key is rejected" '{
+  "version": 2,
+  "extra": 1,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
 
 new_repo; stage leaked.txt "$(printf '%s\n%s' "keep" "x = ${token}")"; git commit -q -m "chore: leak"
 printf '%s\n' "keep" > leaked.txt; git add leaked.txt
@@ -340,8 +502,17 @@ else
   fail "secret-scan: (tracked) --summary omits file names" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-new_repo; stage .agents/skills/x/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
-check_scan "(tracked) excluded paths" 0
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
+SCAN_BIN="${det_ok}" check_scan "(tracked) registered skill path is excluded" 0
+
+new_repo; stage .agents/skills/other/SKILL.md "x = ${token}"; stage deps.lock "x = ${token}"
+stage a/b/foo.lock "x = ${token}"; stage .claude/skills/y/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
+SCAN_BIN="${det_ok}" check_scan "(tracked) unregistered skill path, *.lock and .claude/skills are scanned" 1 deps.lock
+expect_out "(tracked) all four paths are counted" "total: 4 finding(s) in 4 file(s)"
+
+new_repo; stage .agents/skills/vendored-a-evil/x.md "x = ${token}"; stage .agents/skills/vendored-a "x = ${token}"
+git commit -q -m "chore: skill"
+SCAN_BIN="${det_ok}" check_scan "(tracked) sibling name and exact-name blob are scanned" 1 .agents/skills/vendored-a
 
 new_repo; printf 'x = %s\n\000' "${token}" > bin.dat; git add bin.dat; git commit -q -m "chore: bin"
 check_scan "(tracked) NUL-containing file is scanned (fail-closed)" 1 bin.dat
