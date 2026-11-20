@@ -67,7 +67,7 @@ impl fmt::Display for MeterError {
 
 impl std::error::Error for MeterError {}
 
-fn validate_name(s: &str) -> Result<(), MeterError> {
+pub(crate) fn validate_name(s: &str) -> Result<(), MeterError> {
     let ok = !s.is_empty()
         && s.len() <= NAME_MAX_LEN
         && s.bytes()
