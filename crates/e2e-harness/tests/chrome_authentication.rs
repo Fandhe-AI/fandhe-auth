@@ -56,11 +56,17 @@ fn authentication_fails_when_user_verification_fails_with_chrome() {
     .expect("start");
 
     let (aid, cred) = register(&handle, &origin, Browser::Chrome);
+    // 対照: 同じセッション・credential・UV 成功の状態で認証が通ることを先に確かめる。
+    // NotAllowedError は期限切れ等でも返るため、UV の状態だけを変えて結果が変わることで UV による拒否を判別する。
+    let control =
+        authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("control");
+    assert!(control.succeeded(), "error_name={:?}", control.error_name());
     // 登録の後に UV を失敗にする。判定は authenticator 側で完結し、ネットワークに出ない。
     handle.set_user_verified(&aid, false).expect("set uv");
     let outcome =
         authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("authenticate");
     assert!(!outcome.succeeded());
+    // HarnessTimeout とは別の名前で、対照が成功した同一条件から UV だけを変えた結果としてだけ読む。
     assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
     assert_one_localhost_credential(&handle, &aid);
     print_result(

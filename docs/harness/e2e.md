@@ -54,6 +54,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 1. 試験用 origin で `navigator.credentials.create()` が resolve し、`type` が `public-key`、attestation が空でない
 2. `clientDataJSON` の `type`・`origin`・`challenge` が期待と一致（ページ内で比べ、真偽と長さだけを返す）
+3. `cred.id` と `rawId` の base64url 表現が一致し、その値から `CredentialRef` を構築できる（形式の検証に通る）
 
 失敗したときの `DOMException.name` は既知の名前の列挙（`WebAuthnErrorName`。`RegistrationErrorName` は別名）に写し、未知の値は `Other` に畳む（`SECR-23`）。
 
@@ -62,7 +63,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 登録試験の側（`tests/chrome_registration.rs`）が検査する範囲。`register_once` は検査しない:
 
-3. `handle.credentials()` の要約で、仮想 authenticator の credential がちょうど 1 件で、`rpId` が `localhost`
+4. `handle.credentials()` の要約で、仮想 authenticator の credential がちょうど 1 件で、`rpId` が `localhost`
 
 ## 認証 1 件の定義（4/6）
 
@@ -81,6 +82,9 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 - 採ったもの: 登録の後に仮想 authenticator の UV を失敗にし（WebDriver の Set User Verified、`isUserVerified: false`）、
   `userVerification: required` で認証すると `NotAllowedError` になる。判定は authenticator 側で完結し、ネットワークに出ない。
+- 対照: 失敗の試験は、同じセッション・credential で UV が成功の状態の認証を先に通し（対照）、UV だけを失敗に変えて `NotAllowedError` を
+  観測する。`NotAllowedError` は期限切れ等でも返るため、名前だけでは UV による拒否と断定できない。対照が通った同一条件から UV だけを変えた
+  結果として読み、結果の主張は `NotAllowedError` の観測までにとどめる（原因の判別はブラウザが公開しない）。
 - 採らなかったもの: RP ID を origin の suffix でない値にする案（Chrome は Related Origin Requests で `https://<rpId>/.well-known/webauthn` を
   取りに行くため、外への通信が起きる。A10）。credential を消してから認証する案（timeout まで待つかが確かめられていない）。
 - 時間の上限: 認証スクリプトはページ内の `AbortController` で 10 秒の期限を明示的に設ける（`publicKey.timeout` はブラウザが調整し得る

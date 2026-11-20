@@ -121,11 +121,11 @@ fn geckodriver_receives_port_as_two_separate_arguments() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let text = fs::read_to_string(&args).expect("偽のドライバが実行されなかった");
+    let text = fs::read_to_string(&args).expect("fake driver was not executed");
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 3, "{lines:?}");
     assert_eq!(lines[0], "2");
     assert_eq!(lines[1], "--port");
-    let port: u32 = lines[2].parse().expect("ポート番号");
+    let port: u32 = lines[2].parse().expect("port number");
     assert!((1..=65535).contains(&port));
 }

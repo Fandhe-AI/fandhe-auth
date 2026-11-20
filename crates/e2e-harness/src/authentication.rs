@@ -144,8 +144,24 @@ impl AuthenticationOutcome {
 /// `http://<host>[:<port>]` の形の origin からホストを取り出す。形が違えば `None`。
 fn origin_host(origin: &str) -> Option<&str> {
     let rest = origin.strip_prefix("http://")?;
-    let host = rest.split_once(':').map_or(rest, |(h, _)| h);
-    (!host.is_empty() && !host.contains(['/', '@', '?', '#'])).then_some(host)
+    let (host, port) = match rest.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (rest, None),
+    };
+    if host.is_empty() || host.contains(['/', '@', '?', '#', ':']) {
+        return None;
+    }
+    if let Some(p) = port {
+        // ポートは 1〜5 桁の数字で 1〜65535 に限る（パス・空・非数値・範囲外を通さない）。
+        let ok = !p.is_empty()
+            && p.len() <= 5
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n));
+        if !ok {
+            return None;
+        }
+    }
+    Some(host)
 }
 
 /// 認証を 1 回通す。呼ぶ前に `origin` へ移動済みで、`credential` を持つ仮想 authenticator があること。
@@ -273,6 +289,13 @@ mod tests {
             "http://:80",
             "http://a@b:1",
             "http://a/b",
+            "http://localhost:abc",
+            "http://localhost:",
+            "http://localhost:0",
+            "http://localhost:65536",
+            "http://localhost:80/path",
+            "http://localhost:80:90",
+            "http://localhost:+80",
         ] {
             assert_eq!(origin_host(bad), None, "{bad}");
         }
