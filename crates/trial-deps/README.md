@@ -23,6 +23,7 @@
   - `tracing-subscriber`: `default-features = false` + `fmt`（明示）。`fmt` が `registry`・`std` を暗黙に有効にする
   - `proptest`: `default-features = false` + `std`
   - `syn`: `default-features = false` + `full`・`parsing`
+  - `libfuzzer-sys`: 既定（`fuzz/Cargo.toml` の `0.4.13`。fuzz は別の workspace）
 - 採用 crate の根拠は `D-2026-11-20-8`〜`10`。
 - ここでの合格は〔仮想〕の確認で、spec の「確定」ではない（`ACPT-7`）。
 
