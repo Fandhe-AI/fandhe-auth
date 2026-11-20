@@ -1,6 +1,7 @@
-//! TASK-13 (5/8): Hub の stub の遅れと拒否の注入の試験。Docker・ネットワーク・鍵の生成なし。
+//! TASK-13 (5/8): Hub の stub の遅れと拒否の注入の試験。Docker・ネットワークなし。
 //! 値は予約 TLD `.test` の仮の値で、遅れの数値も任意の小さな値（THRT-29・A-2026-10-28-1）。
-//! 鍵が無いので、提示・失効の通知は壊れた token で「内側に届いたか」を確かめる。
+//! 試験ごとに ES256 の鍵を `ring` で生成し、署名済みの token を作る。提示・失効の通知は、注入が内側に届く前に
+//! 止めるか（拒否）・通すか（解除後）を、署名済み token の受理・拒否の結果で確かめる。鍵は試験の中だけで使い保存しない。
 //! 記録は事実の出力で合否の判定ではない。stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）。
 //! 根拠: AVLB-18・AVLB-22・RVPG-28・OCL-36・Hub AUTHC-21・SECR-23。
 
@@ -130,7 +131,7 @@ fn injector(tl: &FaultTimeline) -> (HubStubFaultInjector<impl FnMut(Duration) + 
     let waits: Waits = Rc::default();
     let w = Rc::clone(&waits);
     (
-        HubStubFaultInjector::new(move |d: Duration| w.borrow_mut().push(d), tl),
+        HubStubFaultInjector::new(move |d: Duration| w.borrow_mut().push(d), tl).unwrap(),
         waits,
     )
 }
@@ -184,6 +185,9 @@ fn jwks_status_refusal_then_release() {
     let key = new_key();
     jwks.publish_es256("k-expected", key.public_key().as_ref())
         .unwrap();
+    // 拒否の前にキャッシュを作っておく（OCL-36: 拒否はキャッシュを変えない）。
+    let warm = jwks.serve(NOW);
+    assert!(!warm.from_cache);
     let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503));
     inj.apply(&mut tl, k).unwrap();
     let v = jwks.current_version();
@@ -199,6 +203,9 @@ fn jwks_status_refusal_then_release() {
     let ok = inj.serve_jwks(&mut jwks, NOW + 1).unwrap();
     assert_eq!(ok.status, 200);
     assert_eq!(ok.version, v);
+    // 解除後はキャッシュが保たれ、age は拒否の間も進まず時刻の差だけ増える。
+    assert!(ok.from_cache);
+    assert_eq!(ok.age, warm.age + 1);
     let body: Value = serde_json::from_str(&ok.body).unwrap();
     let kids: Vec<&str> = body["keys"]
         .as_array()
@@ -500,7 +507,7 @@ fn injector_is_bound_to_a_single_run() {
         HubStubFaultError::RunMismatch
     );
     // 解除せずに終える。注入器は消費され、解除しなかった分は記録に数えられる。
-    let rec = inj
+    let (rec, _log) = inj
         .finish(tl1, UtcTimestamp::from_unix_seconds(1_700_000_060))
         .unwrap();
     assert_eq!(rec.unreleased_count(), 1);
@@ -527,9 +534,11 @@ fn event_log_positions_separate_periods_of_the_same_fault() {
     assert!(inj.serve_jwks(&mut jwks, NOW + 2).is_err());
     inj.release(&mut tl, k).unwrap();
     let flags = injected_flags(inj.call_log());
-    let rec = inj
+    let (rec, log) = inj
         .finish(tl, UtcTimestamp::from_unix_seconds(1_700_000_060))
         .unwrap();
+    // 終了後にも、返された呼び出しの記録で照合できる。
+    assert_eq!(injected_flags(&log), flags);
     let pos: Vec<Option<usize>> = rec.events().iter().map(|e| e.log_pos).collect();
     assert_eq!(pos, [Some(0), Some(1), Some(2), Some(3)]);
     assert_eq!(flags, [true, false, true]);
@@ -542,4 +551,17 @@ fn event_log_positions_separate_periods_of_the_same_fault() {
         assert_eq!(inside, *injected);
     }
     assert!(rec.to_string().contains("log_pos=3"));
+}
+
+/// 同じ実行に 2 つ目の注入器は結べない（呼び出し位置の照合が崩れるため）。別の実行には結べる。
+#[test]
+fn second_injector_on_the_same_run_is_rejected() {
+    let tl = timeline();
+    let (_first, _) = injector(&tl);
+    assert_eq!(
+        HubStubFaultInjector::new(|_: Duration| {}, &tl).unwrap_err(),
+        HubStubFaultError::AlreadyBound
+    );
+    let other = timeline();
+    assert!(HubStubFaultInjector::new(|_: Duration| {}, &other).is_ok());
 }

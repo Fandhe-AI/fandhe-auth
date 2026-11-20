@@ -18,14 +18,14 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 
 use super::{FaultKind, FaultPhase, FaultTarget};
 use crate::record::UtcTimestamp;
 
-/// 記録の形式の識別子（仮置き）。形式を変えたら末尾の版を上げる。
-pub const FAULT_RECORD_FORMAT: &str = "fandhe-auth-it-fault-record/1";
+/// 記録の形式の識別子（仮置き）。形式を変えたら末尾の版を上げる。/2 で事象行に任意の `log_pos=<n>` を足した（TASK-13 の 5/8）。
+pub const FAULT_RECORD_FORMAT: &str = "fandhe-auth-it-fault-record/2";
 
 /// 実行の種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,10 @@ pub enum FaultRecordError {
     ReleaseOfInstantaneous,
     /// `offset_ms` が前の件より小さい。
     OffsetWentBackwards,
+    /// 呼び出しの位置（`log_pos`）を Hub の stub 以外の事象に付けようとした。
+    LogPosNotAllowed,
+    /// 呼び出しの位置（`log_pos`）が前の件より小さい。
+    LogPosWentBackwards,
     /// ファイルの書き込みに失敗した。
     WriteFailed,
 }
@@ -67,6 +71,8 @@ impl fmt::Display for FaultRecordError {
             Self::ReleaseWithoutApply => "release without apply",
             Self::ReleaseOfInstantaneous => "release of instantaneous fault",
             Self::OffsetWentBackwards => "offset went backwards",
+            Self::LogPosNotAllowed => "log position not allowed for this target",
+            Self::LogPosWentBackwards => "log position went backwards",
             Self::WriteFailed => "write failed",
         };
         write!(f, "fault record error: {s}")
@@ -91,9 +97,13 @@ pub struct FaultEvent {
 }
 
 /// 事象を積む入口。`Instant` の原点と開始時刻を持つ。
-#[derive(Debug, Clone)]
+///
+/// `Clone` は実装しない。複製すると事象列と開いている注入の記録が分かれ、複製側の解除が元に反映されないため
+/// （1 つの実行の記録は 1 つに集約する）。
+#[derive(Debug)]
 pub struct FaultTimeline {
     run_id: u64,
+    injector_bound: AtomicBool,
     mode: RunMode,
     started_at: UtcTimestamp,
     origin: Instant,
@@ -118,6 +128,7 @@ impl FaultTimeline {
         static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
         Ok(Self {
             run_id: RUN_SEQ.fetch_add(1, Ordering::Relaxed),
+            injector_bound: AtomicBool::new(false),
             mode,
             started_at,
             origin,
@@ -131,6 +142,11 @@ impl FaultTimeline {
         self.run_id
     }
 
+    /// 注入器をこの実行へ結ぶ。すでに結んでいれば `false`（1 つの実行に注入器は 1 つ。呼び出しの位置の照合のため）。
+    pub(crate) fn bind_injector(&self) -> bool {
+        !self.injector_bound.swap(true, Ordering::SeqCst)
+    }
+
     /// ハーネスの時計で現在の時刻を押して積む。
     pub fn record_now(
         &mut self,
@@ -140,8 +156,9 @@ impl FaultTimeline {
         self.record_now_with_log_pos(kind, phase, None)
     }
 
-    /// `record_now` に、呼び出しの記録の件数（`FaultEvent::log_pos`）を添える。
-    pub fn record_now_with_log_pos(
+    /// `record_now` に、呼び出しの記録の件数（`FaultEvent::log_pos`）を添える。注入器の内部だけの入口。
+    /// Hub の stub の事象だけが受け、位置は前の位置以上でなければならない。
+    pub(crate) fn record_now_with_log_pos(
         &mut self,
         kind: FaultKind,
         phase: FaultPhase,
@@ -183,6 +200,20 @@ impl FaultTimeline {
             .map_err(|_| FaultRecordError::InvalidParam)?;
         if self.events.last().is_some_and(|e| offset_ms < e.offset_ms) {
             return Err(FaultRecordError::OffsetWentBackwards);
+        }
+        if let Some(pos) = log_pos {
+            if kind.target() != FaultTarget::HubStub {
+                return Err(FaultRecordError::LogPosNotAllowed);
+            }
+            if self
+                .events
+                .iter()
+                .rev()
+                .find_map(|e| e.log_pos)
+                .is_some_and(|prev| pos < prev)
+            {
+                return Err(FaultRecordError::LogPosWentBackwards);
+            }
         }
         match phase {
             FaultPhase::Applied => {
@@ -326,5 +357,60 @@ impl fmt::Display for FaultRecord {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fault::HubStubPort;
+    use std::time::Duration;
+
+    fn tl() -> FaultTimeline {
+        FaultTimeline::start(
+            Instant::now(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .unwrap()
+    }
+
+    fn stub_delay() -> FaultKind {
+        FaultKind::hub_stub_delay(HubStubPort::Jwks, Duration::from_millis(5)).unwrap()
+    }
+
+    /// 位置は Hub の stub の事象だけに付く。
+    #[test]
+    fn log_pos_is_only_for_hub_stub_events() {
+        let mut t = tl();
+        let db = FaultKind::db_delay(Duration::from_millis(5)).unwrap();
+        assert_eq!(
+            t.record_now_with_log_pos(db, FaultPhase::Applied, Some(0)),
+            Err(FaultRecordError::LogPosNotAllowed)
+        );
+        assert!(t.events.is_empty());
+    }
+
+    /// 位置の逆行は拒否し、何も積まない。同じ位置は受ける。
+    #[test]
+    fn log_pos_must_not_go_backwards() {
+        let mut t = tl();
+        let k = stub_delay();
+        t.record_now_with_log_pos(k, FaultPhase::Applied, Some(3))
+            .unwrap();
+        assert_eq!(
+            t.record_now_with_log_pos(k, FaultPhase::Released, Some(2)),
+            Err(FaultRecordError::LogPosWentBackwards)
+        );
+        assert_eq!(t.events.len(), 1);
+        t.record_now_with_log_pos(k, FaultPhase::Released, Some(3))
+            .unwrap();
+    }
+
+    /// 注入器を結べるのは 1 回だけ。
+    #[test]
+    fn injector_binds_once() {
+        let t = tl();
+        assert!(t.bind_injector());
+        assert!(!t.bind_injector());
     }
 }

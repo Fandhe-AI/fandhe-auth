@@ -21,7 +21,7 @@ fn fault() -> FaultTimeline {
     FaultTimeline::start(Instant::now(), t0()).unwrap()
 }
 
-const HEAD: &str = "format: fandhe-auth-it-fault-record/1\n\
+const HEAD: &str = "format: fandhe-auth-it-fault-record/2\n\
 run_mode: {MODE}\n\
 run_started_at: 2023-11-14T22:13:20Z\n\
 recorded_at: 2023-11-14T22:14:20Z\n";

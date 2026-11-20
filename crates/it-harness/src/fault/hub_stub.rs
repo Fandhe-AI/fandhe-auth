@@ -12,8 +12,8 @@
 //!   解除はその規則を除いた設定の差し替え。回数の範囲を指定する注入は出さない。
 //! - hub-stub は口ごとに最初に当たった 1 件の規則だけを使う。そのため口ごとに有効な遅れと拒否（各最大 1 件）を
 //!   1 つの規則へ合成する。分けると片方が黙って落ち、記録では注入したのに効かない状態になる。
-//! - 注入器は `new(wait, &timeline)` で 1 つの実行に結ぶ。別の実行の記録は `RunMismatch`。`finish` は注入器を消費し、
-//!   有効な規則と呼び出しの記録を次の実行（基準線を含む）へ持ち越さない。
+//! - 注入器は `new(wait, &timeline)` で 1 つの実行に結ぶ。別の実行の記録は `RunMismatch`、同じ実行への 2 つ目は `AlreadyBound`。
+//!   `finish` は注入器を消費し、有効な規則を次の実行（基準線を含む）へ持ち越さず、記録と呼び出しの記録を組で返す。
 //! - 事象には呼び出しの記録の件数（`FaultEvent::log_pos`）を添え、期間と呼び出しを順序で照合できる。
 //! - 記録が先、状態の変更が後。記録が拒否されたら状態を変えない。基準線では記録が拒否し、注入もしない（fail-closed）。
 //! - `MalformedBody` は JWKS の口だけが受ける（hub-stub の `Refusal` で表せない）。他の口は `InvalidParam`。
@@ -61,6 +61,8 @@ pub enum HubStubFaultError {
     Record(FaultRecordError),
     /// 注入器を作ったときの実行と別の実行の記録を渡された。状態も記録も変えていない。
     RunMismatch,
+    /// この実行にはすでに注入器を結んである（1 つの実行に注入器は 1 つ）。
+    AlreadyBound,
 }
 
 impl fmt::Display for HubStubFaultError {
@@ -71,6 +73,7 @@ impl fmt::Display for HubStubFaultError {
             Self::NotActive => f.write_str("hub stub fault error: not active"),
             Self::Record(e) => write!(f, "hub stub fault error: {e}"),
             Self::RunMismatch => f.write_str("hub stub fault error: run mismatch"),
+            Self::AlreadyBound => f.write_str("hub stub fault error: already bound"),
         }
     }
 }
@@ -162,12 +165,17 @@ impl<W: Wait> HubStubFaultInjector<W> {
     /// 注入なし（基準線の形）で始め、`timeline` の実行に結ぶ。`wait` は遅れの渡し先。
     /// 注入器は 1 つの実行だけに使う。別の実行（基準線を含む）には新しい注入器を作る。
     /// 有効な規則と呼び出しの記録を、別の実行へ持ち越せない構造にするため（fail-closed）。
-    pub fn new(wait: W, timeline: &FaultTimeline) -> Self {
-        Self {
+    /// 1 つの実行に結べる注入器は 1 つだけ。事象の呼び出し位置（`log_pos`）は注入器ごとの呼び出しの記録の件数なので、
+    /// 複数あると順序の照合が崩れる。2 つ目は `AlreadyBound`。
+    pub fn new(wait: W, timeline: &FaultTimeline) -> Result<Self, HubStubFaultError> {
+        if !timeline.bind_injector() {
+            return Err(HubStubFaultError::AlreadyBound);
+        }
+        Ok(Self {
             run_id: timeline.run_id(),
             inner: HubFaultInjector::new(HubFaultConfig::baseline(), wait),
             active: [PortFaults::default(); 4],
-        }
+        })
     }
 
     /// 検査して口の番号と系統（遅れなら `true`）を返す。
@@ -246,15 +254,17 @@ impl<W: Wait> HubStubFaultInjector<W> {
 
     /// 実行を終える。注入器を消費するので、解除しなかった規則は次の実行へ残らない
     /// （解除しなかった分は記録の `unreleased_count` に出る）。別の実行の記録は `RunMismatch`。
+    /// 記録と呼び出しの記録を組で返す。事象の `log_pos` と呼び出しの順序で、終了後にも照合できる。
     pub fn finish(
         self,
         timeline: FaultTimeline,
         recorded_at: UtcTimestamp,
-    ) -> Result<FaultRecord, HubStubFaultError> {
+    ) -> Result<(FaultRecord, InjectionLog), HubStubFaultError> {
         self.check_run(&timeline)?;
-        timeline
+        let record = timeline
             .finish(recorded_at)
-            .map_err(HubStubFaultError::Record)
+            .map_err(HubStubFaultError::Record)?;
+        Ok((record, self.inner.log().clone()))
     }
 
     /// 有効な注入の数。

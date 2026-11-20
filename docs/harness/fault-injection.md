@@ -94,31 +94,32 @@ PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を�
 `FaultTimeline` と結ぶ。判定・内側を呼ばない約束（jti を既受信にしない・最終受信時刻を進めない・JWKS のキャッシュを変えない）は
 hub-stub の実装をそのまま使い、作り直さない。
 
-- 入口: `new(wait, &timeline)`（1 つの実行に結ぶ）・`finish`（注入器を消費。別の実行の記録は `RunMismatch`）・`apply`・`release`・`present`・`receive_logout`・`receive_heartbeat`・`serve_jwks`・`call_log`・`active_count`。
+- 入口: `new(wait, &timeline)`（1 つの実行に結ぶ）・`finish`（注入器を消費し、記録と呼び出しの記録を組で返す。別の実行の記録は `RunMismatch`）・`apply`・`release`・`present`・`receive_logout`・`receive_heartbeat`・`serve_jwks`・`call_log`・`active_count`。
   受け口は呼び出しごとに借りる（`HubStubSession` に足さない）。種類は `hub_stub_delay`・`hub_stub_refusal`。
 - 「TASK-7 の設定の仕組み」は `HubFaultConfig`・`FaultRule`・`CallWindow` と `set_faults` と読む。`HubStubConfig` には欄を足さない。
 - 開始は `CallWindow { first: 1, last: None }`（以降すべて）の規則を入れた設定の差し替え、解除はその規則を除いた設定の差し替え。
 - 同じ口の遅れと拒否（各最大 1 件）は 1 つの規則に合成する。hub-stub は最初に当たった 1 件だけを使うため、分けると片方が落ちる。
 - 記録（`Applied`・`Released`）が先、設定の差し替えが後。基準線・記録の拒否では状態を変えない（fail-closed）。
 - 事象に呼び出しの記録の件数（`log_pos`）を添える。呼び出し `i` は `log_pos <= i` の事象より後・次の事象より前に起きたと読み、同じ障害を二度適用・解除しても期間と呼び出しを順序で照合できる。
+- 1 つの実行に結べる注入器は 1 つ（2 つ目の `new` は `AlreadyBound`）。`FaultTimeline` は `Clone` しない。`log_pos` を付ける入口は注入器の内部だけ（`pub(crate)`）で、Hub の stub の事象だけが受け、位置の逆行は拒否する。
 - 注入器は実行をまたいで使わない。基準線・次の実行には新しい注入器を作る（有効な規則と呼び出しの記録を持ち越さない。fail-closed）。
 - 解除は開始と同じ種類・値でだけ受ける。二重の開始は `AlreadyActive`、無い解除は `NotActive`。
 - `MalformedBody` は JWKS の口だけ。`FaultKind::validate` が他の口を拒否する（1/8 の挙動を狭めた）。
 - 遅れは `Wait` のフックへ渡すだけ。眠る実装は出さない。
-- hub-stub の呼び出しの記録（`at` は試験の論理時刻）は `FaultRecord` に入れず、`call_log()` で読む。対応は順序だけ。記録の形式の版は変えない。
+- hub-stub の呼び出しの記録（`at` は試験の論理時刻）は `FaultRecord` に入れず、`call_log()` で読む。対応は順序だけ。`finish` が記録と呼び出しの記録を組で返すので、終了後にも照合できる。事象行に `log_pos` を足したため、記録の形式の版を `/2` に上げた。
 - 対象外の口: `AuthPort`・`ChangeFeedPort`・`AuthJwksPort`（hub-stub の設計で対象外）。
 - 誤りと `Debug` に token・値を載せない（SECR-11・SECR-23〜27）。stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）。
 - 根拠: TASK-13・AVLB-18・AVLB-22・RVPG-28・OCL-36・Hub AUTHC-21。Host への結線は `TODO(TASK-716)`。
 - 記録の例: `injection: 1 applied hub_stub_refusal target=hub_stub at=... offset_ms=... port=jwks refusal=status_503`。
 - 試験: `cargo test -p fandhe-auth-it-harness --test fault_hub_stub`（`make test` に含む）。
 
-## 記録の形式（`fandhe-auth-it-fault-record/1`）
+## 記録の形式（`fandhe-auth-it-fault-record/2`）
 
 `RunRecord`（`fandhe-auth-it-run-record/1`）とは別のファイル。`run_started_at` で結ぶ。UTF-8・LF・1 行 1 項目の `key: value`。
 注入した実行（`run_mode: fault`）と基準線（`run_mode: baseline`）で同じキーを出す。基準線は `injection_count: 0`・`unreleased_count: 0`。
 
 ```
-format: fandhe-auth-it-fault-record/1
+format: fandhe-auth-it-fault-record/2
 run_mode: baseline | fault
 run_started_at: <RFC 3339 UTC>
 recorded_at: <RFC 3339 UTC>
@@ -147,7 +148,7 @@ note: ...
 - DB の外の保存先の実体（ORST-2・Hub `ASTORE-38` の決定待ち）。4/8 では仮に TCP の経路の遮断にした。人の確認待ち
 - console stub の注入（TASK-8）を TASK-13 の一覧に入れるか（spec の列挙には無い）
 - Hub の stub の注入（5/8）: 窓を「以降すべて」に限ったこと・同じ口の遅れと拒否の合成・`validate` を狭めたこと（`MalformedBody` は JWKS だけ）・
-  眠る `Wait` を出さないこと（出すなら上限の決定が要る）・stub の呼び出しの記録を記録の形式に入れないこと（入れるなら版を上げる）・型名と文言
+  眠る `Wait` を出さないこと（出すなら上限の決定が要る）・stub の呼び出しの記録そのものを記録の形式に入れないこと（入れるなら版を上げる。事象行の `log_pos` は `/2` で足した）・型名と文言
 - 記録のファイルを秘密値の走査の対象に入れること（`secret-values.md`）。本段は canary の試験で代える。出力先は追跡ツリーの外（`target/`）
 - DB の遮断の形を「直ちに閉じる」にしたこと。「受けて黙る（blackhole）」を入れるか（2/8）
 - 遅延を応答の向きの塊ごとに足す形（2/8）
