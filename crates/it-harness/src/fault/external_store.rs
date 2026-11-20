@@ -59,7 +59,9 @@ fn convert(e: DbFaultError) -> ExternalStoreFaultError {
         DbFaultError::AlreadyActive => ExternalStoreFaultError::AlreadyActive,
         DbFaultError::NotActive => ExternalStoreFaultError::NotActive,
         DbFaultError::Record(r) => ExternalStoreFaultError::Record(r),
-        DbFaultError::InvalidParam => ExternalStoreFaultError::Internal,
+        DbFaultError::InvalidParam | DbFaultError::DrainIncomplete => {
+            ExternalStoreFaultError::Internal
+        }
     }
 }
 

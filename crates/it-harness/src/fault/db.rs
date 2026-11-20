@@ -62,6 +62,8 @@ pub enum DbFaultError {
     InvalidParam,
     /// 記録が拒否した（基準線である等）。状態は変えていない。
     Record(FaultRecordError),
+    /// 遮断中に溜まった接続を捨て切れず、解除できなかった。遮断は続いたままで、解除は再試行できる。
+    DrainIncomplete,
 }
 
 impl fmt::Display for DbFaultError {
@@ -71,6 +73,7 @@ impl fmt::Display for DbFaultError {
             Self::AlreadyActive => f.write_str("db fault error: already active"),
             Self::NotActive => f.write_str("db fault error: not active"),
             Self::InvalidParam => f.write_str("db fault error: invalid parameter"),
+            Self::DrainIncomplete => f.write_str("db fault error: drain incomplete"),
             Self::Record(e) => write!(f, "db fault error: {e}"),
         }
     }
@@ -310,19 +313,29 @@ impl DbFaultProxy {
         if !self.block_active {
             return Err(DbFaultError::NotActive);
         }
-        timeline
-            .record_now(self.block_kind, FaultPhase::Released)
-            .map_err(DbFaultError::Record)?;
         {
             let _g = self.shared.lock_gate();
-            // 遮断中に backlog へ入った接続は、解除の前に捨てる（解除後に転送させない）。
+            // 遮断中に backlog へ入った接続は、解除の前に捨てる（解除後に転送させない）。空と確かめられない
+            // （上限に達した・割り込み以外の誤り）ときは遮断を続け、記録も状態も変えない（fail-closed）。
+            let mut drained = false;
             for _ in 0..DRAIN_LIMIT {
                 match self.shared.listener.accept() {
                     Ok((c, _)) => refuse(&c, &self.shared),
                     Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        drained = true;
+                        break;
+                    }
                     Err(_) => break,
                 }
             }
+            if !drained {
+                return Err(DbFaultError::DrainIncomplete);
+            }
+            // 待ち行列が空と確かめた同じロックの中で記録し、遮断を外す（accept のスレッドもこのロックを要する）。
+            timeline
+                .record_now(self.block_kind, FaultPhase::Released)
+                .map_err(DbFaultError::Record)?;
             self.shared.blocked.store(false, Ordering::SeqCst);
             self.shared.block_gen.fetch_add(1, Ordering::SeqCst);
         }
@@ -378,6 +391,13 @@ impl DbFaultProxy {
 
     fn shutdown_all(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+        // 試験用の保留中のワーカーを起こす（止まらないまま join しない）。
+        #[cfg(test)]
+        {
+            let (m, cv) = &self.shared.hold;
+            drop(m.lock().unwrap_or_else(PoisonError::into_inner));
+            cv.notify_all();
+        }
         if let Some(h) = self.accept.take() {
             let _ = h.join();
         }
@@ -490,7 +510,7 @@ fn handle_conn(
     {
         let (m, cv) = &shared.hold;
         let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
-        while *g {
+        while *g && !shared.stop.load(Ordering::SeqCst) {
             g = cv.wait(g).unwrap_or_else(PoisonError::into_inner);
         }
     }
@@ -633,8 +653,17 @@ mod tests {
 
     fn set_hold(shared: &Shared, on: bool) {
         let (m, cv) = &shared.hold;
-        *m.lock().unwrap() = on;
+        *m.lock().unwrap_or_else(PoisonError::into_inner) = on;
         cv.notify_all();
+    }
+
+    /// 破棄のとき（試験の失敗の panic を含む）に保留を解除して通知する。プロキシより後に宣言して先に落とす。
+    struct HoldGuard(Arc<Shared>);
+
+    impl Drop for HoldGuard {
+        fn drop(&mut self) {
+            set_hold(&self.0, false);
+        }
     }
 
     /// 引き渡し直後のワーカーを止め、遮断・解除をまたがせて再開する。古い接続は上流へつながれない
@@ -645,6 +674,7 @@ mod tests {
         up.set_nonblocking(true).unwrap();
         let mut p = DbFaultProxy::start_to_port(up.local_addr().unwrap().port()).unwrap();
         let mut tl = FaultTimeline::start(Instant::now(), std::time::SystemTime::now()).unwrap();
+        let _hold = HoldGuard(Arc::clone(&p.shared));
         set_hold(&p.shared, true);
         let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, p.listen_port())).unwrap();
         // ワーカーが引き渡されるまで待つ。
