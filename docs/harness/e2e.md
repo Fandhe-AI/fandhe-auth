@@ -1,6 +1,6 @@
 # passkey の E2E ハーネス: 構成の下書き
 
-`TASK-11`（passkey の E2E ハーネス。MS-1）の構成の下書き。1/6（#101）で範囲と枠を置いた。
+`TASK-11`（passkey の E2E ハーネス。MS-1）の構成の下書き。1/6（#101）で範囲と枠を置き、4/6（#104）で登録の後の認証と失敗の場合を足した。
 仕様は spec の `TASK-11` で引く（本文は写さない）。この文書は下書きで、crate の名前・置き場は仮称、人が確定する。
 
 ## 目的と範囲
@@ -20,7 +20,7 @@ E2E のハーネス。2026-11-04 の追随で、画面の E2E は Hub の `ASCR`
 
 | 種類（`E2eComponentKind`） | 担当の段 | 実体 | 待ち |
 | --- | --- | --- | --- |
-| `BrowserDriver` | 2/6（Chrome）・3/6（Firefox） | chromedriver・geckodriver（外部プロセス）。2/6 で Chrome の実体 `chrome::ChromeDriverComponent` を置いた | Firefox は 3/6 |
+| `BrowserDriver` | 2/6（Chrome）・3/6（Firefox）。4/6 で確立したセッションの `browserName` を照合する | chromedriver・geckodriver（外部プロセス）。2/6 で Chrome の実体 `chrome::ChromeDriverComponent` を置いた | Firefox は 3/6 |
 | `RelyingParty` | 未定 | options を出し応答を検証する側 | `TASK-716` と PKEY の実装タスク |
 
 2/6 で置いた実体は Chrome の `BrowserDriver` だけ。RelyingParty の実体は 0 件。操作は起動前に取る `ChromeHandle`
@@ -46,7 +46,7 @@ JSON は `serde_json` で扱う（下の「依存」）。Chrome の実体と登
 
 ## 登録 1 件の定義（2/6）
 
-登録 1 件が通るとは、次の 1・2 を `register_once` が検査し、3 を登録試験の側が検査することをいう。
+登録 1 件が通るとは、次の 1〜3 を `register_once` が検査し、4 を登録試験の側が検査することをいう。
 サーバー側の登録応答の検証（`webauthn-rs`）は RelyingParty の実体（`TASK-716`）待ちで含めない。
 PKEY の振る舞いを満たしたとは主張しない。
 
@@ -54,12 +54,57 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 1. 試験用 origin で `navigator.credentials.create()` が resolve し、`type` が `public-key`、attestation が空でない
 2. `clientDataJSON` の `type`・`origin`・`challenge` が期待と一致（ページ内で比べ、真偽と長さだけを返す）
+3. `cred.id` と `rawId` の base64url 表現が一致し、その値から `CredentialRef` を構築できる（形式の検証に通る）
 
-失敗したときの `DOMException.name` は既知の名前の列挙（`RegistrationErrorName`）に写し、未知の値は `Other` に畳む（`SECR-23`）。
+失敗したときの `DOMException.name` は既知の名前の列挙（`WebAuthnErrorName`。`RegistrationErrorName` は別名）に写し、未知の値は `Other` に畳む（`SECR-23`）。
+
+登録は `credentialId`（`rawId` の base64url）も返す。不透明な型 `CredentialRef` で持ち、`Debug` は `<redacted>` の固定の文字列、
+`Display` は実装せず、値は crate 内からだけ借りる。公開鍵・attestation の中身・署名は返さない。
 
 登録試験の側（`tests/chrome_registration.rs`）が検査する範囲。`register_once` は検査しない:
 
-3. `handle.credentials()` の要約で、仮想 authenticator の credential がちょうど 1 件で、`rpId` が `localhost`
+4. `handle.credentials()` の要約で、仮想 authenticator の credential がちょうど 1 件で、`rpId` が `localhost`
+
+## 認証 1 件の定義（4/6）
+
+認証 1 件が通るとは、`authenticate_once` が登録で得た credential ID を `allowCredentials` に入れて `navigator.credentials.get()` を呼び、
+次を検査することをいう（`AuthenticationOutcome::succeeded`）。サーバー側の認証応答の検証（`webauthn-rs`）は RelyingParty の実体
+（`TASK-716`）待ちで含めず、PKEY の振る舞いを満たしたとは主張しない。結果は〔仮想〕（`ACPT-7`・`ACPT-8`）。
+
+1. `get()` が resolve し、`type` が `public-key`、`rawId` が渡した credential ID と一致
+2. `clientDataJSON` の `type`（`webauthn.get`）・`origin`・`challenge` が期待と一致
+3. `authenticatorData` の先頭 32 バイトが RP ID の SHA-256 と一致（ページ内の `crypto.subtle`）、flags の UP・UV が立ち、長さが 37 以上、署名の長さが 1 以上
+
+署名・`authenticatorData` の中身・`userHandle` は返さない。認証試験の側は、登録に成功すること・`credentials()` がちょうど 1 件で `rpId` が
+`localhost` であることを検査する。options の形は `PKEY-4` に合わせるが確定扱いにしない。
+
+### 失敗の場合（4/6）
+
+- 採ったもの: 登録の後に仮想 authenticator の UV を失敗にし（WebDriver の Set User Verified、`isUserVerified: false`）、
+  `userVerification: required` で認証すると `NotAllowedError` になる。判定は authenticator 側で完結し、ネットワークに出ない。
+- 対照: 失敗の試験は、同じセッション・credential で UV が成功の状態の認証を先に通し（対照）、UV だけを失敗に変えて `NotAllowedError` を
+  観測する。`NotAllowedError` は期限切れ等でも返るため、名前だけでは UV による拒否と断定できない。対照が通った同一条件から UV だけを変えた
+  結果として読み、結果の主張は `NotAllowedError` の観測までにとどめる（原因の判別はブラウザが公開しない）。
+- 採らなかったもの: RP ID を origin の suffix でない値にする案（Chrome は Related Origin Requests で `https://<rpId>/.well-known/webauthn` を
+  取りに行くため、外への通信が起きる。A10）。credential を消してから認証する案（timeout まで待つかが確かめられていない）。
+- 時間の上限: 認証スクリプトはページ内の `AbortController` で 10 秒の期限を明示的に設ける（`publicKey.timeout` はブラウザが調整し得る
+  ヒントで、打ち切りの保証にならない）。期限切れは `HarnessTimeout`（`NotAllowedError` とは別の名前）で返す。試験側の script timeout は 20 秒、
+  command timeout は 30 秒。拒否が遅れても WebDriver の誤りにならず結果として観測できる。値はハーネスの安全上の値で、要件の値ではない。
+- RP ID: `authenticate_once` は RP ID が試験用 origin のホストと完全一致しなければ、ブラウザへ渡す前に拒否する（A10）。
+- Firefox で期待と違う結果が出ても、期待を緩めず別の案に黙って差し替えない。結果を記録して人に確かめる。
+
+### browserName の照合（4/6）
+
+`new_session` は応答の `capabilities.browserName` を期待の値（Chrome は `chrome`、Firefox は `firefox`）と完全一致で照合し、
+欠落・不一致ならセッションを最善で閉じて `CommandFailed` にする（照合しない経路は残さない）。失敗時は handle に公開せず、`start()` の後片付けが
+プロセスグループごと止める。Firefox の `firefox` はこの環境では実測していない（W3C の名前）。
+
+### 暫定の結果行（4/6。正式な形式は 5/6）
+
+試験が標準出力に 1 行出す（`tests/support/passkey.rs`。crate の公開 API にしない）:
+`e2e-result: operation=… browser=… authenticator=WebDriverVirtual evidence=Virtual counts_as_real_device=false counts_as_safari=false result=succeeded|rejected:<名前>`。
+ドライバが返す文字列（ブラウザの版を含む）は結果行に転記せず、URL・ポート・セッション ID・authenticator ID・credential ID は出さない（`SECR-11`・`SECR-23`）。
+実行の回数の記録と正式な形は 5/6（#105）。入口のスクリプトは `--show-output` で成功した試験の出力も見せ、`--test-threads=1` でブラウザを同時に複数起動しない。
 
 ## 試験用ページと origin の置き場（人が決める）
 
@@ -77,13 +122,13 @@ WebAuthn の secure context と RP ID は PoC-2 の結果を ID で引き、試�
 
 ## ドライバの入手と CI（2/6 以降の案）
 
-2/6 の入口は暫定の `make e2e-chrome`（`scripts/e2e-chrome.sh`。`#[ignore]` の `chrome_registration` を流す。CI 外）。
+2/6 の入口は暫定の `make e2e-chrome`（`scripts/e2e-chrome.sh`。`#[ignore]` の `chrome_registration`・`chrome_authentication` を流す。CI 外）。
 chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless=new` だけで、`--disable-*`・`--no-sandbox` は足さない。
 前提は unix（Linux・macOS 等）。非 unix では登録試験が 0 件になり、入口のスクリプトが失敗にする。
 
 ### Firefox（3/6）
 
-- 入口は暫定の `make e2e-firefox`（`scripts/e2e-firefox.sh`。`#[ignore]` の `firefox_registration` を流す。CI 外）。geckodriver が無ければ失敗する。
+- 入口は暫定の `make e2e-firefox`（`scripts/e2e-firefox.sh`。`#[ignore]` の `firefox_registration`・`firefox_authentication` を流す。CI 外）。geckodriver が無ければ失敗する。
 - 起動・停止は Chrome と共通の `driver_process` に切り出した（振る舞いは 2/6 のまま）。geckodriver は `--port <n>` で起動する。
 - セッションの要求は引数 `-headless` と pref 2 つだけ。Firefox の既定の設定では仮想 authenticator の作成が `ConstraintError` になるため
   softtoken を有効・usbtoken を無効にする（PoC-3 の値で要件の値ではない。人の確認待ち）。検証を外す意味の引数・pref は足さない（DPOL-30）。
@@ -115,7 +160,8 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
     （試験の環境で許容する）。ポートの所有の照合はしない。
   - ブラウザの送信先は flag で制限しない。試験用ページは loopback の試験用 origin だけを開く。
   - 強制終了のため、Chrome の一時プロファイルが残り得る。
-  - 登録結果を解釈できなかった後のセッションの再利用は止めていない（失敗時の試験は 4/6〔#104〕で扱う）。
+  - 登録結果を解釈できなかった後のセッションの再利用は API では止めていない。拒否された経路は 4/6 の失敗の試験で、解釈できない応答
+    （`CommandFailed`）は単体の試験で確かめる。試験は誤りで panic し、`Drop` の後片付けでブラウザを止めるため再利用は起きない。
 
 - chromedriver・geckodriver は外部の実行ファイル。`#[ignore]` と明示の make ターゲット（`it-db` と同じ形）で CI の外に置く案。
 - 環境の有無で自動に飛ばす分岐は作らない（`DPOL-30`〜`32`）。ブラウザの起動 flag（`--disable-*` 等）は `DPOL-30` の走査語に掛かる。
@@ -129,7 +175,7 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 | 1/6（#101） | 範囲と構成の下書き、枠（本段） |
 | 2/6（#102） | Chrome の仮想 authenticator の結線と登録 1 件 |
 | 3/6（#103） | Firefox の結線と識別子の規則（`LGUI-35` → `ASCR-65`） |
-| 4/6（#104） | 登録の後の認証を両ブラウザで通す。失敗する場合の試験 |
+| 4/6（#104） | 登録の後の認証を両ブラウザで通す。失敗する場合の試験。暫定の結果行。3/6 のレビューの持ち越し（`browserName` の照合など） |
 | 5/6（#105） | 実行の記録の形式（ブラウザの版・authenticator の種類・回数・仮想の印） |
 | 6/6（#106） | 使い方の文書と、実機の確認は別タスクである旨 |
 
@@ -148,6 +194,10 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 - 3/6: geckodriver・Firefox のある環境での `make e2e-firefox` の実行は未検証（作業環境に無かった）。初回の実行で、
   `POST /webauthn/authenticator` の応答の形・`Content-Length` の有無・Firefox が geckodriver と同じプロセスグループに入るか・
   `credentials` の欄が揃うかを確かめる。違いが出たら検査を緩めずに人へ確かめる
+- 4/6: credential ID を不透明な型 `CredentialRef` で返すこと。失敗の場合の選び方（UV の失敗）。WebAuthn の timeout 10 秒（ハーネスの値）。
+  `--test-threads=1`。暫定の結果行
+- 4/6: Chrome（Chromium 157）では登録・認証・失敗の場合を実行して通った（〔仮想〕）。Firefox での認証と Set User Verified は未検証
+  （作業環境に geckodriver・Firefox が無かった）。geckodriver・Firefox のある環境での `make e2e-firefox` の実行と記録は人の作業
 - Chrome の起動 flag は `--headless=new` だけ（`DPOL-30` の走査語に掛かる flag は足していない）
 - it-harness・最小の組込み先への辺（足す段で許可表を人に確かめる）
 

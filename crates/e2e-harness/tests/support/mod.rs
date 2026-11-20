@@ -4,6 +4,9 @@
 //! `Host` が `localhost:<port>` 以外は 400（DNS rebinding 対策）。origin は試験用の仮の値（`A-2026-10-28-1`〜`14`）。
 #![allow(dead_code)]
 
+#[cfg(unix)]
+pub mod passkey;
+
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
