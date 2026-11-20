@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # 秘密情報の検査（scripts/hooks/secret-scan.sh --tracked）の陰性対照（TASK-6。CI の secret-scan ジョブが
-# `make secret-scan` の後に呼ぶ）。検出器が壊れて常に合格する状態（fail-open）を CI で見逃さないため、
-# HEAD の tree に実行時に組み立てたダミーを足した一時 index を検出器に走査させ、ちょうど 1 で終わる
-# ことを確かめる。「意図的に混入させたダミーで検査が失敗する」ことの証拠をログに残す役割を持つ。
+# `scripts/secret-scan-ci.sh` 経由で呼ぶ）。検出器が壊れて常に合格する状態（fail-open）を CI で見逃さないため、
+# 実行時に組み立てた既知のダミーだけを入れた一時 index（空から開始）を検出器に走査させ、
+# 終了コード 1・合計 2 件になることを確かめる。リポジトリの内容（PR・base の検出対象の有無）に結果が依存しない。「意図的に混入させたダミーで検査が失敗する」ことの証拠をログに残す役割を持つ。
 #
 # なぜ commit しないか: ダミーのコミットは pre-commit の同じ規則に止められ（--no-verify は禁止）、
 # コミットすれば CI を恒久的に赤にする。そのため一時 index・一時 object dir の中だけで足す。
 # 元の index・作業ツリー・object store は変えない（object は alternates 経由で読むだけ）。
 #
-# 前提: HEAD の tree に検出が無いこと（CI では先の `make secret-scan` が保証する）。
 # ダミーの値は本ファイル自体が規則に当たらないよう、実行時に連結して組み立てる。値は出力しない（SECR-23）。
 #
 # 終了コード: 0 = 検出器がダミーにちょうど 1 を返した / 1 = 期待と異なる / 2 = 準備に失敗（fail-closed）。
@@ -39,7 +38,7 @@ export GIT_INDEX_FILE="${work_dir}/index"
 export GIT_OBJECT_DIRECTORY="${work_dir}/objects"
 export GIT_ALTERNATE_OBJECT_DIRECTORIES="${real_objects}"
 
-git read-tree HEAD || die "failed to read HEAD into the temporary index"
+git read-tree --empty || die "failed to create the empty temporary index"
 
 dash='-----'
 key_line="${dash}BEGIN EC PRIVATE"" KEY${dash}"
@@ -49,17 +48,7 @@ plant() {
   [ -n "${blob}" ] || die "hash-object returned nothing"
   git update-index --add --cacheinfo "100644,${blob},${path}" || die "update-index failed"
 }
-# HEAD に追跡ファイル・ディレクトリとして存在しない名前を選ぶ（同名があると update-index が衝突して失敗する）。
-canary_dir=""
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  candidate="secret-scan-canary-${RANDOM}${RANDOM}"
-  existing="$(git ls-files --cached -- "${candidate}")" || die "ls-files failed"
-  if [ -z "${existing}" ]; then
-    canary_dir="${candidate}"
-    break
-  fi
-done
-[ -n "${canary_dir}" ] || die "could not pick a canary path absent from HEAD"
+canary_dir="secret-scan-canary"
 plant "${canary_dir}/dummy.txt" "${key_line}"
 plant "${canary_dir}/.env" "canary placeholder"
 

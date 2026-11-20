@@ -30,6 +30,7 @@ cat <<'EOF'
 
 Git hooks（lefthook.yml から呼ばれる。直接実行も可）:
 
+  scripts/secret-scan-ci.sh             CI 向けの入口（--summary で件数のみ公開 + 陰性対照。引数は走査対象のパス）
   scripts/hooks/secret-scan.sh          staged 差分の秘密情報検知（--tracked は追跡ファイル全体。フックからは呼ばない）
   scripts/hooks/commit-msg-check.sh F   コミットメッセージ F の Conventional Commits 検証
 

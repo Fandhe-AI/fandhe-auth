@@ -3,7 +3,11 @@
 #
 # 呼び出し:
 #   secret-scan.sh            staged 差分の追加行を走査する（lefthook pre-commit から呼ばれる）
-#   secret-scan.sh --tracked  追跡済みファイル全体を走査する（`make secret-scan`。CI の secret-scan ジョブ）
+#   secret-scan.sh --tracked  追跡済みファイル全体を走査する（`make secret-scan`）
+#   secret-scan.sh --tracked --summary
+#                             上記と同じ走査で、出力から該当ファイル名を除く（規則 ID・件数だけ。公開ログ用。
+#                             パスに値が含まれ得る・改行を含むパスが出力行を偽装し得るため。SECR-23）。
+#                             CI は scripts/secret-scan-ci.sh 経由でこの形だけを使う
 #   それ以外の引数は usage を出して終了コード 2。検査を外す引数・環境変数・除外リストは置かない。
 #
 # 規則表（規則 ID は暫定。確定は人が行う）:
@@ -38,11 +42,16 @@ set -euo pipefail
 export LC_ALL=C
 
 mode=staged
-case "$#:${1:-}" in
-  0:) ;;
-  1:--tracked) mode=tracked ;;
+summary=0
+case "$#:${1:-}:${2:-}" in
+  0::) ;;
+  1:--tracked:) mode=tracked ;;
+  2:--tracked:--summary)
+    mode=tracked
+    summary=1
+    ;;
   *)
-    echo "usage: secret-scan.sh [--tracked]" >&2
+    echo "usage: secret-scan.sh [--tracked [--summary]]" >&2
     exit 2
     ;;
 esac
@@ -280,7 +289,9 @@ if [ "${total}" -gt 0 ]; then
     fi
   done
   echo "secret-scan: total: ${total} finding(s) in ${flagged_count} file(s)" >&2
-  printf '%s' "${flagged_files}" >&2
+  if [ "${summary}" -eq 0 ]; then
+    printf '%s' "${flagged_files}" >&2
+  fi
   echo "replace values with a placeholder / env var reference, or unstage the file (\`git restore --staged <file>\`)." >&2
   exit 1
 fi

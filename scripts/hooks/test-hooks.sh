@@ -329,6 +329,15 @@ new_repo; stage .env "A=1"; git commit -q -m "chore: env"
 check_scan "(tracked) committed .env" 1 .env
 expect_out "(tracked) env-file count" "secret-scan: env-file: 1 file(s)"
 
+# --summary: 件数は同じで、該当ファイル名を出力に含めない（公開ログ用。SECR-23）
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qxF "secret-scan: env-file: 1 file(s)" "${work_dir}/out" && ! grep -q "^  " "${work_dir}/out" ; then
+  pass "secret-scan: (tracked) --summary omits file names"
+else
+  fail "secret-scan: (tracked) --summary omits file names" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 new_repo; stage .agents/skills/x/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
 check_scan "(tracked) excluded paths" 0
 

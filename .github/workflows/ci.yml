@@ -175,12 +175,13 @@ jobs:
         run: make lint
 
   # 秘密情報の混入検査（TASK-6）。PR のマージ結果の追跡ファイル全体を走査し、1 件以上で失敗する（SECR-23）。
-  # 続けて陰性対照（scan-canary）で、実行時に組み立てたダミーを足した一時 index に検出器が 1 を返すことを
-  # 確かめる（検出器が常に合格する状態を見逃さない）。ダミーは commit しない。本検査を先に流す。
+  # 続けて陰性対照（scan-canary）で、実行時に組み立てた既知のダミーだけの一時 index に検出器が 1 を返すことを
+  # 確かめる（検出器が常に合格する状態を見逃さない。リポジトリの内容に依存しない）。ダミーは commit しない。
+  # 実処理は scripts/secret-scan-ci.sh に置く（ローカルからも呼べる。出力の絞り込み・終了コードの伝播もそこ）。
   # 判定コードは信頼済みリビジョン（PR の base）から取り、PR のマージ結果は走査対象のデータとしてだけ渡す
   # （PR 自身が検出器・カナリアを書き換えて合格させる経路を作らない）。base にまだ検出器が無いとき（導入 PR 自身）
   # に限り PR 側の版を使う。導入後は base に必ず在るため、PR が削除・改変しても base の版が判定する。
-  # 公開ログには規則 ID・件数だけを出し、検出ファイルのパスは出さない（パスに値が含まれ得る）。
+  # 公開ログには規則 ID・件数だけを出し、検出ファイルのパスは出さない（--summary。パスに値が含まれ得る）。
   # 範囲外: コミット履歴・submodule の中。検出時は .claude/rules/security.md の重大度「高」に従う。
   secret-scan:
     name: "make secret-scan + make scan-canary"
@@ -200,35 +201,14 @@ jobs:
           path: trusted
           persist-credentials: false
 
-      - name: Select detector
+      - name: secret-scan (scan the PR merge result with the trusted detector)
         run: |
-          if [ -f trusted/scripts/hooks/secret-scan.sh ] && [ -f trusted/scripts/secret-scan-canary.sh ] && [ -f trusted/scripts/lib.sh ]; then
-            echo "DETECTOR_DIR=${GITHUB_WORKSPACE}/trusted" >> "${GITHUB_ENV}"
-            echo "detector: trusted base"
+          if [ -f trusted/scripts/secret-scan-ci.sh ] && [ -f trusted/scripts/secret-scan-canary.sh ] && [ -f trusted/scripts/hooks/secret-scan.sh ]; then
+            trusted/scripts/secret-scan-ci.sh "${GITHUB_WORKSPACE}/target"
           else
-            echo "DETECTOR_DIR=${GITHUB_WORKSPACE}/target" >> "${GITHUB_ENV}"
-            echo "detector: PR version (base has no detector yet)"
+            # base にまだ検出器が無いとき（導入 PR 自身）に限り PR 側の版を使う
+            target/scripts/secret-scan-ci.sh "${GITHUB_WORKSPACE}/target"
           fi
-
-      - name: secret-scan (--tracked on the PR merge result)
-        working-directory: target
-        run: |
-          out="$(mktemp)"
-          rc=0
-          "${DETECTOR_DIR}/scripts/hooks/secret-scan.sh" --tracked > "${out}" 2>&1 || rc=$?
-          # 規則 ID・件数の行だけを出す（検出パス・値・git のエラー文は出さない）。
-          grep -E '^secret-scan: ([a-z0-9-]+: [0-9]+ (line|file)\(s\)|total: [0-9]+ finding\(s\).*|findings in tracked files)$' "${out}" || true
-          rm -f "${out}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "secret-scan failed (exit ${rc}); details are withheld on the public log. Re-run locally: make secret-scan"
-          fi
-          exit "${rc}"
-
-      - name: scan-canary
-        working-directory: trusted
-        run: |
-          if [ "${DETECTOR_DIR}" = "${GITHUB_WORKSPACE}/target" ]; then cd "${DETECTOR_DIR}"; fi
-          scripts/secret-scan-canary.sh
 
   # squash merge では PR タイトルがそのままコミット件名になるため、commit-msg フックと
   # 同じスクリプトで Conventional Commits 形式を検証する（フックの CI 側の対）。
