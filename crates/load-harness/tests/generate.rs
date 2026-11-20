@@ -175,6 +175,23 @@ fn excluded_in_measured_phase_is_rejected() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+/// #5984（仮置き。ACPT-7）: 並行数ぶんの試行が同時に走っている間の誤りでは、走り切る試行は並行数ぶんだけで、
+/// 新しい試行は始まらない。全ワーカーが誤りで抜けるので件数は決まる。
+#[test]
+fn all_in_flight_failures_stop_without_new_trials() {
+    const C: u64 = 4;
+    let clock = FakeClock::new();
+    let calls = AtomicU64::new(0);
+    let barrier = Barrier::new(usize::try_from(C).unwrap());
+    let r = run_closed_loop(meter(&clock), &cfg(C, 100, 0), |_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        barrier.wait();
+        Outcome::Excluded
+    });
+    assert_eq!(r.unwrap_err(), LoadError::InvalidOutcome);
+    assert_eq!(calls.load(Ordering::SeqCst), C);
+}
+
 #[test]
 fn unmeasured_success_is_rejected() {
     let clock = FakeClock::new();

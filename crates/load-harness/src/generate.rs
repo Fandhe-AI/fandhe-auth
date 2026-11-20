@@ -6,12 +6,12 @@
 //!
 //! 閉ループ（固定数のワーカーが、前の試行を締めてから次の試行を取る）を仮置きで採る。開ループは作らない。
 //! ワーカーは 1 度に 1 試行だけ持つので、実測の最大同時実行数は設定の並行数を超えない。
+//! 誤りの記録と停止は枠の取得と同じロックで確定する（#5984。順序は [`run_closed_loop`] の doc）。
 //! 対象の経路を実際に呼ぶ部分は 6/10 の担当で、ここは対象を閉包として受けるだけ。合否は付けない（ACPT-7）。
 
 use std::cell::Cell;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, Once, PoisonError};
 use std::thread;
 
@@ -159,45 +159,62 @@ impl Drop for QuietGuard {
     }
 }
 
-/// ワーカー間で共有する試行の枠・停止の印・最初の誤り。
+/// ロックの下で持つ状態。`first_error` が `Some` であることが「停止中」そのもの（別の停止の印は持たない）。
+struct State {
+    next: u64,
+    first_error: Option<LoadError>,
+}
+
+/// ワーカー間で共有する試行の枠・最初の誤り。
+///
+/// 枠の取得（`claim`）と誤りの記録（`fail`）を同じ 1 つのロックで直列化する（#5984）。記録と停止は 1 つの代入で
+/// 同時に確定するので、「記録したが停止の印がまだ」「停止の印を読んだが枠の更新がまだ」という窓が無い。
+/// ロックは `claim`・`fail`・最後の取り出しの中だけで持つ。対象の呼び出しの間は持たない（ロックの競合を
+/// 計測の区間に入れないため）。
 struct Shared {
-    next: AtomicU64,
-    stop: AtomicBool,
-    first_error: Mutex<Option<LoadError>>,
+    state: Mutex<State>,
 }
 
 impl Shared {
     fn new() -> Self {
         Self {
-            next: AtomicU64::new(0),
-            stop: AtomicBool::new(false),
-            first_error: Mutex::new(None),
+            state: Mutex::new(State {
+                next: 0,
+                first_error: None,
+            }),
         }
     }
 
-    /// 最初の誤りだけを残し、他のワーカーが新しい枠を取らないよう停止の印を立てる。
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// 最初の誤りだけを残す。記録と同時に停止が確定し、以後の `claim` は `false` になる。
     fn fail(&self, e: LoadError) {
-        let mut g = self
-            .first_error
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if g.is_none() {
-            *g = Some(e);
+        let mut g = self.lock();
+        if g.first_error.is_none() {
+            g.first_error = Some(e);
         }
-        drop(g);
-        self.stop.store(true, Ordering::SeqCst);
     }
 
     /// 試行の枠を 1 つ取る。上限に達した・停止中・溢れたときは `false`。
     fn claim(&self, count: u64) -> bool {
-        if self.stop.load(Ordering::SeqCst) {
+        let mut g = self.lock();
+        if g.first_error.is_some() || g.next >= count {
             return false;
         }
-        self.next
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                if v < count { v.checked_add(1) } else { None }
-            })
-            .is_ok()
+        match g.next.checked_add(1) {
+            Some(n) => {
+                g.next = n;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 記録された最初の誤り。
+    fn first_error(&self) -> Option<LoadError> {
+        self.lock().first_error
     }
 }
 
@@ -264,11 +281,7 @@ where
             }
         }
     });
-    let err = *shared
-        .first_error
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    err.map_or(Ok(()), Err)
+    shared.first_error().map_or(Ok(()), Err)
 }
 
 /// 閉ループで対象を繰り返し呼ぶ。暖機の段（`warmup > 0` のときだけ）を回してから本計測の段を回す。
@@ -277,8 +290,15 @@ where
 ///
 /// 対象は試行の中で区間を測り、結果の種類を返す。本計測で `Excluded` を返すと誤り（fail-closed）。
 ///
+/// 誤りの記録・停止・枠の取得の順序（#5984。人の確認待ちの仮置き、ACPT-7）:
+/// - 枠の取得と誤りの記録は同じロックの下で全順序に並ぶ。記録と停止は同時に確定する。
+/// - 記録より後に枠を取ろうとしたワーカーは必ず取れない。記録の後に新しく始まる試行は 0 件。
+/// - 記録より前に枠を取り終えた試行（他のワーカーが持つ分で、最大で並行数 − 1 件）は止めず、対象の呼び出しまで
+///   進んで締めるか誤りで抜ける。「誤りの後に対象の呼び出しが 0 件」までは保証しない。
+/// - 返す誤りは最初の 1 件だけ。
+///
 /// # Errors
-/// 部品の誤り・スレッドの生成の失敗・panic・件数の不一致。誤りが出たら新しい試行を止め、
+/// 部品の誤り・スレッドの生成の失敗・panic・件数の不一致。誤りが出たら上の順序で新しい試行を止め、
 /// 立てたワーカーはすべて join してから最初の誤りを返す。
 pub fn run_closed_loop<F>(
     meter: RunMeter,
@@ -307,4 +327,72 @@ where
         loop_model: LoopModel::Closed,
         samples,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! #5984: 誤りの記録・停止・枠の取得の順序の単体試験。非公開の `Shared` に直接触る（試験用の公開口は作らない）。
+    use super::*;
+    use std::sync::Barrier;
+
+    fn next_of(s: &Shared) -> u64 {
+        s.lock().next
+    }
+
+    #[test]
+    fn fail_keeps_first_error() {
+        let s = Shared::new();
+        s.fail(LoadError::InvalidOutcome);
+        s.fail(LoadError::WorkerPanicked);
+        assert_eq!(s.first_error(), Some(LoadError::InvalidOutcome));
+    }
+
+    #[test]
+    fn claim_stops_at_count() {
+        let s = Shared::new();
+        assert!(s.claim(3) && s.claim(3) && s.claim(3));
+        assert!(!s.claim(3));
+        assert_eq!(next_of(&s), 3);
+    }
+
+    #[test]
+    fn claim_after_fail_does_not_advance() {
+        let s = Shared::new();
+        assert!(s.claim(10));
+        s.fail(LoadError::SpawnFailed);
+        assert!(!s.claim(10));
+        assert_eq!(next_of(&s), 1);
+    }
+
+    /// 記録の後に枠が 1 件も通らない。時間ではなく、記録直後の `next` と最終の `next`・成功の合計の一致で断定する。
+    #[test]
+    fn no_claim_succeeds_after_fail_is_recorded() {
+        const CLAIMERS: usize = 4;
+        let s = Shared::new();
+        let barrier = Barrier::new(CLAIMERS + 1);
+        let (snapshot, total) = thread::scope(|scope| {
+            let hs: Vec<_> = (0..CLAIMERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        let mut n = 0u64;
+                        while s.claim(u64::MAX) {
+                            n += 1;
+                        }
+                        n
+                    })
+                })
+                .collect();
+            barrier.wait();
+            while next_of(&s) == 0 {
+                thread::yield_now();
+            }
+            s.fail(LoadError::InvalidOutcome);
+            let snapshot = next_of(&s);
+            let total: u64 = hs.into_iter().map(|h| h.join().unwrap_or(0)).sum();
+            (snapshot, total)
+        });
+        assert_eq!(next_of(&s), snapshot);
+        assert_eq!(total, snapshot);
+    }
 }
