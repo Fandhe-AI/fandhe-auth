@@ -4,7 +4,9 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,24 +27,80 @@ fn finish(tl: FaultTimeline) -> FaultRecord {
         .unwrap()
 }
 
-/// echo の上流。接続ごとにスレッドを立てる（試験プロセスの終了で回収）。
-fn echo_upstream() -> u16 {
-    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = l.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for s in l.incoming().flatten() {
-            thread::spawn(move || {
-                let mut s = s;
-                let mut b = [0u8; 1024];
-                while let Ok(n) = s.read(&mut b) {
-                    if n == 0 || s.write_all(&b[..n]).is_err() {
+/// 上流のサーバー。drop で待ち受けと接続のスレッドを止めて回収する（試験の後にスレッドとポートを残さない）。
+struct Upstream {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Upstream {
+    /// 受けた接続ごとに `conn` を別スレッドで走らせる。`conn` は `stop` が立つか相手が閉じたら戻ること。
+    fn serve(conn: impl Fn(TcpStream, &AtomicBool) + Send + Sync + 'static) -> Self {
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        l.set_nonblocking(true).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = Arc::clone(&stop);
+        let conn = Arc::new(conn);
+        let handle = thread::spawn(move || {
+            let mut workers = Vec::new();
+            while !stop2.load(Ordering::SeqCst) {
+                match l.accept() {
+                    Ok((s, _)) => {
+                        let _ = s.set_nonblocking(false);
+                        let (stop3, conn) = (Arc::clone(&stop2), Arc::clone(&conn));
+                        workers.push(thread::spawn(move || conn(s, &stop3)));
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+            for w in workers {
+                let _ = w.join();
+            }
+        });
+        Self {
+            port,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// echo の上流。
+fn echo_upstream() -> Upstream {
+    Upstream::serve(|mut s, stop| {
+        let _ = s.set_read_timeout(Some(Duration::from_millis(50)));
+        let mut b = [0u8; 1024];
+        while !stop.load(Ordering::SeqCst) {
+            match s.read(&mut b) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if s.write_all(&b[..n]).is_err() {
                         break;
                     }
                 }
-            });
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(_) => break,
+            }
         }
-    });
-    port
+    })
 }
 
 fn connect(port: u16) -> TcpStream {
@@ -121,7 +179,8 @@ fn silent_peer_is_timed_out_not_disconnected() {
 
 #[test]
 fn forwards_bytes_unchanged() {
-    let p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let up = echo_upstream();
+    let p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut c = connect(p.listen_port());
     assert_eq!(roundtrip(&mut c, b"hello").as_deref(), Some(&b"hello"[..]));
     assert_eq!(p.accepted_count(), 1);
@@ -130,7 +189,8 @@ fn forwards_bytes_unchanged() {
 
 #[test]
 fn block_cuts_open_and_refuses_new_then_release_recovers() {
-    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let up = echo_upstream();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = timeline();
     let mut open = connect(p.listen_port());
     assert!(roundtrip(&mut open, b"a").is_some());
@@ -153,7 +213,8 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
 
 #[test]
 fn delay_adds_lower_bound_and_release_removes_it() {
-    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let up = echo_upstream();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = timeline();
     let mut c = connect(p.listen_port());
     p.delay(&mut tl, Duration::from_millis(200)).unwrap();
@@ -172,7 +233,8 @@ fn delay_adds_lower_bound_and_release_removes_it() {
 
 #[test]
 fn baseline_timeline_rejects_injection_and_does_not_inject() {
-    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let up = echo_upstream();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = FaultTimeline::baseline(Instant::now(), t0()).unwrap();
     assert_eq!(
         p.block(&mut tl),
@@ -191,7 +253,8 @@ fn baseline_timeline_rejects_injection_and_does_not_inject() {
 
 #[test]
 fn double_and_missing_operations_are_rejected_without_recording() {
-    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let up = echo_upstream();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = timeline();
     assert_eq!(p.release_block(&mut tl), Err(DbFaultError::NotActive));
     assert_eq!(p.release_delay(&mut tl), Err(DbFaultError::NotActive));
@@ -212,7 +275,8 @@ fn double_and_missing_operations_are_rejected_without_recording() {
 
 #[test]
 fn unreleased_injections_are_counted() {
-    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let up = echo_upstream();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = timeline();
     p.block(&mut tl).unwrap();
     p.delay(&mut tl, Duration::from_millis(5)).unwrap();
@@ -234,7 +298,8 @@ fn stop_and_drop_finish_in_any_state() {
     for state in 0..4 {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+            let up = echo_upstream();
+            let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
             let mut tl = timeline();
             let mut c = connect(p.listen_port());
             assert!(roundtrip(&mut c, b"s").is_some());
@@ -258,7 +323,8 @@ fn stop_and_drop_finish_in_any_state() {
 
 #[test]
 fn outputs_do_not_leak_ports_or_addresses() {
-    let up = echo_upstream();
+    let up_guard = echo_upstream();
+    let up = up_guard.port();
     let mut p = DbFaultProxy::start_to_port(up).unwrap();
     let listen = p.listen_port();
     let mut tl = timeline();
@@ -283,7 +349,8 @@ fn outputs_do_not_leak_ports_or_addresses() {
 
 #[test]
 fn release_delay_ends_in_flight_wait() {
-    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let up = echo_upstream();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = timeline();
     p.delay(&mut tl, Duration::from_secs(30)).unwrap();
     let mut c = connect(p.listen_port());
@@ -300,7 +367,8 @@ fn release_delay_ends_in_flight_wait() {
 
 #[test]
 fn delay_applies_to_open_connection_with_traffic_in_flight() {
-    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let up = echo_upstream();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = timeline();
     let mut c = connect(p.listen_port());
     // 通信が流れ続ける接続に遅延を適用し、適用後の応答に遅延が掛かることを確かめる。
@@ -315,45 +383,35 @@ fn delay_applies_to_open_connection_with_traffic_in_flight() {
 }
 
 /// 受けたバイト数を数える上流（返さない）。接続ごとに、読み取りの終了（EOF・エラー）を channel で知らせる。
-fn counting_upstream() -> (
-    u16,
-    std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    mpsc::Receiver<()>,
-) {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = l.local_addr().unwrap().port();
+fn counting_upstream() -> (Upstream, Arc<AtomicUsize>, mpsc::Receiver<()>) {
     let n = Arc::new(AtomicUsize::new(0));
     let n2 = Arc::clone(&n);
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        for s in l.incoming().flatten() {
-            let n = Arc::clone(&n2);
-            let tx = tx.clone();
-            thread::spawn(move || {
-                let mut s = s;
-                let mut b = [0u8; 1024];
-                while let Ok(k) = s.read(&mut b) {
-                    if k == 0 {
-                        break;
-                    }
-                    n.fetch_add(k, Ordering::SeqCst);
+    let tx = Mutex::new(tx);
+    let up = Upstream::serve(move |mut s, stop| {
+        let _ = s.set_read_timeout(Some(Duration::from_millis(50)));
+        let mut b = [0u8; 1024];
+        while !stop.load(Ordering::SeqCst) {
+            match s.read(&mut b) {
+                Ok(0) => break,
+                Ok(k) => {
+                    n2.fetch_add(k, Ordering::SeqCst);
                 }
-                let _ = tx.send(());
-            });
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(_) => break,
+            }
         }
+        let _ = tx.lock().unwrap().send(());
     });
-    (port, n, rx)
+    (up, n, rx)
 }
 
 /// ORST-17・#5983: `block()` が戻った後は、開いていた接続から上流へ新しい塊が届かない。
 /// 戻る前に送った分は下限として数え、戻った後の増加だけを見る。
 #[test]
 fn no_client_bytes_reach_upstream_after_block_returns() {
-    use std::sync::atomic::Ordering;
     let (up, count, ended) = counting_upstream();
-    let mut p = DbFaultProxy::start_to_port(up).unwrap();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = timeline();
     let mut c = connect(p.listen_port());
     c.write_all(b"before").unwrap();
@@ -389,19 +447,12 @@ fn no_client_bytes_reach_upstream_after_block_returns() {
 /// バッファに既に入っていた分のバイト数は問わない。
 #[test]
 fn streaming_conn_ends_after_block_returns() {
-    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let up = l.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for s in l.incoming().flatten() {
-            thread::spawn(move || {
-                let mut s = s;
-                while s.write_all(&[0u8; 512]).is_ok() {
-                    thread::sleep(Duration::from_millis(2));
-                }
-            });
+    let up = Upstream::serve(|mut s, stop| {
+        while !stop.load(Ordering::SeqCst) && s.write_all(&[0u8; 512]).is_ok() {
+            thread::sleep(Duration::from_millis(2));
         }
     });
-    let mut p = DbFaultProxy::start_to_port(up).unwrap();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = timeline();
     let mut c = connect(p.listen_port());
     let mut buf = [0u8; 512];
@@ -423,7 +474,8 @@ fn streaming_conn_ends_after_block_returns() {
 /// #5983: `Applied`・`Released` の `offset_ms` は、呼び出しが戻る時刻より後にならない（下限の契約）。
 #[test]
 fn recorded_offsets_are_not_after_call_return() {
-    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let up = echo_upstream();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let start = Instant::now();
     let mut tl = FaultTimeline::start(start, t0()).unwrap();
     p.block(&mut tl).unwrap();
@@ -452,9 +504,8 @@ fn recorded_offsets_are_not_after_call_return() {
 /// 遮断中に切られたことを確かめてから解除する（排出の経路は単体試験で確かめる）。
 #[test]
 fn conn_queued_during_block_never_reaches_upstream_after_release() {
-    use std::sync::atomic::Ordering;
     let (up, count, _ended) = counting_upstream();
-    let mut p = DbFaultProxy::start_to_port(up).unwrap();
+    let mut p = DbFaultProxy::start_to_port(up.port()).unwrap();
     let mut tl = timeline();
     p.block(&mut tl).unwrap();
     let mut queued = connect(p.listen_port());

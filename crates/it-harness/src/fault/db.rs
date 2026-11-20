@@ -982,7 +982,7 @@ mod tests {
         );
     }
 
-    /// 実際の `release_block` が排出を呼ぶ（ORST-17）。accept のスレッドを止めて待ち行列に接続を残し、
+    /// 公開の `release_block` が排出を呼ぶ（ORST-17）。accept のスレッドを止めて待ち行列に接続を残し、
     /// 解除を通して切断数と拒否件数を確かめる。`drain_backlog` が呼ばれなければ `refused` は 0 のまま。
     #[test]
     fn release_block_drains_queued_conns() {
@@ -1003,22 +1003,9 @@ mod tests {
         let mut c1 = connect(p.listen_port());
         let mut c2 = connect(p.listen_port());
         assert_eq!(p.refused_count(), 0);
-        // 2 本が待ち行列に届くまで排出を繰り返す（connect の成功の直後に届いている仮定を置かない）。
-        p.release_block_with(&mut tl, |l, sh| {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut total = 0;
-            while total < 2 && Instant::now() < deadline {
-                match drain_backlog(l, sh) {
-                    Drain::Done(n) => total += n,
-                    other => return other,
-                }
-                if total < 2 {
-                    thread::sleep(Duration::from_millis(5));
-                }
-            }
-            Drain::Done(total)
-        })
-        .unwrap();
+        // 公開の `release_block` を直接呼ぶ。排出の呼び出しが抜ければ、待ち行列の 2 本は切られず拒否件数は 0 のまま。
+        // 待ち行列への到達は、loopback では connect の戻りで握手が済み接続が待ち行列に入っている（カーネルの挙動）。
+        p.release_block(&mut tl).unwrap();
         assert_eq!(p.refused_count(), 2);
         assert_eq!(p.accepted_count(), 0);
         assert_eq!(echo_or_cut(&mut c1, b"a"), None);
