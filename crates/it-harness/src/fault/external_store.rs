@@ -107,7 +107,8 @@ impl ExternalStoreFaultProxy {
         self.inner.accepted_count()
     }
 
-    /// 遮断のために直ちに閉じた接続の数。
+    /// 直ちに閉じた接続の数。遮断中に閉じたものに加え、上流のハンドルが空のとき・上流への接続に失敗したときの
+    /// 閉じも含む（遮断以外の拒否を含む）。
     pub fn refused_count(&self) -> u64 {
         self.inner.refused_count()
     }
