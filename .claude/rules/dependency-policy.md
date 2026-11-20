@@ -121,16 +121,7 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
     fuzz の nightly は日付で固定せず最新を追う。実行の記録に nightly の版を残すかは **未定**（`D-2026-11-20-9`）
   - `SECR-21` の構文木の走査は `syn` を使う自前の検査（`D-2026-11-20-10`）。置き場は spec に記録が無く **未定**。
     マクロ呼び出しの中の型を見落とすかは `TASK-514` の試し実装で確かめる（main の読み）
-  - 最小の試し実装（TASK-4 の成果物）は `crates/trial-deps`（#35）に実施した。
-    normal は `fandhe-auth-secret`・`tracing`・`metrics`、dev は `tracing-subscriber`・`proptest`・`syn`（`default-features = false`、`full`・`parsing`）。
-    fuzz は別の workspace の `crates/trial-deps/fuzz/`（ルートの `exclude`）で、nightly を使い、CI には載せていない。
-    口の feature の選び・K11 の閾値・`deny.toml` の形は **未定**（人が決める）。
-    監査の範囲は次の 3 点（DPOL-33・DPOL-34・DPOL-40・DPOL-46、K7・`D-2026-11-20-7`）:
-    fuzz の workspace は独自の `Cargo.lock` を持ち、ルートの `cargo deny`・`cargo audit` の対象に入らないので、fuzz 側にも同じ監査を流す。
-    禁止の逆引きは trial-deps を含めて流す（試験用の依存も bans の対象である）。
-    K7 は trial-deps を除いた本番の木で確かめる。
-    `deny.toml` が無い間に使う設定と、実行の形（コマンド・合否の判定・記録）は `TASK-668` で決める。
-    試しに流したコマンドと結果は PR #5980 の本文に記録した
+  - 最小の試し実装（TASK-4 の成果物）は未実施。足す前に利用者へ確かめる
   上の対象以外の依存は選定の記録に無いので、足す前に利用者へ確かめる。メール送信と外向き HTTP クライアントは選定の対象から外れた。本体は口と契約テストだけを持ち、具象は組込み先が選ぶ（`D-2026-11-20-4`・`HOST-7`・`AMTH-14`・`AAUD-40`・`DPOL-46`）ので、本体の依存に足さない。
 
 ## 関連 rule
