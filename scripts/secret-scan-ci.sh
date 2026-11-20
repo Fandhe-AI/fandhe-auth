@@ -113,6 +113,10 @@ fi
 rc=0
 # cd の失敗（終了状態 1 になり「検出」と取り違えられる）は、サブシェルの中で検査不能（2）にする。
 (
+  # サブシェルは set -E と ERR トラップを受け継ぐ。検出器の終了状態 1（検出）がトラップで 2 に変わらないよう、
+  # ここでは外し、終了状態は下の明示の `exit 2` と検出器の終了状態だけで決める（bash の版による差も避ける）。
+  trap - ERR
+  set +E
   cd "${target}" 2> /dev/null || exit 2
   GIT_INDEX_FILE="${tmp_index}" "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary
 ) > "${out}" 2>&1 || rc=$?
