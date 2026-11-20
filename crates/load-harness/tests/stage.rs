@@ -340,6 +340,14 @@ fn plan_and_result_debug_hide_interval_names() {
     let res_out = format!("{:?}", run.stages()[0]);
     assert!(!res_out.contains(canary));
     assert_eq!(res_out, "StageResult(..)");
+    // 公開アクセサーの戻り値（回の集計のキー・区間名・対象名）の Debug にも出ない。
+    let acc = format!(
+        "{:?} {:?} {:?}",
+        run.stages()[0].runs(),
+        run.interval(),
+        run.target()
+    );
+    assert!(!acc.contains(canary));
 }
 
 #[test]
@@ -465,17 +473,22 @@ fn multi_worker_stages_really_overlap() {
         || {
             ov.enter();
             let mut g = gate.0.lock().unwrap();
-            if g.0 < g.1 {
+            // 最初のタイムアウトで失敗を記録した後は待たない（直列の回帰で 60 秒を何度も待たないため）。
+            if g.0 < g.1 && !timed_out.load(Ordering::SeqCst) {
                 g.0 += 1;
                 if g.0 >= g.1 {
                     gate.1.notify_all();
                 } else {
                     let (_g, res) = gate
                         .1
-                        .wait_timeout_while(g, Duration::from_secs(60), |s| s.0 < s.1)
+                        .wait_timeout_while(g, Duration::from_secs(60), |s| {
+                            s.0 < s.1 && !timed_out.load(Ordering::SeqCst)
+                        })
                         .unwrap();
                     if res.timed_out() {
                         timed_out.store(true, Ordering::SeqCst);
+                        // 待機中の全員を起こす（判定の条件は変えない）。
+                        gate.1.notify_all();
                     }
                 }
             }

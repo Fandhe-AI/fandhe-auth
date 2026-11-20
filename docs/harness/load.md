@@ -352,7 +352,9 @@ judgment:
   （回の終了まで生標本を保持するため）。段階数・繰り返しの超過、全体の試行数の溢れ、0 の上限も計画の誤りにする。
   計画全体の試行数（各段階の (暖機 + `trials_planned`) × 繰り返し の合計）が `max_total_trials` を超えると `StagePlan::new` は `InvalidPlan` で拒否し、
   上限ちょうどは受理する（全回の集計を保持するため。対象を呼ぶ前に検査する）。
-- `Debug`: `StagePlan`・`StageResult`・`StagedRun` の `Debug` は区間名を出さない固定文字列にする（`SECR-23`・`SECR-26`）。
+- `Debug`: `StagePlan`・`StageResult`・`StagedRun` の `Debug` は区間名を出さない固定文字列にする。
+  公開アクセサーの戻り値も同様で、`IntervalName`・`FailureKind`・`TargetName` の `Debug` は名前の中身を出さない固定文字列にした
+  （`RunSummary` のマップのキーを含む。`SECR-23`・`SECR-26`）。
 - 区間名の語彙: `allowed_intervals` に記録へ出してよい区間名（承認済みの語彙。既定なし・空は誤り）を渡す。`run_stages` は `TargetSpec` の区間名が語彙に無ければ、
   最初の回の前に `InvalidPlan` で拒否する（`metric`・`failure_metric`・`worst_run` に語彙外の名前を出さない。`SECR-23`・`SECR-26`）。
 - 範囲外: `format:`・`run_record_file:`・`judgment:` などファイル全体の出力と書き出し（担当の段は未決）、開ループ、合否、実物の経路（`TODO(TASK-716)`）。
