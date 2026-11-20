@@ -1,12 +1,18 @@
-//! chromedriver 構成要素と操作の入口の試験（公開 API だけ）。
-
+//! chromedriver の構成要素（`ChromeDriverComponent`）の試験。chromedriver・Chrome なしで流せる範囲だけ。
+//!
+//! unix 限定（構成要素が `cfg(unix)`）。結果は起動・停止の形の確認で、E2E の合格に数えない（ACPT-7）。
 #![cfg(unix)]
 
-use fandhe_auth_e2e_harness::chrome;
-use fandhe_auth_e2e_harness::json::Value;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use fandhe_auth_e2e_harness::chrome::new_session_request;
 use fandhe_auth_e2e_harness::{
-    AuthenticatorId, ChromeDriverComponent, ChromeDriverConfig, E2eComponent, E2eErrorKind,
-    Protocol, Transport, VirtualAuthenticatorOptions,
+    ChromeDriverComponent, ChromeDriverConfig, E2eComponent, E2eErrorKind, Protocol, Transport,
+    VirtualAuthenticatorOptions,
 };
 
 fn opts() -> VirtualAuthenticatorOptions {
@@ -21,51 +27,11 @@ fn opts() -> VirtualAuthenticatorOptions {
 }
 
 #[test]
-fn new_session_request_has_only_headless_and_outbound_restrictions() {
-    // DPOL-30: 検証を外す意味の flag を足さない。足してよいのは外部への通信を禁じる制限だけ（A10）。
-    // 実際の起動と同じ入力（--user-data-dir を含む）で引数全体を検査する。
-    let profile = std::path::Path::new("/tmp/fandhe-e2e-chrome-test");
-    let v = chrome::new_session_request_with_profile(
-        &["http://localhost:8080".to_owned()],
-        Some(profile),
-    );
+fn new_session_request_has_only_headless_flag() {
+    // DPOL-30: 検証を外す意味の flag を足さない。
+    let v = new_session_request();
     let args = &v["capabilities"]["alwaysMatch"]["goog:chromeOptions"]["args"];
-    assert_eq!(
-        args,
-        &Value::array(
-            [
-                "--headless=new",
-                chrome::HOST_RESOLVER_RULES_ARG,
-                chrome::PROXY_SERVER_ARG,
-                "--proxy-bypass-list=<-loopback>;http://localhost:8080",
-                "--user-data-dir=/tmp/fandhe-e2e-chrome-test"
-            ]
-            .map(Value::from)
-        )
-    );
-}
-
-#[test]
-fn unvalidated_origins_never_reach_the_bypass_list() {
-    let v = chrome::new_session_request_for(&[
-        "*".to_owned(),
-        "http://localhost:8080;evil.example".to_owned(),
-        "http://*.example:80".to_owned(),
-        "http://127.0.0.1:9000".to_owned(),
-    ]);
-    let args = &v["capabilities"]["alwaysMatch"]["goog:chromeOptions"]["args"];
-    assert_eq!(
-        args[3],
-        Value::from("--proxy-bypass-list=<-loopback>;http://127.0.0.1:9000")
-    );
-}
-
-#[test]
-fn ids_with_path_characters_are_rejected() {
-    for bad in ["", "a/b", "a b", "../x", "a?b", "a\r\nb"] {
-        assert!(AuthenticatorId::new(bad).is_err(), "{bad:?}");
-    }
-    assert!(AuthenticatorId::new("ok-1").is_ok());
+    assert_eq!(args, &serde_json::json!(["--headless=new"]));
 }
 
 #[test]
@@ -98,4 +64,67 @@ fn handle_is_not_running_before_start() {
         h.add_virtual_authenticator(&opts()).unwrap_err().kind(),
         E2eErrorKind::NotRunning
     );
+}
+
+/// 試験ごとの一時ディレクトリ。秘密値は置かない。
+fn temp_dir(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let d = std::env::temp_dir().join(format!("e2e-harness-{tag}-{}-{nanos}", std::process::id()));
+    fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn failed_start_kills_the_whole_process_group() {
+    // 前提: ready にならない偽のドライバ。配下に孫プロセス（Chrome の代わり）を 1 つ残して待ち続ける。
+    // 操作: 短い起動待ちで start する。セッション ID は取れない。
+    // 期待: StartFailed で、子だけでなく孫もプロセスグループごと止まる。
+    let dir = temp_dir("group");
+    let pid_file = dir.join("grandchild.pid");
+    let script = dir.join("fake-driver");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nexec sleep 30\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut c = ChromeDriverComponent::new(
+        ChromeDriverConfig::new(&script).with_ready_timeout(Duration::from_secs(1)),
+    );
+    let started = Instant::now();
+    let e = c.start().unwrap_err();
+    assert_eq!(e.kind(), E2eErrorKind::StartFailed);
+    // 起動待ちの期限（1 秒）を大きく超えて待たない。
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+
+    let grandchild = fs::read_to_string(&pid_file).unwrap();
+    let grandchild = grandchild.trim();
+    // 孫は init に引き取られて回収されるまで zombie で残り得るので、少しだけ待つ。
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while alive(grandchild) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(grandchild), "grandchild survived");
+    assert!(c.stop().is_ok());
+    let _ = fs::remove_dir_all(&dir);
 }

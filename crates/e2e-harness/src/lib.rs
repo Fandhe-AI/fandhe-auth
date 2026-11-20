@@ -9,13 +9,16 @@
 //! Safari と実機（`TASK-784`・`TASK-75`〜`78`）、結合試験（`TASK-10`。it-harness）、計測と負荷（`TASK-12`）。
 //!
 //! 依存の向き: どの crate もこの crate に依存しない（LIB-2・LIB-4）。段階 1 のリリースのメンバーではない
-//! （LIB-14・LIB-15）。名前・置き場は仮称で、人が確定する。外部依存は 0 件（JSON は [`json`] の自前の最小実装）。
+//! （LIB-14・LIB-15）。名前・置き場は仮称で、人が確定する。外部依存は `serde_json` だけ（2026-11-20 の利用者の決定。
+//! 試験専用の crate に限り直接依存として採用）。
 //!
 //! 安全: 検証を外す意味の分岐・feature は作らない（DPOL-30〜32）。誤りの値に秘密値・URL・パスを載せない
 //! （SECR-11・SECR-23）。仮想 authenticator の合格を実機・Safari の合格に数えない（ACPT-7・ACPT-8）。
 //!
-//! 2/6 の実体（chromedriver をプロセスグループで起動するため unix 限定。`it-harness` の `fault::instance` と同じ）: Chrome（chromedriver）の [`chrome::ChromeDriverComponent`] と、passkey の登録 1 件の手順
-//! [`registration::register_once`]。RP 側の実体は `TASK-716` 待ちで置かない。構成の下書きは `docs/harness/e2e.md`。
+//! 2/6 の実体: Chrome（chromedriver）の [`chrome::ChromeDriverComponent`] と、passkey の登録 1 件の手順
+//! [`registration::register_once`]。chromedriver を新しいプロセスグループで起動して配下の Chrome ごと止めるため、
+//! この 2 つは unix（Linux・macOS 等）に限る（`cfg(unix)`）。
+//! RP 側の実体は `TASK-716` 待ちで置かない。構成の下書きは `docs/harness/e2e.md`。
 
 #![forbid(unsafe_code)]
 
@@ -24,13 +27,11 @@ pub mod browser;
 pub mod chrome;
 pub mod component;
 pub mod harness;
-pub mod json;
 #[cfg(unix)]
 pub mod registration;
 pub mod scope;
 pub mod virtual_authenticator;
-#[cfg(unix)]
-pub(crate) mod webdriver;
+pub mod webdriver;
 
 pub use browser::{AuthenticatorKind, Browser, Evidence};
 #[cfg(unix)]
@@ -38,8 +39,7 @@ pub use chrome::{ChromeDriverComponent, ChromeDriverConfig, ChromeHandle};
 pub use component::{E2eComponent, E2eComponentKind};
 pub use harness::{E2eConfig, E2eError, E2eErrorKind, E2eHarness, RunningE2e};
 #[cfg(unix)]
-pub use registration::{RegistrationErrorKind, RegistrationOutcome, register_once};
+pub use registration::{RegistrationOutcome, register_once};
 pub use scope::PasskeyOperation;
 pub use virtual_authenticator::{Protocol, Transport, VirtualAuthenticatorOptions};
-#[cfg(unix)]
-pub use webdriver::{AuthenticatorId, CredentialSummary};
+pub use webdriver::{AuthenticatorId, CredentialSummary, WebDriverClient, WebDriverSession};
