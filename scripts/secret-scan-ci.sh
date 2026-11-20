@@ -3,11 +3,14 @@
 #   scripts/secret-scan-ci.sh [<走査対象のリポジトリのパス>]   既定は本スクリプトのあるリポジトリ
 # 検出器・陰性対照は本スクリプトと同じリポジトリ（CI では PR が書き換えられない base の版）のものを使い、
 # 走査対象はデータとして渡す。公開ログには規則 ID・件数・固定の診断文だけを出す。
+# 走査するのは HEAD を sha に固定して作った専用の一時 index（作業ツリーの index は読まない）。
 # 検出器の出力は一度ファイルへ受け、規則 ID・件数の行（--summary の出力形）だけを通す。ファイル名・値・
 # git のエラー文は出さない（パスに値が含まれ得る。SECR-23）。
 # 終了コード: 0 = 検出なし・陰性対照も期待どおり / 1 = 検出または陰性対照の失敗 / 2 = 検査を完了できない。
 # 範囲外: コミット履歴・submodule の中。検出時は .claude/rules/security.md の重大度「高」に従う。
 set -euo pipefail
+# 相対パスの解決（cd）が CDPATH に左右されないようにする（以降の cd・lib.sh の解決より前に外す）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
@@ -54,24 +57,29 @@ if [ -z "${top_real}" ] || [ "${top_real}" != "${target}" ]; then
   exit 2
 fi
 
-# 走査は index を読むため、index が HEAD のコミットと一致しない（取り違え・未コミットの変更）ときは
-# 検査不能として止める（fail-closed）。終了状態は 0 = 一致 / 1 = 差分あり / その他 = 失敗。
-idx_rc=0
-git -C "${target}" diff-index --cached --quiet HEAD -- > /dev/null 2>&1 || idx_rc=$?
-if [ "${idx_rc}" -ne 0 ]; then
-  echo "secret-scan-ci: index does not match HEAD (exit ${idx_rc}); cannot scan" >&2
+# 走査対象は作業ツリーの index ではなく、HEAD を sha に固定してその tree から作る専用の一時 index にする。
+# 照合（HEAD と index の比較）と走査が index を別々に開く隙間（TOCTOU）で index が書き換わっても、
+# 取り違えて 0 を返さない。作業ツリーの index が HEAD と違っても、走査するのは HEAD の内容である。
+# git の呼び出しは対象の hooks（post-index-change 等）を起動しない。
+if ! head_sha="$(git -C "${target}" rev-parse --verify "HEAD^{commit}" 2> /dev/null)" || [ -z "${head_sha}" ]; then
+  echo "secret-scan-ci: cannot resolve HEAD" >&2
+  exit 2
+fi
+if ! work_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan-ci.XXXXXX" 2> /dev/null)" || [ -z "${work_dir}" ]; then
+  echo "secret-scan-ci: mktemp failed" >&2
+  exit 2
+fi
+trap 'rm -rf "${work_dir}"' EXIT
+out="${work_dir}/out"
+tmp_index="${work_dir}/index"
+if ! GIT_INDEX_FILE="${tmp_index}" git -C "${target}" -c core.hooksPath=/dev/null read-tree "${head_sha}" > /dev/null 2>&1; then
+  echo "secret-scan-ci: failed to build the temporary index from HEAD" >&2
   exit 2
 fi
 
-out="$(mktemp "${TMPDIR:-/tmp}/secret-scan-ci.XXXXXX" 2> /dev/null)" || {
-  echo "secret-scan-ci: mktemp failed" >&2
-  exit 2
-}
-trap 'rm -f "${out}"' EXIT
-
 # 検出器の終了状態は 0 = 検出なし / 1 = 検出 / 2 = 検査不能。それ以外（起動失敗・シグナル等）も検査不能に畳む。
 rc=0
-(cd "${target}" && "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary) > "${out}" 2>&1 || rc=$?
+(cd "${target}" && GIT_INDEX_FILE="${tmp_index}" "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary) > "${out}" 2>&1 || rc=$?
 # 規則 ID は許可した一覧との完全一致だけを通す（任意の文字列・git の診断を公開ログへ通さない）。
 # grep の終了状態は 0 = 一致 / 1 = 該当なし / 2 以上 = エラー。1 だけを「該当なし」として許す。
 grep_rc=0

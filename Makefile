@@ -38,7 +38,7 @@ secret-scan: ## 追跡ファイル全体の秘密情報の混入検査（検査�
 	@scripts/hooks/secret-scan.sh --tracked
 
 # scan-canary は暫定の名前（人が確定する）。検出器が常に合格する状態を CI で見逃さないための陰性対照。
-scan-canary: ## secret-scan の陰性対照（実行時に組み立てたダミーで検出器が 1 を返すことを確かめる。何も変更しない）。直接: scripts/secret-scan-canary.sh
+scan-canary: ## secret-scan の陰性対照（ダミーで検出器が 1 を返し、集計行が期待と完全に一致し、ダミー値が出ないことを確かめる。何も変更しない）。直接: scripts/secret-scan-canary.sh
 	@scripts/secret-scan-canary.sh
 
 # build・test は暫定の名前（人が確定する）。CI の build-test ジョブがこの 2 つを呼ぶ（TASK-6）。--all-features は付けない（DPOL-31）。

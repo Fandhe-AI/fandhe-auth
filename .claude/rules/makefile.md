@@ -58,7 +58,7 @@ description: >
 | `check` | `scripts/check.sh` | ソースを変更しない（自動修正しない）。editorconfig-checker + shellcheck。CI の `check` ジョブと同一 |
 | `test-hooks` | `scripts/hooks/test-hooks.sh` | 一時 git リポジトリで検証し作業ツリーを変更しない。依存は bash + git のみ。CI の `test-hooks` ジョブと同一 |
 | `secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 検査のみ。追跡ファイル全体の秘密情報の混入を規則表で検査し、規則 ID ごとの件数・合計・ファイル名だけを出す（値は出さない）。0 件で 0・検出で 1・検査不能で 2。CI への組み込みは 2 段目で行う予定（#51。TASK-6）。名前は暫定 |
-| `scan-canary` | `scripts/secret-scan-canary.sh` | 検査のみ。元の index・作業ツリー・object store を変えない。実行時に組み立てたダミーを足した一時 index で検出器がちょうど 1 を返せば 0、それ以外は非 0。CI への組み込みは 2 段目で行う予定（#51。TASK-6）。名前は暫定 |
+| `scan-canary` | `scripts/secret-scan-canary.sh` | 検査のみ。元の index・作業ツリー・object store を変えない。実行時に組み立てたダミーを足した一時 index で、検出器が 1 を返し、`--summary` の出力が許可した集計行の集合と完全に一致し（余計な行があれば失敗）、ダミーの値が出力に無ければ 0。検出能力の異常は 1、検出器が検査不能（2 等）・準備や読み取りの失敗は 2。元のリポジトリの hooks は起動しない。CI への組み込みは 2 段目で行う予定（#51。TASK-6）。名前は暫定 |
 | `build` | `cargo build --workspace --locked`（直書き） | ソースを変更しない。`--locked` で `Cargo.lock` の外を解決しない。`--all-features` は付けない（DPOL-31）。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
 | `test` | `cargo test --workspace --locked`（直書き） | ソースを変更しない。`--locked`・`--all-features` なし。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
 | `fmt` | `cargo fmt --all`（直書き） | rustfmt を適用する（ソースを書き換える唯一の make ターゲット） |

@@ -19,7 +19,7 @@ cat <<'EOF'
   check       scripts/check.sh               editorconfig-checker + shellcheck（ソースは変更しない）
   test-hooks  scripts/hooks/test-hooks.sh    フックスクリプト自体の回帰テスト（bash + git のみ）
   secret-scan scripts/hooks/secret-scan.sh --tracked   追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定）
-  scan-canary scripts/secret-scan-canary.sh   secret-scan の陰性対照（実行時に組み立てたダミーで検出器が 1 を返すことを確かめる。何も変更しない）
+  scan-canary scripts/secret-scan-canary.sh   secret-scan の陰性対照（ダミーで検出器が 1 を返し、集計行が期待と完全に一致し、ダミー値が出ないことを確かめる。何も変更しない）
   build       cargo build --workspace --locked   workspace 全体をビルドする（--locked。--all-features は使わない）
   test        cargo test --workspace --locked    workspace 全体の試験を流す
   fmt         cargo fmt --all                rustfmt で整形を適用する（ソースを書き換える）

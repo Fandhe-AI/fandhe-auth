@@ -393,13 +393,25 @@ else
   fail "secret-scan-ci: clean repository passes" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-stage extra.txt "world"
+# 作業ツリーの index が HEAD と違っても、走査するのは HEAD の内容（専用の一時 index）
+# (a) index にだけ秘密値がある（HEAD は無害）→ HEAD を走査するので 0
+stage extra.txt "x = ${token}"
 rc=0
 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 2 ]; then
-  pass "secret-scan-ci: index differing from HEAD exits 2"
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan-ci: scans HEAD even if the working index differs (staged secret ignored)"
 else
-  fail "secret-scan-ci: index differing from HEAD exits 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+  fail "secret-scan-ci: scans HEAD even if the working index differs (staged secret ignored)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# (b) HEAD に秘密値があり、index からは外してある → HEAD を走査するので 1
+new_repo; stage app.txt "x = ${token}"; git commit -q -m "chore: leak"
+git rm -q --cached app.txt
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ]; then
+  pass "secret-scan-ci: scans HEAD even if the working index differs (secret in HEAD detected)"
+else
+  fail "secret-scan-ci: scans HEAD even if the working index differs (secret in HEAD detected)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 # 呼び出し元の GIT_INDEX_FILE（秘密値入りの別 index）を渡しても、対象の本来の index（HEAD と一致）を走査する
@@ -507,6 +519,38 @@ if [ "${rc}" -eq 2 ]; then
 else
   fail "scan-canary: scanner exit 2 makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
+
+# secret-scan-canary.sh: 元のリポジトリの hooks（post-index-change）を起動しない
+hook_dir="${work_dir}/hooks"
+mkdir -p "${hook_dir}"
+printf '#!/bin/sh\ntouch "%s/hook-ran"\n' "${work_dir}" > "${hook_dir}/post-index-change"
+chmod +x "${hook_dir}/post-index-change"
+rm -f "${work_dir}/hook-ran"
+rc=0
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="${hook_dir}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ] && [ ! -e "${work_dir}/hook-ran" ]; then
+  pass "scan-canary: does not run hooks of the original repository"
+else
+  fail "scan-canary: does not run hooks of the original repository" "exit ${rc}" "hook ran: $([ -e "${work_dir}/hook-ran" ] && echo yes || echo no)" "output: $(cat "${work_dir}/out")"
+fi
+
+# secret-scan-canary.sh: --summary の出力に許可した集計行以外の行（ファイル名等）があれば失敗（1）
+extra_shim_dir="${work_dir}/extra-shim"
+mkdir -p "${extra_shim_dir}"
+cat > "${extra_shim_dir}/cmp" <<EOF
+#!/bin/sh
+echo "  some/extra/file.txt" >&4
+exec "$(command -v cmp)" "\$@"
+EOF
+chmod +x "${extra_shim_dir}/cmp"
+rc=0
+PATH="${extra_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ]; then
+  pass "scan-canary: an extra line in the scanner summary fails the canary"
+else
+  fail "scan-canary: an extra line in the scanner summary fails the canary" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 
 new_repo; stage .gitattributes "* -diff"; stage app.txt "x = ${token}"; git commit -q -m "chore: attr"
 check_scan "(tracked) -diff attribute does not hide content" 1 app.txt
