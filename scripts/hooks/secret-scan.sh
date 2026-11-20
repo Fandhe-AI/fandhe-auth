@@ -163,12 +163,18 @@ if [ "${mode}" = tracked ]; then
   fi
 fi
 scan_diff() {
+  # --summary（公開ログ用）では git の診断（標準エラー。パス・値を含み得る）を捨てる。
+  # 失敗は終了状態で検知して固定の文言で止まる（呼び出し側の `if !` が exit 2）。
+  local errsink=/dev/stderr
+  if [ "${summary}" -eq 1 ]; then
+    errsink=/dev/null
+  fi
   if [ "${mode}" = tracked ]; then
     git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@"
+      --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@" 2> "${errsink}"
   else
     git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "$@"
+      --src-prefix=a/ --dst-prefix=b/ "$@" 2> "${errsink}"
   fi
 }
 
@@ -227,47 +233,67 @@ if ! scan_diff -U0 --diff-filter=ACMR -- . \
   exit 2
 fi
 
-# `+++ b/<path>` のファイルヘッダは `diff --git` から最初の `@@` までの間でだけ解釈する。
+# bash の read は NUL を保持できず（実装により NUL 以降を切る・NUL だけを捨てる）、NUL を含む行で
+# 後ろの秘密値や NUL で分割された語を見落とし得る（fail-open）。走査の前に NUL を取り除いた版と
+# 空白へ置き換えた版を作り、NUL を含む場合は両方を走査する（行番号は同じ。同じ行は二重に数えない）。
+if ! tr -d '\000' < "${tmp_dir}/diff" > "${tmp_dir}/diff.del"; then
+  echo "secret-scan: failed to normalize diff; aborting" >&2
+  exit 2
+fi
+if ! tr '\000' ' ' < "${tmp_dir}/diff" > "${tmp_dir}/diff.sp"; then
+  echo "secret-scan: failed to normalize diff; aborting" >&2
+  exit 2
+fi
+
+# scan_pass <file>: `+++ b/<path>` のファイルヘッダは `diff --git` から最初の `@@` までの間でだけ解釈する。
 # hunk 内の追加行の本文が `++ b/...`・`++...` で始まると diff 上は `+++...` になるため、
 # 行頭だけで判定するとヘッダと誤認して走査から漏れる。ヘッダ区間以外の `+` 行はすべて走査する。
-in_header=0
-current_file=""
-while IFS= read -r line || [ -n "${line}" ]; do
-  case "${line}" in
-    'diff --git '*)
-      in_header=1
-      current_file=""
-      continue
-      ;;
-    '@@'*)
-      in_header=0
-      continue
-      ;;
-  esac
-  if [ "${in_header}" -eq 1 ]; then
+hit_lines="|"
+scan_pass() {
+  local in_header=0 current_file="" line lineno=0
+  while IFS= read -r line || [ -n "${line}" ]; do
+    lineno=$((lineno + 1))
     case "${line}" in
-      '+++ "b/'*)
-        # 制御文字等を含むパスは git が二重引用符で囲む（表示用に外すのみ）
-        current_file="${line#+++ \"b/}"
-        current_file="${current_file%\"}"
+      'diff --git '*)
+        in_header=1
+        current_file=""
+        continue
         ;;
-      '+++ b/'*)
-        # 空白を含むパスには git が末尾にタブを付ける
-        current_file="${line#+++ b/}"
-        current_file="${current_file%$'\t'}"
+      '@@'*)
+        in_header=0
+        continue
         ;;
     esac
-    continue
-  fi
-  case "${line}" in
-    '+'*)
-      if classify_line "${line}"; then
-        rule_hits[hit]=$((rule_hits[hit] + 1))
-        add_flagged "${current_file:-(unknown)}"
-      fi
-      ;;
-  esac
-done < "${tmp_dir}/diff"
+    if [ "${in_header}" -eq 1 ]; then
+      case "${line}" in
+        '+++ "b/'*)
+          # 制御文字等を含むパスは git が二重引用符で囲む（表示用に外すのみ）
+          current_file="${line#+++ \"b/}"
+          current_file="${current_file%\"}"
+          ;;
+        '+++ b/'*)
+          # 空白を含むパスには git が末尾にタブを付ける
+          current_file="${line#+++ b/}"
+          current_file="${current_file%$'\t'}"
+          ;;
+      esac
+      continue
+    fi
+    case "${line}" in
+      '+'*)
+        if [[ "${hit_lines}" != *"|${lineno}|"* ]] && classify_line "${line}"; then
+          hit_lines+="${lineno}|"
+          rule_hits[hit]=$((rule_hits[hit] + 1))
+          add_flagged "${current_file:-(unknown)}"
+        fi
+        ;;
+    esac
+  done < "$1"
+}
+scan_pass "${tmp_dir}/diff.del"
+if ! cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del"; then
+  scan_pass "${tmp_dir}/diff.sp"
+fi
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
 total="${env_hits}"

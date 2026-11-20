@@ -344,6 +344,15 @@ check_scan "(tracked) excluded paths" 0
 new_repo; printf 'x = %s\n\000' "${token}" > bin.dat; git add bin.dat; git commit -q -m "chore: bin"
 check_scan "(tracked) NUL-containing file is scanned (fail-closed)" 1 bin.dat
 
+new_repo; printf 'pad\000x = %s\n' "${token}" > nulpre.dat; git add nulpre.dat; git commit -q -m "chore: nul prefix"
+check_scan "(tracked) secret after a NUL byte is detected (fail-closed)" 1 nulpre.dat
+
+new_repo; printf '\000\000\000x = %s\n' "${token}" > nulmulti.dat; git add nulmulti.dat; git commit -q -m "chore: nul run"
+check_scan "(tracked) secret after consecutive NUL bytes is detected" 1 nulmulti.dat
+
+new_repo; printf 'x = %s\000%s\n' "${token:0:8}" "${token:8}" > nulsplit.dat; git add nulsplit.dat; git commit -q -m "chore: nul split"
+check_scan "(tracked) secret split by a NUL byte is detected" 1 nulsplit.dat
+
 new_repo; stage .gitattributes "* -diff"; stage app.txt "x = ${token}"; git commit -q -m "chore: attr"
 check_scan "(tracked) -diff attribute does not hide content" 1 app.txt
 

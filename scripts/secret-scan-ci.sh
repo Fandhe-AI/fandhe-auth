@@ -37,7 +37,8 @@ trap 'rm -f "${out}"' EXIT
 
 rc=0
 (cd "${target}" && "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary) > "${out}" 2>&1 || rc=$?
-grep -aE '^secret-scan: ([a-z0-9-]+: [0-9]+ (line|file)\(s\)|total: [0-9]+ finding\(s\)( in [0-9]+ file\(s\)| \([0-9]+ tracked file\(s\) checked\))|findings in tracked files)$' "${out}" || true
+# 規則 ID は許可した一覧との完全一致だけを通す（任意の文字列・git の診断を公開ログへ通さない）。
+grep -aE '^secret-scan: (env-file|vendor-token|private-key|jwt|jwk-private|credential-url|assignment): [0-9]+ (line|file)\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) in [0-9]+ file\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) \([0-9]+ tracked file\(s\) checked\)$|^secret-scan: findings in tracked files$' "${out}" || true
 if [ "${rc}" -ne 0 ]; then
   echo "secret-scan-ci: scan failed (exit ${rc}); details are withheld on the public log. Re-run locally: make secret-scan" >&2
   exit "${rc}"
