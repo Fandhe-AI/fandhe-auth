@@ -24,6 +24,8 @@ description: >
 - 対象の型の一覧（SECR-10・SECR-29）を保つ。CI の構文木の走査で秘密値らしい欄を持つ型を見つけ、その型が一覧に無い、または欄が
   専用の秘密値の型でなければ CI を失敗させる（SECR-21。検討中。道具は `syn` を使う自前の検査〔`D-2026-11-20-10`。置き場は未定〕）。走査は人のコードレビューの確認項目で補う（SECR-21）。
 - 型を足す変更で、一覧と試験の片方だけを更新したものも CI を失敗させる（SECR-32。検討中）。
+- 一覧の暫定の記録（一覧の置き場と形は未定で、TASK-512 で作る。作るまでは型を足す変更がここへ 1 行足す）:
+  - `fandhe-auth-e2e-harness` の `SessionId`（`crates/e2e-harness/src/webdriver.rs`。非公開。`SecretString` を持つ）と、それを持つ `WebDriverSession`（SECR-10・SECR-29。試験専用の入れ物）
 
 ## 出力（Debug・Display・Serialize）
 

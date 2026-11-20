@@ -27,7 +27,8 @@ cd "${ROOT_DIR}"
 # it-harness も試験専用で secret・hub-stub・console-stub（DB のパスワードを秘密値の型で持つ。SECR-30。Hub・console の
 # stub を構成要素に組み込む。TASK-10 (3/6)・(4/6)。どの crate からも依存されない。この行は人の確認待ち。
 # minimal-host への辺は後続の段で足し、足すときに確かめる）。
-# e2e-harness も試験専用で workspace 内の依存なし（TASK-11 (1/6)。どの crate からも依存されない。この行は人の確認待ち。
+# e2e-harness も試験専用で secret のみ（TASK-11。セッション ID を秘密値の型で持つ。SECR-30・SECR-31。どの crate からも
+# 依存されない。e2e-harness → secret の辺は利用者が 2026-11-20 に承認済み〔#5975〕）。
 # it-harness・minimal-host への辺は後続の段で足し、足すときに確かめる）。
 # load-harness も試験専用で、通常（normal・build）の依存は workspace 内になし。試験（dev）だけ it-harness・hub-stub に
 # 依存する（dev_only_deps の表。dev の辺に限って許可し、normal・build に現れたら拒否する）
@@ -45,7 +46,7 @@ allowed_deps() {
     fandhe-auth-hub-stub) echo "fandhe-auth-secret" ;;
     fandhe-auth-console-stub) echo "" ;;
     fandhe-auth-it-harness) echo "fandhe-auth-secret fandhe-auth-hub-stub fandhe-auth-console-stub" ;;
-    fandhe-auth-e2e-harness) echo "" ;;
+    fandhe-auth-e2e-harness) echo "fandhe-auth-secret" ;;
     fandhe-auth-load-harness) echo "" ;;
     fandhe-auth-trial-deps) echo "fandhe-auth-secret" ;;
     fandhe-auth-backend) echo "" ;;

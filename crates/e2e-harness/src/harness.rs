@@ -18,6 +18,10 @@ pub enum E2eErrorKind {
     StartFailed,
     /// 停止に失敗した。
     StopFailed,
+    /// ドライバへの命令が失敗した（ドライバの誤り応答・応答の形の不一致・通信の失敗・上限超過）。
+    CommandFailed,
+    /// 起動前または停止後のドライバに操作した。
+    NotRunning,
 }
 
 /// ハーネスの誤り。種類と構成要素の種類だけを持ち、秘密値・URL・パス・ポートを載せない（SECR-11・SECR-23）。
