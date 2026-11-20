@@ -211,12 +211,19 @@ impl StageResult {
 }
 
 /// 段階を変える実行の結果。段階ごとに分けて持つ。フィールドは非公開で読み取りだけを許す。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StagedRun {
     target: TargetName,
     interval: IntervalName,
     by: MetricKey,
     stages: Vec<StageResult>,
+}
+
+/// SECR-23・SECR-26: 対象名・区間名・段階の中身を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
+impl fmt::Debug for StagedRun {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StagedRun(..)")
+    }
 }
 
 impl StagedRun {
@@ -329,7 +336,7 @@ impl fmt::Display for StagedRun {
                 l.warmup(),
             )?;
             for (i, r) in st.runs.iter().enumerate() {
-                // 回の数は繰り返しの上限（1024）以下なので溢れない。溢れたら出力を誤りにする。
+                // 回の通し番号の変換に失敗したら（繰り返しの上限は呼び出し元の StageLimits で決まる）fmt::Error を返す。
                 let n = number(i).map_err(|_| fmt::Error)?;
                 let id = format!("{}.{}", st.stage, n);
                 let s = r;

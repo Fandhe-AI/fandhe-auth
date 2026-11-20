@@ -297,3 +297,18 @@ fn error_display_is_fixed_english() {
     assert_eq!(e.to_string(), "target error in stage");
     assert_eq!(StageError::InvalidPlan.to_string(), "invalid stage plan");
 }
+
+#[test]
+fn staged_run_debug_hides_target_name() {
+    // SECR-23・SECR-26: 対象名に目印を渡し、Debug の出力に含まれないことを確かめる。
+    let canary = "canary_target_zq";
+    let spec = TargetSpec::new(
+        TargetName::new(canary).unwrap(),
+        IntervalName::new("op").unwrap(),
+    );
+    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let run = run_stages(|| step_clock(10), &spec, &plan, || CallResult::Ok).unwrap();
+    let out = format!("{run:?}");
+    assert!(!out.contains(canary));
+    assert_eq!(out, "StagedRun(..)");
+}
