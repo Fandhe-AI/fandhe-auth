@@ -110,9 +110,19 @@ fn failed_start_kills_the_whole_process_group() {
     let mut c = ChromeDriverComponent::new(
         ChromeDriverConfig::new(&script).with_ready_timeout(Duration::from_secs(1)),
     );
-    let started = Instant::now();
-    let e = c.start().unwrap_err();
-    assert_eq!(e.kind(), E2eErrorKind::StartFailed);
+    // 書いた直後の実行ファイルは、他の試験スレッドの fork と競合して spawn が失敗する（ETXTBSY）ことがある。
+    // スクリプトが走った（pid ファイルがある）ことを確かめてから停止を検査し、走っていなければやり直す。
+    let mut started = Instant::now();
+    for _ in 0..5 {
+        started = Instant::now();
+        let e = c.start().unwrap_err();
+        assert_eq!(e.kind(), E2eErrorKind::StartFailed);
+        if pid_file.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(pid_file.exists(), "偽のドライバが実行されなかった");
     // 起動待ちの期限（1 秒）を大きく超えて待たない。
     assert!(
         started.elapsed() < Duration::from_secs(5),
