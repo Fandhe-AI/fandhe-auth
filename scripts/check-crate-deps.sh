@@ -32,7 +32,8 @@ cd "${ROOT_DIR}"
 # load-harness も試験専用で、通常（normal・build）の依存は workspace 内になし。試験（dev）だけ it-harness・hub-stub に
 # 依存する（dev_only_deps の表。dev の辺に限って許可し、normal・build に現れたら拒否する）
 # （TASK-12 (5/10)。it-harness の上で構成要素へ負荷をかける。どの crate からも依存されない。この行は人の確認待ち）。
-# trial-deps も試験専用で secret のみ（TASK-4 (6/6)・#35。どの crate からも依存されない。D-2026-11-20-8〜10）。
+# trial-deps も試験専用で secret のみ（TASK-4 (6/6)・#35。どの crate からも依存されない。D-2026-11-20-8〜10。
+# この行（trial-deps → secret の辺）は利用者が 2026-11-20 に確認済み〔#35〕）。
 # backend は差し替え点の枠だけで workspace 内の依存なし（TASK-9。辺を足すのは中身の TASK で、足すときに確かめる）。
 allowed_deps() {
   case "$1" in
