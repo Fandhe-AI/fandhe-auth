@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
 use fandhe_auth_hub_stub::fault::{InjectedRefusal, InjectionLog};
 use fandhe_auth_hub_stub::heartbeat::{DbState, Heartbeat, HeartbeatReceiver, Liveness};
@@ -42,6 +42,31 @@ fn canary() -> String {
     SystemRandom::new().fill(&mut b).unwrap();
     let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
     format!("canary-{hex}.test")
+}
+
+/// 値の現れ方の一覧: 生・base64（標準・URL 安全。パディングの有無）・16 進（小文字・大文字）（AAUD-30）。
+fn leak_forms(c: &str) -> Vec<String> {
+    let hex: String = c.bytes().map(|x| format!("{x:02x}")).collect();
+    vec![
+        c.to_owned(),
+        STANDARD.encode(c),
+        STANDARD_NO_PAD.encode(c),
+        URL_SAFE.encode(c),
+        URL_SAFE_NO_PAD.encode(c),
+        hex.to_uppercase(),
+        hex,
+    ]
+}
+
+/// どの出力にも、どの値のどの形も含まれないこと。
+fn assert_no_leak(outputs: &[String], canaries: &[&String]) {
+    for c in canaries {
+        for f in leak_forms(c) {
+            for o in outputs {
+                assert!(!o.contains(&f), "出力に値の形が含まれた");
+            }
+        }
+    }
 }
 
 fn new_key() -> EcdsaKeyPair {
@@ -464,17 +489,29 @@ fn record_lines_and_no_token_leak() {
     let c2 = canary();
     let c3 = canary();
     let c4 = canary();
-    let _ = inj.receive_logout(&tl, &mut lo, &c1, NOW);
-    let _ = inj.present(&tl, &mut pr, &c2, NOW);
+    // 実際に返った誤り（拒否時・委譲時・別の実行）を捨てずに保持し、整形結果を検査する。
+    let mut outputs: Vec<String> = Vec::new();
+    let e1 = inj.receive_logout(&tl, &mut lo, &c1, NOW).unwrap_err();
+    let e2 = inj.present(&tl, &mut pr, &c2, NOW).unwrap_err();
+    assert_eq!(e1, InjectedRefusal::Unreachable);
+    assert_eq!(e2, InjectedRefusal::Unreachable);
+    outputs.extend([format!("{e1:?}"), format!("{e1:#?}")]);
+    outputs.extend([format!("{e2:?}"), format!("{e2:#?}")]);
+    let other = timeline();
+    let e5 = inj.receive_logout(&other, &mut lo, &c1, NOW).unwrap_err();
+    assert_eq!(e5, HubStubCallError::RunMismatch);
+    outputs.extend([format!("{e5:?}"), format!("{e5:#?}")]);
     inj.release(&mut tl, kl).unwrap();
     inj.release(&mut tl, kp).unwrap();
-    assert!(inj.receive_logout(&tl, &mut lo, &c3, NOW).unwrap().is_err());
-    assert!(inj.present(&tl, &mut pr, &c4, NOW).unwrap().is_err());
+    let r3 = inj.receive_logout(&tl, &mut lo, &c3, NOW).unwrap();
+    let r4 = inj.present(&tl, &mut pr, &c4, NOW).unwrap();
+    let (e3, e4) = (r3.unwrap_err(), r4.unwrap_err());
+    outputs.extend([format!("{e3:?}"), format!("{e3:#?}")]);
+    outputs.extend([format!("{e4:?}"), format!("{e4:#?}")]);
     let cs = [&c1, &c2, &c3, &c4];
-    for c in cs {
-        assert!(!format!("{inj:?}").contains(c.as_str()));
-        assert!(!format!("{:?}", inj.call_log()).contains(c.as_str()));
-    }
+    outputs.push(format!("{inj:?}"));
+    outputs.push(format!("{:?}", inj.call_log()));
+    let before = outputs.len();
     let (rec, log) = inj
         .finish(tl, UtcTimestamp::from_unix_seconds(1_700_000_060))
         .unwrap();
@@ -482,10 +519,11 @@ fn record_lines_and_no_token_leak() {
     assert!(text.contains("hub_stub_refusal target=hub_stub"));
     assert!(text.contains("port=jwks refusal=status_503"));
     assert!(text.contains("A-2026-10-28-9"));
-    for c in cs {
-        assert!(!text.contains(c.as_str()));
-        assert!(!format!("{log:?}").contains(c.as_str()));
-    }
+    outputs.push(text);
+    outputs.push(format!("{log:?}"));
+    outputs.push(format!("{rec:?}"));
+    assert!(outputs.len() > before);
+    assert_no_leak(&outputs, &cs);
     for e in [
         HubStubFaultError::InvalidParam,
         HubStubFaultError::AlreadyActive,
@@ -496,7 +534,7 @@ fn record_lines_and_no_token_leak() {
 }
 
 /// ハーネスで起動した stub のセッションの口へ注入できる。`with` のクロージャ内ではセッションのロックを握ったまま
-/// `Wait` が走るので、ここで使う `Wait` は同じハンドルを参照しない。
+/// `Wait` が走る（契約。`HubStubFaultInjector::new` の文書）ので、ここで使う `Wait` は同じハンドルを参照しない。
 #[test]
 fn injects_into_harness_started_stub() {
     let comp = HubStubComponent::new(config());
