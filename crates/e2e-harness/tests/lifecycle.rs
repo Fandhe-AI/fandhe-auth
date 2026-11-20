@@ -168,6 +168,9 @@ fn browser_driver_without_browser_is_rejected() {
         fn kind(&self) -> E2eComponentKind {
             E2eComponentKind::BrowserDriver
         }
+        fn browser(&self) -> Option<Browser> {
+            None
+        }
         fn start(&mut self) -> Result<(), E2eError> {
             Ok(())
         }

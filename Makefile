@@ -77,5 +77,5 @@ e2e-chrome: ## ハーネスの Chrome の E2E（chromedriver 必須・#[ignore] 
 	@scripts/e2e-chrome.sh
 
 # e2e-firefox は暫定の名前（人が確定する）。geckodriver を使う E2E（#[ignore]）の明示の入口。CI には載せない（TASK-6）。
-e2e-firefox: ## ハーネスの Firefox の E2E（geckodriver・Firefox 必須（仮想 authenticator のエンドポイントが使える組み合わせ。既定無効の版は失敗する。版の組み合わせは未実測。詳細は scripts/e2e-firefox.sh）・#[ignore] の試験を流す。CI 外）。直接: scripts/e2e-firefox.sh
+e2e-firefox: ## ハーネスの Firefox の E2E（geckodriver・Firefox 必須（記録のある組み合わせは Firefox 156〜158 + geckodriver 0.37.1。詳細は scripts/e2e-firefox.sh）・#[ignore] の試験を流す。CI 外）。直接: scripts/e2e-firefox.sh
 	@scripts/e2e-firefox.sh

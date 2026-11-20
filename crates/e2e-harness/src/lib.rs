@@ -19,7 +19,7 @@
 //! `registration::register_once`。chromedriver を新しいプロセスグループで起動して配下の Chrome ごと止めるため、
 //! この 2 つは unix（Linux・macOS 等）に限る（`cfg(unix)`）。
 //! 3/6 の実体: Firefox（geckodriver）の `firefox::GeckoDriverComponent`。起動・停止は Chrome と共通の
-//! [`driver_process`] に切り出した（振る舞いは 2/6 のまま）。
+//! `driver_process`（unix のみ）に切り出した（振る舞いは 2/6 のまま）。
 //! RP 側の実体は `TASK-716` 待ちで置かない。構成の下書きは `docs/harness/e2e.md`。
 
 #![forbid(unsafe_code)]

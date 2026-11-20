@@ -40,10 +40,9 @@ pub trait E2eComponent {
     fn kind(&self) -> E2eComponentKind;
     /// この構成要素が対象とするブラウザ。ブラウザに結び付く要素（ドライバ）は `Some` を返し、
     /// [`crate::harness::E2eHarness::start`] が [`crate::harness::E2eConfig`] のブラウザとの一致を起動前に確かめる。
-    /// ブラウザに結び付かない要素（RelyingParty 等）は既定の `None`。
-    fn browser(&self) -> Option<Browser> {
-        None
-    }
+    /// ブラウザに結び付かない要素（RelyingParty 等）は `None`。
+    /// 実装の漏れを型で検出するため既定の実装は持たない（BrowserDriver が `None` を返すと起動前に `BrowserMismatch` で拒否される）。
+    fn browser(&self) -> Option<Browser>;
     /// 起動する。
     fn start(&mut self) -> Result<(), E2eError>;
     /// 停止する。

@@ -92,6 +92,10 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
   将来要素を引く段を足すときは `LGUI-35`（→ Hub `ASCR-65`）を ID で引いて従い、本番の画面に試験用の要素を持ち込まない。
 - 受け入れた制限（Chrome と同じ）: 強制終了で geckodriver の一時プロファイルが残り得る。送信先は flag で制限しない。
 - 2 台の authenticator を同時に有効にすると Firefox が拒否することがある（PoC-3）ため、1 台だけを使う。
+- 動作の記録がある組み合わせ（spec の `03-poc/` の記録。〔仮想〕）: Firefox 156〜158、geckodriver 0.37.1、pref は上の 2 つだけ
+  （capabilities の `moz:firefoxOptions.prefs` で渡す。geckodriver が起動する Firefox に届く）。この repo の `make e2e-firefox` では未実行。
+  geckodriver 0.34.0 で対応が入ったが、0.36.0 の変更履歴は使用を避けるよう勧める（`02-poc-plan.md`）ため、上の組み合わせを試す。
+  これより古い版・上の 2 つで足りない版の可否は未確認で、追加の設定を推測で足さない（足すなら人に確かめる）。
 
 ### 起動・停止の契約（2/6）
 
@@ -139,7 +143,7 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 - make ターゲット名 `e2e-chrome`・`e2e-firefox`
 - 3/6: Firefox の pref 2 つ（`security.webauth.webauthn_enable_softtoken`=true・`..._usbtoken`=false。PoC-3 の値で要件の値ではない）と、
   引数を `-headless` だけにしたこと
-- 3/6: 起動・停止の共通部の切り出しの形（`DriverHandle` と別名 `ChromeHandle`・`FirefoxHandle`、共通の設定型 `DriverConfig`）
+- 3/6: 起動・停止の共通部の切り出しの形（共通の `DriverHandle` を包む独立した型 `ChromeHandle`・`FirefoxHandle`〔`Deref` で操作を使う。取り違えは型で弾き、`register_once` へは `Deref` で渡す〕、共通の設定型 `DriverConfig`〔`ChromeDriverConfig`・`GeckoDriverConfig` はその別名〕）
 - 3/6: 受け入れ条件 3（要素の識別が `LGUI-35` → `ASCR-65` に従う）を「ハーネスが引く要素は 0 件」で満たすとする解釈
 - 3/6: geckodriver・Firefox のある環境での `make e2e-firefox` の実行は未検証（作業環境に無かった）。初回の実行で、
   `POST /webauthn/authenticator` の応答の形・`Content-Length` の有無・Firefox が geckodriver と同じプロセスグループに入るか・
