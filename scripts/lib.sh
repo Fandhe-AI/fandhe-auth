@@ -14,15 +14,25 @@ set -euo pipefail
 # 出力は改行を足さないパスそのもので、受け取る側も番兵を付けて受けてから外す（下の ROOT_DIR）。
 repo_root() {
   local lib_dir root
-  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  root="$(cd "${lib_dir}/.." && pwd && printf x)"
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+  root="$(cd "${lib_dir}/.." && pwd && printf x)" || return 1
   root="${root%x}"
   root="${root%$'\n'}"
+  [ -n "${root}" ] || return 1
   printf '%s' "${root}"
 }
 
-ROOT_DIR="$(repo_root && printf x)"
+# 解決の失敗・空の結果は、空の ROOT_DIR のまま先へ進めず終了コード 2（検査不能・環境の誤り）で止める。
+# `&&` の左では errexit が効かないため、代入の終了状態を明示して確かめる。
+if ! ROOT_DIR="$(repo_root && printf x)"; then
+  echo "error: cannot resolve the repository root" >&2
+  exit 2
+fi
 ROOT_DIR="${ROOT_DIR%x}"
+if [ -z "${ROOT_DIR}" ]; then
+  echo "error: cannot resolve the repository root" >&2
+  exit 2
+fi
 # shellcheck disable=SC2034 # source した側のスクリプトで参照する
 readonly ROOT_DIR
 

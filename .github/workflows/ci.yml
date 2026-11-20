@@ -177,6 +177,8 @@ jobs:
   # 検出器（scripts/secret-scan-ci.sh・scripts/hooks/secret-scan.sh・陰性対照）は、PR では base のコミットを
   # trusted/ へ取得した版だけを使い、PR の head（target/）は走査対象のデータとして渡す。PR 側の検出器は
   # 呼ばない（検出器の書き換えで検査を迂回させない）。push（main）では同じコミットを両方に取得する。
+  # 前提: 「PR が書き換えられない版」になるのは base が main の PR だけ。base が main 以外（stacked PR 等）の
+  # PR では trusted/ はその base ブランチ先端の検出器で、main の版とは限らない（取得元を main に固定はしていない）。
   # 公開ログへ出るのは規則 ID・件数の集計行と固定の診断文だけで、パス・値は出さない（--summary の契約。SECR-23）。
   # 既知の限界: pull_request の workflow 定義（本ファイル）自体は PR が書き換えられる（#5985 で追跡。人の担当）。
   # 他のジョブと同じく if: で skip させない（edited でも走らせる。上の on: のコメント）。

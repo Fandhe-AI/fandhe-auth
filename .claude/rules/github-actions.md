@@ -277,5 +277,7 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
 
 - 検出器は PR では base のコミットを `trusted/` へ取得した版だけを使い、PR の head（`target/`）は走査対象のデータとして渡す
   （`scripts/secret-scan-ci.sh <target>`）。push（main）では同じコミットを両方に取得する。PR 側の検出器を呼ばない
+- 「PR が書き換えられない版」になるのは base が `main` の PR だけ。base が `main` 以外（stacked PR 等）の PR では、
+  `trusted/` はその base ブランチ先端の検出器になる（取得元を `main` に固定はしていない）
 - 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
 - 既知の限界: pull_request の workflow 定義自体は PR が書き換えられる（#5985 で追跡。人の担当）

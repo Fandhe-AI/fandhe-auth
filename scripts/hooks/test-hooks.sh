@@ -743,6 +743,25 @@ for missing in git mktemp mkdir rm sort cmp grep; do
   fi
 done
 
+# lib.sh のルートの解決に失敗したら、空の ROOT_DIR で先へ進まず終了コード 2 で止める
+cd_up_fail_env="${work_dir}/cd-up-fail.sh"
+cat > "${cd_up_fail_env}" <<'EOF'
+cd() {
+  case "${1:-}" in
+    */..) return 1 ;;
+  esac
+  builtin cd "$@"
+}
+EOF
+rc=0
+# shellcheck disable=SC2016 # 子の bash に渡す固定のコード（展開させない）
+BASH_ENV="${cd_up_fail_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" -c 'source "$1"; echo reached' _ "${HOOKS_DIR}/../lib.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && ! grep -q '^reached$' "${work_dir}/out"; then
+  pass "lib.sh: failure to resolve the repository root stops with exit 2"
+else
+  fail "lib.sh: failure to resolve the repository root stops with exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 # lib.sh の repo_root は末尾の改行も保つ。パスが改行で終わるリポジトリに scripts/ の複製を置き、
 # 引数なし（既定の対象 = ROOT_DIR）で CI 入口・陰性対照を起動する
 nl_root="${work_dir}/nl-root-parent/repo"$'\n'

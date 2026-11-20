@@ -11,13 +11,13 @@
 set -euo pipefail
 # 相対パスの解決（cd）が CDPATH に左右されないようにする（以降の cd・lib.sh の解決より前に外す）。
 unset CDPATH
+# 想定外の失敗（set -e 相当）は検出（1）と取り違えないよう、すべて検査不能（2）として止める（fail-closed）。
+# lib.sh の読み込み・DIR の解決の失敗も対象にするため、source より前に置く。
+set -E
+trap 'echo "secret-scan-ci: internal error; aborting" >&2; exit 2' ERR
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
-
-# 想定外の失敗（set -e 相当）は検出（1）と取り違えないよう、すべて検査不能（2）として止める（fail-closed）。
-set -E
-trap 'echo "secret-scan-ci: internal error; aborting" >&2; exit 2' ERR
 
 # 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
 for _c in git mktemp grep rm; do
