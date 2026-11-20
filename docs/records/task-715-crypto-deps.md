@@ -36,8 +36,15 @@
 | `cargo metadata --format-version 1 --locked` | 0 | `core`・`secret`・`db-tests`・`client` の `dependencies[]` の件数はいずれも 0 |
 | `cargo tree --locked -p fandhe-auth-<名前> -e normal,build --depth 1 --target all`（4 crate それぞれ） | 0 | `fandhe-auth-<名前> v0.0.0 (<repo>/crates/<名前>)` の 1 行のみ |
 | `cargo tree --locked -p fandhe-auth-<名前> -e dev --depth 1 --target all`（4 crate それぞれ） | 0 | 同上の 1 行のみ |
-| `cargo tree --locked --workspace -e normal,build,dev --target all -i ring` | 0 | `ring v0.17.14` から `fandhe-auth-hub-stub` を経て `it-harness`・`load-harness` へ至る木 |
-| `cargo tree --locked --workspace -e normal,build,dev --target all -i openssl`（lock に無い名前） | 101 | `error: package ID specification `openssl` did not match any packages`（実行失敗ではなく「lock に無い」の意味） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i ring` | 0 | `ring v0.17.14` ← `fandhe-auth-hub-stub` ← `fandhe-auth-it-harness`（その dev 依存に `fandhe-auth-load-harness`）。`load-harness` は `hub-stub` にも dev で直接依存（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i untrusted` | 0 | `untrusted v0.9.0` ← `ring v0.17.14` ← `fandhe-auth-hub-stub` ← `it-harness`・`load-harness`（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i rand` | 0 | `rand v0.10.4` ← `proptest v1.12.0` ← `fandhe-auth-trial-deps`（dev）（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i rand_core` | 0 | `rand_core v0.10.1` ← `chacha20`・`getrandom v0.4.3`・`rand`・`rand_xorshift` ← `proptest v1.12.0` ← `trial-deps`（dev）（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i rand_xorshift` | 0 | `rand_xorshift v0.5.0` ← `proptest v1.12.0` ← `trial-deps`（dev）（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i chacha20` | 0 | `chacha20 v0.10.2` ← `proptest v1.12.0` ← `trial-deps`（dev）（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i getrandom@0.2.17` | 0 | `getrandom v0.2.17` ← `ring v0.17.14` ← `hub-stub` ← `it-harness`・`load-harness`（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i getrandom@0.4.3` | 0 | `getrandom v0.4.3` ← `rand v0.10.4` ← `proptest v1.12.0` ← `trial-deps`（dev）（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i openssl`（lock に無い名前） | 101 | ``error: package ID specification `openssl` did not match any packages``（実行失敗ではなく「lock に無い」の意味） |
 | `grep -c '^name = "<名前>"' Cargo.lock`（`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken` を 1 名ずつ） | 1（5 名とも） | 標準出力は `0`（一致 0 件。grep は一致 0 件で終了コード 1 を返す） |
 | `grep -c '^name = ' Cargo.lock` | 0 | `69` |
 
@@ -90,7 +97,7 @@
 
 | 名前 | 根 |
 |---|---|
-| `ring` → `untrusted`・`getrandom 0.2.17` | `hub-stub`（normal）。`it-harness`・`load-harness` を経由 |
+| `ring`（依存先に `untrusted`・`getrandom 0.2.17` を持つ） | 逆引きの根は `hub-stub`（normal）。`it-harness`・`load-harness` はどちらも `hub-stub` に直接依存する（`load-harness` は `it-harness` 経由の dev 依存もある）。`untrusted`・`getrandom 0.2.17` は `ring` の依存先で、`ring` → `hub-stub` → 各 harness の順に依存元へ至る |
 | `rand`・`rand_core`・`chacha20`・`rand_xorshift`・`getrandom 0.4.3` | `trial-deps` の dev 依存 `proptest` |
 
 試験専用の crate の暗号の扱いを検査の対象にするかは本タスクの範囲外で、人が決める。
