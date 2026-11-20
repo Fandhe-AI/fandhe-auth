@@ -141,8 +141,8 @@ fn transient_clock_error_in_warmup_stops_before_measured_phase() {
         },
     );
     assert!(matches!(r, Err(TargetError::Meter(_))));
-    // 誤りの後は対象を呼ばない。本計測（5 件）へ進んでいれば呼び出しは 5 回になる。
-    assert!(calls.load(Ordering::SeqCst) <= 1);
+    // 最初の時計の読み取りで失敗するので、対象は 1 回も呼ばれない。
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

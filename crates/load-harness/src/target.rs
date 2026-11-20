@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::aggregate::{AggregateError, RunSummary, summarize_run};
-use crate::generate::{LoadConfig, LoadError, LoadRun, run_closed_loop};
+use crate::generate::{LoadConfig, LoadError, LoadRun, run_closed_loop_until};
 use crate::meter::{
     FailureKind, IntervalName, MeterError, MonotonicClock, Outcome, RunMeter, validate_name,
 };
@@ -151,10 +151,14 @@ impl From<MeterError> for TargetError {
 /// 対象を閉ループで呼び、結果を [`TargetRun`] に残す。
 ///
 /// 閉包は試行ごとに 1 回呼ばれ、`spec` の区間で測られる。対象の中で計測の誤りが起きたら最初の誤りを残し、
-/// 試行を `Excluded` で締める。誤りの後は暖機・本計測のどちらでも閉包を呼ばず（呼び出しは増えない）、
-/// 本計測の段では `Excluded` が生成器の `InvalidOutcome` で停止を起こす（生成器の fail-closed に依存する）。
-/// 暖機の段は生成器が結果を問わず `Excluded` で締めるため止まらないが、暖機の残りは閉包を呼ばずに空回りし、
-/// 本計測の最初の試行で止まる。戻ったら結果より先に残した誤りを見て、黙って数えず [`TargetError::Meter`] を返す。
+/// 試行を `Excluded` で締め、停止の印（`Outcome` とは別の経路）を生成器へ渡す。印が立つと生成器は
+/// 暖機・本計測のどちらでも新しい試行を始めず、本計測の段へも進まない。
+///
+/// 停止と呼び出しの受け付け: 閉包を呼ぶ直前（区間の始点の時計を読んだ後）に印を確かめ、立っていれば呼ばない。
+/// 誤りの記録と印の更新・確認は同じ全順序（SeqCst）で並ぶので、誤りの記録より前に確認を通った呼び出しだけが
+/// 受け付け済みになる。受け付け済みの呼び出しは、並行する別のワーカーが誤りを記録しても止めずに最後まで続く
+/// （途中で止めない。終点の時計の誤りがあれば同じ規則で残す）。記録より後に始まる呼び出しは 0 件。
+/// 戻ったら結果より先に残した誤りを見て、黙って数えず [`TargetError::Meter`] を返す。
 /// panic・`unwrap` は使わない。
 ///
 /// # Errors
@@ -179,12 +183,20 @@ where
             *g = Some(e);
         }
     };
-    let result = run_closed_loop(meter, config, |trial| {
+    let result = run_closed_loop_until(meter, config, &failed, |trial| {
         if failed.load(Ordering::SeqCst) {
             return Outcome::Excluded;
         }
-        let called = match trial.measure(interval, &call) {
-            Ok(r) => r,
+        // 受け付けは始点の時計の後・呼び出しの直前で確かめる（時計を待つ間に立った印を見逃さない）。
+        let called = match trial.measure(interval, || {
+            if failed.load(Ordering::SeqCst) {
+                None
+            } else {
+                Some(call())
+            }
+        }) {
+            Ok(Some(r)) => r,
+            Ok(None) => return Outcome::Excluded,
             Err(e) => {
                 record(e);
                 return Outcome::Excluded;

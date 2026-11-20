@@ -27,7 +27,10 @@ pub use aggregate::{
     worst_run,
 };
 
-pub use generate::{LoadConfig, LoadError, LoadRun, LoopModel, MAX_CONCURRENCY, run_closed_loop};
+pub use generate::{
+    LoadConfig, LoadError, LoadRun, LoopModel, MAX_CONCURRENCY, run_closed_loop,
+    run_closed_loop_until,
+};
 
 pub use meter::{
     FailureKind, IntervalName, MeterError, MonotonicClock, Outcome, RunMeter, RunSamples, Sample,

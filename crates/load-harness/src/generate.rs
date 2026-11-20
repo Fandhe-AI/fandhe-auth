@@ -35,6 +35,8 @@ pub enum LoadError {
     WorkerPanicked,
     /// 終了時の件数が計画と合わない。
     CountMismatch,
+    /// 呼び出し元の停止の印が立ち、新しい試行を止めた（[`run_closed_loop_until`]）。
+    Cancelled,
 }
 
 impl fmt::Display for LoadError {
@@ -46,6 +48,7 @@ impl fmt::Display for LoadError {
             Self::SpawnFailed => "worker spawn failed",
             Self::WorkerPanicked => "worker panicked",
             Self::CountMismatch => "trial count mismatch",
+            Self::Cancelled => "load cancelled",
         };
         f.write_str(msg)
     }
@@ -160,17 +163,20 @@ impl Drop for QuietGuard {
 }
 
 /// ワーカー間で共有する試行の枠・停止の印・最初の誤り。
-struct Shared {
+struct Shared<'a> {
     next: AtomicU64,
     stop: AtomicBool,
+    /// 呼び出し元が立てる停止の印。立っている間は新しい枠を取らせない。
+    cancel: &'a AtomicBool,
     first_error: Mutex<Option<LoadError>>,
 }
 
-impl Shared {
-    fn new() -> Self {
+impl<'a> Shared<'a> {
+    fn new(cancel: &'a AtomicBool) -> Self {
         Self {
             next: AtomicU64::new(0),
             stop: AtomicBool::new(false),
+            cancel,
             first_error: Mutex::new(None),
         }
     }
@@ -190,7 +196,7 @@ impl Shared {
 
     /// 試行の枠を 1 つ取る。上限に達した・停止中・溢れたときは `false`。
     fn claim(&self, count: u64) -> bool {
-        if self.stop.load(Ordering::SeqCst) {
+        if self.stop.load(Ordering::SeqCst) || self.cancel.load(Ordering::SeqCst) {
             return false;
         }
         self.next
@@ -207,13 +213,14 @@ fn run_phase<F>(
     workers: u64,
     count: u64,
     warm: bool,
+    cancel: &AtomicBool,
     target: &F,
 ) -> Result<(), LoadError>
 where
     F: Fn(&mut Trial<'_>) -> Outcome + Sync,
 {
     install_quiet_hook();
-    let shared = Shared::new();
+    let shared = Shared::new(cancel);
     let worker = || {
         while shared.claim(count) {
             let mut trial = match meter.begin_trial() {
@@ -268,7 +275,14 @@ where
         .first_error
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    err.map_or(Ok(()), Err)
+    if let Some(e) = err {
+        return Err(e);
+    }
+    // 停止の印で枠の取得が止まった段は、件数が計画に届かない。次の段へ進ませない。
+    if cancel.load(Ordering::SeqCst) {
+        return Err(LoadError::Cancelled);
+    }
+    Ok(())
 }
 
 /// 閉ループで対象を繰り返し呼ぶ。暖機の段（`warmup > 0` のときだけ）を回してから本計測の段を回す。
@@ -288,14 +302,42 @@ pub fn run_closed_loop<F>(
 where
     F: Fn(&mut Trial<'_>) -> Outcome + Sync,
 {
+    run_closed_loop_until(meter, config, &AtomicBool::new(false), target)
+}
+
+/// [`run_closed_loop`] に、呼び出し元の停止の印を足したもの。`cancel` が立つと、暖機・本計測のどちらでも
+/// 新しい試行の枠を取らせず、次の段へ進まず、立てたワーカーを join してから最初の誤りを返す。
+/// 誤りが無く印だけが立っていたときは [`LoadError::Cancelled`]。印は対象が結果（`Outcome`）とは別の経路で
+/// 生成器へ伝えるための道で、暖機の段が結果を問わず `Excluded` で締める規則は変えない。
+/// 枠を取り終えて走っている試行は、印が立っても締めるまで続く（途中で止めない）。
+///
+/// # Errors
+/// [`run_closed_loop`] と同じ。加えて停止の印が立ったとき [`LoadError::Cancelled`]。
+pub fn run_closed_loop_until<F>(
+    meter: RunMeter,
+    config: &LoadConfig,
+    cancel: &AtomicBool,
+    target: F,
+) -> Result<LoadRun, LoadError>
+where
+    F: Fn(&mut Trial<'_>) -> Outcome + Sync,
+{
     if config.warmup > 0 {
-        run_phase(&meter, config.concurrency, config.warmup, true, &target)?;
+        run_phase(
+            &meter,
+            config.concurrency,
+            config.warmup,
+            true,
+            cancel,
+            &target,
+        )?;
     }
     run_phase(
         &meter,
         config.concurrency,
         config.trials_planned,
         false,
+        cancel,
         &target,
     )?;
     let samples = meter.finish()?;

@@ -5,7 +5,7 @@ use std::sync::{Arc, Barrier};
 
 use fandhe_auth_load_harness::{
     FailureKind, IntervalName, LoadConfig, LoadError, LoopModel, MAX_CONCURRENCY, MeterError,
-    MonotonicClock, Outcome, RunMeter, run_closed_loop, summarize_run,
+    MonotonicClock, Outcome, RunMeter, run_closed_loop, run_closed_loop_until, summarize_run,
 };
 
 #[derive(Clone)]
@@ -214,9 +214,27 @@ fn error_text_is_fixed() {
         (LoadError::SpawnFailed, "worker spawn failed"),
         (LoadError::WorkerPanicked, "worker panicked"),
         (LoadError::CountMismatch, "trial count mismatch"),
+        (LoadError::Cancelled, "load cancelled"),
     ];
     for (e, text) in cases {
         assert_eq!(e.to_string(), text);
     }
     assert_eq!(format!("{:?}", LoadError::WorkerPanicked), "WorkerPanicked");
+}
+
+#[test]
+fn cancel_in_warmup_stops_new_trials_and_skips_measured_phase() {
+    use std::sync::atomic::AtomicBool;
+    let clock = FakeClock::new();
+    let cancel = AtomicBool::new(false);
+    let started = AtomicU64::new(0);
+    // 並行数 1: 暖機の 2 試行目で印を立てる。以後の試行は 1 件も始まらない（本計測へも進まない）。
+    let r = run_closed_loop_until(meter(&clock), &cfg(1, 5, 4), &cancel, |_| {
+        if started.fetch_add(1, Ordering::SeqCst) == 1 {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        Outcome::Success
+    });
+    assert_eq!(r.unwrap_err(), LoadError::Cancelled);
+    assert_eq!(started.load(Ordering::SeqCst), 2);
 }
