@@ -15,7 +15,7 @@
 # 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。本番 feature 構成の明示（PROD_FEATURES）が決まったら、A をそれに置き換える。
 # B は依存の列挙にだけ使い、ビルド・clippy には使わない（DPOL-31。check-crate-deps.sh と同じ扱い）。
 # 本番の範囲は normal・build（dev は見ない）。`cargo tree -i` は一致が無いと非 0 のため使わない。
-# 実行のたびに自己試験（陰性対照 F1〜F6）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陰性対照 F1〜F7）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は件数と規則名だけ。cargo tree の生の出力には絶対パスが入るため出さない。
 # 限界: dev の依存・別 workspace の crates/trial-deps/fuzz・Hub の最終バイナリは対象外。
 # TODO(TASK-667): 動的リンクと版の記録の対応（#318 の 2/4）を足す
@@ -28,8 +28,10 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
-require_cmd cargo || exit 2
-require_cmd mktemp || exit 2
+# 使う外部コマンドは作業ディレクトリの作成前にすべて確かめる（EXIT トラップの rm の不足で 127 にしない）。
+for c in cargo mktemp mkdir rm grep dirname basename; do
+  require_cmd "${c}" || exit 2
+done
 
 cd "${ROOT_DIR}"
 
@@ -96,7 +98,7 @@ count_rule() {
 # 書き込みの失敗（ENOSPC 等）は検査不能（2）。set -e の 1 では「違反」と区別できないため明示する。
 mkpkg() {
   if ! mkdir -p "$1/src" ||
-    ! printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n[workspace]\n' "$2" "$3" >"$1/Cargo.toml" ||
+    ! printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n[workspace]\nresolver = "3"\n' "$2" "$3" >"$1/Cargo.toml" ||
     ! : >"$1/src/lib.rs"; then
     log "error: cannot write fixture ($2); cannot inspect"
     exit 2
@@ -154,10 +156,16 @@ selftest() {
   for r in R1 R2 R3; do expect_count F5A "${r}" "${a}" eq0; done
   expect_count F5B R3 "${b}" ge1
 
+  # F7: 同じ openssl-sys を normal 依存と dev 依存で共有し、dev 側だけが vendored を要求 → 走査 A（dev を見ない）で 0 件。
+  # 辺指定に dev が混入すると本番の依存を誤って違反にするため、その回帰を防ぐ（DPOL-13・resolver は本番と同じ 3）。
+  mkpkg "${f}/f7" "f7" $'[dependencies]\nopenssl-sys = { path = "../openssl-sys" }\n[dev-dependencies]\nopenssl-sys = { path = "../openssl-sys", features = ["vendored"] }'
+  a="$(run_tree "${f}/f7" offline)" || exit 2
+  for r in R1 R2 R3; do expect_count F7A "${r}" "${a}" eq0; done
+
   # F6: 本番メンバーと試験専用メンバーを含む workspace → 走査 A（--exclude）で 0 件、全メンバーの走査 C で検出
   local w="${f}/f6" tp="${TEST_ONLY_PKGS[0]}"
   if ! mkdir -p "${w}/prod/src" "${w}/${tp}/src" ||
-    ! printf '[workspace]\nmembers = ["prod", "%s"]\n' "${tp}" >"${w}/Cargo.toml" ||
+    ! printf '[workspace]\nresolver = "3"\nmembers = ["prod", "%s"]\n' "${tp}" >"${w}/Cargo.toml" ||
     ! printf '[package]\nname = "prod"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys" }\n' >"${w}/prod/Cargo.toml" ||
     ! printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys", features = ["vendored"] }\n' "${tp}" >"${w}/${tp}/Cargo.toml" ||
     ! : >"${w}/prod/src/lib.rs" || ! : >"${w}/${tp}/src/lib.rs"; then
@@ -169,7 +177,7 @@ selftest() {
   for r in R1 R2 R3; do expect_count F6A "${r}" "${a}" eq0; done
   expect_count F6C R1 "${b}" ge1
 
-  log "selftest ok (F1-F6)"
+  log "selftest ok (F1-F7)"
 }
 
 selftest
