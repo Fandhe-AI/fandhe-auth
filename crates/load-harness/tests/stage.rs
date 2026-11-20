@@ -322,3 +322,20 @@ fn staged_run_debug_hides_target_name() {
     assert!(!out.contains(canary));
     assert_eq!(out, "StagedRun(..)");
 }
+
+#[test]
+fn plan_and_result_debug_hide_interval_names() {
+    // SECR-23・SECR-26: 区間名に目印を渡し、計画・結果（回の集計のキーを含む）の Debug に含まれないことを確かめる。
+    let canary = "canary_interval_zq";
+    let name = IntervalName::new(canary).unwrap();
+    let spec = TargetSpec::new(TargetName::new("op_target").unwrap(), name.clone());
+    let plan =
+        StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vec![name]).unwrap();
+    let plan_out = format!("{plan:?}");
+    assert!(!plan_out.contains(canary));
+    assert_eq!(plan_out, "StagePlan(..)");
+    let run = run_stages(|| step_clock(10), &spec, &plan, || CallResult::Ok).unwrap();
+    let res_out = format!("{:?}", run.stages()[0]);
+    assert!(!res_out.contains(canary));
+    assert_eq!(res_out, "StageResult(..)");
+}

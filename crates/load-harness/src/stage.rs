@@ -122,11 +122,18 @@ impl StageConfig {
 }
 
 /// 段階の並びと、最悪の回を比べる指標（明示。既定は置かない）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StagePlan {
     stages: Vec<StageConfig>,
     by: MetricKey,
     allowed_intervals: Vec<IntervalName>,
+}
+
+/// SECR-23・SECR-26: 区間名の語彙を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
+impl fmt::Debug for StagePlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StagePlan(..)")
+    }
 }
 
 impl StagePlan {
@@ -194,12 +201,19 @@ impl StagePlan {
 /// （回の削除・並べ替えで `Display` の番号と `worst_run` がずれないようにする。`load.md` の 3・4）。
 /// 回ごとに持つのは集計 [`RunSummary`] だけで、生標本は回の終了時に捨てる
 /// （試行数に比例してメモリを持たないため）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StageResult {
     stage: u64,
     config: StageConfig,
     runs: Vec<RunSummary>,
     worst_run: Option<u64>,
+}
+
+/// SECR-23・SECR-26: 回の集計の指標のキー（区間名）を出さない固定文字列にする。
+impl fmt::Debug for StageResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StageResult(..)")
+    }
 }
 
 impl StageResult {
