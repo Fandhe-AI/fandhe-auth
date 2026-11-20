@@ -4,7 +4,10 @@
 # geckodriver と Firefox が無ければ失敗する（黙って飛ばさない。DPOL-30〜32）。結果は〔仮想〕で実機・Safari に数えない（ACPT-7）。
 # 前提: 仮想 authenticator の WebDriver エンドポイントを使える Firefox と geckodriver の組み合わせ（両バイナリの存在だけでは足りない）。
 # 既定でエンドポイントが無効な組み合わせ（例: Firefox 122 と geckodriver 0.34.0）では、softtoken・usbtoken の pref を切り替えても
-# 有効にならず、登録操作の前に失敗する。有効にする設定と対応する版の組み合わせは人が確かめる（PoC-3 の値。要件の値ではない）。
+# 有効にならず、登録操作の前に失敗する。ハーネスは geckodriver が起動する Firefox へ capabilities の `moz:firefoxOptions.prefs` で
+# softtoken 有効・usbtoken 無効の 2 つの pref を渡す（crates/e2e-harness/src/firefox.rs）。これ以外の設定の渡し方は無い。
+# 登録まで通る版の組み合わせは、この repo ではまだ実測していない（実機の Firefox・geckodriver が無い環境で作ったため。未検証）。
+# 人が実測して記録する: 候補の組み合わせで `make e2e-firefox` を流し、登録の操作まで進むものを控える（PoC-3 の値。要件の値ではない）。
 # 前提: unix（Linux・macOS 等。geckodriver をプロセスグループで起動・停止するため）。
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

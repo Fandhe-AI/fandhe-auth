@@ -92,6 +92,9 @@ pub struct E2eHarness;
 
 impl E2eHarness {
     /// 決まった順で起動する。重複は起動前に拒否し、途中で失敗したら起動済みを逆順に停止してから誤りを返す。
+    ///
+    /// ブラウザの食い違いは起動前に `BrowserMismatch` で拒否する。独自の `BrowserDriver` 実装は、
+    /// `E2eComponent::browser()` を上書きして `Some(config.browser)` を返す必要がある（既定の `None` のままでは拒否される）。
     pub fn start(config: E2eConfig) -> Result<RunningE2e, E2eError> {
         let E2eConfig {
             operation,

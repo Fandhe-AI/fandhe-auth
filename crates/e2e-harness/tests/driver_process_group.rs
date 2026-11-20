@@ -39,7 +39,7 @@ fn parse_pid(text: &str) -> String {
 fn alive(pid: &str) -> bool {
     let out = Command::new("ps")
         .args(["-o", "stat=", "-p", pid])
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
         .expect("ps を起動できない");
     let stat = String::from_utf8_lossy(&out.stdout);
@@ -48,10 +48,13 @@ fn alive(pid: &str) -> bool {
         assert!(!stat.is_empty(), "ps が成功したのに状態が空");
         return !stat.starts_with('Z');
     }
+    // 対象不在と確認できるのは、終了コード 1・標準出力も標準エラーも空のときだけ。
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        out.status.code() == Some(1) && stat.is_empty(),
-        "ps の照会に失敗: {:?}",
-        out.status
+        out.status.code() == Some(1) && stat.is_empty() && err.trim().is_empty(),
+        "ps の照会に失敗: {:?} stderr={:?}",
+        out.status,
+        err.trim()
     );
     false
 }
