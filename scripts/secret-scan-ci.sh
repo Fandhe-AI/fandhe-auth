@@ -32,12 +32,24 @@ for _v in ${env_names}; do
   esac
 done
 unset _v env_names
+# 置換参照（refs/replace/）でオブジェクトの中身が差し替わらないよう、対象の確定から検出器・陰性対照の実行まで
+# 一貫して無効にする（子プロセスへ受け継ぐ）。
+export GIT_NO_REPLACE_OBJECTS=1
+# git の呼び出しは、設定で外部プログラムを起動し得る経路（hooks・fsmonitor）を無効にして通す。
+g() {
+  git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
 
 if [ "$#" -gt 1 ]; then
   echo "usage: secret-scan-ci.sh [<target-repo-path>]" >&2
   exit 2
 fi
 target="${1:-${ROOT_DIR}}"
+# `-` や `-x` のような値を cd がオプション・OLDPWD として解釈しないよう、絶対パスでなければ `./` を前に付ける。
+case "${target}" in
+  /*) ;;
+  *) target="./${target}" ;;
+esac
 if [ ! -d "${target}" ]; then
   echo "secret-scan-ci: target is not a directory" >&2
   exit 2
@@ -47,7 +59,7 @@ if ! target="$(cd "${target}" 2> /dev/null && pwd -P)" || [ -z "${target}" ]; th
   exit 2
 fi
 # 親のリポジトリを誤って走査しないよう、対象がリポジトリのルートそのものであることを確かめる（fail-closed）。
-top="$(git -C "${target}" rev-parse --show-toplevel 2>/dev/null)" || top=""
+top="$(g -C "${target}" rev-parse --show-toplevel 2>/dev/null)" || top=""
 top_real=""
 if [ -n "${top}" ]; then
   top_real="$(cd "${top}" 2> /dev/null && pwd -P)" || top_real=""
@@ -61,7 +73,7 @@ fi
 # 照合（HEAD と index の比較）と走査が index を別々に開く隙間（TOCTOU）で index が書き換わっても、
 # 取り違えて 0 を返さない。作業ツリーの index が HEAD と違っても、走査するのは HEAD の内容である。
 # git の呼び出しは対象の hooks（post-index-change 等）を起動しない。
-if ! head_sha="$(git -C "${target}" rev-parse --verify "HEAD^{commit}" 2> /dev/null)" || [ -z "${head_sha}" ]; then
+if ! head_sha="$(g -C "${target}" rev-parse --verify "HEAD^{commit}" 2> /dev/null)" || [ -z "${head_sha}" ]; then
   echo "secret-scan-ci: cannot resolve HEAD" >&2
   exit 2
 fi
@@ -72,14 +84,18 @@ fi
 trap 'rm -rf "${work_dir}"' EXIT
 out="${work_dir}/out"
 tmp_index="${work_dir}/index"
-if ! GIT_INDEX_FILE="${tmp_index}" git -C "${target}" -c core.hooksPath=/dev/null read-tree "${head_sha}" > /dev/null 2>&1; then
+if ! GIT_INDEX_FILE="${tmp_index}" g -C "${target}" read-tree "${head_sha}" > /dev/null 2>&1; then
   echo "secret-scan-ci: failed to build the temporary index from HEAD" >&2
   exit 2
 fi
 
 # 検出器の終了状態は 0 = 検出なし / 1 = 検出 / 2 = 検査不能。それ以外（起動失敗・シグナル等）も検査不能に畳む。
 rc=0
-(cd "${target}" && GIT_INDEX_FILE="${tmp_index}" "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary) > "${out}" 2>&1 || rc=$?
+# cd の失敗（終了状態 1 になり「検出」と取り違えられる）は、サブシェルの中で検査不能（2）にする。
+(
+  cd "${target}" 2> /dev/null || exit 2
+  GIT_INDEX_FILE="${tmp_index}" "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary
+) > "${out}" 2>&1 || rc=$?
 # 規則 ID は許可した一覧との完全一致だけを通す（任意の文字列・git の診断を公開ログへ通さない）。
 # grep の終了状態は 0 = 一致 / 1 = 該当なし / 2 以上 = エラー。1 だけを「該当なし」として許す。
 grep_rc=0

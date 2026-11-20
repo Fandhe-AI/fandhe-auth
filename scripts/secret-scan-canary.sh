@@ -24,6 +24,20 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
+
+# 単独で起動されても、呼び出し元の GIT_*（GIT_DIR・GIT_WORK_TREE・GIT_CONFIG_* 等）に左右されないよう外し、
+# 置換参照（refs/replace/）も無効にする（このあと本スクリプトが自前の一時 index・object dir を設定する）。
+if ! env_names="$(compgen -e 2> /dev/null)"; then
+  echo "scan-canary: failed to list environment variables" >&2
+  exit 2
+fi
+for _v in ${env_names}; do
+  case "${_v}" in
+    GIT_*) unset "${_v}" ;;
+  esac
+done
+unset _v env_names
+export GIT_NO_REPLACE_OBJECTS=1
 require_cmd git
 
 die() {
@@ -33,7 +47,7 @@ die() {
 
 # 元のリポジトリの hooks（post-index-change 等）を起動しないよう、git の呼び出しはすべてこの関数を通す。
 g() {
-  git -c core.hooksPath=/dev/null "$@"
+  git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 
 cd "${ROOT_DIR}" 2> /dev/null || die "cannot enter the repository root"

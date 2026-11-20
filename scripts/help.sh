@@ -30,7 +30,7 @@ cat <<'EOF'
 
 CI 向けに直接実行するコマンド:
 
-  scripts/secret-scan-ci.sh [PATH]      CI 向けの入口（--summary で件数のみ公開 + 陰性対照。PATH は走査対象のリポジトリのルート。HEAD と一致しない index は検査不能で終了コード 2）
+  scripts/secret-scan-ci.sh [PATH]      CI 向けの入口（PATH は走査対象のリポジトリのルート）。HEAD の tree から作った一時 index を --summary（件数のみ公開）で走査し、続けて陰性対照を実行。作業中の index は読まない。終了コード 0 = 検出なし / 1 = 検出 / 2 = 検査不能
 
 Git hooks（lefthook.yml から呼ばれる。直接実行も可）:
 

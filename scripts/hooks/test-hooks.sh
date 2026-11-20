@@ -438,6 +438,66 @@ else
   fail "secret-scan-ci: non-root target exits 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# 置換参照（refs/replace）で HEAD の blob を無害なものへ差し替えても検出する
+new_repo; stage app.txt "x = ${token}"; git commit -q -m "chore: leak"
+secret_blob="$(git rev-parse HEAD:app.txt)"
+harmless_blob="$(printf 'harmless\n' | git hash-object -w --stdin)"
+git replace "${secret_blob}" "${harmless_blob}"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ]; then
+  pass "secret-scan-ci: refs/replace does not hide a secret in HEAD"
+else
+  fail "secret-scan-ci: refs/replace does not hide a secret in HEAD" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 名前が `-` のディレクトリを対象にしても、cd が OLDPWD へ移動せず、そのディレクトリを走査する
+dash_parent="${work_dir}/dash-parent"
+mkdir -p "${dash_parent}/-"
+(
+  cd "${dash_parent}/-"
+  git -c init.defaultBranch=main init -q
+  printf 'hello\n' > app.txt
+  git add app.txt
+  git commit -q -m "chore: add"
+)
+rc=0
+(cd "${dash_parent}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" -) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan-ci: a target named '-' is scanned as a directory"
+else
+  fail "secret-scan-ci: a target named '-' is scanned as a directory" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 検出器を起動するサブシェルの cd が失敗したら、終了状態 1（検出）と取り違えず検査不能（2）にする
+new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
+repo_real="$(cd "${repo}" && pwd -P)"
+cd_counter="${work_dir}/cd-counter"
+rm -f "${cd_counter}"
+cd_fail_env="${work_dir}/cd-fail.sh"
+cat > "${cd_fail_env}" <<EOF
+cd() {
+  if [ "\${1:-}" = "${repo_real}" ]; then
+    local n=0
+    [ -f "${cd_counter}" ] && n="\$(cat "${cd_counter}")"
+    n=\$((n + 1))
+    echo "\${n}" > "${cd_counter}"
+    # 1 回目 = 対象の解決、2 回目 = ルートの確認、3 回目 = 検出器を起動するサブシェル
+    if [ "\${n}" -ge 3 ]; then
+      return 1
+    fi
+  fi
+  builtin cd "\$@"
+}
+EOF
+rc=0
+BASH_ENV="${cd_fail_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo_real}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "secret-scan-ci: failure to enter the target before scanning exits 2 (not 1)"
+else
+  fail "secret-scan-ci: failure to enter the target before scanning exits 2 (not 1)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 # ---- scripts/secret-scan-canary.sh: grep のエラー（終了状態 2）は失敗にする
 grep_shim_dir="${work_dir}/grep-shim"
 mkdir -p "${grep_shim_dir}"
@@ -526,8 +586,11 @@ mkdir -p "${hook_dir}"
 printf '#!/bin/sh\ntouch "%s/hook-ran"\n' "${work_dir}" > "${hook_dir}/post-index-change"
 chmod +x "${hook_dir}/post-index-change"
 rm -f "${work_dir}/hook-ran"
+# 呼び出し元の GIT_* は canary が外すため、グローバル設定（HOME の .gitconfig）で hooksPath を差し込む
+printf '[core]\n\thooksPath = %s\n' "${hook_dir}" > "${HOME}/.gitconfig"
 rc=0
-GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="${hook_dir}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+rm -f "${HOME}/.gitconfig"
 if [ "${rc}" -eq 0 ] && [ ! -e "${work_dir}/hook-ran" ]; then
   pass "scan-canary: does not run hooks of the original repository"
 else

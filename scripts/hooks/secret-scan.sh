@@ -54,6 +54,13 @@ exec 4>&2
 set -E
 trap 'echo "secret-scan: internal error; aborting" >&4; exit 2' ERR
 
+# 置換参照（refs/replace/）でオブジェクトの中身が差し替わると、検査対象と実際の内容が食い違う。無効にする。
+export GIT_NO_REPLACE_OBJECTS=1
+# git の呼び出しは、設定で外部プログラムを起動し得る経路（hooks・fsmonitor）を無効にして通す。
+g() {
+  git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
+
 mode=staged
 summary=0
 case "$#:${1:-}:${2:-}" in
@@ -154,7 +161,7 @@ expect_none "+password = ${q}short${q}"
 
 # サブディレクトリから直接実行しても走査範囲が狭まらないよう、リポジトリルートで実行する。
 # rev-parse の失敗を `cd "$(...)"` に埋めると cd "" になり失敗が隠れるため、先に代入で受ける。
-if ! repo_root="$(git rev-parse --show-toplevel)" || [ -z "${repo_root}" ]; then
+if ! repo_root="$(g rev-parse --show-toplevel)" || [ -z "${repo_root}" ]; then
   echo "secret-scan: not inside a git work tree; aborting" >&4
   exit 2
 fi
@@ -182,17 +189,17 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 # 空になりうる配列を使わず mode で分岐し、tracked のときだけ empty_tree を渡す。
 empty_tree=""
 if [ "${mode}" = tracked ]; then
-  if ! empty_tree="$(git hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
+  if ! empty_tree="$(g hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
     echo "secret-scan: failed to resolve the empty tree; aborting" >&4
     exit 2
   fi
 fi
 scan_diff() {
   if [ "${mode}" = tracked ]; then
-    git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
+    g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
       --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@"
   else
-    git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
+    g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
       --src-prefix=a/ --dst-prefix=b/ "$@"
   fi
 }
@@ -234,7 +241,7 @@ done < "${tmp_dir}/names"
 
 # 取り違えで「対象なし」を合格にしないため、追跡ファイルがあるのに対象が 0 件なら止める。
 if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
-  if ! git ls-files -z > "${tmp_dir}/ls"; then
+  if ! g ls-files -z > "${tmp_dir}/ls"; then
     echo "secret-scan: failed to list tracked files; aborting" >&4
     exit 2
   fi
