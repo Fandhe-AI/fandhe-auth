@@ -45,8 +45,7 @@ pub use meter::{
 };
 
 pub use stage::{
-    MAX_REPETITIONS, MAX_STAGES, StageConfig, StageError, StagePlan, StageResult, StagedRun,
-    run_stages,
+    StageConfig, StageError, StageLimits, StagePlan, StageResult, StagedRun, run_stages,
 };
 
 pub use target::{CallResult, TargetError, TargetName, TargetRun, TargetSpec, run_target};

@@ -25,15 +25,41 @@ use crate::generate::LoadConfig;
 use crate::meter::{IntervalName, MonotonicClock};
 use crate::target::{CallResult, TargetError, TargetName, TargetSpec, run_target};
 
-/// 段階の数の上限（仮置きの安全弁。要件の値・PoC の値ではない）。
-pub const MAX_STAGES: u64 = 64;
-/// 1 段階の繰り返しの上限（仮置きの安全弁。要件の値・PoC の値ではない）。
-pub const MAX_REPETITIONS: u64 = 1024;
+/// 計画の上限。呼び出し元が実行環境に合わせて明示する（既定値・固定の上限は置かない。DPOL-32）。
+/// 値の導出は本 crate の範囲外。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StageLimits {
+    max_stages: u64,
+    max_repetitions: u64,
+    max_trials_per_run: u64,
+}
+
+impl StageLimits {
+    /// `max_stages`: 段階の数、`max_repetitions`: 1 段階の繰り返し、
+    /// `max_trials_per_run`: 1 回の試行数（ウォームアップ + 計測。回の終了まで生標本を保持するため）。
+    ///
+    /// # Errors
+    /// どれかが 0 のとき [`StageError::InvalidPlan`]。
+    pub fn new(
+        max_stages: u64,
+        max_repetitions: u64,
+        max_trials_per_run: u64,
+    ) -> Result<Self, StageError> {
+        if max_stages == 0 || max_repetitions == 0 || max_trials_per_run == 0 {
+            return Err(StageError::InvalidPlan);
+        }
+        Ok(Self {
+            max_stages,
+            max_repetitions,
+            max_trials_per_run,
+        })
+    }
+}
 
 /// 段階の実行の誤り。値・名前の中身・元の誤りの文言は載せない（SECR-11・SECR-23）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StageError {
-    /// 計画が不正（段階が 0 件・上限超過・繰り返しが 0 または上限超過・試行数の溢れ）。
+    /// 計画が不正（段階が 0 件・上限超過・繰り返しが 0 または上限超過・試行数の溢れ・区間名が語彙外）。
     InvalidPlan,
     /// 回の実行の誤り（段階・回は 1 始まり）。
     Target {
@@ -70,9 +96,9 @@ pub struct StageConfig {
 
 impl StageConfig {
     /// # Errors
-    /// `repetitions` が 0 または [`MAX_REPETITIONS`] 超のとき [`StageError::InvalidPlan`]。
+    /// `repetitions` が 0 のとき [`StageError::InvalidPlan`]。上限は [`StagePlan::new`] が [`StageLimits`] で検査する。
     pub fn new(load: LoadConfig, repetitions: u64) -> Result<Self, StageError> {
-        if repetitions == 0 || repetitions > MAX_REPETITIONS {
+        if repetitions == 0 {
             return Err(StageError::InvalidPlan);
         }
         Ok(Self { load, repetitions })
@@ -92,33 +118,41 @@ impl StageConfig {
 pub struct StagePlan {
     stages: Vec<StageConfig>,
     by: MetricKey,
+    allowed_intervals: Vec<IntervalName>,
 }
 
 impl StagePlan {
     /// 段階の並びに制約（並行数の単調増加等）は置かない。
     ///
+    /// `allowed_intervals` は記録に出してよい区間名の語彙で、呼び出し元が承認済みの名前だけを渡す（既定値なし）。
+    /// [`run_stages`] は対象の区間名がこの語彙に無ければ、最初の回の前に拒否する
+    /// （`load.md` の 6・SECR-23・SECR-26）。
+    ///
     /// # Errors
-    /// 段階が 0 件または [`MAX_STAGES`] 超、全体の試行数の計算が溢れる、または 1 回の試行数
-    /// （ウォームアップ + 計測）が `max_trials_per_run` を超える段階があるとき [`StageError::InvalidPlan`]。
-    /// 回の終了まで生標本を保持するため、呼び出し元が実行環境のメモリに合わせた回ごとの予算を明示する
-    /// （既定値は置かない。値の導出は本 crate の範囲外）。
+    /// 段階が 0 件または `limits` の段階数超、繰り返しが `limits` 超、全体の試行数の計算が溢れる、
+    /// 1 回の試行数（ウォームアップ + 計測）が `limits` の予算超の段階があるとき、
+    /// または語彙が空のとき [`StageError::InvalidPlan`]。
     pub fn new(
         stages: Vec<StageConfig>,
         by: MetricKey,
-        max_trials_per_run: u64,
+        limits: StageLimits,
+        allowed_intervals: Vec<IntervalName>,
     ) -> Result<Self, StageError> {
         let n = u64::try_from(stages.len()).map_err(|_| StageError::InvalidPlan)?;
-        if n == 0 || n > MAX_STAGES {
+        if n == 0 || n > limits.max_stages || allowed_intervals.is_empty() {
             return Err(StageError::InvalidPlan);
         }
         let mut total: u64 = 0;
         for s in &stages {
+            if s.repetitions > limits.max_repetitions {
+                return Err(StageError::InvalidPlan);
+            }
             let per_run = s
                 .load
                 .warmup()
                 .checked_add(s.load.trials_planned())
                 .ok_or(StageError::InvalidPlan)?;
-            if per_run > max_trials_per_run {
+            if per_run > limits.max_trials_per_run {
                 return Err(StageError::InvalidPlan);
             }
             let t = s
@@ -127,7 +161,11 @@ impl StagePlan {
                 .ok_or(StageError::InvalidPlan)?;
             total = total.checked_add(t).ok_or(StageError::InvalidPlan)?;
         }
-        Ok(Self { stages, by })
+        Ok(Self {
+            stages,
+            by,
+            allowed_intervals,
+        })
     }
 
     pub fn stages(&self) -> &[StageConfig] {
@@ -213,6 +251,10 @@ where
     C: FnMut() -> Box<dyn MonotonicClock>,
     F: Fn() -> CallResult + Sync,
 {
+    // 語彙外の区間名は記録に出さず、最初の回の前に拒否する。
+    if !plan.allowed_intervals.contains(spec.interval()) {
+        return Err(StageError::InvalidPlan);
+    }
     let mut stages = Vec::with_capacity(plan.stages.len());
     for (si, cfg) in plan.stages.iter().enumerate() {
         let stage = number(si)?;

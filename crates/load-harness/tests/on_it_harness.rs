@@ -12,9 +12,9 @@ use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
 use fandhe_auth_it_harness::{ComponentKind, Harness, HarnessConfig, HubStubComponent};
 use fandhe_auth_load_harness::{
     CallResult, ComponentConditions, ConditionComponent, FailureKind, IntervalName, LoadConfig,
-    LoopModel, MeasurementConditions, MetricKey, Outcome, RunMeter, StageConfig, StagePlan,
-    StdMonotonicClock, TargetName, TargetSpec, Trial, run_closed_loop, run_stages, run_target,
-    summarize_run,
+    LoopModel, MeasurementConditions, MetricKey, Outcome, RunMeter, StageConfig, StageLimits,
+    StagePlan, StdMonotonicClock, TargetName, TargetSpec, Trial, run_closed_loop, run_stages,
+    run_target, summarize_run,
 };
 
 const T0: u64 = 1_000;
@@ -200,7 +200,8 @@ fn run_stages_calls_hub_stub_jwks_on_harness() {
             StageConfig::new(LoadConfig::new(4, 20, 2).unwrap(), 2).unwrap(),
         ],
         MetricKey::P99Ns,
-        1_000_000,
+        StageLimits::new(64, 1024, 1_000_000).unwrap(),
+        vec![IntervalName::new("stub_jwks").unwrap()],
     )
     .unwrap();
     let call = || match handle.with(|s| s.jwks.serve(T0)) {

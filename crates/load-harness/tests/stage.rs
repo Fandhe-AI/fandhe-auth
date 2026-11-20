@@ -3,9 +3,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_auth_load_harness::{
-    CallResult, IntervalName, LoadConfig, MAX_REPETITIONS, MAX_STAGES, MeterError, MetricKey,
-    MonotonicClock, StageConfig, StageError, StagePlan, TargetError, TargetName, TargetSpec,
-    run_stages,
+    CallResult, IntervalName, LoadConfig, MeterError, MetricKey, MonotonicClock, StageConfig,
+    StageError, StageLimits, StagePlan, TargetError, TargetName, TargetSpec, run_stages,
 };
 
 /// 呼ぶたびに `step` ずつ進む時計。
@@ -42,6 +41,14 @@ fn spec() -> TargetSpec {
     )
 }
 
+fn limits() -> StageLimits {
+    StageLimits::new(64, 1024, 1_000_000).unwrap()
+}
+
+fn vocab() -> Vec<IntervalName> {
+    vec![IntervalName::new("op").unwrap()]
+}
+
 fn sc(c: u64, n: u64, w: u64, reps: u64) -> StageConfig {
     StageConfig::new(LoadConfig::new(c, n, w).unwrap(), reps).unwrap()
 }
@@ -49,43 +56,72 @@ fn sc(c: u64, n: u64, w: u64, reps: u64) -> StageConfig {
 #[test]
 fn plan_validation() {
     let one = sc(1, 1, 0, 1);
-    assert_eq!(
-        StagePlan::new(vec![], MetricKey::P99Ns, 1_000_000),
-        Err(StageError::InvalidPlan)
-    );
-    let too_many = vec![one; usize::try_from(MAX_STAGES).unwrap() + 1];
-    assert_eq!(
-        StagePlan::new(too_many, MetricKey::P99Ns, 1_000_000),
-        Err(StageError::InvalidPlan)
-    );
-    let ok = vec![one; usize::try_from(MAX_STAGES).unwrap()];
-    assert!(StagePlan::new(ok, MetricKey::P99Ns, 1_000_000).is_ok());
+    let lim = StageLimits::new(3, 5, 12).unwrap();
+    let new = |v: Vec<StageConfig>, l: StageLimits| StagePlan::new(v, MetricKey::P99Ns, l, vocab());
+    assert_eq!(new(vec![], lim), Err(StageError::InvalidPlan));
+    assert_eq!(new(vec![one; 4], lim), Err(StageError::InvalidPlan));
+    assert!(new(vec![one; 3], lim).is_ok());
+    // 上限は呼び出し元の設定で決まる。
+    assert!(new(vec![one; 4], StageLimits::new(4, 5, 12).unwrap()).is_ok());
     let load = LoadConfig::new(1, 1, 0).unwrap();
     assert_eq!(StageConfig::new(load, 0), Err(StageError::InvalidPlan));
-    assert_eq!(
-        StageConfig::new(load, MAX_REPETITIONS + 1),
-        Err(StageError::InvalidPlan)
-    );
-    assert!(StageConfig::new(load, MAX_REPETITIONS).is_ok());
+    assert_eq!(new(vec![sc(1, 1, 0, 6)], lim), Err(StageError::InvalidPlan));
+    assert!(new(vec![sc(1, 1, 0, 5)], lim).is_ok());
+    assert_eq!(StageLimits::new(0, 1, 1), Err(StageError::InvalidPlan));
+    assert_eq!(StageLimits::new(1, 0, 1), Err(StageError::InvalidPlan));
+    assert_eq!(StageLimits::new(1, 1, 0), Err(StageError::InvalidPlan));
     // 全体の試行数の溢れ。
     let big = StageConfig::new(LoadConfig::new(1, u64::MAX / 2, 0).unwrap(), 3).unwrap();
     assert_eq!(
-        StagePlan::new(vec![big], MetricKey::P99Ns, u64::MAX),
+        new(vec![big], StageLimits::new(1, 3, u64::MAX).unwrap()),
         Err(StageError::InvalidPlan)
     );
     // 回ごとの試行数の予算（ウォームアップ + 計測）。ちょうどは通り、1 超過は拒否する。
     let cfg = vec![sc(1, 10, 2, 1)];
-    assert!(StagePlan::new(cfg.clone(), MetricKey::P99Ns, 12).is_ok());
+    assert!(new(cfg.clone(), StageLimits::new(1, 1, 12).unwrap()).is_ok());
     assert_eq!(
-        StagePlan::new(cfg, MetricKey::P99Ns, 11),
+        new(cfg, StageLimits::new(1, 1, 11).unwrap()),
+        Err(StageError::InvalidPlan)
+    );
+    // 語彙が空なら計画を作れない。
+    assert_eq!(
+        StagePlan::new(vec![one], MetricKey::P99Ns, lim, vec![]),
         Err(StageError::InvalidPlan)
     );
 }
 
 #[test]
+fn interval_outside_vocabulary_is_rejected_before_any_run() {
+    let plan = StagePlan::new(
+        vec![sc(1, 2, 0, 1)],
+        MetricKey::P99Ns,
+        limits(),
+        vec![IntervalName::new("other").unwrap()],
+    )
+    .unwrap();
+    let calls = AtomicU64::new(0);
+    let clocks = AtomicU64::new(0);
+    let r = run_stages(
+        || {
+            clocks.fetch_add(1, Ordering::SeqCst);
+            step_clock(10)
+        },
+        &spec(),
+        &plan,
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            CallResult::Ok
+        },
+    );
+    assert_eq!(r, Err(StageError::InvalidPlan));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(clocks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn results_are_kept_per_stage() {
     let cfgs = vec![sc(1, 5, 1, 2), sc(2, 6, 0, 3), sc(4, 8, 2, 1)];
-    let plan = StagePlan::new(cfgs.clone(), MetricKey::P99Ns, 1_000_000).unwrap();
+    let plan = StagePlan::new(cfgs.clone(), MetricKey::P99Ns, limits(), vocab()).unwrap();
     let r = run_stages(|| step_clock(10), &spec(), &plan, || CallResult::Ok).unwrap();
     assert_eq!(r.stages().len(), 3);
     assert_eq!(r.target().as_str(), "route_a");
@@ -115,7 +151,8 @@ fn stages_and_runs_do_not_overlap() {
     let plan = StagePlan::new(
         vec![sc(3, 6, 1, 2), sc(2, 4, 0, 3)],
         MetricKey::P99Ns,
-        1_000_000,
+        limits(),
+        vocab(),
     )
     .unwrap();
     let in_flight = AtomicU64::new(0);
@@ -155,7 +192,8 @@ fn error_stops_and_discards_finished_stages() {
     let plan = StagePlan::new(
         vec![sc(1, 3, 0, 2), sc(1, 3, 0, 2), sc(1, 3, 0, 2)],
         MetricKey::P99Ns,
-        1_000_000,
+        limits(),
+        vocab(),
     )
     .unwrap();
     let clock_calls = AtomicU64::new(0);
@@ -191,7 +229,7 @@ fn error_stops_and_discards_finished_stages() {
 
 #[test]
 fn worst_run_picks_largest_and_smallest_on_tie() {
-    let plan = StagePlan::new(vec![sc(1, 4, 0, 3)], MetricKey::P99Ns, 1_000_000).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 4, 0, 3)], MetricKey::P99Ns, limits(), vocab()).unwrap();
     let steps = [10, 30, 30];
     let n = AtomicU64::new(0);
     let r = run_stages(
@@ -209,7 +247,7 @@ fn worst_run_picks_largest_and_smallest_on_tie() {
 
 #[test]
 fn all_timeouts_give_none_and_none_tokens() {
-    let plan = StagePlan::new(vec![sc(1, 3, 0, 1)], MetricKey::P99Ns, 1_000_000).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 3, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
     let r = run_stages(|| step_clock(10), &spec(), &plan, || CallResult::TimedOut).unwrap();
     assert_eq!(r.stages()[0].worst_run(), None);
     let text = r.to_string();
@@ -223,7 +261,7 @@ fn all_timeouts_give_none_and_none_tokens() {
 
 #[test]
 fn display_lines_in_order() {
-    let plan = StagePlan::new(vec![sc(1, 4, 0, 1)], MetricKey::MaxNs, 1_000_000).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 4, 0, 1)], MetricKey::MaxNs, limits(), vocab()).unwrap();
     let seq = AtomicU64::new(0);
     let r = run_stages(
         || step_clock(10),
