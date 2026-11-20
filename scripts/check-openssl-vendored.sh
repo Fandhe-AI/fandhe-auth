@@ -27,7 +27,10 @@ require_cmd cargo
 
 cd "${ROOT_DIR}"
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/openssl-vendored.XXXXXX")"
+# 偽 crate は repo の target/ の下に作る。誰でも書ける /tmp の下だと、親の .cargo/config.toml
+# （build.rustc-wrapper 等）を別の利用者に置かれて任意のコードが実行され得るため。
+mkdir -p "${ROOT_DIR}/target"
+WORK="$(mktemp -d "${ROOT_DIR}/target/openssl-vendored.XXXXXX")"
 cleanup() { rm -rf "${WORK}"; }
 trap cleanup EXIT
 
@@ -56,10 +59,10 @@ count_rule() {
   echo "${n}"
 }
 
-# mkpkg <dir> <name> <Cargo.toml の追加本文>: path 依存の偽 crate を作る。
+# mkpkg <dir> <name> <Cargo.toml の追加本文>: path 依存の偽 crate を作る。[workspace] は repo の workspace に取り込まれないため。
 mkpkg() {
   mkdir -p "$1/src"
-  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n' "$2" "$3" >"$1/Cargo.toml"
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n[workspace]\n' "$2" "$3" >"$1/Cargo.toml"
   : >"$1/src/lib.rs"
 }
 
