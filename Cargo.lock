@@ -48,6 +48,10 @@ name = "fandhe-auth-db-tests"
 version = "0.0.0"
 
 [[package]]
+name = "fandhe-auth-e2e-harness"
+version = "0.0.0"
+
+[[package]]
 name = "fandhe-auth-hub-stub"
 version = "0.0.0"
 dependencies = [
@@ -55,6 +59,23 @@ dependencies = [
  "fandhe-auth-secret",
  "ring",
  "serde_json",
+]
+
+[[package]]
+name = "fandhe-auth-it-harness"
+version = "0.0.0"
+dependencies = [
+ "fandhe-auth-console-stub",
+ "fandhe-auth-hub-stub",
+ "fandhe-auth-secret",
+]
+
+[[package]]
+name = "fandhe-auth-load-harness"
+version = "0.0.0"
+dependencies = [
+ "fandhe-auth-hub-stub",
+ "fandhe-auth-it-harness",
 ]
 
 [[package]]

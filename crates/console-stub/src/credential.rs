@@ -20,15 +20,15 @@
 //!   全て `Err` か非成功の値で、成功に数えない（AVLB-18・AVLB-22 の向き）。承認・拒否・期限切れは口の答え
 //!   （試験の設定値）として現れるだけで、本モジュールは承認を模さない。
 //! - 各呼び出しは結果に関わらず 1 件記録してから返す（[`crate::record`]）。
-//! - 判定しないもの: DPoP の proof の生成、遅延・拒否の注入（[`crate::fault`]。#76）、仮定の契約の印（[`crate::contract`]）、実物との差（#79）。
+//! - 判定しないもの: DPoP の proof の生成、遅延・拒否の注入（[`crate::fault`]。#76）、仮定の契約の印（[`crate::contract`]）、実物との差（`docs/stubs/console-stub.md`、#79）。
 
 use crate::config::AgentCredentialConfig;
 use crate::introspection::TransportFailure;
 use crate::record::{CallKind, CallLog, CallOutcome};
 
-// TODO(TASK-8): proof を生成しない点・型付きの答えで受け
-// HTTP の本文を解釈しない点・refresh の grant を模さない点・登録の失効が人の画面操作の代わりである点は #79 に書く。
-// TODO(TASK-8): 鍵・proof を持たせる段で fandhe-auth-secret の型を使い、許可表を見直す。
+// proof を生成しない点・型付きの答えで受け HTTP の本文を解釈しない点・refresh の grant を模さない点・
+// 登録の失効が人の画面操作の代わりである点は `docs/stubs/console-stub.md` の 3.3 に書いた（#79）。
+// TODO(TASK-511): 鍵・proof を持たせる段で fandhe-auth-secret の型を使い、許可表を見直す。
 
 /// `device_code` grant の識別子（DGRT-11）。
 pub const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";

@@ -55,6 +55,7 @@ trap 'rm -rf "${work_dir}"' EXIT
 # lefthook 経由で起動された場合に備え、親リポジトリを指す環境変数も外す。
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+real_home="${HOME}"
 export HOME="${work_dir}/home"
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
@@ -443,6 +444,44 @@ if [ "${rc}" -ne 0 ] && [[ "${doctor_out}" == *"miss cargo-fmt"* ]]; then
   pass "doctor: NG: cargo fmt --version failure is reported as missing"
 else
   fail "doctor: NG: cargo fmt --version failure is reported as missing" "expected non-zero exit and 'miss cargo-fmt', got ${rc}"
+fi
+
+# ---------------------------------------------------------------- check-crate-deps: dev 限定の許可
+# load-harness -> it-harness・hub-stub は dev の辺に限って許可する。normal・build に移したら拒否する。
+# 使い捨ての workspace を作って実際のスクリプトで検証する（cargo が無い環境では実行しない）。
+if command -v cargo > /dev/null 2>&1; then
+  deps_fx="${work_dir}/crate-deps-fx"
+  mkdir -p "${deps_fx}/scripts" "${deps_fx}/crates"
+  cp "${HOOKS_DIR}/../check-crate-deps.sh" "${HOOKS_DIR}/../lib.sh" "${deps_fx}/scripts/"
+  printf '[workspace]\nresolver = "2"\nmembers = ["crates/*"]\n' > "${deps_fx}/Cargo.toml"
+  for c in it-harness hub-stub; do
+    mkdir -p "${deps_fx}/crates/${c}/src"
+    printf '[package]\nname = "fandhe-auth-%s"\nversion = "0.0.0"\nedition = "2021"\n' "${c}" > "${deps_fx}/crates/${c}/Cargo.toml"
+    : > "${deps_fx}/crates/${c}/src/lib.rs"
+  done
+  mkdir -p "${deps_fx}/crates/load-harness/src"
+  : > "${deps_fx}/crates/load-harness/src/lib.rs"
+  for section in dev-dependencies dependencies build-dependencies; do
+    printf '[package]\nname = "fandhe-auth-load-harness"\nversion = "0.0.0"\nedition = "2021"\n\n[%s]\nfandhe-auth-it-harness = { path = "../it-harness" }\nfandhe-auth-hub-stub = { path = "../hub-stub" }\n' "${section}" > "${deps_fx}/crates/load-harness/Cargo.toml"
+    rm -f "${deps_fx}/Cargo.lock"
+    rc=0
+    deps_out="$(cd "${deps_fx}" && export HOME="${real_home}" && cargo generate-lockfile --offline 2>&1 && "${HOOK_BASH}" scripts/check-crate-deps.sh 2>&1)" || rc=$?
+    if [ "${section}" = "dev-dependencies" ]; then
+      if [ "${rc}" -eq 0 ]; then
+        pass "crate-deps: OK: load-harness -> it-harness・hub-stub as dev-dependencies"
+      else
+        fail "crate-deps: OK: dev-dependencies" "expected exit 0, got ${rc}: ${deps_out}"
+      fi
+    else
+      if [ "${rc}" -ne 0 ] && [[ "${deps_out}" == *"forbidden dependency: fandhe-auth-load-harness -> fandhe-auth-it-harness"* ]]; then
+        pass "crate-deps: NG: load-harness -> it-harness as ${section}"
+      else
+        fail "crate-deps: NG: ${section}" "expected forbidden dependency, got ${rc}: ${deps_out}"
+      fi
+    fi
+  done
+else
+  echo "ok - crate-deps: skipped (cargo not found)"
 fi
 
 echo "# passed: ${passed}, failed: ${failed}"

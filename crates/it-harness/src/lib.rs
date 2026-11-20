@@ -1,0 +1,43 @@
+//! 結合試験のハーネスの枠を置く crate（TASK-10）。試験専用で、本番のビルドには入らない。
+//!
+//! 役割: 最小の組込み先（TASK-716）・DB（dev/postgres。TASK-5）・Hub の stub（TASK-7）・console の stub
+//! （TASK-8）をつなぐ本体の結合試験で、構成要素の起動と停止の入口を 1 か所にそろえる。呼び出し元は
+//! 結合試験（試験ビルド）だけで、構成要素の実体は [`Component`] を実装して置く（DB は 2/6、Hub の stub は 3/6、console の stub は 4/6 で置いた）。
+//!
+//! 範囲外: 複数インスタンス・前段のリバースプロキシ・TLS の終端を含む統合の試験は Hub の `ARUN` の担当で、
+//! ここには置かない。E2E（TASK-11）・計測と負荷（TASK-12）も別のハーネスで、区別のため `it-` を付けた。
+//!
+//! 依存の向き: 本体・Plugin からは依存しない（LIB-2・LIB-4）。試験専用の load-harness だけが試験（dev）で依存する
+//! （TASK-12 5/10。許可表の行は人の確認待ち）。段階 1 のリリースのメンバーではない
+//! （LIB-14・LIB-15）。名前・置き場は仮称で、人が確定する。
+//!
+//! 安全: 検証を外す意味の分岐・feature は作らない（DPOL-30〜32）。誤りの値に秘密値・接続文字列を載せない
+//! （SECR-11・SECR-23）。stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）。
+//!
+//! 5/6 で実行の記録（版・構成・日時。[`record`]）を置いた。
+//! 6/6 で使い方（`docs/harness/integration.md` の「使い方」）と、手順どおりのサンプル（`tests/sample.rs`）を置いた。
+//!
+//! TASK-13 の 1/8 で障害注入の種類と記録の形式（[`fault`]）を置き、2/8 で DB の遮断と遅延（[`fault::db`]）を、3/8 でインスタンスの停止（`fault::instance`。Unix 限定）を置いた。
+//!
+//! 構成の下書きは `docs/harness/integration.md`。
+
+#![forbid(unsafe_code)]
+
+pub mod component;
+pub mod console_stub;
+pub mod database;
+pub mod fault;
+pub mod harness;
+pub mod hub_stub;
+pub mod record;
+
+pub use component::{Component, ComponentKind};
+pub use console_stub::{ConsoleStubComponent, ConsoleStubHandle, ConsoleStubSession};
+pub use database::{Database, DatabaseConfig, DatabaseEndpoint, EndpointHandle};
+pub use fault::{FaultCategory, FaultKind, FaultRecord, FaultTimeline, RunMode};
+pub use harness::{
+    CompositionEntry, CompositionRecord, Harness, HarnessConfig, HarnessError, HarnessErrorKind,
+    RunningHarness,
+};
+pub use hub_stub::{HubStubComponent, HubStubHandle, HubStubSession};
+pub use record::{RecordError, RunRecord, UtcTimestamp, VersionInfo};

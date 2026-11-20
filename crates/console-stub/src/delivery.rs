@@ -13,7 +13,7 @@
 //! - ②③ の応答は有効か無効かだけを受け、理由・申告値を判定に使わない（ADLG-29・ADLG-31・D-2026-10-17-49 の (3)）。
 //! - 切り替えられるのは相手側の応答の値だけ。確認を省く設定・分岐は作らない（DPOL-30・DPOL-32）。
 //! - token は引数で借りて ① の口へ渡すだけで、構造体・誤り・出力に保持しない（SECR-23〜27）。
-//! - 判定しないもの: 静的な確認（署名・DPoP の proof・ローカルの `exp`。呼び出し元が済ませた前提。#79）、
+//! - 判定しないもの: 静的な確認（署名・DPoP の proof・ローカルの `exp`。呼び出し元が済ませた前提。`docs/stubs/console-stub.md`、#79）、
 //!   遅延・拒否の注入（[`crate::fault`]。#76）、呼び出しの記録（[`crate::record::RecordingDeliveryPorts`]）、窓（`t_done − t_commit`）の計測と上限（TASK-451・TASK-30）。
 
 use crate::config::ConsoleStubConfig;
@@ -22,8 +22,9 @@ use crate::introspection::{
     IntrospectionHttpResponse, IntrospectionRequest, TransportFailure,
 };
 
-// TODO(TASK-8): ② ③ の口の本文の形は Hub が正本（Hub ARUN-60 等）。抽象の型で受けた点は [`crate::contract`] で仮定の印を付けた。
-// 静的な確認を持たない点・① の拒否理由を 1 種類にまとめた点・③ の口の URL を設定に持たない点を #79 に書く。
+// ② ③ の口の本文の形は Hub が正本（Hub ARUN-60 等）。抽象の型で受けた点は [`crate::contract`] で仮定の印を付けた。
+// 静的な確認を持たない点・① の拒否理由を 1 種類にまとめた点・③ の口の URL を設定に持たない点は
+// `docs/stubs/console-stub.md` の 3.2 に書いた（#79）。
 
 /// 有効性の照会の応答。理由を持たない（ADLG-29・ADLG-31）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

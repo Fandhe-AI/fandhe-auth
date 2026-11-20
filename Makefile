@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps pg-check
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps pg-check it-db
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -62,3 +62,7 @@ crate-deps: ## crate 間の依存の向きの検査（許可表との照合）�
 # （make の子プロセスは生成したパスワードを呼び出し元のシェルへ export できず、保存へ流れるため。SECR-6）。
 pg-check: ## 開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）。直接: scripts/dev-pg-check.sh
 	@scripts/dev-pg-check.sh
+
+# it-db は暫定の名前（人が確定する）。Docker を使う結合試験（#[ignore]）の明示の入口。CI には載せない（TASK-6）。
+it-db: ## ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）。直接: scripts/it-db.sh
+	@scripts/it-db.sh

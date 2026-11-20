@@ -12,9 +12,19 @@
 # crates/plugin-oidc に置く。本体には含めない（LIB-14・PLG-26）。名前 fandhe-auth-plugin-oidc は
 # D-2026-11-20-2 で決まった。crates.io の空きは未照会で、公開するかは別に決める（同決定）。
 # TASK-7 (1/12): crates/hub-stub は Hub の検証用 stub で、試験専用。段階 1 のリリースのメンバーではない
-# （LIB-14・LIB-15）。どの crate からも依存しない。名前・置き場は仮称で、人が確定する。
+# （LIB-14・LIB-15）。本体・Plugin からは依存しない。試験専用の it-harness と、試験（dev）だけの load-harness が依存する
+# （TASK-10 (3/6)・TASK-12 (5/10)。許可表の行は人の確認待ち）。名前・置き場は仮称で、人が確定する。
 # TASK-8 (1/8): crates/console-stub は console の検証用 stub で、試験専用。段階 1 のリリースのメンバーではない
-# （LIB-14・LIB-15）。どの crate からも依存しない。名前・置き場は仮称で、人が確定する。
+# （LIB-14・LIB-15）。本体・Plugin からは依存しない。試験専用の it-harness だけが依存する
+# （TASK-10 (4/6)。許可表の行は人の確認待ち）。名前・置き場は仮称で、人が確定する。
+# TASK-10 (1/6): crates/it-harness は結合試験のハーネスの枠で、試験専用。段階 1 のリリースのメンバーではない
+# （LIB-14・LIB-15）。本体・Plugin からは依存しない。試験専用の load-harness だけが試験（dev）で依存する
+# （TASK-12 (5/10)。許可表の行は人の確認待ち）。名前・置き場は仮称で、人が確定する。
+# TASK-11 (1/6): crates/e2e-harness は passkey の E2E ハーネスの枠で、試験専用。段階 1 のリリースのメンバーではない
+# （LIB-14・LIB-15）。どの crate からも依存しない。依存は 0。名前・置き場は仮称で、人が確定する。
+# TASK-12 (3/10): crates/load-harness は計測・負荷のハーネスの計測の部品で、試験専用。段階 1 のリリースのメンバー
+# ではない（LIB-14・LIB-15）。どの crate からも依存しない。通常の依存は 0（std だけ）。試験（dev）だけ it-harness・hub-stub に依存する
+# （TASK-12 (5/10)。許可表の行は人の確認待ち）。名前・置き場は仮称で、人が確定する。
 [workspace]
 resolver = "3" # 暫定。人が確定する。
 members = [
@@ -25,6 +35,9 @@ members = [
   "crates/plugin-oidc",
   "crates/hub-stub",
   "crates/console-stub",
+  "crates/it-harness",
+  "crates/e2e-harness",
+  "crates/load-harness",
   "crates/backend",
 ]
 

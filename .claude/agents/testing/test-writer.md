@@ -27,7 +27,7 @@ tools:
 |------|-------|
 | 単体テスト | 各 crate の `#[cfg(test)]`・`tests/` |
 | DB の契約テスト | `crates/db-tests`（`db-pg`・`sqlx` に依存しない。DPOL-37）。PostgreSQL 実装・migration の試験は Hub の担当（`ASTORE`）で、作る前に利用者へ確かめる |
-| property test・fuzz | 継続検査の対象（QP-3・ACPT-33）。置き場・使う crate は未定（TASK-3・TASK-4 で決める）。決まるまで呼び出し元の指示に従う |
+| property test・fuzz | 継続検査の対象（QP-3・ACPT-33）。道具は property test が `proptest`、fuzz が `cargo-fuzz`（`libfuzzer-sys`）（`D-2026-11-20-9`）。本番の依存の木に入れず、dev 依存か別の workspace に置く（K7。`D-2026-11-20-7`）。fuzz の nightly は日付で固定せず最新を追う（実行の記録に nightly の版を残すかは未定）。置き場は未定（決める TASK は未定）。決まるまで呼び出し元の指示に従う |
 | 変異の試験 | 既定で無効の feature か別 crate に閉じた変異のスイッチを使う（DPOL-31） |
 
 対象外: 本体の実装の変更（各 builder。試験で見つけた不具合は報告する）、`docs/spec/` のステータスの変更、CI の構成（infra-builder）。
