@@ -14,7 +14,12 @@
   - `TASK-500`: 陽性対照、つまり検出力の確認（`AAUD-30`・`AAUD-31`）
   - `TASK-511`: `SECR-11` の property test（`prop_debug`）と fuzz
 - 消す条件: 採った道具と試験の形を、本番の TASK（500・511・513・514・518・116・117）が引き取ったら、この crate は消す。
-- feature はすべて default のままの暫定（`syn` だけ `default-features = false` + `full`・`parsing`）。K11 の記入後に人が確定する。
+- feature は、利用者の方針（2026-11-20。安全な最新の安定版・必要最小の feature）で必要最小に絞った暫定。K11 の記入後に人が確定する（`D-2026-11-20-7`）。
+  - `tracing`: `default-features = false` + `std`
+  - `metrics`: 既定（`[features]` が無い）
+  - `tracing-subscriber`: `default-features = false` + `fmt`・`registry`・`std`
+  - `proptest`: `default-features = false` + `std`
+  - `syn`: `default-features = false` + `full`・`parsing`
 - 採用 crate の根拠は `D-2026-11-20-8`〜`10`。
 - ここでの合格は〔仮想〕の確認で、spec の「確定」ではない（`ACPT-7`）。
 
@@ -56,7 +61,7 @@ nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly �
 
 - K11 の測り方・ターゲット・閾値は未定で、人が決める（`D-2026-11-20-7`）。この README には測定の手順も、値を入れる表も置かない。
 - 測定手順の下書きは PR 本文で渡す。
-- 口の feature の選び（`tracing`・`metrics`・dev の道具）は未定で、K11 を人が決めた後に確定する。いまの feature は、`syn` を除いて default のままの暫定である（`syn` は `default-features = false` + `full`・`parsing`。上の「位置づけ」）。
+- 口の feature の選び（`tracing`・`metrics`・dev の道具）は未定で、K11 を人が決めた後に確定する。いまの feature は、利用者の方針（2026-11-20）で必要最小に絞った暫定である（組は上の「位置づけ」）。
 
 ## 確かめた事実
 
@@ -64,24 +69,24 @@ nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly �
 
 - `tracing`: default は `std`・`attributes`。`attributes` は proc-macro の `tracing-attributes` を引く。`#[instrument]` を本体が使うかが論点になる。
   ほかに `max_level_*`・`release_max_level_*` がある。
-- `tracing` の default の `attributes` は、`tracing-attributes`（proc-macro）を経由して `syn` 2.0.119 を normal で引く。
-  repo のルートで、次のコマンドで確かめた事実は次のとおり（`-i` の引数は版つきの `syn@2.0.119`・`syn@3.0.10`）。
+- `tracing` の default のままなら、`attributes` が `tracing-attributes`（proc-macro）を経由して `syn` 2.x を normal で引く。
+  この crate は `default-features = false` + `std` にして `attributes` を外した（マクロだけを使い、`#[instrument]` は使わない）。
+  lock から `syn` 2.0.119 と `tracing-attributes` は消えた。
+  repo のルートで、次のコマンドで確かめた事実は次のとおり（`-i` の引数は版つきの `syn@3.0.10`）。
 
   ```bash
-  cargo tree --locked -p fandhe-auth-trial-deps -e normal,build --target all -i syn@2.0.119
   cargo tree --locked -p fandhe-auth-trial-deps -e normal,build --target all -i syn@3.0.10
-  cargo tree --locked -p fandhe-auth-trial-deps -e normal,build,dev --target all -i syn@2.0.119
   cargo tree --locked -p fandhe-auth-trial-deps -e normal,build,dev --target all -i syn@3.0.10
   cargo tree --locked --workspace -e normal,build --target all -i syn@3.0.10
   ```
 
-  - この crate の normal・build の木には `syn` 2.0.119 だけが入る（`tracing-attributes` 経由）。`syn` 3.0.10 は入らない（`-e normal,build` の 2 本目の出力は `nothing to print`）。
-  - `-e normal,build,dev` に替えると（3・4 本目）、この crate の木には `syn` 2.0.119（`tracing-attributes` 経由）と `syn` 3.0.10（`[dev-dependencies]` の直接依存）の両方が入る。`syn` 3 は、この crate の dev 依存（構文の走査用）である。
-  - workspace 全体の normal・build では（5 本目）、`syn` 3.0.10 は `serde_derive` を経由して `hub-stub` と `console-stub` に入っている。この crate の変更によるものではない。
-  - 並ぶかどうかの判断はここでは書かない。本体の木に `syn` が何を引くかは、feature の組の選びと併せて人が決める。
+  - この crate の normal・build の木には `syn` が入らない（1 本目の出力は `nothing to print`）。`syn` 2.x は lock にも無く、`-i syn@2.0.119` は `did not match any packages` になる。
+  - `-e normal,build,dev` に替えると（2 本目）、`syn` 3.0.10 が `[dev-dependencies]` の直接依存として入る。構文の走査用である。
+  - workspace 全体の normal・build では（3 本目）、`syn` 3.0.10 は `serde_derive` を経由して `hub-stub` と `console-stub` に入っている（どちらも `serde_json` 経由）。この crate の変更によるものではない。
+  - 並ぶかどうかの判断はここでは書かない。本体の木に何を引くかは、feature の組の選びと併せて人が決める。
 - `metrics`: `[features]` が無い。既定の feature が無いので、`default-features = false` を指定しても差は出ない。
-- `tracing-subscriber`: default は `smallvec`・`fmt`・`ansi`・`tracing-log`・`std`。
-- `proptest`: default は `std`・`fork`・`timeout`・`bit-set`。
+- `tracing-subscriber`: default は `smallvec`・`fmt`・`ansi`・`tracing-log`・`std`。いまの試し実装は `default-features = false` + `fmt`・`registry`・`std`。
+- `proptest`: default は `std`・`fork`・`timeout`・`bit-set`。いまの試し実装は `default-features = false` + `std`。
 - `syn`: default は `derive`・`parsing`・`printing`・`clone-impls`・`proc-macro`。`full`・`visit` は別の feature。いまの試し実装は `default-features = false` + `full`・`parsing`。
 
 ## 観測した事実
