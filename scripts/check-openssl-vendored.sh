@@ -7,7 +7,10 @@
 #   R1: `openssl-sys feature "vendored"`（DPOL-13 の本体）
 #   R2: `openssl feature "vendored"`（openssl-sys/vendored を有効にする上流の経路）
 #   R3: package `openssl-src`（vendored の build 依存が木に入った痕跡）
-# 走査 A は既定の feature（本番の木）で、合否に入る。走査 B は --all-features の上位集合で、参考の警告だけ出し合否に入れない
+# 走査 A は既定の feature（本番の木）で、試験専用メンバーを除いた本番対象のメンバーだけを起点にし、合否に入る。
+# 試験専用メンバー（TEST_ONLY_PKGS）は自身の normal・build 依存が残るため、含めると試験専用 crate だけの vendored を本番の違反として
+# 落としてしまう。そのため合否の起点から外し、含めた走査 C は参考の警告だけにする（合否に入れない）。
+# 新しい試験専用メンバーは TEST_ONLY_PKGS に足す（足し忘れは合否に入る側＝安全側に倒れる）。走査 B は --all-features の上位集合で、参考の警告だけ出し合否に入れない
 # （optional の feature の後ろに隠した vendored の早期発見用）。dependency-policy.md は本番の依存の監査に --all-features を使わないと
 # 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。本番 feature 構成の明示（PROD_FEATURES）が決まったら、A をそれに置き換える。
 # B は依存の列挙にだけ使い、ビルド・clippy には使わない（DPOL-31。check-crate-deps.sh と同じ扱い）。
@@ -43,6 +46,18 @@ if ! WORK="$(mktemp -d "${ROOT_DIR}/target/openssl-vendored.XXXXXX")"; then
 fi
 cleanup() { rm -rf "${WORK}"; }
 trap cleanup EXIT
+
+# 本番対象から外す試験専用メンバー（Cargo.toml の注記・check-crate-deps.sh の試験専用の表と同じ。TASK-667）。
+TEST_ONLY_PKGS=(
+  fandhe-auth-hub-stub
+  fandhe-auth-console-stub
+  fandhe-auth-it-harness
+  fandhe-auth-e2e-harness
+  fandhe-auth-load-harness
+  fandhe-auth-trial-deps
+)
+EXCLUDE_ARGS=()
+for p in "${TEST_ONLY_PKGS[@]}"; do EXCLUDE_ARGS+=(--exclude "${p}"); done
 
 # run_tree <dir> <locked|offline> [追加引数...]: cargo tree の出力を stdout に返す。失敗は 2（生の出力は出さない）。
 run_tree() {
@@ -138,7 +153,7 @@ selftest
 
 # 走査 A（合否）。検査不能（2）と違反（1）はここで確定し、参考の走査 B より先に返す。
 total=0
-tree="$(run_tree "${ROOT_DIR}" locked --workspace)"
+tree="$(run_tree "${ROOT_DIR}" locked --workspace "${EXCLUDE_ARGS[@]}")"
 for r in R1 R2 R3; do
   n="$(count_rule "${r}" "${tree}")"
   log "scan A ${r}: ${n}"
@@ -149,14 +164,23 @@ if [ "${total}" -ne 0 ]; then
   exit 1
 fi
 
-# 走査 B（参考）。失敗しても終了コードに影響させず警告だけ出す（A の合否を上書きしない）。
-if tree="$(run_tree "${ROOT_DIR}" locked --workspace --all-features)"; then
-  for r in R1 R2 R3; do
-    n="$(count_rule "${r}" "${tree}")"
-    log "scan B (info, not gated) ${r}: ${n}"
-    [ "${n}" -ne 0 ] && log "warn: vendored path behind a non-default feature (${r}); confirm it is not a production feature"
-  done
-else
-  log "warn: scan B (info, not gated) could not run; result not affected"
-fi
+# scan_info <ラベル> <追加引数...>: 参考の走査。失敗しても終了コードに影響させず警告だけ出す（A の合否を上書きしない）。
+scan_info() {
+  local label="$1" t r n
+  shift
+  if t="$(run_tree "${ROOT_DIR}" locked "$@")"; then
+    for r in R1 R2 R3; do
+      n="$(count_rule "${r}" "${t}")"
+      log "scan ${label} (info, not gated) ${r}: ${n}"
+      [ "${n}" -ne 0 ] && log "warn: vendored path found in scan ${label} (${r}); confirm it is not a production dependency"
+    done
+  else
+    log "warn: scan ${label} (info, not gated) could not run; result not affected"
+  fi
+  return 0
+}
+# 走査 B（参考）: 本番対象のメンバーの --all-features。非既定 feature の後ろの経路。
+scan_info B --workspace --all-features "${EXCLUDE_ARGS[@]}"
+# 走査 C（参考）: 試験専用メンバーを含む全メンバーの既定 feature。
+scan_info C --workspace
 log "ok: no vendored openssl (DPOL-13)"

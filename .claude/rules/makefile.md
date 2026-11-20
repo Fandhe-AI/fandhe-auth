@@ -64,7 +64,7 @@ description: >
 | `fmt` | `cargo fmt --all`（直書き） | rustfmt を適用する（ソースを書き換える唯一の make ターゲット） |
 | `lint` | `scripts/lint.sh` | 検査のみ。`cargo fmt --check`・clippy `-D warnings`・`crate-deps`・`no-vendored`。CI の `lint` ジョブと同一（TASK-6） |
 | `crate-deps` | `scripts/check-crate-deps.sh` | 検査のみ。crate 間の依存の向きを許可表と照合する。表に無い member・辺は失敗（fail-closed） |
-| `no-vendored` | `scripts/check-openssl-vendored.sh` | 検査のみ。`openssl-sys` の `vendored` が依存解決に 0 件かを陰性対照つきで確かめる（DPOL-13・TASK-667）。検査不能は 2、違反は 1。名前は暫定 |
+| `no-vendored` | `scripts/check-openssl-vendored.sh` | 検査のみ。`openssl-sys` の `vendored` が依存解決に 0 件かを陰性対照つきで確かめる（DPOL-13・TASK-667）。終了コードの 1（違反）・2（検査不能）の区別はスクリプトの直接実行に適用される（make 経由ではレシピが 1 で終了しても make 自体は 2 を返す）。名前は暫定 |
 | `pg-check` | `scripts/dev-pg-check.sh` | 起動中の開発・検証用 PostgreSQL の起動の確かめ。起動・停止はしない。CI へは載せない（TASK-6）。名前は暫定。手順の正は `dev/postgres/README.md` |
 | `it-db` | `scripts/it-db.sh` | ハーネス（`crates/it-harness`）の Docker を使う結合試験（`#[ignore]`）の明示の入口。Docker 必須・CI 外（TASK-6）。パスワードは試験プロセスの中で生成する。名前は暫定 |
 | `e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネス（`crates/e2e-harness`）の Chrome の仮想 authenticator の E2E（`#[ignore]`）の明示の入口。chromedriver 必須・CI 外（TASK-6）。結果は〔仮想〕で実機・Safari に数えない。名前は暫定 |

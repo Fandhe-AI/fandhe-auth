@@ -148,7 +148,8 @@ jobs:
 
   # Rust の整形の差分検査と lint（TASK-6）。ローカルの `make lint` と同じ契約で、rustfmt の差分・
   # clippy の警告（-D warnings）・crate 間の依存の向きの検査・vendored の検査（DPOL-13）のどれかが非 0 なら失敗する。
-  # --all-features は付けない（DPOL-31。crate 間の依存の列挙だけは check-crate-deps.sh の方針に従う）。
+  # --all-features は付けない（DPOL-31）。依存の列挙（check-crate-deps.sh）と vendored の参考走査（check-openssl-vendored.sh の走査 B）にだけ使い、
+  # ビルド・clippy・合否判定では使わない。
   # toolchain は runner 既定の rustup の stable（暫定。版・MSRV は TASK-4 で人が決める）。
   # キャッシュは未導入。build-test とは needs を張らず並列に流す。
   lint:
