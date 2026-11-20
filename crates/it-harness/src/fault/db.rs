@@ -27,9 +27,11 @@
 //! 順序と境界の契約（#5983。詳細は `docs/harness/fault-injection.md`。ORST-17）:
 //! - `block`: ロック → `Applied` を記録 → 状態を入れて切断 → ロックを外す。記録が拒否されたら状態を変えない（fail-closed）。
 //!   `Applied` の時刻は実際の遮断の開始の下限で、`block` が戻った後は新しい塊を書かず、以後の accept は上流へ届けず切る。
-//! - 確立中に遮断と重なった接続は、上流への TCP の試行までは起こり得るが、client のバイトは上流へ送らず切る。
+//! - 上流への接続の開始の保証は「事前確認の時点」までで、確認の後（ポートの取得・`connect_timeout`）に `block` が
+//!   完了しても上流への TCP の試行は起こり得る。ただし client のバイトは上流へ送らず切る。
 //! - `release_block`: ロック → 待ち受けの待ち行列を上限まで排出して切る → `Released` を記録 → 解く。
-//!   解除の前に待ち行列にあった接続は上流へ届かない（排出の上限を超えた分は保証外。`docs/harness/fault-injection.md`）。
+//!   `Ok(())` で戻った場合に限り、解除の前に待ち行列にあった接続は上流へ届かない（排出の上限を超えた分は保証外。
+//!   `docs/harness/fault-injection.md`）。`Err`（`DrainFailed`・記録の拒否）では遮断のままで、新規接続も切る。
 //!   待ち行列の空を確かめられない accept の失敗（`WouldBlock` 以外。fd 枯渇等）では `Released` を記録せず遮断のまま
 //!   `DrainFailed` で戻る（fail-closed）。呼び出しと重なった往復は未定で、試験の合否に使わない。
 //! - 遅延は順序の契約の対象外（記録してから値を入れる。重なった塊は未定）。
@@ -192,7 +194,8 @@ pub struct DbFaultProxy {
     listen_port: u16,
     accept: Option<JoinHandle<()>>,
     /// 待ち受け。accept のスレッドと共有し、解除のときの待ち行列の排出に使う。
-    listener: Arc<TcpListener>,
+    /// 停止時に `take` して取り外す（accept のスレッドの複製と合わせて、中継の回収を待たずに待ち受けを閉じる）。
+    listener: Option<Arc<TcpListener>>,
     block_active: bool,
     /// 遮断を記録するときの種類。`DbBlock` か `ExternalStoreBlock` だけ（4/8 が後者で包む）。
     block_kind: FaultKind,
@@ -267,7 +270,7 @@ impl DbFaultProxy {
             upstream,
             listen_port,
             accept: Some(accept),
-            listener,
+            listener: Some(listener),
             block_active: false,
             block_kind,
             delay_active: None,
@@ -338,6 +341,16 @@ impl DbFaultProxy {
         timeline: &mut FaultTimeline,
         drain: impl FnOnce(&TcpListener, &Shared) -> Drain,
     ) -> Result<(), DbFaultError> {
+        self.release_block_inner(timeline, drain, |_| {})
+    }
+
+    /// 本体。`before_record` は `Released` の記録の直前（まだ遮断中）に呼ぶ。状態変更と記録の順序を試験で観測する口（ORST-17）。
+    fn release_block_inner(
+        &mut self,
+        timeline: &mut FaultTimeline,
+        drain: impl FnOnce(&TcpListener, &Shared) -> Drain,
+        before_record: impl FnOnce(&Shared),
+    ) -> Result<(), DbFaultError> {
         if !self.block_active {
             return Err(DbFaultError::NotActive);
         }
@@ -349,12 +362,17 @@ impl DbFaultProxy {
         // ロックを持つ間は accept のスレッドが進めないので、排出の後に新しく転送される接続は無い。
         // `WouldBlock` 以外の失敗は待ち行列の空を確かめられていない。`Released` を記録せず遮断を保つ（fail-closed）。
         // 割り込みの再試行を使い切った場合も空を確かめられていないので同じ扱い（件数の上限到達とは分ける）。
+        // 停止後は待ち受けが無い。空を確かめられないので失敗として扱う（fail-closed）。
+        let Some(listener) = self.listener.as_deref() else {
+            return Err(DbFaultError::DrainFailed);
+        };
         if matches!(
-            drain(&self.listener, &self.shared),
+            drain(listener, &self.shared),
             Drain::Failed(_) | Drain::InterruptsExhausted(_)
         ) {
             return Err(DbFaultError::DrainFailed);
         }
+        before_record(&self.shared);
         timeline
             .record_now(self.block_kind, FaultPhase::Released)
             .map_err(DbFaultError::Record)?;
@@ -415,6 +433,9 @@ impl DbFaultProxy {
         if let Some(h) = self.accept.take() {
             let _ = h.join();
         }
+        // accept のスレッドが終わった時点で、共有していた待ち受けを取り外す。中継の回収（join）を待たずに
+        // 新規接続を受け付けなくなる（#5983）。
+        self.listener.take();
         self.shared.sever_all();
         let workers: Vec<_> = {
             let mut g = self
@@ -1070,5 +1091,25 @@ mod tests {
             offset >= 250,
             "Applied recorded before taking the lock: {offset} ms"
         );
+    }
+
+    /// `Released` の記録の時点では、まだ遮断中である。記録が拒否されたら遮断のまま戻る（ORST-17）。
+    /// 状態変更と記録の順序が逆転すると、記録の直前に `blocked` が false になる。
+    #[test]
+    fn released_is_recorded_while_still_blocked() {
+        let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+        let mut tl = timeline();
+        p.block(&mut tl).unwrap();
+        let mut observed = None;
+        let r = p.release_block_inner(
+            &mut tl,
+            |_, _| Drain::Done(0),
+            |sh| {
+                observed = Some(sh.blocked.load(Ordering::SeqCst));
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(observed, Some(true), "must still be blocked at record time");
+        assert!(!p.shared.blocked.load(Ordering::SeqCst));
     }
 }
