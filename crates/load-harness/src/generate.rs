@@ -169,6 +169,8 @@ struct Shared<'a> {
     stop: AtomicBool,
     /// 呼び出し元が立てる停止の印。立っている間は新しい枠を取らせない。
     cancel: &'a AtomicBool,
+    /// `claim` が `cancel` の立っていることを観測した事実。呼び出し元が後で印を戻しても残す。
+    cancelled: AtomicBool,
     first_error: Mutex<Option<LoadError>>,
 }
 
@@ -178,6 +180,7 @@ impl<'a> Shared<'a> {
             next: Mutex::new(0),
             stop: AtomicBool::new(false),
             cancel,
+            cancelled: AtomicBool::new(false),
             first_error: Mutex::new(None),
         }
     }
@@ -205,8 +208,11 @@ impl<'a> Shared<'a> {
     /// （確認より後に立った印は、その枠には効かない）。
     fn claim(&self, count: u64) -> bool {
         let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
-        if self.stop.load(Ordering::SeqCst) || self.cancel.load(Ordering::SeqCst) || *next >= count
-        {
+        if self.cancel.load(Ordering::SeqCst) {
+            self.cancelled.store(true, Ordering::SeqCst);
+            return false;
+        }
+        if self.stop.load(Ordering::SeqCst) || *next >= count {
             return false;
         }
         match next.checked_add(1) {
@@ -291,7 +297,8 @@ where
         return Err(e);
     }
     // 停止の印で枠の取得が止まった段は、件数が計画に届かない。次の段へ進ませない。
-    if cancel.load(Ordering::SeqCst) {
+    // 呼び出し元が join 後に印を戻していても、観測済みの停止は落とさない。
+    if shared.cancelled.load(Ordering::SeqCst) {
         return Err(LoadError::Cancelled);
     }
     Ok(())

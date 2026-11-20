@@ -1,6 +1,6 @@
 //! 負荷の対象の呼び出しの部品（TASK-12 6/10）。名前・語・値はすべて仮置きで、人が確認する。
 //!
-//! 役割: 経路の名前・測る区間・呼び出しを 1 組で受け、[`crate::generate::run_closed_loop`] の上で閉ループで呼び、
+//! 役割: 経路の名前・測る区間・呼び出しを 1 組で受け、[`crate::generate::run_closed_loop_until`]（停止の印を受ける）の上で閉ループで呼び、
 //! 呼び出しの結果を固定の語彙（[`CallResult`]）で [`Outcome`] に写し、結果を [`TargetRun`] に残す。
 //! 呼び出し元: 結合試験のハーネスの上で構成要素へ負荷をかける試験（試験ビルド）。
 //! 呼び出し先: 計測の部品・生成器・集計だけ。対象を具体の stub に結ぶ部分は呼び出し元（試験）が書く。
@@ -179,11 +179,13 @@ where
     let first_error: Mutex<Option<MeterError>> = Mutex::new(None);
     let failed = AtomicBool::new(false);
     let record = |e: MeterError| {
-        failed.store(true, Ordering::SeqCst);
+        // 先頭の誤りの保存と停止の公開を同じ区間で行い、保存の後に公開する。
         let mut g = first_error.lock().unwrap_or_else(PoisonError::into_inner);
         if g.is_none() {
             *g = Some(e);
         }
+        failed.store(true, Ordering::SeqCst);
+        drop(g);
     };
     let result = run_closed_loop_until(meter, config, &failed, |trial| {
         if failed.load(Ordering::SeqCst) {
