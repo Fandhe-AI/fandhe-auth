@@ -316,6 +316,7 @@ fn debug_and_display_do_not_leak_port() {
         ExternalStoreFaultError::StartFailed,
         ExternalStoreFaultError::AlreadyActive,
         ExternalStoreFaultError::NotActive,
+        ExternalStoreFaultError::DrainFailed,
         ExternalStoreFaultError::Internal,
         ExternalStoreFaultError::Record(FaultRecordError::EventsInBaseline),
     ] {

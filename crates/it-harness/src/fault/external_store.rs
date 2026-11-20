@@ -35,6 +35,8 @@ pub enum ExternalStoreFaultError {
     NotActive,
     /// 記録が拒否した（基準線である等）。状態は変えていない。
     Record(FaultRecordError),
+    /// 解除の排出に失敗し、`Released` を記録せず遮断のまま戻った（`DbFaultError::DrainFailed` と同じ。ORST-17）。
+    DrainFailed,
     /// 遮断の経路では起きない想定の内部の誤り。
     Internal,
 }
@@ -46,6 +48,7 @@ impl fmt::Display for ExternalStoreFaultError {
             Self::AlreadyActive => f.write_str("external store fault error: already active"),
             Self::NotActive => f.write_str("external store fault error: not active"),
             Self::Record(e) => write!(f, "external store fault error: {e}"),
+            Self::DrainFailed => f.write_str("external store fault error: drain failed"),
             Self::Internal => f.write_str("external store fault error: internal"),
         }
     }
@@ -59,7 +62,8 @@ fn convert(e: DbFaultError) -> ExternalStoreFaultError {
         DbFaultError::AlreadyActive => ExternalStoreFaultError::AlreadyActive,
         DbFaultError::NotActive => ExternalStoreFaultError::NotActive,
         DbFaultError::Record(r) => ExternalStoreFaultError::Record(r),
-        DbFaultError::InvalidParam | DbFaultError::DrainFailed => ExternalStoreFaultError::Internal,
+        DbFaultError::DrainFailed => ExternalStoreFaultError::DrainFailed,
+        DbFaultError::InvalidParam => ExternalStoreFaultError::Internal,
     }
 }
 

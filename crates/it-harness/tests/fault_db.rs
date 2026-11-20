@@ -363,19 +363,19 @@ fn no_client_bytes_reach_upstream_after_block_returns() {
         thread::sleep(Duration::from_millis(5));
     }
     p.block(&mut tl).unwrap();
-    // 戻った後の転送器は上流へ書かない。カーネルの送信バッファに入っていた分は届き得るので、
-    // 対象の接続の上流側の読み取りが終わる（切断）のを期限付きで待ってから控える。
-    ended
-        .recv_timeout(Duration::from_secs(5))
-        .expect("upstream side of the conn was not closed after block");
-    let settled = count.load(Ordering::SeqCst);
+    // 戻った直後に、識別できるデータ（5 バイト）を送る。上流の読み取りが終わる前に届けば数が増える。
+    // 終了後に送っても読み取りが無く検証にならないので、終了を待つ前に送る（ORST-17）。
     for _ in 0..20 {
         if c.write_all(b"after").is_err() {
             break;
         }
         thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(count.load(Ordering::SeqCst), settled, "bytes after block");
+    ended
+        .recv_timeout(Duration::from_secs(5))
+        .expect("upstream side of the conn was not closed after block");
+    // 戻る前に確かめた 6 バイト（"before"）だけが上流に届いている。"after" は 1 バイトも観測されない。
+    assert_eq!(count.load(Ordering::SeqCst), 6, "bytes after block");
     let mut buf = [0u8; 8];
     match c.read(&mut buf) {
         Ok(0) => {}

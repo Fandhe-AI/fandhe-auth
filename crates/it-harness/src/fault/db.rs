@@ -329,6 +329,15 @@ impl DbFaultProxy {
     /// ロックを取り、待ち受けの待ち行列に残る接続を切ってから `Released` を記録して遮断を解く。
     /// 記録が拒否されたら遮断のまま戻る（排出は遮断中の accept と同じ扱いで、状態の変化ではない。ORST-17）。
     pub fn release_block(&mut self, timeline: &mut FaultTimeline) -> Result<(), DbFaultError> {
+        self.release_block_with(timeline, drain_backlog)
+    }
+
+    /// `release_block` の本体。排出を差し替えられる（排出の失敗が解除を止めることを試験で確かめる。ORST-17）。
+    fn release_block_with(
+        &mut self,
+        timeline: &mut FaultTimeline,
+        drain: impl FnOnce(&TcpListener, &Shared) -> Drain,
+    ) -> Result<(), DbFaultError> {
         if !self.block_active {
             return Err(DbFaultError::NotActive);
         }
@@ -339,9 +348,10 @@ impl DbFaultProxy {
             .unwrap_or_else(PoisonError::into_inner);
         // ロックを持つ間は accept のスレッドが進めないので、排出の後に新しく転送される接続は無い。
         // `WouldBlock` 以外の失敗は待ち行列の空を確かめられていない。`Released` を記録せず遮断を保つ（fail-closed）。
+        // 割り込みの再試行を使い切った場合も空を確かめられていないので同じ扱い（件数の上限到達とは分ける）。
         if matches!(
-            drain_backlog(&self.listener, &self.shared),
-            Drain::Failed(_)
+            drain(&self.listener, &self.shared),
+            Drain::Failed(_) | Drain::InterruptsExhausted(_)
         ) {
             return Err(DbFaultError::DrainFailed);
         }
@@ -484,8 +494,10 @@ fn drain_backlog(listener: &TcpListener, shared: &Shared) -> Drain {
 enum Drain {
     /// `WouldBlock` で待ち行列の空を確かめた。
     Done(usize),
-    /// 件数または割り込みの回数の上限で打ち切った（上限を超えた分は保証外）。
+    /// 件数の上限で打ち切った（上限を超えた分は保証外）。
     Truncated(usize),
+    /// `Interrupted` の再試行を使い切った。空を確かめられておらず、失敗として扱う。
+    InterruptsExhausted(usize),
     /// `WouldBlock`・`Interrupted` 以外の失敗で、空を確かめられなかった。
     Failed(usize),
 }
@@ -508,7 +520,7 @@ fn drain_with(
                 ErrorKind::Interrupted => {
                     interrupts += 1;
                     if interrupts > max_interrupts {
-                        return Drain::Truncated(n);
+                        return Drain::InterruptsExhausted(n);
                     }
                 }
                 _ => return Drain::Failed(n),
@@ -912,7 +924,7 @@ mod tests {
         let err = |k: ErrorKind| move || Err::<TcpStream, _>(std::io::Error::from(k));
         assert_eq!(
             drain_with(&shared, 4096, 3, err(ErrorKind::Interrupted)),
-            Drain::Truncated(0)
+            Drain::InterruptsExhausted(0)
         );
         assert_eq!(
             drain_with(&shared, 4096, 3, err(ErrorKind::WouldBlock)),
@@ -951,6 +963,40 @@ mod tests {
         assert_eq!(echo_or_cut(&mut c1, b"a"), None);
         assert_eq!(echo_or_cut(&mut c2, b"b"), None);
         let _ = tl.finish(UtcTimestamp::from_unix_seconds(1_700_000_060));
+    }
+
+    /// 排出が失敗（割り込みの使い切り・`Failed`）なら `Released` を記録せず遮断のまま `DrainFailed` で戻る。
+    /// 件数の上限到達（`Truncated`）は解除できる（ORST-17）。
+    #[test]
+    fn release_block_fails_closed_on_drain_failure() {
+        for (drain, ok) in [
+            (Drain::InterruptsExhausted(0), false),
+            (Drain::Failed(0), false),
+            (Drain::Truncated(4096), true),
+        ] {
+            let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let mut p = DbFaultProxy::start_to_port(up.local_addr().unwrap().port()).unwrap();
+            let mut tl = FaultTimeline::start(
+                Instant::now(),
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .unwrap();
+            p.block(&mut tl).unwrap();
+            let r = p.release_block_with(&mut tl, |_, _| drain);
+            if ok {
+                assert!(r.is_ok());
+                assert!(!p.shared.blocked.load(Ordering::SeqCst));
+            } else {
+                assert_eq!(r, Err(DbFaultError::DrainFailed));
+                assert!(p.shared.blocked.load(Ordering::SeqCst), "still blocked");
+                assert!(p.block_active);
+            }
+            let text = tl
+                .finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
+                .unwrap()
+                .to_string();
+            assert_eq!(text.contains(" released db_block"), ok, "{text}");
+        }
     }
 
     /// 上流への接続の後・中継の開始の前に遮断が入っても、client のバイトは上流へ届かない（ORST-17）。
