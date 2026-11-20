@@ -32,6 +32,13 @@ const credB64u = arguments[2];
     let timedOut = false;
     const ctl = new AbortController();
     const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, 10000);
+    let finished = false;
+    const finish = (result) => {
+        if (finished) { return; }
+        finished = true;
+        clearTimeout(timer);
+        done(result);
+    };
     try {
         if (location.origin !== expectedOrigin) {
             finish({ ok: false, errorName: 'OriginMismatch' });

@@ -1,7 +1,7 @@
 //! WebAuthn の呼び出し（登録の `create()`・認証の `get()`）の失敗の名前の列挙。
 //!
 //! 役割: ブラウザが返す `DOMException.name` のうち既知のものだけを閉じた列挙で持つ。呼び出し元は
-//! [`crate::registration`] と [`crate::authentication`] で、試験は列挙で失敗の種類を判定する。
+//! `registration` と `authentication` で、試験は列挙で失敗の種類を判定する。
 //! 未知の値は固定の `Other` に畳み、ブラウザが返した生の文字列は持たない・出さない（SECR-23）。
 //! 結果は〔仮想〕の試験の判定で、実機・Safari に数えない（ACPT-7・ACPT-8）。
 
