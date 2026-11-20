@@ -119,12 +119,13 @@ fn fields_match(ev: &CapturedEvent, expected: &[(&str, &str)]) -> bool {
             .all(|((n, v), (en, ev_))| n == en && v == ev_)
 }
 
-/// 整形済みの出力に、固定メッセージを含む行がちょうど 1 行あり、その行が `expected` で終わるか。
-/// 末尾の空白は落とさない。部分一致にせず、マスク済みの欄の列で終わることを求める（SECR-23）。
-fn formatted_line_ends_with(out: &str, message: &str, expected: &str) -> bool {
+/// 整形済みの出力に、固定メッセージを含む行がちょうど 1 行あり、その行の「メッセージが最初に現れる位置から行末まで」が
+/// `expected` と完全一致するか。時刻・レベル・target などの可変な接頭辞だけを切り落とし、
+/// メッセージと欄の間に余分な出力が入る変異を検知する（SECR-23）。末尾の空白は落とさない。
+fn formatted_tail_matches(out: &str, message: &str, expected: &str) -> bool {
     let mut lines = out.lines().filter(|l| l.contains(message));
     match (lines.next(), lines.next()) {
-        (Some(line), None) => line.ends_with(expected),
+        (Some(line), None) => line.find(message).is_some_and(|i| &line[i..] == expected),
         _ => false,
     }
 }
@@ -158,15 +159,15 @@ fn secr23_secret_debug_field_has_no_value() {
         events.len(),
         ev.fields.len()
     );
-    // 整形済みの出力でも、対象の行がちょうど 1 行で、マスク済みの欄で終わること（fmt の層が出さない変異を検知する）。
-    let formatted_ok = formatted_line_ends_with(
+    // 整形済みの出力でも、対象の行がちょうど 1 行で、メッセージから行末までが完全一致すること（fmt の層が出さない変異を検知する）。
+    let formatted_ok = formatted_tail_matches(
         &out,
         "secret field emitted",
-        " token=SecretString(<redacted>)",
+        "secret field emitted token=SecretString(<redacted>)",
     );
     assert!(
         formatted_ok,
-        "formatted line exactly one and ends with masked field: {formatted_ok} (output len={})",
+        "formatted line exactly one and tail exact: {formatted_ok} (output len={})",
         out.len()
     );
     let is_leaked = leaked(&probe, &out, &events);
@@ -206,16 +207,17 @@ fn secr23_derived_debug_holder_has_no_value() {
         events.len(),
         ev.fields.len()
     );
-    // 整形済みの出力でも、対象の行がちょうど 1 行で、3 つの欄の完全な列で終わること。
+    // 整形済みの出力でも、対象の行がちょうど 1 行で、メッセージから 3 つの欄の列の末尾までが完全一致すること。
     let expected_line = concat!(
+        "container fields emitted",
         " pair=(\"label\", SecretString(<redacted>))",
         " maybe=Some(SecretString(<redacted>))",
         " list=[SecretString(<redacted>), SecretString(<redacted>)]",
     );
-    let formatted_ok = formatted_line_ends_with(&out, "container fields emitted", expected_line);
+    let formatted_ok = formatted_tail_matches(&out, "container fields emitted", expected_line);
     assert!(
         formatted_ok,
-        "formatted line exactly one and ends with masked fields: {formatted_ok} (output len={})",
+        "formatted line exactly one and tail exact: {formatted_ok} (output len={})",
         out.len()
     );
     let is_leaked = leaked(&probe, &out, &events);
