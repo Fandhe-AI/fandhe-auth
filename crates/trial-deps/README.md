@@ -22,10 +22,10 @@
 
 | 対象 | 場所 | 確かめること | ID |
 | --- | --- | --- | --- |
-| `tracing` + `tracing-subscriber` | | | | `tests/secr23_tracing.rs` | | | | |
-| `metrics` | | | | `tests/metrics_probe.rs` | | | | |
-| `proptest` | | | | `tests/prop_debug.rs` | | | | |
-| `syn` | | | | `src/scan.rs` の `#[cfg(test)]` | | | | |
+| `tracing` + `tracing-subscriber` | `tests/secr23_tracing.rs` | `SecretString` を `?` 形式で出しても、派生 `Debug` の入れ物（std の tuple・`Option`。自前の構造体の試験は `TASK-513`）に入れても、捕獲した出力に値が無い。`tests/secr23_tracing.rs` の中で `expose()` の値を直接出す経路は検出できる（陽性対照。lib には置かない） | `SECR-23`・`SECR-11`・`SECR-13` |
+| `metrics` | `tests/metrics_probe.rs` | 自前の最小 `Recorder` を `with_local_recorder` で当て、counter の key・ラベル・増分を受けられる | `SECR-26`・`SECR-27` |
+| `proptest` | `tests/prop_debug.rs` | 任意の `String` から作った `SecretString` の `Debug` が常に固定文字列で、値を含まない。`expose()` が往復する。K8 の形を試すもので、対象の P-n・F-n ではない | `SECR-11`（K8 の形。`ACPT-37` の対象外） |
+| `syn` | `src/scan.rs` の `#[cfg(test)]` | `syn::parse_file` で、秘密値らしい欄名で型が生の `String` の欄を拾う。edition 2024 の構文を読める | `SECR-21` |
 | `cargo-fuzz` / `libfuzzer-sys` | `fuzz/fuzz_targets/secret_debug.rs` | 任意のバイト列を UTF-8 として読めたら `SecretString` にし、`Debug` が固定で `expose()` が往復する。K8 の形を試すもので、対象の P-n・F-n ではない | `SECR-11`（K8 の形。`ACPT-38` の対象外） |
 
 範囲外: `SECR-23` の本番の試験（`TASK-518`）、`SECR-21` の本番の走査と CI への組み込み（`TASK-514`）、本番の property test と fuzz の継続（`TASK-116`・`TASK-117`）。
@@ -63,7 +63,15 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
 
 1. 厳格版を repo の外へ写す（`docs/spec` は submodule なので書き換えない）。
 2. 写しの許可リストに `"NCSA"` を足す（`libfuzzer-sys` 向け。`D-2026-11-20-9`）。他は変えない。
-3. 先に `cargo deny fetch` を 1 回流し、advisory DB の commit と取得日を控える（`DPOL-33`）。
+3. 先に `cargo deny fetch` を 1 回流し、取得の直後に次の 2 つを控える（`DPOL-33`）。commit の日付は取得日ではないので、取得日時は別に取る。
+
+    ```bash
+    date -u +%Y-%m-%dT%H:%M:%SZ
+    git -C ~/.cargo/advisory-dbs/<DB のディレクトリ> rev-parse HEAD
+    ```
+
+    - 取得日時: 上の `date` の出力。
+    - 監査に使った DB の commit SHA: 上の `rev-parse` の出力。DB のディレクトリは `~/.cargo/advisory-dbs/` の下にある。
 4. 一時の設定のパスを変数に入れ（`DENY_CONFIG`）、ルートに対して流す。
 
     ```bash
@@ -91,10 +99,11 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
     cargo audit --file Cargo.lock
     ```
 
-2. DB の commit と日付を控える。
+2. 取得の直後に、取得日時と DB の commit SHA を控える。`git log` の `%cd` は DB の最新 commit の日付で、取得した日ではないので使わない。
 
     ```bash
-    git -C ~/.cargo/advisory-db log -1 --format='%h %cd'
+    date -u +%Y-%m-%dT%H:%M:%SZ
+    git -C ~/.cargo/advisory-db rev-parse HEAD
     ```
 
 3. ルートの `Cargo.lock` と fuzz 側の `Cargo.lock` の両方に流す。以降は取得を止めて、同じ DB で照合する。
@@ -117,7 +126,10 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
     dev の道具（`tracing-subscriber`・`proptest`・`syn`）も、測定用の manifest では `[dependencies]` に置く。
     こうすると、その crate を使ったときの推移依存を、全組で同じ `normal,build` の値として測れる。
     実際の利用が dev であること（本番の木に入らない）は、K7 として別に扱い、この数には含めない。
-3. 次の手順で数える。`-e normal,build` を起点にし、`--target` を明示する。測定用のルートのパッケージ（手順 2 で作ったもの。`PROBE_NAME` に入れる名前）と、
+3. 比べる組は、同じ日に同じ環境（同じ toolchain・同じ `--target`・同じ registry の状態）でまとめて測る。
+    各組の測定用の `Cargo.lock` を保存し、共通する推移依存の解決版が組の間でそろっているかを照合する。
+    そろっていない依存は、版の違いが数の差に混ざるので、そろえて測り直す。保存先は未定で、人が決める。
+4. 次の手順で数える。`-e normal,build` を起点にし、`--target` を明示する。測定用のルートのパッケージ（手順 2 で作ったもの。`PROBE_NAME` に入れる名前）と、
     測る crate 自身（`CRATE` に入れる名前）は推移依存ではないので、数から除く。`cargo tree` が失敗したら集計に進まないよう、2 段に分ける。
 
     ```bash
@@ -142,7 +154,7 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
     - `--target` の値
     - 測った日と `rustc -V` の出力
     - 測定用の `Cargo.lock`（または `tree.txt`）の保存先。保存先は未定で、人が決める
-4. MSRV は、解決したパッケージの `rust_version` を `cargo metadata` から引く。宣言の無い依存は `未宣言` と出る。
+5. MSRV は、解決したパッケージの `rust_version` を `cargo metadata` から引く。宣言の無い依存は `未宣言` と出る。
 
     ```bash
     cargo metadata --format-version 1 | jq -r '.packages[] | "\(.name) \(.version) \(.rust_version // "未宣言")"'
@@ -150,7 +162,7 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
 
     `packages` には全プラットフォーム分の依存が入る。`未宣言` の依存は、MSRV の toolchain（1.100）でビルドして確かめる。
     構成の MSRV は、各依存の宣言の最大値を人が読み取る。
-5. ライセンスは `cargo deny list` の結果を使う。
+6. ライセンスは `cargo deny list` の結果を使う。
 
 組の候補（各 crate の `[features]` を読んだ事実による）:
 
