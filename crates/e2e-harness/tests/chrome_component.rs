@@ -22,7 +22,12 @@ fn opts() -> VirtualAuthenticatorOptions {
 #[test]
 fn new_session_request_has_only_headless_and_outbound_restrictions() {
     // DPOL-30: 検証を外す意味の flag を足さない。足してよいのは外部への通信を禁じる制限だけ（A10）。
-    let v = chrome::new_session_request_for(&["http://localhost:8080".to_owned()]);
+    // 実際の起動と同じ入力（--user-data-dir を含む）で引数全体を検査する。
+    let profile = std::path::Path::new("/tmp/fandhe-e2e-chrome-test");
+    let v = chrome::new_session_request_with_profile(
+        &["http://localhost:8080".to_owned()],
+        Some(profile),
+    );
     let args = &v["capabilities"]["alwaysMatch"]["goog:chromeOptions"]["args"];
     assert_eq!(
         args,
@@ -30,7 +35,8 @@ fn new_session_request_has_only_headless_and_outbound_restrictions() {
             "--headless=new",
             chrome::HOST_RESOLVER_RULES_ARG,
             chrome::PROXY_SERVER_ARG,
-            "--proxy-bypass-list=<-loopback>;http://localhost:8080"
+            "--proxy-bypass-list=<-loopback>;http://localhost:8080",
+            "--user-data-dir=/tmp/fandhe-e2e-chrome-test"
         ])
     );
 }

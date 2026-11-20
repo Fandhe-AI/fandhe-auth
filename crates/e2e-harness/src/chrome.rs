@@ -10,6 +10,8 @@
 //! 解決できない proxy・登録 origin だけの bypass list）だけで、検証を外す flag を足さない（DPOL-30）。`navigate` は起動前に登録した試験用 origin の配下だけを許し、移動後の
 //! URL（リダイレクト先）も同じ許可リストで確かめる。サブリソースと許可外のループバックのポートへの通信は、proxy の bypass list が登録 origin だけを直接接続にするため送信前に失敗する（A10）。
 //! unix 限定（プロセスグループで起動する。`it-harness` の `fault::instance` と同じ）。
+//! A10 の保証範囲: proxy 設定が効くのは Chrome の HTTP(S) の送信先だけ。WebRTC の直接 UDP など proxy を通らない
+//! 経路はこの flag では制限できず、保証しない（試験用ページはそれらを使わない。ネットワーク層の隔離は実行環境の担当で、ここでは主張しない）。
 //! 誤り・停止・`Drop` のすべてでセッションの削除と、子のプロセスグループ（chromedriver と Chrome）の終了・wait を行う。
 
 use std::ffi::OsString;
@@ -133,14 +135,15 @@ fn proxy_bypass_arg(allowed_origins: &[String]) -> String {
     list
 }
 
-/// `POST /session` の本文。Chrome の flag は `--headless=new` と、外部への通信を禁じる 3 つだけ（DPOL-30）。
+/// `POST /session` の本文。Chrome の flag は `--headless=new` と、外部への通信を禁じる 3 つだけ（DPOL-30。実起動ではこれに `--user-data-dir` が加わる）。
 /// `allowed_origins` に登録した origin 以外へは、初回の移動・リダイレクト・サブリソースとも送信前に失敗する（A10）。
 pub fn new_session_request_for(allowed_origins: &[String]) -> Value {
     new_session_request_with_profile(allowed_origins, None)
 }
 
+/// 実際の起動（`try_start`）と同じ入力で本文を作る入口。
 /// `profile_dir` があれば `--user-data-dir` で Chrome の一時領域をハーネスが所有する場所に固定する（後片付けはハーネスが行う）。
-fn new_session_request_with_profile(
+pub fn new_session_request_with_profile(
     allowed_origins: &[String],
     profile_dir: Option<&Path>,
 ) -> Value {
@@ -241,17 +244,19 @@ impl ChromeHandle {
                 return Err(err(E2eErrorKind::CommandFailed));
             }
             // リダイレクト先も許可リストで確かめる。外れていたら空白ページへ戻して誤りにする。
-            let landed_ok = l
-                .session
-                .current_url()
-                .is_ok_and(|u| url_is_allowed(&self.allowed_origins, &u));
-            if landed_ok {
-                Ok(())
-            } else {
-                if l.session.navigate("about:blank").is_err() {
-                    l.unusable = true;
+            match l.session.current_url() {
+                Ok(u) if url_is_allowed(&self.allowed_origins, &u) => Ok(()),
+                Ok(_) => {
+                    if l.session.navigate("about:blank").is_err() {
+                        l.unusable = true;
+                    }
+                    Err(err(E2eErrorKind::CommandFailed))
                 }
-                Err(err(E2eErrorKind::CommandFailed))
+                // 移動後の URL を取れない場合は着地先を確定できないので、空白ページへの復帰を試みず使用不可にする。
+                Err(_) => {
+                    l.unusable = true;
+                    Err(err(E2eErrorKind::CommandFailed))
+                }
             }
         })
     }
@@ -326,11 +331,13 @@ impl ChromeDriverComponent {
             result = Err(err(E2eErrorKind::StopFailed));
         }
         // プロセスの回収後に一時領域を消す（セッションを確立できなかった場合も同じ）。
-        if let Some(dir) = self.profile_dir.take()
-            && let Err(e) = std::fs::remove_dir_all(&dir)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            result = Err(err(E2eErrorKind::StopFailed));
+        // 削除の成功か NotFound を確かめるまでパスを保持し、stop()・Drop で再試行できるようにする。
+        if let Some(dir) = self.profile_dir.as_ref() {
+            match std::fs::remove_dir_all(dir) {
+                Ok(()) => self.profile_dir = None,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.profile_dir = None,
+                Err(_) => result = Err(err(E2eErrorKind::StopFailed)),
+            }
         }
         result
     }
@@ -506,6 +513,10 @@ impl E2eComponent for ChromeDriverComponent {
 
     fn start(&mut self) -> Result<(), E2eError> {
         if self.child.is_some() {
+            return Err(err(E2eErrorKind::StartFailed));
+        }
+        // 前回の一時領域の削除に失敗して残っていれば、再試行して消えるまで起動しない（パスを上書きして取りこぼさない）。
+        if self.profile_dir.is_some() && self.teardown().is_err() {
             return Err(err(E2eErrorKind::StartFailed));
         }
         let result = self.try_start();

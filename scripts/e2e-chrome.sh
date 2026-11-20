@@ -10,6 +10,9 @@ source "${DIR}/lib.sh"
 reject_args "$(basename "$0")" "$@"
 require_cmd cargo
 require_cmd chromedriver
+require_cmd mktemp
+require_cmd tee
+require_cmd grep
 cd "${ROOT_DIR}"
 
 # chrome_registration.rs は unix 限定（cfg(unix)）。uname はホストの判定で Cargo の対象と一致しないため、実行した試験の件数で確かめる。

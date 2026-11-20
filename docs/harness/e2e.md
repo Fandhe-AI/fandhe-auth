@@ -73,12 +73,13 @@ WebAuthn の secure context と RP ID は PoC-2 の結果を ID で引き、試�
 2/6 の入口は暫定の `make e2e-chrome`（`scripts/e2e-chrome.sh`。`#[ignore]` の `chrome_registration` を流す。CI 外）。
 chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless=new` と、外部への通信を禁じる `--host-resolver-rules`・
 `--proxy-server`（解決できない proxy）・`--proxy-bypass-list`（`<-loopback>` と登録 origin の `http://host:port`（スキーム付き）だけ。許可外の
-ループバックのポートも送信前に失敗させる。A10）の計 4 つだけで、
+ループバックのポートも送信前に失敗させる。A10）の 4 つと、ハーネスが付ける `--user-data-dir`（一時領域）だけで、
 `--disable-*`・`--no-sandbox` は足さない。`navigate` は移動後の URL も許可リストで確かめ、外れたら空白ページへ戻して誤りにする。
+A10 の保証範囲は Chrome の HTTP(S) の送信先までで、proxy を通らない WebRTC の直接 UDP などは flag では制限できず保証しない（試験用ページは使わない。ネットワーク層の隔離は実行環境の担当で、ここでは主張しない）。
 chromedriver の起動はプロセスグループを使うため、Chrome 側の実装・公開経路・試験は `cfg(unix)` に限る。
 停止は、子を回収する前にグループへ SIGKILL を送り、そのあと wait する（回収後の PID を宛先にしない）。
 WebDriver の応答は、ヘッダー名の token 検査・値と理由句の制御文字の拒否を行う。宣言した長さを超える余分なバイトの拒否は、
-長さに届いた後の短い猶予（50ms）内に届いた分までを保証の範囲とする（接続は 1 命令で捨てる）。
+長さに届いた後の短い猶予（50ms と残り時間の小さい方）内に届いた分までを保証の範囲とする（接続は 1 命令で捨てる）。
 
 - chromedriver・geckodriver は外部の実行ファイル。`#[ignore]` と明示の make ターゲット（`it-db` と同じ形）で CI の外に置く案。
 - 環境の有無で自動に飛ばす分岐は作らない（`DPOL-30`〜`32`）。ブラウザの起動 flag（`--disable-*` 等）は `DPOL-30` の走査語に掛かる。

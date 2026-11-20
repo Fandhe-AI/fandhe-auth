@@ -7,7 +7,7 @@
 //! path は許可文字だけ、path に埋める id は英数字と `-` だけ（A03）。応答はステータス行・ヘッダーの構文が正しくない・
 //! 長さが曖昧（重複・不正な Content-Length、chunked）・上限超過なら誤りにする（fail-closed）。
 //! 誤りに URL・ポート・path・応答本文を載せない（SECR-11・SECR-23）。
-//! 余分なバイトの拒否は、宣言した長さに届いた後の猶予（50ms）内に届いた分と、同じ受信に含まれた分までが保証の範囲
+//! 余分なバイトの拒否は、宣言した長さに届いた後の猶予（50ms と残り時間の小さい方）内に届いた分と、同じ受信に含まれた分までが保証の範囲
 //! （接続は 1 命令で捨てる）。
 //! 生の応答（`privateKey` を含み得る）を返す入口は crate 内に閉じ、外へは型付きの値だけを出す（SECR-10・SECR-11）。
 
@@ -328,12 +328,18 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
     // 宣言した長さに届いた時点で読み終えている場合、続きの余分なバイトを短い猶予で 1 回だけ確かめる。
     // 接続は 1 命令で捨てる（`Connection: close`）ので、猶予内に届かないバイトは見ない（保証は猶予内の到着まで）。
     if head.content_length.is_some() && !eof {
-        // 本文は期限内に届き切っているので、期限が丁度切れても完全な応答は成功にする。確かめる窓は固定の猶予だけ。
-        stream
-            .set_read_timeout(Some(EXTRA_BYTES_GRACE))
-            .map_err(|_| failed())?;
-        if matches!(stream.read(&mut chunk), Ok(n) if n > 0) {
-            return Err(failed());
+        // 確かめる窓は固定の猶予と残り時間の小さい方（絶対期限を超えない）。期限が尽きていたら確かめず、
+        // 本文が届き切った完全な応答は成功にする（保証は期限内の到着まで）。
+        if let Some(left) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+        {
+            stream
+                .set_read_timeout(Some(EXTRA_BYTES_GRACE.min(left)))
+                .map_err(|_| failed())?;
+            if matches!(stream.read(&mut chunk), Ok(n) if n > 0) {
+                return Err(failed());
+            }
         }
     }
     let body = &buf[end..];
