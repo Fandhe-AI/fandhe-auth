@@ -307,6 +307,8 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
   - 取得処理は `scripts/` に置かない（取得の前に `trusted/` が無く、PR の CI では main の版に新しいスクリプトが無いため）
 - 本文の走査の除外（`.agents/skills/<名前>/`）の一覧は、`trusted/` の `skills-lock.json` から検出器が読む。走査対象（`target/`）の
   `skills-lock.json` は読まない（PR が自分で名前を足して検査を免れないため。#6000）。`*.lock`・`.claude/skills/` は除外しない。
+  除外はディレクトリ単位で、登録名の下の既存ファイルへの追記・新規ファイル・リネームによる移動は走査されない（残る限界。TASK-6・#6000 で追跡。
+  登録名の下の変更は人がレビューで確かめる）。
   新しい skill を足す PR は、main の一覧にまだ名前が無いため中身が全部走査される（誤検出は人が判断する。先に lock だけを入れる等）
 - 取得は匿名で `GITHUB_TOKEN` を使わないため、ジョブの権限は `permissions: {}` にする
 - 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
