@@ -897,6 +897,23 @@ mod tests {
         panic!("not accepted");
     }
 
+    /// 非ブロッキングの待ち受けから受理する。`wait` なら握手の完了まで期限（5 秒）付きで待つ。
+    /// 期限は合否を決める時間ではなく、握手遅延で flaky にしないための上限。
+    fn accept_within(l: &TcpListener, wait: bool) -> std::io::Result<TcpStream> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match l.accept() {
+                Ok((c, _)) => return Ok(c),
+                Err(e)
+                    if wait && e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// 解除の排出が待ち行列の接続を切る（ORST-17）。遮断中に connect が済み、まだ accept していない接続は、
     /// 排出しなければ解除の後に accept されて上流へ届く。ここでは排出の後に accept できる接続が無く、切断になる。
     /// 待ちはカーネルが握手を終えるためだけで、合否を時間で決めない。
@@ -909,10 +926,16 @@ mod tests {
             shared.engage_block(&mut conns);
         }
         let mut client = connect(port);
-        thread::sleep(Duration::from_millis(50));
         {
             let _conns = shared.conns.lock().unwrap();
-            assert_eq!(drain_backlog(&l, &shared), Drain::Done(1));
+            // 握手の完了は期限付きで待つ（固定の待ちに頼らない）。最初の 1 件だけ待ち、以後は即 WouldBlock。
+            let mut waited = false;
+            let drained = drain_with(&shared, MAX_DRAIN_ON_RELEASE, MAX_DRAIN_INTERRUPTS, || {
+                let r = accept_within(&l, !waited);
+                waited = true;
+                r
+            });
+            assert_eq!(drained, Drain::Done(1));
             shared.blocked.store(false, Ordering::SeqCst);
         }
         assert!(accept_one(&l, &shared).is_none(), "nothing left to accept");
@@ -929,10 +952,10 @@ mod tests {
         assert_eq!(drain_backlog(&l, &shared), Drain::Done(0));
         let _c1 = connect(port);
         let _c2 = connect(port);
-        thread::sleep(Duration::from_millis(50));
-        let acc = || l.accept().map(|(c, _)| c);
+        // 受理は期限付きで待つ。件数で打ち切るので、待つのは受理が必要な間だけ。
+        let acc = || accept_within(&l, true);
         assert_eq!(drain_with(&shared, 1, 8, acc), Drain::Truncated(1));
-        let acc = || l.accept().map(|(c, _)| c);
+        let acc = || accept_within(&l, true);
         assert_eq!(drain_with(&shared, 1, 8, acc), Drain::Truncated(1));
         assert_eq!(drain_backlog(&l, &shared), Drain::Done(0));
         assert_eq!(shared.refused.load(Ordering::SeqCst), 2);
