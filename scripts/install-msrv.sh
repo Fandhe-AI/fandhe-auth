@@ -65,7 +65,9 @@ if ! active="$(rustc --version 2> /dev/null)" || [[ "${active}" != "rustc ${msrv
   exit 2
 fi
 if [ -n "${GITHUB_ENV:-}" ]; then
-  # 書けなければ後続のステップが MSRV 以外の toolchain で黙って走る（fail-open）ため、set -e に任せず 2 で止める。
+  # 書けない場合は変更前も set -e で非ゼロ終了していたが、終了コードは失敗した操作の状態に依っていた。
+  # 明示的に処理するのは、環境エラーの終了コードを 2 に統一し、原因を示す診断を出すため。
+  # 書けないまま進むと後続のステップが MSRV 以外の toolchain で黙って走る（fail-open）ので、必ず止める。
   if ! printf 'RUSTUP_TOOLCHAIN=%s\n' "${msrv}" >> "${GITHUB_ENV}"; then
     echo "error: could not write RUSTUP_TOOLCHAIN to GITHUB_ENV (later steps would not use the MSRV)" >&2
     exit 2
