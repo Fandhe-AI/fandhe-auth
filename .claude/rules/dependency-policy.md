@@ -89,12 +89,16 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 ```bash
 # advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。使った DB の commit と取得日を記録する
-cargo deny fetch
-cargo audit --file Cargo.lock        # cargo-audit の DB の取得を兼ねる（QP-2 の手順）
-git -C ~/.cargo/advisory-db log -1 --format='%H %cI'                  # cargo-audit の DB の commit と日時
+# 取得と監査を分ける。取得の段では監査を流さない（`cargo audit` を --no-fetch なしで流すと取得と監査が同時に走り、
+# 記録した DB の版と監査に使った版がずれうる）。
+cargo deny fetch db                  # cargo-deny の DB を取得する（`fetch` の対象は db・index・all）
+# cargo-audit 0.22.2 の --help には取得だけの口が無い（サブコマンドは bin のみ）。cargo-audit 用の DB を
+# 監査と別に取得する手順（--db で置き場を明示して git で取得する等）は TASK-679 で決める（未定）。決まるまで取得と監査を同時に流す形を契約にしない。
+git -C ~/.cargo/advisory-db log -1 --format='%H %cI'                  # cargo-audit の DB の commit と日時（既定の置き場。--db で変えられる）
 git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'  # cargo-deny の DB の commit と日時
+# 2 つのツールが同じ DB のスナップショットを共有できるかは未確認。両方の commit を記録し、食い違えば人が判断する（共有できると断定しない）
 
-# 取得なしで流す（DPOL-33・DPOL-34）
+# 取得なしで流す（DPOL-33・DPOL-34）。上で記録した DB だけを使い、ここでは取得しない
 cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
 cargo audit --no-fetch --file Cargo.lock    # cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
 git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換えが無いこと（依存を足した変更では差分を目視で確かめる）
