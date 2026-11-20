@@ -3,7 +3,9 @@
 #
 # 一時ディレクトリに使い捨ての git リポジトリを作り、secret-scan.sh の検出・許可ケースと
 # commit-msg-check.sh の OK / NG ケースを実際のスクリプトで検証する。
-# 外部依存は bash と git のみ。フックではなく CI で実行する（.claude/rules/git-hooks.md）。
+# 基本の外部依存は bash と git。msrv・install-msrv の節は cargo・jq・tomllib を持つ python3（3.11 以上）も要し、
+# 前提が足りなければ CI（CI か GITHUB_ACTIONS が設定されている）では失敗、ローカルでは skip する。
+# crate-deps の節は cargo が無ければ skip する。フックではなく CI で実行する（.claude/rules/git-hooks.md）。
 #
 # 回帰ケースは過去に見つかった fail-open の不具合クラスに対応する:
 #   (a) 検査エラーを「一致なし」と同一視する
@@ -1137,6 +1139,34 @@ EOF
   install_msrv_case "RUSTUP_UPDATE_ROOT set exits 2 without calling rustup" 2 "" "" "" RUSTUP_UPDATE_ROOT=https://example.invalid
   install_msrv_case "empty RUSTUP_DIST_SERVER exits 2 without calling rustup" 2 "" "" "" RUSTUP_DIST_SERVER=
   install_msrv_case "empty RUSTUP_UPDATE_ROOT exits 2 without calling rustup" 2 "" "" "" RUSTUP_UPDATE_ROOT=
+  # 書けない GITHUB_ENV（ディレクトリ。root でも確実に書き込みに失敗する）は、導入と既定化を終えた後の書き込みの段で
+  # 2 で止まり、原因を示す誤り文を出す（環境の誤りは 2 の契約。完了の log も出さない）。
+  ro_bin="${work_dir}/install-msrv-bin-ro"
+  ro_env="${work_dir}/install-msrv-ghenv-dir"
+  mkdir -p "${ro_bin}" "${ro_env}"
+  : > "${ro_bin}/rustup-calls"
+  cat > "${ro_bin}/rustup" <<'EOF'
+#!/bin/sh
+echo "$*" >> "${FAKE_RUSTUP_CALLS}"
+exit 0
+EOF
+  cat > "${ro_bin}/rustc" <<'EOF'
+#!/bin/sh
+echo "rustc ${FAKE_RUSTC_VER:-${RUSTUP_TOOLCHAIN:-unset}} (abcdef 2026-01-01)"
+EOF
+  chmod +x "${ro_bin}/rustup" "${ro_bin}/rustc"
+  rc=0
+  env -u RUSTUP_DIST_SERVER -u RUSTUP_UPDATE_ROOT -u RUSTUP_TOOLCHAIN \
+    FAKE_RUSTUP_CALLS="${ro_bin}/rustup-calls" FAKE_RUSTC_VER= PATH="${ro_bin}:${PATH}" HOME="${real_home}" GITHUB_ENV="${ro_env}" \
+    "${HOOK_BASH}" "${INSTALL_MSRV_SH}" > /dev/null 2> "${work_dir}/out" || rc=$?
+  got_calls="$(cat "${ro_bin}/rustup-calls")"
+  if [ "${rc}" -eq 2 ] && [ "${got_calls}" = "${want_calls}" ] \
+    && grep -qF "could not write RUSTUP_TOOLCHAIN to GITHUB_ENV" "${work_dir}/out" \
+    && ! grep -qF "active toolchain is" "${work_dir}/out"; then
+    pass "install-msrv: an unwritable GITHUB_ENV exits 2 after installing"
+  else
+    fail "install-msrv: an unwritable GITHUB_ENV exits 2 after installing" "exit ${rc} (expected 2), rustup calls: ${got_calls} (expected: ${want_calls})" "stderr: $(cat "${work_dir}/out")"
+  fi
 else
   echo "ok - install-msrv: skipped (cargo, jq or python3 with tomllib not found)"
 fi
