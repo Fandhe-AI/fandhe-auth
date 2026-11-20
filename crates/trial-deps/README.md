@@ -41,6 +41,8 @@ cargo test -p fandhe-auth-trial-deps --locked
 
 fuzz は別 workspace（`fuzz/`）で、`make build`・`make test`・`make lint`・`make crate-deps`・CI のどれの対象にもならない。CI に載せるかは `TASK-117` で決める。
 手で流すときは、空の専用のコーパスか合成の入力だけを使う。crash のときの stderr と `fuzz/artifacts/` を PR・Issue・記録に貼らない（`SECR-23`・`SECR-26`）。
+手で流す手順は、PR #5980 の本文にある折りたたみ「試しの実行の手順」に置いた。作業ディレクトリは `crates/trial-deps/fuzz`、対象は `secret_debug` である。
+手順には、lock の確認（`cargo metadata --locked`）と、空の専用コーパスの指定を含む。正式な手順は `TASK-117` が作る。
 nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly の版を残すかは未定（`D-2026-11-20-9`）で、記録の保存先も未定である。どちらも人が決める。
 
 ## 依存の監査

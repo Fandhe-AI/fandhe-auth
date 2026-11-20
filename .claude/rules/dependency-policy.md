@@ -78,7 +78,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
   - メモリの代替アダプター。試験用 feature の後ろに置き、本番の `cargo tree -e features` に現れない（LIB-6）。
   運用・検査用の `Ops` は Hub の担当（DPOL-38 の改訂 → Hub `ASTORE-5`）で、本体は作らない。
 - `jsonwebtoken`（DPOL-17）は、決まった feature 以外が有効になっていないかを `cargo tree -e features` で確かめる。
-- HTTP クライアントの具象 crate（`reqwest` 等）は本体の依存に現れないことを `cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" -i reqwest` で確かめる（合格: 一致なし。HOST-7・HOST-9）。下の確認手順の bash ブロックにも入れてある。
+- HTTP クライアントの具象 crate（`reqwest` 等）は本体の依存に現れないことを `cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest` で確かめる（合格: 一致なし。HOST-7・HOST-9）。下の確認手順の bash ブロックにも入れてある。
   限界: 機械の検査は `reqwest` の 1 名前だけを見る。他の具象 crate（`hyper` の client・`ureq` 等）はレビューで見る。
   検査する名前の一覧と `deny.toml` の bans への追加は未定（TASK-668 で決める。利用者が決めるまで名前を bans に足さない）。
 
@@ -105,11 +105,16 @@ git diff --exit-code crates/trial-deps/fuzz/Cargo.lock   # fuzz 側の Cargo.loc
 
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
 # SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形。無ければ空）
-cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 合格: 「did not match any packages」（一致なし）
-cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" -i native-tls  # 合格: 同上
-cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
-cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
-cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 合格: 「did not match any packages」（一致なし）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls  # 合格: 同上
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
+cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
+
+# K7: 試験の道具が本番の依存の木に入らない（D-2026-11-20-7）。trial-deps を除くのはこの 3 行だけ
+cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" -i tracing-subscriber  # 合格: 一致なし
+cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" -i proptest            # 合格: 同上
+cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" -i libfuzzer-sys       # 合格: 同上（fuzz は別 workspace のため、ルートの木に出ないことの確認）
 ```
 
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
@@ -132,9 +137,10 @@ cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build
     fuzz の workspace はルートの `cargo deny`・`cargo audit --file Cargo.lock` の対象に入らない（`libfuzzer-sys` とその推移依存を見ない）ので、
     上の確認手順の bash ブロックにある fuzz 側の 3 行（`--manifest-path crates/trial-deps/fuzz/Cargo.toml` と `crates/trial-deps/fuzz/Cargo.lock`）も流す（DPOL-33・DPOL-34）。
     `deny.toml` が無い間の扱いはルートと同じで、ルートの手順と同じ形で流す。`--config` で厳格版を渡すときは `check` の後ろに置く（`--manifest-path` と同じ階層には置けない）。
-    この crate は workspace のメンバーで、`tracing`・`metrics` とその推移依存を normal に持つ。本番向けの確認（上の `cargo tree --workspace`）に根として混ざらないよう、
-    `--exclude fandhe-auth-trial-deps` で明示して除く（K7・`D-2026-11-20-7`。DPOL-34）。試験用の依存の確認は別に
-    `cargo tree --locked -p fandhe-auth-trial-deps -e normal,build,dev --target all` で行う。
+    この crate は workspace のメンバーで、`tracing`・`metrics` とその推移依存を normal に持つ。試験用の依存（`tracing-subscriber`・`proptest` 等）も bans の対象で、
+    禁止の逆引き（`rsa`・`native-tls`・`openssl`・`web-sys`・`reqwest`）は trial-deps を含めて流す（`--exclude` で除かない。DPOL-40・DPOL-46）。
+    K7 の確認（`tracing-subscriber`・`proptest`・`libfuzzer-sys` の逆引き）だけは `--exclude fandhe-auth-trial-deps` を付けて流す（`D-2026-11-20-7`）。
+    試験用の依存の確認は別に `cargo tree --locked -p fandhe-auth-trial-deps -e normal,build,dev --target all` で行う。
   上の対象以外の依存は選定の記録に無いので、足す前に利用者へ確かめる。メール送信と外向き HTTP クライアントは選定の対象から外れた。本体は口と契約テストだけを持ち、具象は組込み先が選ぶ（`D-2026-11-20-4`・`HOST-7`・`AMTH-14`・`AAUD-40`・`DPOL-46`）ので、本体の依存に足さない。
 
 ## 関連 rule
