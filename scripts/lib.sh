@@ -10,13 +10,19 @@ set -euo pipefail
 
 # 本ファイルの親ディレクトリ（= リポジトリルート）を cwd に依存せず解決する。
 # `scripts/check.sh` を直接叩いても `make check` 経由でも同じ対象を扱うための前提。
+# 末尾の改行で終わるパスも保つため、`$(...)` が末尾の改行を落とす点を番兵（x）で避ける。
+# 出力は改行を足さないパスそのもので、受け取る側も番兵を付けて受けてから外す（下の ROOT_DIR）。
 repo_root() {
-  local lib_dir
+  local lib_dir root
   lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  (cd "${lib_dir}/.." && pwd)
+  root="$(cd "${lib_dir}/.." && pwd && printf x)"
+  root="${root%x}"
+  root="${root%$'\n'}"
+  printf '%s' "${root}"
 }
 
-ROOT_DIR="$(repo_root)"
+ROOT_DIR="$(repo_root && printf x)"
+ROOT_DIR="${ROOT_DIR%x}"
 # shellcheck disable=SC2034 # source した側のスクリプトで参照する
 readonly ROOT_DIR
 

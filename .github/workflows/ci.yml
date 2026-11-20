@@ -2,7 +2,7 @@
 #
 # ローカル（`make check`）・Git hooks（lefthook.yml）・CI が同じコマンド契約を共有する。
 # CI 側で独自のチェックを定義せず、scripts/ の実体を呼ぶ（make スキルの「入口は複数でも
-# 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブで流す（TASK-6）。
+# 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブ、秘密情報の検査は secret-scan ジョブで流す（TASK-6）。
 # 言語固有のジョブを足すときは、必ず ci-complete の needs にも追加すること。
 # ジョブ・発火条件の追加・変更時は .claude/rules/github-actions.md に従う。
 #
@@ -173,6 +173,39 @@ jobs:
       - name: make lint
         run: make lint
 
+  # 追跡ファイル全体の秘密情報の混入検査（TASK-6 4/10。#51）。処理は scripts/secret-scan-ci.sh に置き、ここは呼ぶだけ。
+  # 検出器（scripts/secret-scan-ci.sh・scripts/hooks/secret-scan.sh・陰性対照）は、PR では base のコミットを
+  # trusted/ へ取得した版だけを使い、PR の head（target/）は走査対象のデータとして渡す。PR 側の検出器は
+  # 呼ばない（検出器の書き換えで検査を迂回させない）。push（main）では同じコミットを両方に取得する。
+  # 公開ログへ出るのは規則 ID・件数の集計行と固定の診断文だけで、パス・値は出さない（--summary の契約。SECR-23）。
+  # 既知の限界: pull_request の workflow 定義（本ファイル）自体は PR が書き換えられる（#5985 で追跡。人の担当）。
+  # 他のジョブと同じく if: で skip させない（edited でも走らせる。上の on: のコメント）。
+  secret-scan:
+    name: "secret scan (tracked files)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted detector (PR base / pushed commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout scan target (PR head / pushed commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: target
+          persist-credentials: false
+
+      - name: Scan tracked files with the trusted detector
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: bash "${WORKSPACE}/trusted/scripts/secret-scan-ci.sh" "${WORKSPACE}/target"
+
   # squash merge では PR タイトルがそのままコミット件名になるため、commit-msg フックと
   # 同じスクリプトで Conventional Commits 形式を検証する（フックの CI 側の対）。
   # PR タイトルは任意文字列のため、${{ }} を run へ直接展開せず env 経由でファイルへ書き出す
@@ -212,6 +245,7 @@ jobs:
       - test-hooks
       - build-test
       - lint
+      - secret-scan
       - pr-title
     steps:
       - name: 全ジョブ結果の検証

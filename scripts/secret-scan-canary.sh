@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 秘密情報の検査（scripts/hooks/secret-scan.sh --tracked --summary。CI と同じ引数）の陰性対照（TASK-6。2 段目で CI の secret-scan ジョブが
+# 秘密情報の検査（scripts/hooks/secret-scan.sh --tracked --summary。CI と同じ引数）の陰性対照（TASK-6。CI の secret-scan ジョブが
 # `scripts/secret-scan-ci.sh` 経由で呼ぶ）。検出器が壊れて常に合格する状態（fail-open）を CI で見逃さないため、
 # 実行時に組み立てた既知のダミーだけを入れた一時 index（空から開始）を検出器に走査させ、
 # 終了コード 1・出力が許可した集計行の集合と完全に一致すること（余計な行は失敗）・ダミーの値が出力に無いことを確かめる。リポジトリの内容（PR・base の検出対象の有無）に結果が依存しない。「意図的に混入させたダミーで検査が失敗する」ことの証拠をログに残す役割を持つ。
@@ -38,7 +38,11 @@ for _v in ${env_names}; do
 done
 unset _v env_names
 export GIT_NO_REPLACE_OBJECTS=1
-require_cmd git
+# 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
+for _c in git mktemp mkdir rm sort cmp grep; do
+  require_cmd "${_c}" || exit 2
+done
+unset _c
 
 die() {
   echo "scan-canary: $*" >&2
@@ -50,14 +54,25 @@ g() {
   git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 
+# 一時領域は cd の前に作り、作った直後に絶対パスへ解決する（相対の TMPDIR が cd で別の場所を指さないように）。
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/scan-canary.XXXXXX" 2> /dev/null)" || die "mktemp failed"
+trap 'rm -rf "${work_dir}"' EXIT
+work_dir="$(cd "${work_dir}" 2> /dev/null && pwd -P && printf x)" || die "cannot resolve the temporary directory"
+work_dir="${work_dir%x}"
+work_dir="${work_dir%$'\n'}"
+case "${work_dir}" in
+  /*) ;;
+  *) die "cannot resolve the temporary directory" ;;
+esac
+# 検出器の mktemp なども絶対パスの一時領域を使うよう、TMPDIR も解決済みの値に置き換える。
+export TMPDIR="${work_dir}"
+
 cd "${ROOT_DIR}" 2> /dev/null || die "cannot enter the repository root"
 
 if ! real_objects="$(g rev-parse --path-format=absolute --git-path objects 2> /dev/null)" || [ -z "${real_objects}" ]; then
   die "failed to resolve the object directory"
 fi
 
-work_dir="$(mktemp -d "${TMPDIR:-/tmp}/scan-canary.XXXXXX" 2> /dev/null)" || die "mktemp failed"
-trap 'rm -rf "${work_dir}"' EXIT
 mkdir "${work_dir}/objects" 2> /dev/null || die "mkdir failed"
 
 # 以降の git は一時 index・一時 object dir だけを書き換える。

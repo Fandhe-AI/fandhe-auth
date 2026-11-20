@@ -20,7 +20,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 
 | ファイル | ジョブ（check 名） | トリガー | runs-on |
 | --- | --- | --- | --- |
-| `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
+| `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
 
@@ -272,3 +272,10 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
 
 この時点で push は `main` のみ・concurrency 設定済み・ジョブは並列で、ワークフローの統合や削除の余地は無かった。
 変更点は `main` への push で `cancel-in-progress` を無効化したことのみ。
+
+## 秘密情報の検査ジョブ（`secret scan (tracked files)`）
+
+- 検出器は PR では base のコミットを `trusted/` へ取得した版だけを使い、PR の head（`target/`）は走査対象のデータとして渡す
+  （`scripts/secret-scan-ci.sh <target>`）。push（main）では同じコミットを両方に取得する。PR 側の検出器を呼ばない
+- 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
+- 既知の限界: pull_request の workflow 定義自体は PR が書き換えられる（#5985 で追跡。人の担当）

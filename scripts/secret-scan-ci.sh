@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 秘密情報検査の CI 向け入口（TASK-6。2 段目で CI の secret-scan ジョブから呼ぶ予定〔#51〕。ローカルからも同じ形で呼べる）。
+# 秘密情報検査の CI 向け入口（TASK-6。CI の secret-scan ジョブから呼ぶ〔#51〕。ローカルからも同じ形で呼べる）。
 #   scripts/secret-scan-ci.sh [<走査対象のリポジトリのパス>]   既定は本スクリプトのあるリポジトリ
 # 検出器・陰性対照は本スクリプトと同じリポジトリ（CI では PR が書き換えられない base の版）のものを使い、
 # 走査対象はデータとして渡す。公開ログには規則 ID・件数・固定の診断文だけを出す。
@@ -18,6 +18,12 @@ source "${DIR}/lib.sh"
 # 想定外の失敗（set -e 相当）は検出（1）と取り違えないよう、すべて検査不能（2）として止める（fail-closed）。
 set -E
 trap 'echo "secret-scan-ci: internal error; aborting" >&2; exit 2' ERR
+
+# 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
+for _c in git mktemp grep rm; do
+  require_cmd "${_c}" || exit 2
+done
+unset _c
 
 # 呼び出し元の環境が git のリポジトリ・index・設定を差し替えないよう、GIT_* をすべて外す
 # （GIT_INDEX_FILE・GIT_DIR・GIT_WORK_TREE 等。対象の確認と本走査を同じ環境で行う）。
@@ -102,6 +108,22 @@ if ! work_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan-ci.XXXXXX" 2> /dev/null)
   exit 2
 fi
 trap 'rm -rf "${work_dir}"' EXIT
+# 相対の TMPDIR でも、git は `-C` や cd で作業ディレクトリが変わる。一時領域は作った直後に絶対パスへ解決してから使う。
+if ! work_dir="$(cd "${work_dir}" 2> /dev/null && pwd -P && printf x)"; then
+  echo "secret-scan-ci: cannot resolve the temporary directory" >&2
+  exit 2
+fi
+work_dir="${work_dir%x}"
+work_dir="${work_dir%$'\n'}"
+case "${work_dir}" in
+  /*) ;;
+  *)
+    echo "secret-scan-ci: cannot resolve the temporary directory" >&2
+    exit 2
+    ;;
+esac
+# 検出器の mktemp なども絶対パスの一時領域を使うよう、TMPDIR も解決済みの値に置き換える。
+export TMPDIR="${work_dir}"
 out="${work_dir}/out"
 tmp_index="${work_dir}/index"
 if ! GIT_INDEX_FILE="${tmp_index}" g -C "${target}" read-tree "${head_sha}" > /dev/null 2>&1; then
@@ -122,14 +144,34 @@ rc=0
 ) > "${out}" 2>&1 || rc=$?
 # 規則 ID は許可した一覧との完全一致だけを通す（任意の文字列・git の診断を公開ログへ通さない）。
 # grep の終了状態は 0 = 一致 / 1 = 該当なし / 2 以上 = エラー。1 だけを「該当なし」として許す。
+filtered="${work_dir}/filtered"
 grep_rc=0
-grep -aE '^secret-scan: (env-file|vendor-token|private-key|jwt|jwk-private|credential-url|assignment): [0-9]+ (line|file)\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) in [0-9]+ file\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) \([0-9]+ tracked file\(s\) checked\)$|^secret-scan: findings in tracked files$' "${out}" 2> /dev/null || grep_rc=$?
+grep -aE '^secret-scan: (env-file|vendor-token|private-key|jwt|jwk-private|credential-url|assignment): [0-9]+ (line|file)\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) in [0-9]+ file\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) \([0-9]+ tracked file\(s\) checked\)$|^secret-scan: findings in tracked files$' "${out}" > "${filtered}" 2> /dev/null || grep_rc=$?
 if [ "${grep_rc}" -gt 1 ]; then
   echo "secret-scan-ci: failed to filter the scanner output (grep exit ${grep_rc})" >&2
   exit 2
 fi
+# 許可した行だけを公開ログへ出し、走査完了の集計行（検出 0 件）の数と、それ以外の行の数を数える。
+clean_re='^secret-scan: total: 0 finding\(s\) \([0-9]+ tracked file\(s\) checked\)$'
+clean_lines=0
+other_lines=0
+while IFS= read -r line || [ -n "${line}" ]; do
+  printf '%s\n' "${line}"
+  if [[ ${line} =~ ${clean_re} ]]; then
+    clean_lines=$((clean_lines + 1))
+  else
+    other_lines=$((other_lines + 1))
+  fi
+done < "${filtered}"
 case "${rc}" in
-  0) ;;
+  0)
+    # 検出器が 0 を返しても、走査完了の集計行（検出 0 件）がちょうど 1 行で、ほかの許可行（検出の行）が無いことを
+    # 合格の条件にする。欠けていたり矛盾していたりしたら、走査が完了した証拠が無いため検査不能（2）。
+    if [ "${clean_lines}" -ne 1 ] || [ "${other_lines}" -ne 0 ]; then
+      echo "secret-scan-ci: the scanner exited 0 without exactly one completion summary line; treating as incomplete" >&2
+      exit 2
+    fi
+    ;;
   1)
     echo "secret-scan-ci: findings reported; details are withheld on the public log. Re-run locally: make secret-scan" >&2
     exit 1
