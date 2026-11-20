@@ -91,16 +91,24 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 # advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。使った DB の commit と取得日を記録する
 # 取得と監査を分ける。取得の段では監査を流さない（`cargo audit` を --no-fetch なしで流すと取得と監査が同時に走り、
 # 記録した DB の版と監査に使った版がずれうる）。
+# 取得が成功した UTC 日時と、監査に使う DB の commit を、両ツールについて記録する。
+# `%cI` は DB の commit の日時で取得日時ではないため、取得日時は取得の成功の直後に `date -u` で別に取る。
 cargo deny fetch db                  # cargo-deny の DB を取得する（`fetch` の対象は db・index・all）
-# cargo-audit 0.22.2 の --help には取得だけの口が無い（サブコマンドは bin のみ）。cargo-audit 用の DB を
-# 監査と別に取得する手順（--db で置き場を明示して git で取得する等）は TASK-679 で決める（未定）。決まるまで取得と監査を同時に流す形を契約にしない。
-git -C ~/.cargo/advisory-db log -1 --format='%H %cI'                  # cargo-audit の DB の commit と日時（既定の置き場。--db で変えられる）
-git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'  # cargo-deny の DB の commit と日時
+DENY_FETCHED_AT="$(date -u +%FT%TZ)" # cargo deny fetch が成功した直後の UTC 日時
+# cargo-audit 0.22.2 の --help には取得だけの口が無い（サブコマンドは bin のみ）。cargo-audit 用の DB は、
+# 監査の直前に取得した置き場を --db で明示して渡す。置き場は実行ごとの新しい空のディレクトリにし、既定の
+# ~/.cargo/advisory-db や前回の残りを使わない（古い DB で成功する経路を残さない）。取得の具体の手順
+# （例: 空のディレクトリへの advisory-db の git clone）は TASK-679 で決める（未定）。暫定でもこの前提を外さない。
+# AUDIT_DB=<直前に取得した DB のディレクトリ>   # 取得が失敗したら監査へ進まず失敗にする
+# AUDIT_FETCHED_AT="$(date -u +%FT%TZ)"         # 取得が成功した直後の UTC 日時
+git -C "$AUDIT_DB" log -1 --format='%H'                               # cargo-audit が使う DB の commit
+git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H'  # cargo-deny の DB の commit
+# 記録: DENY_FETCHED_AT・AUDIT_FETCHED_AT と、上の 2 つの commit（DPOL-33）
 # 2 つのツールが同じ DB のスナップショットを共有できるかは未確認。両方の commit を記録し、食い違えば人が判断する（共有できると断定しない）
 
 # 取得なしで流す（DPOL-33・DPOL-34）。上で記録した DB だけを使い、ここでは取得しない
 cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
-cargo audit --no-fetch --file Cargo.lock    # cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
+cargo audit --no-fetch --db "$AUDIT_DB" --file Cargo.lock   # 直前に取得した DB を明示して渡す。cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
 git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換えが無いこと（依存を足した変更では差分を目視で確かめる）
 
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
