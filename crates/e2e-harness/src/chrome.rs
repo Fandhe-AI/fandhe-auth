@@ -226,20 +226,19 @@ impl ChromeDriverComponent {
             let ready = probe.is_ready() && Instant::now() < deadline;
             // ready を受理する前に子の生存を確かめる。子が終了していたら、応答したのは別のプロセスの可能性があり、
             // 起動の失敗にする（ポートの所有の完全な照合ではない。試験環境の上の攻撃者の仮定は P2 以下）。
-            match self.child.as_mut().map(Child::try_wait) {
-                Some(Ok(None)) => {
+            match self.child.as_mut().map(child_state) {
+                Some(ChildState::Alive) => {
                     if ready {
                         break;
                     }
                 }
-                Some(Ok(Some(_))) => {
-                    // 親が先に終了しても、配下（子孫）が同じグループに残り得る。回収の直後にグループへ送って止める
-                    // （グループの ID は、メンバーが残る間は再利用されない。残っていなければ ESRCH で成功）。
-                    // 回収済みの PID は teardown から再度送らないよう手放す。送信の失敗は握りつぶさず、起動の失敗に含める。
-                    let pgid = self.child.as_ref().map(Child::id);
-                    self.child = None;
-                    if let Some(pgid) = pgid {
-                        let _ = kill_group(pgid);
+                // 終了しているが未回収（zombie）。所有を保ったまま返し、呼び出し元（`start`）の teardown が
+                // 回収の前にグループへ送って止める。止められなければ所有を保ち、後の stop・Drop で再試行できる。
+                Some(ChildState::ExitedUnreaped) => return Err(fail()),
+                // 状態を見分けられず `try_wait` で回収した場合。PID が再利用され得るので手放し、直後にグループへ送る。
+                Some(ChildState::Reaped) => {
+                    if let Some(c) = self.child.take() {
+                        let _ = kill_group(c.id());
                     }
                     return Err(fail());
                 }
@@ -292,6 +291,65 @@ impl Drop for ChromeDriverComponent {
     fn drop(&mut self) {
         let _ = self.teardown();
     }
+}
+
+/// 子の状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildState {
+    /// 動いている。
+    Alive,
+    /// 終了したが回収していない（zombie）。グループ ID はまだ保たれている。
+    ExitedUnreaped,
+    /// `try_wait` が回収した（`ps` で見分けられなかったときの代替）。
+    Reaped,
+    /// 見分けられない。
+    Unknown,
+}
+
+/// 子を回収せずに状態を見る。`ps` の状態（`Z` は zombie）で見分け、見分けられなければ `try_wait` に落とす。
+/// 回収の前にグループへ送れるようにするため（回収すると、再利用され得る PGID へ送ることになる）。
+fn child_state(child: &mut Child) -> ChildState {
+    if let Some(stat) = ps_stat(child.id())
+        && !stat.is_empty()
+    {
+        return if stat.starts_with('Z') {
+            ChildState::ExitedUnreaped
+        } else {
+            ChildState::Alive
+        };
+    }
+    match child.try_wait() {
+        Ok(None) => ChildState::Alive,
+        Ok(Some(_)) => ChildState::Reaped,
+        Err(_) => ChildState::Unknown,
+    }
+}
+
+/// `ps -o stat= -p <pid>` の出力（期限付き。無期限に待たない）。
+fn ps_stat(pid: u32) -> Option<String> {
+    let mut child = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + KILL_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => sleep(Duration::from_millis(5)),
+            _ => {
+                let _ = child.kill();
+                let _ = wait_until(&mut child, KILL_REAP_TIMEOUT);
+                return None;
+            }
+        }
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
+    Some(text.trim().to_owned())
 }
 
 /// `kill` の実行時間の上限。ハーネスの安全上の値で、要件の値ではない。
@@ -395,6 +453,24 @@ mod tests {
             KillOutcome::Failed
         );
         assert_eq!(classify_kill(false, ""), KillOutcome::Failed);
+    }
+
+    #[test]
+    fn exited_leader_is_seen_unreaped_so_the_group_can_be_killed_before_reaping() {
+        // 親が子孫を残して終了する。回収せずに終了を見分け、回収の前にグループへ送って子孫を止められる。
+        let mut leader = Command::new("sh")
+            .args(["-c", "sleep 30 & exit 0"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child_state(&mut leader) == ChildState::Alive && Instant::now() < deadline {
+            sleep(Duration::from_millis(20));
+        }
+        assert_eq!(child_state(&mut leader), ChildState::ExitedUnreaped);
+        // 未回収なので PGID はまだ自分の子のもの。回収の前に送る。
+        assert!(kill_group(leader.id()).is_ok());
+        assert!(wait_until(&mut leader, Duration::from_secs(5)).is_ok());
     }
 
     #[test]

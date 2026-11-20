@@ -89,6 +89,7 @@ version = "0.0.0"
 name = "fandhe-auth-e2e-harness"
 version = "0.0.0"
 dependencies = [
+ "fandhe-auth-secret",
  "serde_json",
 ]
 

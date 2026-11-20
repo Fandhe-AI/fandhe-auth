@@ -13,6 +13,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
+use fandhe_auth_secret::SecretString;
 use serde_json::{Value, json};
 
 use crate::component::E2eComponentKind;
@@ -74,13 +75,13 @@ fn validated_path(path: &str) -> Result<&str, E2eError> {
 /// `Debug` で値の代わりに出す固定の文字列（SECR-11）。
 const REDACTED: &str = "<redacted>";
 
-/// セッション ID。セッションを操作できる値のため、専用の型で持つ（SECR-10・SECR-30。`fandhe-auth-secret` へは
-/// `scripts/check-crate-deps.sh` の許可表で辺が許されていないため、この crate の中に非公開の型を置く）。
+/// セッション ID。セッションを操作できる値のため、秘密値の型 `SecretString`（`fandhe-auth-secret`。SECR-31）で持つ
+/// （SECR-10・SECR-30。`e2e-harness → secret` の辺は利用者の承認、2026-11-20）。
 ///
 /// `Debug` は固定の文字列だけ。`Display`・`Clone` 以外の暗黙の取り出し経路を持たず、値は要求の path を
 /// 組み立てるときだけ [`SessionId::expose`] で借りる（SECR-11・SECR-16）。
 #[derive(Clone)]
-struct SessionId(String);
+struct SessionId(SecretString);
 
 impl fmt::Debug for SessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -90,12 +91,12 @@ impl fmt::Debug for SessionId {
 
 impl SessionId {
     fn new(raw: &str) -> Result<Self, E2eError> {
-        validated_id(raw).map(Self)
+        validated_id(raw).map(|v| Self(SecretString::new(v)))
     }
 
     /// 要求の path の組み立てだけで使う。戻り値をログ・誤りに渡さない。
     fn expose(&self) -> &str {
-        &self.0
+        self.0.expose()
     }
 }
 
@@ -290,6 +291,8 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
     if !(200..300).contains(&status) || value.get("error").is_some_and(Value::is_string) {
         return Err(failed());
     }
+    // 成功として返す直前にも、同じ絶対期限を確かめる（最後の read・解析で期限を過ぎた応答は成功にしない）。
+    remaining(deadline)?;
     Ok(value)
 }
 
@@ -305,6 +308,14 @@ fn parse_status_line(head: &[u8]) -> Result<u16, E2eError> {
     code.parse::<u16>().map_err(|_| failed())
 }
 
+/// HTTP の token（空でなく、英数字と ``!#$%&'*+-.^_`|~`` だけ）。
+fn is_token(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
 /// ヘッダー部の構文を一度だけ検証する。行は CRLF だけで区切り（裸の CR・LF を含む行は誤り）、
 /// 2 行目以降は名前が空でない `名前: 値` の形に限る。解釈できない行を読み飛ばして `Content-Length` を
 /// 見落とすことがないようにする（fail-closed）。
@@ -315,8 +326,9 @@ fn validate_head(head: &[u8]) -> Result<(), E2eError> {
             return Err(failed());
         }
         if i > 0 {
+            // 名前は HTTP の token の文字だけ（RFC 9110）。コロンの前の空白も拒否する（名前を trim しない）。
             match line.split_once(':') {
-                Some((name, _)) if !name.trim().is_empty() => {}
+                Some((name, _)) if is_token(name) => {}
                 _ => return Err(failed()),
             }
         }
@@ -485,6 +497,8 @@ mod tests {
             _id: SessionId,
         }
         let id = SessionId::new("sid-visible-9").unwrap();
+        // 値は共有の秘密値の型で持つ（SECR-31）。
+        let _: &SecretString = &id.0;
         assert_eq!(id.expose(), "sid-visible-9");
         for shown in [
             format!("{id:?}"),
