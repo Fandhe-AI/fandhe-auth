@@ -26,6 +26,9 @@
 # 一致した行・値・値の一部・長さは出さない。0 件なら終了コード 0、1 件以上なら 1。
 #
 # 走査範囲: 追加行のみ（削除行は漏洩済み値の除去コミットを妨げないため対象外）。
+# 本文は `git diff --text` で受けるため、.gitattributes の binary・-diff 属性や NUL を含むファイルも走査する。
+# NUL は取り除いた版と空白へ置き換えた版の両方で照合する。照合できるのは上の規則表の形式（行内の文字列）だけで、
+# 圧縮・エンコード（base64 等）・複数行に分割された値・規則に無い形の値は検出できない。
 # .agents/skills/・.claude/skills/・*.lock は本文の走査（規則 assignment 等）の対象外（skills-lock.json 管理の外部取得物・ハッシュ列）。
 # ただし env-file の名前の検査は除外より前に全パスへ掛かる（除外は本文の走査にだけ効く。fail-closed）。
 # 範囲外で検出力が無いもの: コミット履歴・submodule の中・バイナリ・規則に無い形（長い 16 進や base64 の塊単体）。
@@ -56,6 +59,14 @@ case "$#:${1:-}:${2:-}" in
     exit 2
     ;;
 esac
+
+# git の診断（標準エラー）の出力先を fd 5 に固める。通常は受け継いだ標準エラーの複製、--summary（公開ログ用）
+# では /dev/null（診断はパス・値を含み得る。SECR-23）。失敗は終了状態で検知し、固定の文言と終了コードで伝える。
+if [ "${summary}" -eq 1 ]; then
+  exec 5> /dev/null
+else
+  exec 5>&2
+fi
 
 # 行に対する規則（bash 3.2 互換のため添字配列を並べる）。nocase_from 以降は大文字小文字を区別しない。
 rule_ids=(vendor-token private-key jwt jwk-private credential-url assignment)
@@ -135,7 +146,7 @@ expect_none "+password = ${q}short${q}"
 
 # サブディレクトリから直接実行しても走査範囲が狭まらないよう、リポジトリルートで実行する。
 # rev-parse の失敗を `cd "$(...)"` に埋めると cd "" になり失敗が隠れるため、先に代入で受ける。
-if ! repo_root="$(git rev-parse --show-toplevel)" || [ -z "${repo_root}" ]; then
+if ! repo_root="$(git rev-parse --show-toplevel 2>&5)" || [ -z "${repo_root}" ]; then
   echo "secret-scan: not inside a git work tree; aborting" >&2
   exit 2
 fi
@@ -157,24 +168,18 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 # 空になりうる配列を使わず mode で分岐し、tracked のときだけ empty_tree を渡す。
 empty_tree=""
 if [ "${mode}" = tracked ]; then
-  if ! empty_tree="$(git hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
+  if ! empty_tree="$(git hash-object -t tree --stdin < /dev/null 2>&5)" || [ -z "${empty_tree}" ]; then
     echo "secret-scan: failed to resolve the empty tree; aborting" >&2
     exit 2
   fi
 fi
 scan_diff() {
-  # --summary（公開ログ用）では git の診断（標準エラー。パス・値を含み得る）を捨てる。
-  # 失敗は終了状態で検知して固定の文言で止まる（呼び出し側の `if !` が exit 2）。
-  local errsink=/dev/stderr
-  if [ "${summary}" -eq 1 ]; then
-    errsink=/dev/null
-  fi
   if [ "${mode}" = tracked ]; then
     git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@" 2> "${errsink}"
+      --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@" 2>&5
   else
     git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "$@" 2> "${errsink}"
+      --src-prefix=a/ --dst-prefix=b/ "$@" 2>&5
   fi
 }
 
@@ -215,7 +220,7 @@ done < "${tmp_dir}/names"
 
 # 取り違えで「対象なし」を合格にしないため、追跡ファイルがあるのに対象が 0 件なら止める。
 if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
-  if ! git ls-files -z > "${tmp_dir}/ls"; then
+  if ! git ls-files -z > "${tmp_dir}/ls" 2>&5; then
     echo "secret-scan: failed to list tracked files; aborting" >&2
     exit 2
   fi
@@ -248,7 +253,9 @@ fi
 # scan_pass <file>: `+++ b/<path>` のファイルヘッダは `diff --git` から最初の `@@` までの間でだけ解釈する。
 # hunk 内の追加行の本文が `++ b/...`・`++...` で始まると diff 上は `+++...` になるため、
 # 行頭だけで判定するとヘッダと誤認して走査から漏れる。ヘッダ区間以外の `+` 行はすべて走査する。
-hit_lines="|"
+# 再走査が要る（NUL がある）ときだけ、1 回目に検出した行番号を seen に記録する（bash 3.2 の添字配列）。
+seen=()
+record_seen=0
 scan_pass() {
   local in_header=0 current_file="" line lineno=0
   while IFS= read -r line || [ -n "${line}" ]; do
@@ -281,8 +288,13 @@ scan_pass() {
     fi
     case "${line}" in
       '+'*)
-        if [[ "${hit_lines}" != *"|${lineno}|"* ]] && classify_line "${line}"; then
-          hit_lines+="${lineno}|"
+        if [ -n "${seen[lineno]:-}" ]; then
+          continue
+        fi
+        if classify_line "${line}"; then
+          if [ "${record_seen}" -eq 1 ]; then
+            seen[lineno]=1
+          fi
           rule_hits[hit]=$((rule_hits[hit] + 1))
           add_flagged "${current_file:-(unknown)}"
         fi
@@ -290,8 +302,12 @@ scan_pass() {
     esac
   done < "$1"
 }
-scan_pass "${tmp_dir}/diff.del"
-if ! cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del"; then
+if cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del"; then
+  scan_pass "${tmp_dir}/diff.del"
+else
+  record_seen=1
+  scan_pass "${tmp_dir}/diff.del"
+  record_seen=0
   scan_pass "${tmp_dir}/diff.sp"
 fi
 

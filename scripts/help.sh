@@ -28,9 +28,12 @@ cat <<'EOF'
   pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
   it-db       scripts/it-db.sh               ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）
 
+CI 向けに直接実行するコマンド:
+
+  scripts/secret-scan-ci.sh [PATH]      CI 向けの入口（--summary で件数のみ公開 + 陰性対照。PATH は走査対象のリポジトリのルート。HEAD と一致しない index は検査不能で終了コード 2）
+
 Git hooks（lefthook.yml から呼ばれる。直接実行も可）:
 
-  scripts/secret-scan-ci.sh             CI 向けの入口（--summary で件数のみ公開 + 陰性対照。引数は走査対象のパス）
   scripts/hooks/secret-scan.sh          staged 差分の秘密情報検知（--tracked は追跡ファイル全体。フックからは呼ばない）
   scripts/hooks/commit-msg-check.sh F   コミットメッセージ F の Conventional Commits 検証
 

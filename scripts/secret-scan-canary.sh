@@ -68,8 +68,16 @@ for expected in \
   'secret-scan: total: 2 finding(s) in 2 file(s)'; do
   grep -qxF -- "${expected}" "${work_dir}/out" || fail "missing expected line: ${expected}"
 done
-if grep -qF -- "${key_line}" "${work_dir}/out"; then
-  fail "scanner output contains the planted value"
-fi
+# grep の終了状態は 0 = 一致 / 1 = 不一致 / 2 以上 = エラー。1 のときだけ「値は出ていない」とする。
+grep_rc=0
+grep -qF -- "${key_line}" "${work_dir}/out" || grep_rc=$?
+case "${grep_rc}" in
+  1) ;;
+  0) fail "scanner output contains the planted value" ;;
+  *)
+    echo "scan-canary: FAILED: could not check the scanner output (grep exit ${grep_rc})" >&2
+    exit 2
+    ;;
+esac
 
 echo "scan-canary: scanner exited 1 on the planted dummies as expected (private-key: 1, env-file: 1, total: 2)"

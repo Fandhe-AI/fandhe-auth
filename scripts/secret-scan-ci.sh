@@ -12,6 +12,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
 
+# 呼び出し元の環境が git のリポジトリ・index・設定を差し替えないよう、GIT_* をすべて外す
+# （GIT_INDEX_FILE・GIT_DIR・GIT_WORK_TREE 等。対象の確認と本走査を同じ環境で行う）。
+for _v in $(compgen -e | grep '^GIT_' || true); do
+  unset "${_v}"
+done
+unset _v
+
 if [ "$#" -gt 1 ]; then
   echo "usage: secret-scan-ci.sh [<target-repo-path>]" >&2
   exit 2
@@ -26,6 +33,15 @@ target="$(cd "${target}" && pwd -P)"
 top="$(git -C "${target}" rev-parse --show-toplevel 2>/dev/null)" || top=""
 if [ -z "${top}" ] || [ "$(cd "${top}" && pwd -P)" != "${target}" ]; then
   echo "secret-scan-ci: target is not the root of a git repository" >&2
+  exit 2
+fi
+
+# 走査は index を読むため、index が HEAD のコミットと一致しない（取り違え・未コミットの変更）ときは
+# 検査不能として止める（fail-closed）。終了状態は 0 = 一致 / 1 = 差分あり / その他 = 失敗。
+idx_rc=0
+git -C "${target}" diff-index --cached --quiet HEAD -- > /dev/null 2>&1 || idx_rc=$?
+if [ "${idx_rc}" -ne 0 ]; then
+  echo "secret-scan-ci: index does not match HEAD (exit ${idx_rc}); cannot scan" >&2
   exit 2
 fi
 

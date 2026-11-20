@@ -353,6 +353,106 @@ check_scan "(tracked) secret after consecutive NUL bytes is detected" 1 nulmulti
 new_repo; printf 'x = %s\000%s\n' "${token:0:8}" "${token:8}" > nulsplit.dat; git add nulsplit.dat; git commit -q -m "chore: nul split"
 check_scan "(tracked) secret split by a NUL byte is detected" 1 nulsplit.dat
 
+# NUL と同じ行の秘密値は 2 回の走査（NUL 除去・空白置換）でも 1 件として数える
+new_repo; printf 'pad\000x = %s\n' "${token}" > nulcount.dat; git add nulcount.dat; git commit -q -m "chore: nul count"
+check_scan "(tracked) NUL line is counted once" 1 nulcount.dat
+expect_out "(tracked) NUL line count" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
+# --summary は git の診断（標準エラー）を捨て、通常モードは受け継いだ標準エラーに出す
+new_repo
+rc=0
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=ls-files LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && ! grep -q "git shim" "${work_dir}/out"; then
+  pass "secret-scan: (tracked) --summary drops git diagnostics (ls-files)"
+else
+  fail "secret-scan: (tracked) --summary drops git diagnostics (ls-files)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rc=0
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=hash-object LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && ! grep -q "git shim" "${work_dir}/out"; then
+  pass "secret-scan: (tracked) --summary drops git diagnostics (hash-object)"
+else
+  fail "secret-scan: (tracked) --summary drops git diagnostics (hash-object)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rc=0
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=ls-files LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" --tracked > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -q "git shim" "${work_dir}/out"; then
+  pass "secret-scan: (tracked) normal mode keeps git diagnostics on stderr"
+else
+  fail "secret-scan: (tracked) normal mode keeps git diagnostics on stderr" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# ---- scripts/secret-scan-ci.sh（CI 向けの入口）
+CI_ENTRY="${HOOKS_DIR}/../secret-scan-ci.sh"
+new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan-ci: clean repository passes"
+else
+  fail "secret-scan-ci: clean repository passes" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+stage extra.txt "world"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "secret-scan-ci: index differing from HEAD exits 2"
+else
+  fail "secret-scan-ci: index differing from HEAD exits 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 呼び出し元の GIT_INDEX_FILE（秘密値入りの別 index）を渡しても、対象の本来の index（HEAD と一致）を走査する
+new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
+alt_index="${work_dir}/alt-index-${repo_seq}"
+GIT_INDEX_FILE="${alt_index}" git read-tree HEAD
+printf '%s\n' "x = ${token}" > leak.txt
+GIT_INDEX_FILE="${alt_index}" git add leak.txt
+rc=0
+GIT_INDEX_FILE="${alt_index}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan-ci: caller GIT_INDEX_FILE is ignored"
+else
+  fail "secret-scan-ci: caller GIT_INDEX_FILE is ignored" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 親のリポジトリを走査しないよう、リポジトリのルートでない対象は exit 2
+mkdir -p "${repo}/sub"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}/sub" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "secret-scan-ci: non-root target exits 2"
+else
+  fail "secret-scan-ci: non-root target exits 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# ---- scripts/secret-scan-canary.sh: grep のエラー（終了状態 2）は失敗にする
+grep_shim_dir="${work_dir}/grep-shim"
+mkdir -p "${grep_shim_dir}"
+real_grep="$(command -v grep)"
+cat > "${grep_shim_dir}/grep" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "-qF" ]; then
+  exit 2
+fi
+exec "${real_grep}" "\$@"
+EOF
+chmod +x "${grep_shim_dir}/grep"
+rc=0
+PATH="${grep_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "scan-canary: grep error on the leak check fails (exit 2)"
+else
+  fail "scan-canary: grep error on the leak check fails (exit 2)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "scan-canary: passes without a grep error"
+else
+  fail "scan-canary: passes without a grep error" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 new_repo; stage .gitattributes "* -diff"; stage app.txt "x = ${token}"; git commit -q -m "chore: attr"
 check_scan "(tracked) -diff attribute does not hide content" 1 app.txt
 
