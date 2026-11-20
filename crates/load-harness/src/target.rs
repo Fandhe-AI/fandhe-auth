@@ -6,13 +6,15 @@
 //! 呼び出し先: 計測の部品・生成器・集計だけ。対象を具体の stub に結ぶ部分は呼び出し元（試験）が書く。
 //! 時計は注入で受け、環境変数・設定ファイル・壁時計を読まない（DPOL-32）。
 //!
-//! 結果の記録: 呼び出しごとの種類と区間の時間は [`TargetRun`] の `run`・`summary` に残る。
+//! 結果の記録: [`TargetRun`] の `run`・`summary` に残る。試行番号と時間の標本が残るのは成功と失敗（種類を問わない）だけで、
+//! 失敗の種類（`rejected`・`unavailable`）・時間切れ・暖機の除外は件数だけが残り、標本は残らない。
 //! `fandhe-auth-load-record/1` のファイルへの出力は未提供で、担当の段は未決（`docs/harness/load.md`）。
 //! 対象は stub だけで、実物の経路は最小の組込み先の完成後に呼ぶ。
 //! TODO(TASK-716): 実物の経路の呼び出しは最小の組込み先の完成後に足す。stub の合格を実物の合格に数えない
 //! （A-2026-10-28-9・ACPT-7）。合否は付けない。
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::aggregate::{AggregateError, RunSummary, summarize_run};
@@ -149,9 +151,11 @@ impl From<MeterError> for TargetError {
 /// 対象を閉ループで呼び、結果を [`TargetRun`] に残す。
 ///
 /// 閉包は試行ごとに 1 回呼ばれ、`spec` の区間で測られる。対象の中で計測の誤りが起きたら最初の誤りを残し、
-/// 試行を `Excluded` で締めて生成器に新しい試行を止めさせる（本計測の段では `InvalidOutcome` で止まる。
-/// この挙動は生成器の fail-closed に依存する）。戻ったら結果より先に残した誤りを見て、
-/// 黙って数えず [`TargetError::Meter`] を返す。panic・`unwrap` は使わない。
+/// 試行を `Excluded` で締める。誤りの後は暖機・本計測のどちらでも閉包を呼ばず（呼び出しは増えない）、
+/// 本計測の段では `Excluded` が生成器の `InvalidOutcome` で停止を起こす（生成器の fail-closed に依存する）。
+/// 暖機の段は生成器が結果を問わず `Excluded` で締めるため止まらないが、暖機の残りは閉包を呼ばずに空回りし、
+/// 本計測の最初の試行で止まる。戻ったら結果より先に残した誤りを見て、黙って数えず [`TargetError::Meter`] を返す。
+/// panic・`unwrap` は使わない。
 ///
 /// # Errors
 /// 計測の誤り・生成の誤り・集計の誤り。
@@ -167,13 +171,18 @@ where
     let interval = spec.interval();
     let meter = RunMeter::new(clock, std::slice::from_ref(interval))?;
     let first_error: Mutex<Option<MeterError>> = Mutex::new(None);
+    let failed = AtomicBool::new(false);
     let record = |e: MeterError| {
+        failed.store(true, Ordering::SeqCst);
         let mut g = first_error.lock().unwrap_or_else(PoisonError::into_inner);
         if g.is_none() {
             *g = Some(e);
         }
     };
     let result = run_closed_loop(meter, config, |trial| {
+        if failed.load(Ordering::SeqCst) {
+            return Outcome::Excluded;
+        }
         let called = match trial.measure(interval, &call) {
             Ok(r) => r,
             Err(e) => {
