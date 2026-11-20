@@ -240,6 +240,46 @@ fn all_in_flight_failures_stop_without_new_trials() {
     assert_eq!(calls.load(Ordering::SeqCst), C);
 }
 
+/// #5984（仮置き。ACPT-7）: 1 つのワーカーが誤りを記録した後に、取得済みの試行を正常に締めたワーカーが枠の取得へ
+/// 戻っても、次の対象の呼び出しは起きない。誤りを返した側の記録が済むまで、もう一方の締めを遅らせる（待ちは有限）。
+/// 順序は完全には固定できないので繰り返す。停止の判定が欠けていれば、もう一方が次の試行を取って 3 回目の呼び出しが起きる。
+#[test]
+fn healthy_worker_returning_after_error_does_not_start_new_trial() {
+    for _ in 0..50 {
+        let clock = FakeClock::new();
+        let name = iv();
+        let calls = AtomicU64::new(0);
+        let barrier = Rendezvous::new(2);
+        let a_returned = AtomicBool::new(false);
+        let r = run_closed_loop(meter(&clock), &cfg(2, 100, 0), |t| {
+            let index = calls.fetch_add(1, Ordering::SeqCst);
+            if index >= 2 {
+                // 停止が効いていれば来ない呼び出し。
+                return Outcome::Excluded;
+            }
+            barrier.wait();
+            if index == 0 {
+                a_returned.store(true, Ordering::SeqCst);
+                return Outcome::Excluded;
+            }
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !a_returned.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            // 誤りの記録が済むのを待つ。
+            for _ in 0..10_000 {
+                std::thread::yield_now();
+            }
+            t.measure(&name, || clock.advance(1)).unwrap();
+            Outcome::Success
+        });
+        assert!(barrier.completed(), "rendezvous aborted or timed out");
+        assert!(a_returned.load(Ordering::SeqCst));
+        assert_eq!(r.unwrap_err(), LoadError::InvalidOutcome);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+}
+
 #[test]
 fn unmeasured_success_is_rejected() {
     let clock = FakeClock::new();

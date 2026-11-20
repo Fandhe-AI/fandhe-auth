@@ -205,6 +205,12 @@ impl Shared {
 
     /// 試行の枠を 1 つ取る。上限に達した・停止中・溢れたときは `false`。
     fn claim(&self, count: u64) -> bool {
+        self.claim_after(count, || {})
+    }
+
+    /// `claim` と同じ。ロックを取る直前に `before_lock` を呼ぶ（#5984 の試験用の同期点。通常は何もしない）。
+    fn claim_after(&self, count: u64, before_lock: impl FnOnce()) -> bool {
+        before_lock();
         let mut g = self.lock();
         if g.first_error.is_some() || g.next >= count {
             return false;
@@ -373,40 +379,43 @@ mod tests {
         assert_eq!(next_of(&s), 1);
     }
 
-    /// 同期点を制御した順序の試験。取得者が枠のロックの待ちに入っている間に、ロックを持つ側が記録を確定する。
-    /// 待っていた取得は記録の後に走るので、枠を更新できず `false` になる。記録と枠の更新が別のロックなら、
-    /// 記録を確定した後でも待っていた取得が枠を進められる。待ちは有限回で打ち切る。
+    /// 同期点を制御した順序の試験。取得者は枠のロックを取る直前の同期点で止まり、その間に実際の `fail` を呼んで
+    /// 記録を確定してから再開する。再開した取得は記録の後に走るので、枠を進められず `false` になる。
+    /// 停止の判定が枠の取得に無ければ、記録の後でも枠が進む。待ちはすべて有限回で打ち切り、同期点に着かなかった
+    /// ときは断定で失敗させる。
     #[test]
-    fn claim_blocked_across_fail_does_not_advance() {
+    fn claim_resumed_after_fail_does_not_advance() {
         use std::sync::atomic::{AtomicBool, Ordering};
         const MAX_SPINS: u32 = 1_000_000;
         let s = Shared::new();
-        let about_to_claim = AtomicBool::new(false);
-        let claimed = thread::scope(|scope| {
-            let mut guard = s.lock();
+        let reached = AtomicBool::new(false);
+        let release = AtomicBool::new(false);
+        let (claimed, was_reached) = thread::scope(|scope| {
             let h = thread::Builder::new()
                 .spawn_scoped(scope, || {
-                    about_to_claim.store(true, Ordering::SeqCst);
-                    s.claim(u64::MAX)
+                    s.claim_after(u64::MAX, || {
+                        reached.store(true, Ordering::SeqCst);
+                        let mut spins = 0;
+                        while !release.load(Ordering::SeqCst) && spins < MAX_SPINS {
+                            thread::yield_now();
+                            spins += 1;
+                        }
+                    })
                 })
                 .expect("claimer thread must start");
             let mut spins = 0;
-            while !about_to_claim.load(Ordering::SeqCst) && spins < MAX_SPINS {
+            while !reached.load(Ordering::SeqCst) && spins < MAX_SPINS {
                 thread::yield_now();
                 spins += 1;
             }
-            // 取得者がロックの待ちに入る時間を与える。記録は必ずロックを持ったまま確定するので、順序は保たれる。
-            for _ in 0..1000 {
-                thread::yield_now();
-            }
-            guard.first_error = Some(LoadError::InvalidOutcome);
-            drop(guard);
-            h.join().expect("claimer must not panic")
+            let was_reached = reached.load(Ordering::SeqCst);
+            // 実際の fail の経路で記録してから、止めていた取得を再開する。
+            s.fail(LoadError::InvalidOutcome);
+            release.store(true, Ordering::SeqCst);
+            (h.join().expect("claimer must not panic"), was_reached)
         });
-        assert!(
-            !claimed,
-            "a blocked claim succeeded after fail was recorded"
-        );
+        assert!(was_reached, "claimer did not reach the sync point");
+        assert!(!claimed, "a claim succeeded after fail was recorded");
         assert_eq!(next_of(&s), 0);
     }
 
@@ -419,14 +428,16 @@ mod tests {
         const CLAIMERS: usize = 4;
         const ROUNDS: usize = 200;
         const MAX_SPINS: u32 = 1_000_000;
+        const MAX_CLAIMS: u32 = 5_000_000;
         for _ in 0..ROUNDS {
             let s = Shared::new();
             let (snapshot, spawn_failed) = thread::scope(|scope| {
                 let mut hs = Vec::new();
                 let mut spawn_failed = false;
                 for _ in 0..CLAIMERS {
-                    let r =
-                        thread::Builder::new().spawn_scoped(scope, || while s.claim(u64::MAX) {});
+                    // 停止の判定が欠けても終わるよう反復に上限を置き、止まったかどうかを返す。
+                    let r = thread::Builder::new()
+                        .spawn_scoped(scope, || (0..MAX_CLAIMS).any(|_| !s.claim(u64::MAX)));
                     match r {
                         Ok(h) => hs.push(h),
                         Err(_) => {
@@ -442,9 +453,13 @@ mod tests {
                     spins += 1;
                 }
                 let snapshot = s.fail_observing(LoadError::InvalidOutcome);
-                for h in hs {
-                    h.join().expect("claimer must not panic");
-                }
+                let all_stopped = hs
+                    .into_iter()
+                    .all(|h| h.join().expect("claimer must not panic"));
+                assert!(
+                    all_stopped,
+                    "a claimer did not stop after fail was recorded"
+                );
                 (snapshot, spawn_failed)
             });
             assert!(!spawn_failed, "claimer thread failed to start");
