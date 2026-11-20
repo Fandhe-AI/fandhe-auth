@@ -6,7 +6,8 @@
 //! 呼び出し先: 計測の部品・生成器・集計だけ。対象を具体の stub に結ぶ部分は呼び出し元（試験）が書く。
 //! 時計は注入で受け、環境変数・設定ファイル・壁時計を読まない（DPOL-32）。
 //!
-//! 結果の記録: 呼び出しごとの種類と区間の時間は [`TargetRun`] の `run`・`summary` に残る。
+//! 結果の記録: [`TargetRun`] の `run`・`summary` に残る。試行番号と時間の標本が残るのは成功と失敗（種類を問わない）だけで、
+//! 失敗の種類（`rejected`・`unavailable`）の内訳・時間切れ・暖機の除外は件数だけが残り、個々の試行には対応付けられない。
 //! `fandhe-auth-load-record/1` のファイルへの出力は未提供で、担当の段は未決（`docs/harness/load.md`）。
 //! 対象は stub だけで、実物の経路は最小の組込み先の完成後に呼ぶ。
 //! TODO(TASK-716): 実物の経路の呼び出しは最小の組込み先の完成後に足す。stub の合格を実物の合格に数えない
@@ -148,10 +149,14 @@ impl From<MeterError> for TargetError {
 
 /// 対象を閉ループで呼び、結果を [`TargetRun`] に残す。
 ///
-/// 閉包は試行ごとに 1 回呼ばれ、`spec` の区間で測られる。対象の中で計測の誤りが起きたら最初の誤りを残し、
-/// 試行を `Excluded` で締めて生成器に新しい試行を止めさせる（本計測の段では `InvalidOutcome` で止まる。
-/// この挙動は生成器の fail-closed に依存する）。戻ったら結果より先に残した誤りを見て、
-/// 黙って数えず [`TargetError::Meter`] を返す。panic・`unwrap` は使わない。
+/// 閉包は試行ごとに高々 1 回呼ばれ、`spec` の区間で測られる。対象の中で計測の誤りが起きたら最初の誤りを残し、
+/// その試行は `Excluded` を返す。以後、試行の始めに誤りの記録を見た試行は閉包を呼ばずに `Excluded` を返す。
+/// 記録より前にこの確認を通った試行（並行数が 2 以上のとき）は、記録の後に閉包を呼び得る。
+///
+/// 停止は生成器の fail-closed に依存する。暖機の段は生成器が結果を問わず `Excluded` で締めるため止まらず、
+/// 残りの暖機は閉包を呼ばずに回り、本計測の段へ進む。本計測の段では `Excluded` が生成器の `InvalidOutcome` で
+/// 拒否され、新しい試行が止まる。拒否された試行は締められず `unfinished` に数えられ、ワーカーごとに 1 件起こり得る。
+/// 戻ったら結果より先に残した誤りを見て、黙って数えず [`TargetError::Meter`] を返す。panic・`unwrap` は使わない。
 ///
 /// # Errors
 /// 計測の誤り・生成の誤り・集計の誤り。
@@ -174,6 +179,13 @@ where
         }
     };
     let result = run_closed_loop(meter, config, |trial| {
+        if first_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+        {
+            return Outcome::Excluded;
+        }
         let called = match trial.measure(interval, &call) {
             Ok(r) => r,
             Err(e) => {

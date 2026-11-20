@@ -114,6 +114,38 @@ fn clock_error_in_warmup_is_not_silently_counted() {
     assert!(matches!(r, Err(TargetError::Meter(_))));
 }
 
+/// 最初の 1 回だけ誤りを返し、その後は回復する時計。
+struct FlakyClock(AtomicU64);
+
+impl MonotonicClock for FlakyClock {
+    fn now_ns(&self) -> Result<u64, MeterError> {
+        let n = self.0.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            Err(MeterError::ClockOverflow)
+        } else {
+            Ok(n * 10)
+        }
+    }
+}
+
+#[test]
+fn target_is_not_called_after_meter_error_is_recorded() {
+    // 並行数 1 なので、誤りの記録より前に確認を通った試行は無い。最初の試行の始点の時計で誤りになり、
+    // その試行は対象を呼ばない。以後の暖機（2 件）と本計測の試行は記録を見て対象を呼ばない。
+    let calls = AtomicU64::new(0);
+    let r = run_target(
+        Box::new(FlakyClock(AtomicU64::new(0))),
+        &spec(),
+        &cfg(1, 5, 3),
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            CallResult::Ok
+        },
+    );
+    assert_eq!(r, Err(TargetError::Meter(MeterError::ClockOverflow)));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn target_name_validation() {
     for bad in ["", "Abc", "a\nb", "a\u{2028}b", "a-b", &"a".repeat(65)] {
@@ -126,8 +158,13 @@ fn target_name_validation() {
 
 #[test]
 fn error_display_and_debug_carry_no_canary() {
-    let e = TargetError::Meter(MeterError::ClockOverflow);
-    let text = format!("{e} {e:?}");
-    assert!(!text.contains("canary"));
-    assert_eq!(e.to_string(), "meter error in target");
+    // SECR-23: 識別用の文字列を含む無効な名前を実際の API に渡し、返された誤りに入力が出ないことを見る。
+    let canary = "CANARY-zq9x";
+    let e = TargetName::new(canary).unwrap_err();
+    let ie = IntervalName::new(canary).unwrap_err();
+    let wrapped = TargetError::from(e);
+    let text = format!("{e} {e:?} {ie} {ie:?} {wrapped} {wrapped:?}");
+    assert!(!text.to_lowercase().contains("canary"));
+    assert!(!text.contains("zq9x"));
+    assert_eq!(wrapped.to_string(), "meter error in target");
 }
