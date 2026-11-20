@@ -191,10 +191,16 @@ impl Shared {
 
     /// 最初の誤りだけを残す。記録と同時に停止が確定し、以後の `claim` は `false` になる。
     fn fail(&self, e: LoadError) {
+        self.fail_observing(e);
+    }
+
+    /// `fail` と同じ。記録を確定した同じロックの中で、その時点の取得済みの枠の件数を返す（#5984 の試験用）。
+    fn fail_observing(&self, e: LoadError) -> u64 {
         let mut g = self.lock();
         if g.first_error.is_none() {
             g.first_error = Some(e);
         }
+        g.next
     }
 
     /// 試行の枠を 1 つ取る。上限に達した・停止中・溢れたときは `false`。
@@ -292,9 +298,10 @@ where
 ///
 /// 誤りの記録・停止・枠の取得の順序（#5984。人の確認待ちの仮置き、ACPT-7）:
 /// - 枠の取得と誤りの記録は同じロックの下で全順序に並ぶ。記録と停止は同時に確定する。
-/// - 記録より後に枠を取ろうとしたワーカーは必ず取れない。記録の後に新しく始まる試行は 0 件。
-/// - 記録より前に枠を取り終えた試行（他のワーカーが持つ分で、最大で並行数 − 1 件）は止めず、対象の呼び出しまで
-///   進んで締めるか誤りで抜ける。「誤りの後に対象の呼び出しが 0 件」までは保証しない。
+/// - 記録より後に枠を取ろうとしたワーカーは必ず取れない。記録の後に新しく取得できる枠は 0 件（保証するのは枠の取得だけ）。
+/// - 記録より前に取得済みの枠の試行は止めない。対象の呼び出しまで進んで締めるか誤りで抜ける。取得済みの枠は、
+///   ワーカー自身の誤りの記録でも、起動側が join で panic を検出するまでの間でも残り得るため、件数の上限は保証しない。
+///   記録の後に `begin_trial` や対象の呼び出しへ進む試行があり得る。
 /// - 返す誤りは最初の 1 件だけ。
 ///
 /// # Errors
@@ -387,8 +394,8 @@ mod tests {
             while next_of(&s) == 0 {
                 thread::yield_now();
             }
-            s.fail(LoadError::InvalidOutcome);
-            let snapshot = next_of(&s);
+            // 記録を確定したロックの中で件数を観測する（ロック解放から再取得までの空白を作らない）。
+            let snapshot = s.fail_observing(LoadError::InvalidOutcome);
             let total: u64 = hs.into_iter().map(|h| h.join().unwrap_or(0)).sum();
             (snapshot, total)
         });

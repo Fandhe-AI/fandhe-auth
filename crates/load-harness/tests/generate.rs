@@ -1,7 +1,8 @@
 //! 負荷の生成の単体試験（TASK-12 5/10）。時間は偽の時計を手で進め、実際の経過・sleep・時間の値では判定しない。
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
 
 use fandhe_auth_load_harness::{
     FailureKind, IntervalName, LoadConfig, LoadError, LoopModel, MAX_CONCURRENCY, MeterError,
@@ -23,6 +24,29 @@ impl FakeClock {
 impl MonotonicClock for FakeClock {
     fn now_ns(&self) -> Result<u64, MeterError> {
         Ok(self.0.load(Ordering::SeqCst))
+    }
+}
+
+/// 期限付きの待ち合わせ。ワーカーの起動に失敗して参加者が揃わなくても、期限で戻って試験を終えられる
+/// （判定は件数・最大同時実行数の断定で行い、期限の長さでは行わない）。
+struct Rendezvous {
+    arrived: AtomicU64,
+    parties: u64,
+}
+
+impl Rendezvous {
+    fn new(parties: u64) -> Self {
+        Self {
+            arrived: AtomicU64::new(0),
+            parties,
+        }
+    }
+    fn wait(&self) {
+        self.arrived.fetch_add(1, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.arrived.load(Ordering::SeqCst) < self.parties && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
     }
 }
 
@@ -82,7 +106,7 @@ fn serial_run_counts_and_summarizes() {
 fn reaches_configured_concurrency() {
     let clock = FakeClock::new();
     let name = iv();
-    let barrier = Barrier::new(4);
+    let barrier = Rendezvous::new(4);
     let run = run_closed_loop(meter(&clock), &cfg(4, 4, 0), |t| {
         t.measure(&name, || {
             barrier.wait();
@@ -182,7 +206,7 @@ fn all_in_flight_failures_stop_without_new_trials() {
     const C: u64 = 4;
     let clock = FakeClock::new();
     let calls = AtomicU64::new(0);
-    let barrier = Barrier::new(usize::try_from(C).unwrap());
+    let barrier = Rendezvous::new(C);
     let r = run_closed_loop(meter(&clock), &cfg(C, 100, 0), |_| {
         calls.fetch_add(1, Ordering::SeqCst);
         barrier.wait();
