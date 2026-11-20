@@ -63,22 +63,25 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
 
 1. 厳格版を repo の外へ写す（`docs/spec` は submodule なので書き換えない）。
 2. 写しの許可リストに `"NCSA"` を足す（`libfuzzer-sys` 向け。`D-2026-11-20-9`）。他は変えない。
-3. 先に `cargo deny fetch` を 1 回流し、取得の直後に次の 2 つを控える（`DPOL-33`）。commit の日付は取得日ではないので、取得日時は別に取る。
+3. 一時の設定のパスを変数に入れる（`DENY_CONFIG`）。取得と照合で同じ設定を使う。
+4. 先にその設定で `cargo deny fetch` を 1 回流し、取得の直後に次の 2 つを控える（`DPOL-33`）。commit の日付は取得日ではないので、取得日時は別に取る。
 
     ```bash
+    cargo deny fetch --config "$DENY_CONFIG" db
     date -u +%Y-%m-%dT%H:%M:%SZ
-    git -C ~/.cargo/advisory-dbs/<DB のディレクトリ> rev-parse HEAD
+    ADVISORY_DB_DIR="$(ls -d ~/.cargo/advisory-dbs/advisory-db-* | head -1)"
+    git -C "$ADVISORY_DB_DIR" rev-parse HEAD
     ```
 
     - 取得日時: 上の `date` の出力。
-    - 監査に使った DB の commit SHA: 上の `rev-parse` の出力。DB のディレクトリは `~/.cargo/advisory-dbs/` の下にある。
-4. 一時の設定のパスを変数に入れ（`DENY_CONFIG`）、ルートに対して流す。
+    - 監査に使った DB の commit SHA: 上の `rev-parse` の出力。`ls` が複数の DB を返すときは、その設定で使う DB のディレクトリを選ぶ。
+5. ルートに対して流す。取得は済んでいるので `--disable-fetch` を付ける。
 
     ```bash
     cargo deny --locked check --config "$DENY_CONFIG" --disable-fetch
     ```
 
-5. fuzz 側は `--manifest-path` を付けて流す。`libfuzzer-sys` の NCSA の通過を確かめるのは、こちらである。
+6. fuzz 側は `--manifest-path` を付けて流す。`libfuzzer-sys` の NCSA の通過を確かめるのは、こちらである。
 
     ```bash
     cargo deny --locked --manifest-path crates/trial-deps/fuzz/Cargo.toml check --config "$DENY_CONFIG" --disable-fetch
@@ -103,7 +106,8 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
 
     ```bash
     date -u +%Y-%m-%dT%H:%M:%SZ
-    git -C ~/.cargo/advisory-db rev-parse HEAD
+    CARGO_AUDIT_DB_DIR=~/.cargo/advisory-db
+    git -C "$CARGO_AUDIT_DB_DIR" rev-parse HEAD
     ```
 
 3. ルートの `Cargo.lock` と fuzz 側の `Cargo.lock` の両方に流す。以降は取得を止めて、同じ DB で照合する。

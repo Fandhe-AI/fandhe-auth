@@ -88,7 +88,7 @@ fn secr23_derived_debug_holder_has_no_value() {
     let s = SecretString::new(&probe);
     let maybe = Some(SecretString::new(&probe));
     let list = vec![SecretString::new(&probe), SecretString::new(&probe)];
-    let out = capture(|| log_container_debug_fields(&("label", &s), &maybe, &list));
+    let out = capture(|| log_container_debug_fields(&s, &maybe, &list));
     // 欄ごとにマスク済みの値が出ていることを確かめる（1 つの欄だけで通らないようにする）。
     let expected_fields = [
         ("pair", "pair=(\"label\", SecretString(<redacted>))"),
