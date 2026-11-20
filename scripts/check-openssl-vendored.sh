@@ -7,15 +7,19 @@
 #   R1: `openssl-sys feature "vendored"`（DPOL-13 の本体）
 #   R2: `openssl feature "vendored"`（openssl-sys/vendored を有効にする上流の経路）
 #   R3: package `openssl-src`（vendored の build 依存が木に入った痕跡）
-# 走査 A は既定の feature（本番の木）で、試験専用メンバーを除いた本番対象のメンバーだけを起点にし、合否に入る。
+# 走査 A は本番の feature 構成（既定の feature + 環境変数 PROD_FEATURES）で、試験専用メンバーを除いた本番対象のメンバーだけを起点にし、合否に入る。
+# PROD_FEATURES は dependency-policy.md の手順と同じ `<crate>/<feature>` のカンマ区切り（無ければ空）。本番で有効にする非既定 feature を足す変更では、
+# 同じ変更で PROD_FEATURES の既定（CI・make の呼び出し側）も更新する。PROD_FEATURES は検査を足すだけで、外す効果は無い。形式が違う値は検査不能（2）。
 # 試験専用メンバー（TEST_ONLY_PKGS）は自身の normal・build 依存が残るため、含めると試験専用 crate だけの vendored を本番の違反として
 # 落としてしまう。そのため合否の起点から外し、含めた走査 C は参考の警告だけにする（合否に入れない）。
-# 新しい試験専用メンバーは TEST_ONLY_PKGS に足す（足し忘れは合否に入る側＝安全側に倒れる）。走査 B は --all-features の上位集合で、参考の警告だけ出し合否に入れない
+# メンバーの分類は TEST_ONLY_PKGS と PROD_PKGS の 2 表で持ち、workspace のメンバーがどちらにも無い、または両方にあれば検査不能（2）で止める
+# （分類の漏れで本番のメンバーが合否から外れる道を塞ぐ）。新しいメンバーはどちらかに足す。本番の crate が試験専用 crate に依存しても、
+# その依存の木は走査 A に含まれる。走査 B は --all-features の上位集合で、参考の警告だけ出し合否に入れない
 # （optional の feature の後ろに隠した vendored の早期発見用）。dependency-policy.md は本番の依存の監査に --all-features を使わないと
-# 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。本番 feature 構成の明示（PROD_FEATURES）が決まったら、A をそれに置き換える。
+# 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。
 # B は依存の列挙にだけ使い、ビルド・clippy には使わない（DPOL-31。check-crate-deps.sh と同じ扱い）。
 # 本番の範囲は normal・build（dev は見ない）。`cargo tree -i` は一致が無いと非 0 のため使わない。
-# 実行のたびに自己試験（陰性対照 F1〜F7）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陰性対照 F1〜F8）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は件数と規則名だけ。cargo tree の生の出力には絶対パスが入るため出さない。
 # 限界: dev の依存・別 workspace の crates/trial-deps/fuzz・Hub の最終バイナリは対象外。
 # TODO(TASK-667): 動的リンクと版の記録の対応（#318 の 2/4）を足す
@@ -60,6 +64,62 @@ TEST_ONLY_PKGS=(
 )
 EXCLUDE_ARGS=()
 for p in "${TEST_ONLY_PKGS[@]}"; do EXCLUDE_ARGS+=(--exclude "${p}"); done
+
+# 本番対象のメンバー（段階 1・段階 2 の枠。db-tests は契約の試験の crate だが本番側に置き、合否に入れる＝安全側）。
+PROD_PKGS=(
+  fandhe-auth-core
+  fandhe-auth-secret
+  fandhe-auth-db-tests
+  fandhe-auth-client
+  fandhe-auth-plugin-oidc
+  fandhe-auth-backend
+)
+
+# build_feature_args <PROD_FEATURES 相当の文字列>: FA に `--features` の引数を作る。空なら空配列。
+# 形式は `<crate>/<feature>` のカンマ区切り（dependency-policy.md）。違えば検査不能（2）。
+FA=()
+build_feature_args() {
+  FA=()
+  [ -z "$1" ] && return 0
+  if ! printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+(,[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)*$'; then
+    log "error: PROD_FEATURES must be comma-separated <crate>/<feature>; cannot inspect"
+    exit 2
+  fi
+  FA=(--features "$1")
+}
+
+# prod_tree <dir> <locked|offline> <features>: 走査 A の木（本番メンバーだけを起点。features は PROD_FEATURES 形式）。
+prod_tree() {
+  build_feature_args "$3"
+  run_tree "$1" "$2" --workspace "${EXCLUDE_ARGS[@]}" ${FA[@]+"${FA[@]}"}
+}
+
+# check_member_classification: workspace のメンバーが PROD_PKGS・TEST_ONLY_PKGS のどちらか 1 つだけにあることを確かめる。
+check_member_classification() {
+  local out line name rest p known
+  out="$(run_tree "${ROOT_DIR}" locked --workspace --depth 0)" || exit 2
+  for p in "${PROD_PKGS[@]}"; do
+    for known in "${TEST_ONLY_PKGS[@]}"; do
+      if [ "${p}" = "${known}" ]; then
+        log "error: member classified as both production and test-only: ${p}; cannot inspect"
+        exit 2
+      fi
+    done
+  done
+  while IFS= read -r line; do
+    name="${line%% *}"
+    rest="${line#* }"
+    case "${rest}" in v[0-9]*) ;; *) continue ;; esac
+    known=0
+    for p in "${PROD_PKGS[@]}" "${TEST_ONLY_PKGS[@]}"; do
+      [ "${p}" = "${name}" ] && known=1
+    done
+    if [ "${known}" -eq 0 ]; then
+      log "error: workspace member not classified (add to PROD_PKGS or TEST_ONLY_PKGS): ${name}; cannot inspect"
+      exit 2
+    fi
+  done <<<"${out}"
+}
 
 # run_tree <dir> <locked|offline> [追加引数...]: cargo tree の出力を stdout に返す。失敗は 2（生の出力は出さない）。
 # 失敗の原因は分類名だけ出す（絶対パス・認証情報を含み得る生の stderr は出さない）。
@@ -172,19 +232,34 @@ selftest() {
     log "error: cannot write fixture (f6); cannot inspect"
     exit 2
   fi
-  a="$(run_tree "${w}" offline --workspace "${EXCLUDE_ARGS[@]}")" || exit 2
+  a="$(prod_tree "${w}" offline "")" || exit 2
   b="$(run_tree "${w}" offline --workspace)" || exit 2
   for r in R1 R2 R3; do expect_count F6A "${r}" "${a}" eq0; done
   expect_count F6C R1 "${b}" ge1
 
-  log "selftest ok (F1-F7)"
+  # F8: 本番メンバーの非既定 feature が openssl-sys/vendored を引く → PROD_FEATURES なしは 0 件、PROD_FEATURES ありは走査 A で検出
+  local w8="${f}/f8"
+  if ! mkdir -p "${w8}/prod8/src" ||
+    ! printf '[workspace]\nresolver = "3"\nmembers = ["prod8"]\n' >"${w8}/Cargo.toml" ||
+    ! printf '[package]\nname = "prod8"\nversion = "0.1.0"\nedition = "2021"\n[features]\nx = ["openssl-sys/vendored"]\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys" }\n' >"${w8}/prod8/Cargo.toml" ||
+    ! : >"${w8}/prod8/src/lib.rs"; then
+    log "error: cannot write fixture (f8); cannot inspect"
+    exit 2
+  fi
+  a="$(prod_tree "${w8}" offline "")" || exit 2
+  for r in R1 R2 R3; do expect_count F8A "${r}" "${a}" eq0; done
+  a="$(prod_tree "${w8}" offline "prod8/x")" || exit 2
+  expect_count F8B R3 "${a}" ge1
+
+  log "selftest ok (F1-F8)"
 }
 
 selftest
 
 # 走査 A（合否）。検査不能（2）と違反（1）はここで確定し、参考の走査 B より先に返す。
 total=0
-tree="$(run_tree "${ROOT_DIR}" locked --workspace "${EXCLUDE_ARGS[@]}")" || exit 2
+check_member_classification
+tree="$(prod_tree "${ROOT_DIR}" locked "${PROD_FEATURES:-}")" || exit 2
 for r in R1 R2 R3; do
   n="$(count_rule "${r}" "${tree}")" || exit 2
   log "scan A ${r}: ${n}"
