@@ -4,27 +4,22 @@
 
 use fandhe_auth_secret::SecretString;
 
-/// 秘密値を派生 `Debug` の入れ物に入れた試験用の構造体。
-/// 派生 `Debug` を付けても値が出ないこと（SECR-13・SECR-30）を確かめるために使う。
-///
-/// 注記: 秘密値を持つ試験の入れ物で、SECR-10・SECR-29 の型の一覧の対象である。
-/// 一覧はまだ repo に無い。一覧を作るときにこの型を載せる。その前に本 crate を消すなら不要。
-// TODO(TASK-512): 型の一覧の作成時に TokenHolder を載せる
-#[derive(Debug)]
-pub struct TokenHolder {
-    /// 入れ物の名前。秘密値ではない。
-    pub label: String,
-    /// 秘密値。専用の型で包む（SECR-30）。
-    pub token: SecretString,
-}
-
 /// `SecretString` を `?` 形式の欄として出す（SECR-11・SECR-23）。
 /// 期待: 出力に値が現れず、固定文字列だけが現れる。
 pub fn log_secret_debug_field(secret: &SecretString) {
     tracing::info!(token = ?secret, "secret field emitted");
 }
 
-/// 派生 `Debug` の入れ物を `?` 形式の欄として出す（SECR-13・SECR-23）。
-pub fn log_holder_debug_field(holder: &TokenHolder) {
-    tracing::info!(holder = ?holder, "holder field emitted");
+/// std の入れ物（tuple・`Option`・slice）に入れた `SecretString` を `?` 形式の欄として出す（SECR-13・SECR-23）。
+/// std の派生 `Debug` は中身の `Debug` に委ねるため、期待は値が現れず固定文字列だけが現れること。
+///
+/// 注記: 秘密値を持つ名前付きの型をここで新しく定義しない。SECR-10・SECR-29 の型の一覧（TASK-512 で作る）が
+/// 無い間に、一覧の外の型を増やさないためである。自前の構造体に `#[derive(Debug)]` を付けた入れ物の試験は
+/// TASK-513 の範囲である。
+pub fn log_container_debug_fields(
+    pair: &(&str, &SecretString),
+    maybe: &Option<SecretString>,
+    list: &[SecretString],
+) {
+    tracing::info!(pair = ?pair, maybe = ?maybe, list = ?list, "container fields emitted");
 }

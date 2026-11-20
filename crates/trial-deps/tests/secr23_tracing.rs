@@ -15,9 +15,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use fandhe_auth_secret::SecretString;
-use fandhe_auth_trial_deps::logging::{
-    TokenHolder, log_holder_debug_field, log_secret_debug_field,
-};
+use fandhe_auth_trial_deps::logging::{log_container_debug_fields, log_secret_debug_field};
 use tracing_subscriber::fmt::MakeWriter;
 
 /// 試験用の値を実行時に作る。実在の秘密ではない。呼ぶたびに別の値になる。
@@ -82,15 +80,15 @@ fn secr23_secret_debug_field_has_no_value() {
     );
 }
 
-/// SECR-23・SECR-13: 派生 `Debug` の入れ物に入れても値が無い。
+/// SECR-23・SECR-13: std の派生 `Debug` の入れ物（tuple・`Option`・slice）に入れても値が無い。
+/// 自前の構造体の入れ物は TASK-513 の範囲。
 #[test]
 fn secr23_derived_debug_holder_has_no_value() {
     let probe = make_probe();
-    let holder = TokenHolder {
-        label: "holder-label".to_owned(),
-        token: SecretString::new(&probe),
-    };
-    let out = capture(|| log_holder_debug_field(&holder));
+    let s = SecretString::new(&probe);
+    let maybe = Some(SecretString::new(&probe));
+    let list = vec![SecretString::new(&probe), SecretString::new(&probe)];
+    let out = capture(|| log_container_debug_fields(&("label", &s), &maybe, &list));
     assert!(
         out.contains("<redacted>"),
         "redacted marker present: false (output len={})",

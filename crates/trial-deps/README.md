@@ -22,7 +22,7 @@
 
 | 対象 | 場所 | 確かめること | ID |
 | --- | --- | --- | --- |
-| `tracing` + `tracing-subscriber` | `tests/secr23_tracing.rs` | `SecretString` を `?` 形式で出しても、派生 `Debug` の入れ物に入れても、捕獲した出力に値が無い。`tests/secr23_tracing.rs` の中で `expose()` の値を直接出す経路は検出できる（陽性対照。lib には置かない） | `SECR-23`・`SECR-11`・`SECR-13` |
+| `tracing` + `tracing-subscriber` | `tests/secr23_tracing.rs` | `SecretString` を `?` 形式で出しても、派生 `Debug` の入れ物（std の tuple・`Option`。自前の構造体の試験は `TASK-513`）に入れても、捕獲した出力に値が無い。`tests/secr23_tracing.rs` の中で `expose()` の値を直接出す経路は検出できる（陽性対照。lib には置かない） | `SECR-23`・`SECR-11`・`SECR-13` |
 | `metrics` | `tests/metrics_probe.rs` | 自前の最小 `Recorder` を `with_local_recorder` で当て、counter の key・ラベル・増分を受けられる | `SECR-26`・`SECR-27` |
 | `proptest` | `tests/prop_debug.rs` | 任意の `String` から作った `SecretString` の `Debug` が常に固定文字列で、値を含まない。`expose()` が往復する。K8 の形を試すもので、対象の P-n・F-n ではない | `SECR-11`（K8 の形。`ACPT-37` の対象外） |
 | `syn` | `src/scan.rs` の `#[cfg(test)]` | `syn::parse_file` で、秘密値らしい欄名で型が生の `String` の欄を拾う。edition 2024 の構文を読める | `SECR-21` |
@@ -76,7 +76,9 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
     cargo deny --locked --manifest-path crates/trial-deps/fuzz/Cargo.toml check --config "$DENY_CONFIG" --disable-fetch
     ```
 
-判定は基線との差で行う。依存を足す前の HEAD で同じ設定を流した出力と、足した後の出力を比べる。
+合否は PR の head で、`cargo deny` の 4 検査（advisories・bans・licenses・sources）の全部が成功することで決める（`DPOL-34`）。
+基線との差で合格にしない。基線と PR の両方で同じ検査が失敗していても合格とは読まない。
+基線との差は、失敗したときの原因の切り分けにだけ使う。依存を足す前の HEAD で同じ設定を流した出力と、足した後の出力を比べる。
 通過は判断材料であり、例外の追加は人が決める（`DPOL-35`）。
 
 ## cargo audit
@@ -103,6 +105,7 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
     ```
 
 fuzz 側は別 workspace なので、ルートの `Cargo.lock` の監査では拾えない。2 つの lock を別々に流す。
+合否は PR の head で、ルートと fuzz の両方の lockfile への `cargo audit` が成功することで決める（`DPOL-34`）。基線との差は切り分けにだけ使う。
 結果の判定と例外の追加は人が決める（`DPOL-35`）。
 
 ## K11 と feature の測定手順
@@ -115,11 +118,15 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
   測る crate 自身も、推移依存ではないので数から除く。
 
     ```bash
-    cargo tree -e normal,build --prefix none --format '{p}' | sort -u | grep -v "^$PROBE_NAME " | wc -l
+    cargo tree -e normal,build --prefix none --format '{p}' | sed 's/ (\*)$//' | sort -u | grep -v "^$PROBE_NAME " | wc -l
     ```
 
+    `cargo tree` は 2 回目以降に出る依存の行に ` (*)` を付ける。`sort -u` は行全体で比べるので、印を `sed` で除いてから重複を除く。
+    除かないと、複数の経路で届く依存を 2 回数える。`tracing` と `tracing-subscriber` を両方 normal に置いた一時の crate で流したところ、
+    印を除かない場合は 21、除いた場合は 18 で、`--no-dedupe` で数えた 18 と一致した。
+
     測る crate 自身の 1 行は、出力から引いて「推移依存の数」とする。dev の道具（`tracing-subscriber`・`proptest`・`syn`）は、
-    `-e normal,build,dev` に替えて同じ数え方で別に数える。表の「推移依存の数」の列は `normal,build` の値で、`dev` 込みの値は別の測定として分けて記入する。
+    `-e normal,build,dev` に替え、`sed` を含む同じ形で別に数える。表の「推移依存の数」の列は `normal,build` の値で、`dev` 込みの値は別の測定として分けて記入する。
 
 4. MSRV は、解決したパッケージの `rust_version` を `cargo metadata` から引く。宣言の無い依存は `未宣言` と出る。
 
