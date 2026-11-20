@@ -58,6 +58,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
   `fandhe-backend` の `deny.toml` との照合は Hub の担当（DPOL-44・TASK-683 → Hub `AOPS-4`・`AOPS-5`）で、本体は TASK-668（厳格版）と TASK-2 の残りだけを持つ。
   作るまで下の基準を手元の確認に使う。MPL-2.0 を `fandhe-backend` の許可リストに足さない条件は緩めない（DPOL-45 → Hub `AOPS-5`）。
 - advisories・bans・licenses・sources の 4 検査と `cargo-audit` の 5 つが全て成功しない変更はマージしない（DPOL-34）。
+  CI の枠は `ci.yml` の `deps-audit`（道具の導入だけ。TASK-6 6/10）で、検査の結線は TASK-680。契約は `./github-actions.md` の「依存の検査の拡張点」。
 - 依存の変更のたびと、変更が無い期間も 1 日 1 回流す。1 日 1 回は初期値で、本番の開始から 3 か月の後に見直す。新しい advisory が
   見つかったら運用の監視の警報の経路（DPOL-34 の改訂では Hub の `AOPS-3`）で運用担当（人）へ知らせる（DPOL-35）。
 - advisory DB は実行の前に 1 回だけ取得し、全ての実行に `--disable-fetch`（cargo deny）・`--no-fetch`（cargo audit）を付ける。
