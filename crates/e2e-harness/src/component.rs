@@ -31,7 +31,7 @@ impl E2eComponentKind {
 
 /// 構成要素の起動・停止の契約。誤りに秘密値・URL・パスを載せない（SECR-11・SECR-23）。
 ///
-/// BrowserDriver の実体は Chrome・Firefox とも置き済み（[`crate::chrome`]・[`crate::firefox`]）。
+/// BrowserDriver の実体は Chrome・Firefox とも置き済み（`chrome`・`firefox`（unix のみ））。
 ///
 /// TODO(TASK-716): RelyingParty の実体は最小の組込み先の完成後に置く。
 pub trait E2eComponent {

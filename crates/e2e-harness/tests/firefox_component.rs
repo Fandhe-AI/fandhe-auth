@@ -4,7 +4,7 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -93,21 +93,39 @@ fn temp_dir(tag: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let d = std::env::temp_dir().join(format!("e2e-harness-{tag}-{}-{nanos}", std::process::id()));
-    fs::create_dir_all(&d).unwrap();
+    // 排他的に作る（既存なら失敗。他者のディレクトリを使わない）。所有者だけが入れる権限（0700）で作る。
+    fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
     d
+}
+
+/// PID ファイルの内容を正の整数として検証して返す。空・非数・0 は試験の失敗（孫を確かめないまま通さない）。
+fn parse_pid(text: &str) -> String {
+    let pid: u32 = text.trim().parse().expect("PID ファイルが正の整数でない");
+    assert!(pid > 0, "PID が 0");
+    pid.to_string()
 }
 
 /// `pid` が zombie 以外の状態で居るか。zombie は止まっている（回収待ちなだけ）とみなす。
 /// 引き取り先が回収しない実行環境でも判定が変わらないよう、`ps` の状態で見分ける。
+/// プロセス不在（終了コード 1・出力なし）と照会の失敗は区別し、照会できなければ試験を失敗させる。
 fn alive(pid: &str) -> bool {
     let out = Command::new("ps")
         .args(["-o", "stat=", "-p", pid])
         .stderr(Stdio::null())
         .output()
-        .unwrap();
+        .expect("ps を起動できない");
     let stat = String::from_utf8_lossy(&out.stdout);
     let stat = stat.trim();
-    !stat.is_empty() && !stat.starts_with('Z')
+    if out.status.success() {
+        assert!(!stat.is_empty(), "ps が成功したのに状態が空");
+        return !stat.starts_with('Z');
+    }
+    assert!(
+        out.status.code() == Some(1) && stat.is_empty(),
+        "ps の照会に失敗: {:?}",
+        out.status
+    );
+    false
 }
 
 #[test]
@@ -150,8 +168,8 @@ fn failed_start_kills_the_whole_process_group() {
         started.elapsed()
     );
 
-    let grandchild = fs::read_to_string(&pid_file).unwrap();
-    let grandchild = grandchild.trim();
+    let grandchild = parse_pid(&fs::read_to_string(&pid_file).unwrap());
+    let grandchild = grandchild.as_str();
     // SIGKILL の配送を少しだけ待つ。
     let deadline = Instant::now() + Duration::from_secs(3);
     while alive(grandchild) && Instant::now() < deadline {
