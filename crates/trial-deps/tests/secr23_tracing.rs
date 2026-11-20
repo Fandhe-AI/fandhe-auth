@@ -119,6 +119,16 @@ fn fields_match(ev: &CapturedEvent, expected: &[(&str, &str)]) -> bool {
             .all(|((n, v), (en, ev_))| n == en && v == ev_)
 }
 
+/// 整形済みの出力に、固定メッセージを含む行がちょうど 1 行あり、その行が `expected` で終わるか。
+/// 末尾の空白は落とさない。部分一致にせず、マスク済みの欄の列で終わることを求める（SECR-23）。
+fn formatted_line_ends_with(out: &str, message: &str, expected: &str) -> bool {
+    let mut lines = out.lines().filter(|l| l.contains(message));
+    match (lines.next(), lines.next()) {
+        (Some(line), None) => line.ends_with(expected),
+        _ => false,
+    }
+}
+
 /// 整形済みの出力・メッセージ・全欄の値のどこにも probe が無いか（`true` なら漏れている）。
 fn leaked(probe: &str, out: &str, events: &[CapturedEvent]) -> bool {
     out.contains(probe)
@@ -147,6 +157,17 @@ fn secr23_secret_debug_field_has_no_value() {
         "events==1: {one_event}, message exact: {message_ok}, field `token` exact: {fields_ok} (events={}, fields={})",
         events.len(),
         ev.fields.len()
+    );
+    // 整形済みの出力でも、対象の行がちょうど 1 行で、マスク済みの欄で終わること（fmt の層が出さない変異を検知する）。
+    let formatted_ok = formatted_line_ends_with(
+        &out,
+        "secret field emitted",
+        " token=SecretString(<redacted>)",
+    );
+    assert!(
+        formatted_ok,
+        "formatted line exactly one and ends with masked field: {formatted_ok} (output len={})",
+        out.len()
     );
     let is_leaked = leaked(&probe, &out, &events);
     assert!(
@@ -184,6 +205,18 @@ fn secr23_derived_debug_holder_has_no_value() {
         "events==1: {one_event}, message exact: {message_ok}, fields `pair`/`maybe`/`list` exact: {fields_ok} (events={}, fields={})",
         events.len(),
         ev.fields.len()
+    );
+    // 整形済みの出力でも、対象の行がちょうど 1 行で、3 つの欄の完全な列で終わること。
+    let expected_line = concat!(
+        " pair=(\"label\", SecretString(<redacted>))",
+        " maybe=Some(SecretString(<redacted>))",
+        " list=[SecretString(<redacted>), SecretString(<redacted>)]",
+    );
+    let formatted_ok = formatted_line_ends_with(&out, "container fields emitted", expected_line);
+    assert!(
+        formatted_ok,
+        "formatted line exactly one and ends with masked fields: {formatted_ok} (output len={})",
+        out.len()
     );
     let is_leaked = leaked(&probe, &out, &events);
     assert!(
