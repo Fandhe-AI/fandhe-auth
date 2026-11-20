@@ -366,7 +366,7 @@ impl Drop for DbFaultProxy {
 fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, upstream: &Upstream) {
     while !shared.stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((client, _)) => handle_conn(client, shared, upstream),
+            Ok((client, _)) => spawn_conn(client, shared, upstream),
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {
                 thread::sleep(ACCEPT_TICK);
             }
@@ -380,9 +380,32 @@ fn refuse(client: &TcpStream, shared: &Shared) {
     let _ = client.shutdown(Shutdown::Both);
 }
 
-fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
-    // 遮断の世代を先に控える。確立中に遮断が入って解除されても、世代の差で見つける。
+/// 受けた接続の処理を別のスレッドへ渡す。上流への接続の待ち（最大 `UPSTREAM_CONNECT_TIMEOUT`）で
+/// accept のスレッドを塞がず、遮断中の新規接続を直ちに閉じられるようにする。
+fn spawn_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
+    // 遮断の世代を accept の時点で控える。処理の開始前や確立中に遮断が入って解除されても、世代の差で見つける。
     let block_gen = shared.block_gen.load(Ordering::SeqCst);
+    let (s, u) = (Arc::clone(shared), upstream.clone());
+    let spawned = thread::Builder::new()
+        .name("it-db-fault-conn".into())
+        .spawn(move || handle_conn(client, &s, &u, block_gen));
+    match spawned {
+        Ok(h) => {
+            let mut g = shared
+                .workers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            g.retain(|h| !h.is_finished());
+            g.push(h);
+        }
+        // client は closure と共に落ちて閉じる。数だけ合わせる。
+        Err(_) => {
+            shared.refused.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream, block_gen: u64) {
     // 受けた接続は blocking に戻す（listener の非 blocking を引き継ぐ環境がある）。
     if client.set_nonblocking(false).is_err() || shared.halted() {
         return refuse(&client, shared);

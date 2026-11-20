@@ -114,12 +114,19 @@ enum Outcome {
     Echoed(Vec<u8>),
     Disconnected,
     TimedOut,
+    Other(ErrorKind),
 }
 
 fn classify(e: &std::io::Error) -> Outcome {
     match e.kind() {
         ErrorKind::WouldBlock | ErrorKind::TimedOut => Outcome::TimedOut,
-        _ => Outcome::Disconnected,
+        ErrorKind::UnexpectedEof
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe
+        | ErrorKind::NotConnected => Outcome::Disconnected,
+        // 切断を示さない誤りは受け入れない（試験の失敗にする）。
+        _ => Outcome::Other(e.kind()),
     }
 }
 
