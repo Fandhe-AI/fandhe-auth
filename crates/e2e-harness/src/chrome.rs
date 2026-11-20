@@ -235,7 +235,14 @@ impl ChromeDriverComponent {
                 }
                 _ => return Err(fail()),
             }
-            sleep(Duration::from_millis(100).min(left));
+            // 残り時間は probe・try_wait の後で計算し直す（古い `left` でスリープして期限を超えない）。
+            let Some(left_now) = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+            else {
+                return Err(fail());
+            };
+            sleep(Duration::from_millis(100).min(left_now));
         }
         let (session, browser_version) = client
             .new_session(&new_session_request())
@@ -279,6 +286,9 @@ impl Drop for ChromeDriverComponent {
 
 /// `kill` の実行時間の上限。ハーネスの安全上の値で、要件の値ではない。
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 期限切れの `kill` を止めたあと、回収を待つ上限。ハーネスの安全上の値で、要件の値ではない。
+const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// `kill` の結果の分類。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,8 +340,9 @@ fn run_kill(pgid: u32) -> KillOutcome {
             Ok(Some(st)) => break st,
             Ok(None) if Instant::now() < deadline => sleep(Duration::from_millis(10)),
             _ => {
+                // 回収にも期限を設ける（`wait()` で無期限に待たない）。回収できなくても失敗として返す。
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = wait_until(&mut child, KILL_REAP_TIMEOUT);
                 return KillOutcome::Failed;
             }
         }

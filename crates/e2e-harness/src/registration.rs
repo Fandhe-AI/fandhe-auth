@@ -22,6 +22,11 @@ const rpId = arguments[0];
 const expectedOrigin = arguments[1];
 (async () => {
     try {
+        // 登録の前に、今のページが試験用の origin であることを確かめる（別の origin で create() を呼ばない）。
+        if (location.origin !== expectedOrigin) {
+            done({ ok: false, errorName: 'OriginMismatch' });
+            return;
+        }
         const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
         const b64u = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         const challenge = rnd(32);
@@ -67,6 +72,8 @@ pub enum RegistrationErrorName {
     Timeout,
     Unknown,
     Type,
+    /// 登録の前の確認で、ページの origin が試験用の origin と違った（ハーネス自身の固定の名前）。
+    OriginMismatch,
     /// 既知の名前に当たらない値。
     Other,
 }
@@ -86,6 +93,7 @@ impl RegistrationErrorName {
             "TimeoutError" => Self::Timeout,
             "UnknownError" => Self::Unknown,
             "TypeError" => Self::Type,
+            "OriginMismatch" => Self::OriginMismatch,
             _ => Self::Other,
         }
     }
@@ -187,6 +195,7 @@ mod tests {
             ("SecurityError", RegistrationErrorName::Security),
             ("NotSupportedError", RegistrationErrorName::NotSupported),
             ("AbortError", RegistrationErrorName::Abort),
+            ("OriginMismatch", RegistrationErrorName::OriginMismatch),
         ] {
             let o =
                 RegistrationOutcome::from_value(&json!({ "ok": false, "errorName": raw })).unwrap();

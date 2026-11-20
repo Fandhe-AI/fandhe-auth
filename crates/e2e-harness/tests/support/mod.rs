@@ -29,8 +29,12 @@ impl TestOrigin {
                     break;
                 }
                 if let Ok(s) = conn {
-                    // 投機的な preconnect が受け付けを塞がないよう、接続ごとに別スレッドで処理する。
-                    std::thread::spawn(move || handle(s, port));
+                    // 枠を取ってからスレッドを作る。上限を超えた接続はスレッドを作らず閉じる。
+                    // 投機的な preconnect が受け付けを塞がないよう、枠の中では接続ごとに別スレッドで処理する。
+                    let Some(slot) = Slot::acquire() else {
+                        continue;
+                    };
+                    std::thread::spawn(move || handle(s, port, slot));
                 }
             }
         });
@@ -100,10 +104,7 @@ fn host_is_exact(head: &str, expected: &str) -> bool {
     matches!((hosts.next(), hosts.next()), (Some(h), None) if h == expected)
 }
 
-fn handle(mut s: TcpStream, port: u16) {
-    let Some(_slot) = Slot::acquire() else {
-        return;
-    };
+fn handle(mut s: TcpStream, port: u16, _slot: Slot) {
     let deadline = Instant::now() + HEADER_DEADLINE;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];

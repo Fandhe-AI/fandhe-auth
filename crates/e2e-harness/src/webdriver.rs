@@ -74,6 +74,31 @@ fn validated_path(path: &str) -> Result<&str, E2eError> {
 /// `Debug` で値の代わりに出す固定の文字列（SECR-11）。
 const REDACTED: &str = "<redacted>";
 
+/// セッション ID。セッションを操作できる値のため、専用の型で持つ（SECR-10・SECR-30。`fandhe-auth-secret` へは
+/// `scripts/check-crate-deps.sh` の許可表で辺が許されていないため、この crate の中に非公開の型を置く）。
+///
+/// `Debug` は固定の文字列だけ。`Display`・`Clone` 以外の暗黙の取り出し経路を持たず、値は要求の path を
+/// 組み立てるときだけ [`SessionId::expose`] で借りる（SECR-11・SECR-16）。
+#[derive(Clone)]
+struct SessionId(String);
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SessionId").field(&REDACTED).finish()
+    }
+}
+
+impl SessionId {
+    fn new(raw: &str) -> Result<Self, E2eError> {
+        validated_id(raw).map(Self)
+    }
+
+    /// 要求の path の組み立てだけで使う。戻り値をログ・誤りに渡さない。
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
 /// 仮想 authenticator の識別子。ドライバが返した値を検証して持つ。
 ///
 /// `Debug` は値を出さない（SECR-11。authenticator の操作に使う値のため）。
@@ -204,7 +229,7 @@ impl WebDriverClient {
         Ok((
             WebDriverSession {
                 client: *self,
-                id: validated_id(id)?,
+                id: SessionId::new(id)?,
             },
             version,
         ))
@@ -326,7 +351,7 @@ fn header_value(head: &[u8], name: &str) -> Option<String> {
 #[derive(Clone)]
 pub struct WebDriverSession {
     client: WebDriverClient,
-    id: String,
+    id: SessionId,
 }
 
 impl fmt::Debug for WebDriverSession {
@@ -340,13 +365,17 @@ impl fmt::Debug for WebDriverSession {
 
 impl WebDriverSession {
     fn path(&self, tail: &str) -> String {
-        format!("/session/{}{tail}", self.id)
+        format!("/session/{}{tail}", self.id.expose())
     }
 
     /// セッションを閉じる。
     pub fn delete(&self) -> Result<(), E2eError> {
         self.client
-            .request(HttpMethod::Delete, &format!("/session/{}", self.id), None)
+            .request(
+                HttpMethod::Delete,
+                &format!("/session/{}", self.id.expose()),
+                None,
+            )
             .map(|_| ())
     }
 
@@ -427,6 +456,26 @@ impl WebDriverSession {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn session_id_debug_is_redacted_and_value_is_borrowed_only_by_expose() {
+        // SECR-11・SECR-30: 秘密値として持つ型。derive(Debug) の入れ物に入れても値が出ない。
+        #[derive(Debug)]
+        struct Holder {
+            _id: SessionId,
+        }
+        let id = SessionId::new("sid-visible-9").unwrap();
+        assert_eq!(id.expose(), "sid-visible-9");
+        for shown in [
+            format!("{id:?}"),
+            format!("{id:#?}"),
+            format!("{:?}", Holder { _id: id.clone() }),
+        ] {
+            assert!(!shown.contains("sid-visible-9"), "{shown}");
+            assert!(shown.contains("<redacted>"), "{shown}");
+        }
+        assert!(SessionId::new("a/b").is_err());
+    }
 
     #[test]
     fn unsafe_paths_are_rejected_before_anything_is_sent() {
