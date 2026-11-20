@@ -173,7 +173,11 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
 - `tracing`: default は `std`・`attributes`。`attributes` は proc-macro の `tracing-attributes` を引く。`#[instrument]` を本体が使うかが論点になる。
   ほかに `max_level_*`・`release_max_level_*` がある。
 - `tracing` の default の `attributes` は、`tracing-attributes`（proc-macro）を経由して `syn` 2.0.119 を normal で引く。
-  本体に default のまま入れると、本番のビルドに `syn` 2 が入り、`syn` 3 と 2 つの major が並ぶ。
+  `cargo tree --locked -p fandhe-auth-trial-deps -e normal,build --target all -i` で確かめた事実は次のとおり。
+  - この crate の normal・build の木には `syn` 2.0.119 だけが入る（`tracing-attributes` 経由）。`syn` 3.0.10 は入らない（出力は `nothing to print`）。
+  - `-e normal,build,dev` に替えると、この crate の木には `syn` 2.0.119 と `syn` 3.0.10 の両方が入る。`syn` 3 は、この crate の dev 依存（構文の走査用）である。
+  - workspace 全体の normal・build では、`syn` 3.0.10 は `serde_derive` を経由して `hub-stub` と `console-stub` に入っている。この crate の変更によるものではない。
+  - 並ぶかどうかの判断はここでは書かない。本体の木に `syn` が何を引くかは、feature の組の選びと併せて人が決める。
 - `metrics`: `[features]` が無い。`default-features = false` の組は成り立たない。
 - `tracing-subscriber`: default は `smallvec`・`fmt`・`ansi`・`tracing-log`・`std`。
 - `proptest`: default は `std`・`fork`・`timeout`・`bit-set`。

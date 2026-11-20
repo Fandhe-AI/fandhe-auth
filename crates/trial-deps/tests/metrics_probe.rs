@@ -3,7 +3,6 @@
 //! 追加の crate を使わず、自前の最小の `Recorder` を `with_local_recorder` で当てる。
 //! ラベルに秘密値を載せない型の制約は範囲外。〔仮想〕の確認。
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fandhe_auth_trial_deps::metrics_probe::emit_probe_counter;
@@ -17,20 +16,29 @@ struct Registered {
     keys: Vec<(String, Vec<(String, String)>)>,
 }
 
-struct Handle(Arc<AtomicU64>);
+/// `increment` と `absolute` を区別して記録する。
+#[derive(Default)]
+struct Calls {
+    /// `increment` に渡された値を呼ばれた順に持つ。
+    increments: Mutex<Vec<u64>>,
+    /// `absolute` に渡された値を呼ばれた順に持つ。
+    absolutes: Mutex<Vec<u64>>,
+}
+
+struct Handle(Arc<Calls>);
 
 impl CounterFn for Handle {
     fn increment(&self, value: u64) {
-        self.0.fetch_add(value, Ordering::SeqCst);
+        self.0.increments.lock().unwrap().push(value);
     }
     fn absolute(&self, value: u64) {
-        self.0.fetch_max(value, Ordering::SeqCst);
+        self.0.absolutes.lock().unwrap().push(value);
     }
 }
 
 struct MinimalRecorder {
     registered: Mutex<Registered>,
-    total: Arc<AtomicU64>,
+    calls: Arc<Calls>,
 }
 
 impl Recorder for MinimalRecorder {
@@ -48,7 +56,7 @@ impl Recorder for MinimalRecorder {
             .unwrap()
             .keys
             .push((key.name().to_owned(), labels));
-        Counter::from_arc(Arc::new(Handle(self.total.clone())))
+        Counter::from_arc(Arc::new(Handle(self.calls.clone())))
     }
     fn register_gauge(&self, _: &Key, _: &Metadata<'_>) -> Gauge {
         Gauge::noop()
@@ -63,7 +71,7 @@ impl Recorder for MinimalRecorder {
 fn secr26_probe_counter_key_label_and_increment_received() {
     let rec = MinimalRecorder {
         registered: Mutex::new(Registered::default()),
-        total: Arc::new(AtomicU64::new(0)),
+        calls: Arc::new(Calls::default()),
     };
     metrics::with_local_recorder(&rec, emit_probe_counter);
 
@@ -75,5 +83,6 @@ fn secr26_probe_counter_key_label_and_increment_received() {
             vec![("kind".to_owned(), "probe".to_owned())]
         )]
     );
-    assert_eq!(rec.total.load(Ordering::SeqCst), 1);
+    assert_eq!(*rec.calls.increments.lock().unwrap(), vec![1]);
+    assert!(rec.calls.absolutes.lock().unwrap().is_empty());
 }
