@@ -18,3 +18,10 @@ workspace = true
 fandhe-auth-secret = { path = "../secret" }
 fandhe-auth-hub-stub = { path = "../hub-stub" }
 fandhe-auth-console-stub = { path = "../console-stub" }
+
+# 試験専用の依存（TASK-13 5/8）。hub-stub の受け口が受理する署名済みトークンを、実行時に生成した鍵で作る。
+# 版は hub-stub と同じ。人の確認待ち。
+[dev-dependencies]
+base64 = "0.22.1"
+ring = "0.17.14"
+serde_json = "1"

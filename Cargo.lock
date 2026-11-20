@@ -107,9 +107,12 @@ dependencies = [
 name = "fandhe-auth-it-harness"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "fandhe-auth-console-stub",
  "fandhe-auth-hub-stub",
  "fandhe-auth-secret",
+ "ring",
+ "serde_json",
 ]
 
 [[package]]
