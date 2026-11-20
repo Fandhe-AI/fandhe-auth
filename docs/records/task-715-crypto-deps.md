@@ -29,6 +29,18 @@
 2. `cargo tree --locked -p fandhe-auth-<名前> -e normal,build --depth 1 --target all`（本体の 4 crate）。dev は `-e dev` で別に見た。
 3. `cargo tree --locked --workspace -e normal,build,dev --target all -i <名前>`（lock にある暗号に関わる名前の逆依存。`getrandom` は版が 2 つあり `@0.2.17`・`@0.4.3` で指定した）。
 
+実行した各コマンドの終了コードと出力の抜粋（空の結果と実行失敗を区別するため、終了コードを併記する。パスは `<repo>` に置換）:
+
+| コマンド | 終了コード | 出力の抜粋 |
+|---|---|---|
+| `cargo metadata --format-version 1 --locked` | 0 | `core`・`secret`・`db-tests`・`client` の `dependencies[]` の件数はいずれも 0 |
+| `cargo tree --locked -p fandhe-auth-<名前> -e normal,build --depth 1 --target all`（4 crate それぞれ） | 0 | `fandhe-auth-<名前> v0.0.0 (<repo>/crates/<名前>)` の 1 行のみ |
+| `cargo tree --locked -p fandhe-auth-<名前> -e dev --depth 1 --target all`（4 crate それぞれ） | 0 | 同上の 1 行のみ |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i ring` | 0 | `ring v0.17.14` から `fandhe-auth-hub-stub` を経て `it-harness`・`load-harness` へ至る木 |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i openssl`（lock に無い名前） | 101 | `error: package ID specification `openssl` did not match any packages`（実行失敗ではなく「lock に無い」の意味） |
+| `grep -c '^name = "<名前>"' Cargo.lock`（`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken` を 1 名ずつ） | 1（5 名とも） | 標準出力は `0`（一致 0 件。grep は一致 0 件で終了コード 1 を返す） |
+| `grep -c '^name = ' Cargo.lock` | 0 | `69` |
+
 `cargo tree -i` は一致が無いと非 0 で終わるため、合否は終了コードだけで決めず出力で確かめる（`.claude/rules/dependency-policy.md`）。
 
 ### 4. 結果 1: 本体の直接の依存
@@ -62,7 +74,7 @@
 | 署名 | 自社発行の ID トークン・アクセストークン・Logout Token の署名 | 0 件 | `aws-lc-rs` または `ring`。`jsonwebtoken` を使うなら `aws_lc_rs` の feature だけ。どれにするかは未定 | 未導入 | `SIGN-1`・`SIGN-2`・`SIGN-8`・`DPOL-10`・`DPOL-11`・`DPOL-17`・`D-2026-10-16-4` | （空） |
 | 検証 | JWT の検証（`client` の自前の薄い検証部。`rsa` を入れない） | 0 件 | 署名の検証そのものは署名と同じ既存の crate に任せる | 未導入 | `DPOL-18`・`DPOL-21`・`SIGN-6`・`SIGN-9`・`SIGN-10`・`SIGN-17` | （空） |
 | 乱数 | state・nonce・PKCE・認可コード・TOTP の秘密などの生成 | 0 件 | 本体は乱数の crate を直接持たず、組込み先の口（仮称 `Rng`）で受ける | 直接の依存 0 が設計どおり | `HOST-2`・`HOST-22`・`AMTH-2` | （空） |
-| WebAuthn | passkey の登録・認証の検証 | 0 件 | `webauthn-rs` 0.5.5。`openssl` を引く根は `webauthn-rs` 系に限る。置く crate は未定 | 未導入 | `PKEY-4`・`DPOL-10`・`DPOL-11` | （空） |
+| WebAuthn | passkey の登録・認証の検証 | 0 件 | `webauthn-rs`（0.5.5 は PoC で既定 options を実測した版で、本番の導入候補として選定した版ではない。版は `dependency-policy.md`・`PKEY-4` に従い別に決める）。`openssl` を引く根は `webauthn-rs` 系に限る。置く crate は未定 | 未導入 | `PKEY-4`・`DPOL-10`・`DPOL-11` | （空） |
 | TOTP | RFC 6238 の検証（定数時間の比較） | 0 件 | 検証済みの既存実装を使い自作しない。本番の crate は未定（`TASK-762`。評価は `PoC-18`） | 未導入 | `AMTH-2`・`AMTH-3`・`DPOL-47` | （空） |
 
 補足（`LIB-21` が挙げる他の基本処理）:
@@ -73,7 +85,7 @@
 ### 6. 結果 3: lock にあり本体の外にある暗号に関わる crate
 
 `Cargo.lock`（69 crate）に `ring`・`untrusted`・`rand`・`rand_core`・`rand_xorshift`・`chacha20`・`getrandom`（0.2.17・0.4.3）がある。
-`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken` は lock に無い（`grep` 0 件）。
+`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken` は lock に無い（上の `grep -c '^name = "<名前>"' Cargo.lock` が 5 名とも `0` で終了コード 1）。
 `cargo tree -i`（normal,build,dev）の逆依存の根は次のとおりで、段階 1 の本体の 4 crate は根にも経路にも現れない。
 
 | 名前 | 根 |
