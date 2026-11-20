@@ -136,25 +136,27 @@ selftest() {
 
 selftest
 
+# 走査 A（合否）。検査不能（2）と違反（1）はここで確定し、参考の走査 B より先に返す。
 total=0
-for scan in A B; do
-  extra=()
-  [ "${scan}" = "B" ] && extra=(--all-features)
-  tree="$(run_tree "${ROOT_DIR}" locked --workspace ${extra[@]+"${extra[@]}"})"
-  for r in R1 R2 R3; do
-    n="$(count_rule "${r}" "${tree}")"
-    if [ "${scan}" = "A" ]; then
-      log "scan A ${r}: ${n}"
-      total=$((total + n))
-    else
-      log "scan B (info, not gated) ${r}: ${n}"
-      [ "${n}" -ne 0 ] && log "warn: vendored path behind a non-default feature (${r}); confirm it is not a production feature"
-    fi
-  done
+tree="$(run_tree "${ROOT_DIR}" locked --workspace)"
+for r in R1 R2 R3; do
+  n="$(count_rule "${r}" "${tree}")"
+  log "scan A ${r}: ${n}"
+  total=$((total + n))
 done
-
 if [ "${total}" -ne 0 ]; then
   log "FAIL: vendored openssl detected in dependency resolution (DPOL-13)"
   exit 1
+fi
+
+# 走査 B（参考）。失敗しても終了コードに影響させず警告だけ出す（A の合否を上書きしない）。
+if tree="$(run_tree "${ROOT_DIR}" locked --workspace --all-features)"; then
+  for r in R1 R2 R3; do
+    n="$(count_rule "${r}" "${tree}")"
+    log "scan B (info, not gated) ${r}: ${n}"
+    [ "${n}" -ne 0 ] && log "warn: vendored path behind a non-default feature (${r}); confirm it is not a production feature"
+  done
+else
+  log "warn: scan B (info, not gated) could not run; result not affected"
 fi
 log "ok: no vendored openssl (DPOL-13)"
