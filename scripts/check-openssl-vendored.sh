@@ -68,10 +68,14 @@ count_rule() {
 }
 
 # mkpkg <dir> <name> <Cargo.toml の追加本文>: path 依存の偽 crate を作る。[workspace] は repo の workspace に取り込まれないため。
+# 書き込みの失敗（ENOSPC 等）は検査不能（2）。set -e の 1 では「違反」と区別できないため明示する。
 mkpkg() {
-  mkdir -p "$1/src"
-  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n[workspace]\n' "$2" "$3" >"$1/Cargo.toml"
-  : >"$1/src/lib.rs"
+  if ! mkdir -p "$1/src" ||
+    ! printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n[workspace]\n' "$2" "$3" >"$1/Cargo.toml" ||
+    ! : >"$1/src/lib.rs"; then
+    log "error: cannot write fixture ($2); cannot inspect"
+    exit 2
+  fi
 }
 
 # expect_count <label> <rule> <tree> <eq0|ge1>: 自己試験の期待と違えば 1 で止める。
@@ -90,7 +94,10 @@ expect_count() {
 
 selftest() {
   local f="${WORK}/fx" t a b r
-  mkdir -p "${f}"
+  if ! mkdir -p "${f}"; then
+    log "error: cannot create selftest dir; cannot inspect"
+    exit 2
+  fi
   mkpkg "${f}/openssl-src" "openssl-src" ""
   mkpkg "${f}/openssl-sys" "openssl-sys" $'[features]\nvendored = ["dep:openssl-src"]\n[build-dependencies]\nopenssl-src = { path = "../openssl-src", optional = true }'
   mkpkg "${f}/openssl" "openssl" $'[features]\nvendored = ["openssl-sys/vendored"]\n[dependencies]\nopenssl-sys = { path = "../openssl-sys" }'
