@@ -153,7 +153,7 @@ UTF-8・LF の 1 行 1 項目 `key: value`。キーは ASCII 固定。
 
 - `make test`: Docker 不要。サンプルを含む。CI の build-test ジョブと同じ契約。
 - `make it-db`: Docker 必須。`#[ignore]` の試験を流す。CI の外。
-- `make it-db-ci`: Docker 必須。枠の試験 `db_job_frame` だけを流す。CI の DB ジョブの入口。一致 0 件は失敗。
+- `make it-db-ci`: Docker・Docker Compose・openssl 必須。枠の試験 `db_job_frame` だけを流す。CI の DB ジョブの入口。一致 0 件は失敗。
 - Docker の有無で自動に飛ばす仕組みは作らない（`DPOL-30`〜`DPOL-32`）。
 
 ### 守ること

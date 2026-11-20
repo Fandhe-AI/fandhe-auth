@@ -69,7 +69,7 @@ it-db: ## ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験�
 
 # it-db-ci は暫定の名前（人が確定する）。CI の DB ジョブ（it-db-ci）が呼ぶ入口で、枠の試験（db_job_frame）だけを流す（TASK-6。#52）。
 # パスワードは試験プロセスの中で生成する（SECR-6）。ここでも CI でも起動・停止の手順は持たない。
-it-db-ci: ## CI の DB ジョブの入口（Docker 必須・枠の試験だけを流す。0 件は失敗）。直接: scripts/it-db-ci.sh
+it-db-ci: ## CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験だけを流す。0 件は失敗）。直接: scripts/it-db-ci.sh
 	@scripts/it-db-ci.sh
 
 # e2e-chrome は暫定の名前（人が確定する）。chromedriver を使う E2E（#[ignore]）の明示の入口。CI には載せない（TASK-6）。
