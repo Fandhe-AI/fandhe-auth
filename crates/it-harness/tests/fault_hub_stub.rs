@@ -451,25 +451,46 @@ fn record_lines_and_no_token_leak() {
     let mut tl = timeline();
     let (mut inj, _) = injector(&tl);
     let mut lo = logout_rx();
+    let mut pr = presenter();
     let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503));
     let kl = refusal(HubStubPort::Logout, HubStubRefusalKind::Unreachable);
+    let kp = refusal(HubStubPort::Presentation, HubStubRefusalKind::Unreachable);
     inj.apply(&mut tl, k).unwrap();
     inj.apply(&mut tl, kl).unwrap();
-    let c = canary();
-    let _ = inj.receive_logout(&tl, &mut lo, &c, NOW);
-    assert!(!format!("{inj:?}").contains(&c));
-    assert!(!format!("{:?}", inj.call_log()).contains(&c));
-    let text = finish(inj, tl).to_string();
+    inj.apply(&mut tl, kp).unwrap();
+    // 両方の受け口で、拒否時と委譲時（解除後）に実行時生成の値を渡す（SECR-23・SECR-26）。
+    let c1 = canary();
+    let c2 = canary();
+    let c3 = canary();
+    let c4 = canary();
+    let _ = inj.receive_logout(&tl, &mut lo, &c1, NOW);
+    let _ = inj.present(&tl, &mut pr, &c2, NOW);
+    inj.release(&mut tl, kl).unwrap();
+    inj.release(&mut tl, kp).unwrap();
+    assert!(inj.receive_logout(&tl, &mut lo, &c3, NOW).unwrap().is_err());
+    assert!(inj.present(&tl, &mut pr, &c4, NOW).unwrap().is_err());
+    let cs = [&c1, &c2, &c3, &c4];
+    for c in cs {
+        assert!(!format!("{inj:?}").contains(c.as_str()));
+        assert!(!format!("{:?}", inj.call_log()).contains(c.as_str()));
+    }
+    let (rec, log) = inj
+        .finish(tl, UtcTimestamp::from_unix_seconds(1_700_000_060))
+        .unwrap();
+    let text = rec.to_string();
     assert!(text.contains("hub_stub_refusal target=hub_stub"));
     assert!(text.contains("port=jwks refusal=status_503"));
     assert!(text.contains("A-2026-10-28-9"));
-    assert!(!text.contains(&c));
+    for c in cs {
+        assert!(!text.contains(c.as_str()));
+        assert!(!format!("{log:?}").contains(c.as_str()));
+    }
     for e in [
         HubStubFaultError::InvalidParam,
         HubStubFaultError::AlreadyActive,
         HubStubFaultError::NotActive,
     ] {
-        assert!(!e.to_string().contains(&c));
+        assert!(!e.to_string().contains(c1.as_str()));
     }
 }
 
@@ -671,4 +692,34 @@ fn second_injector_is_already_bound_even_after_events() {
         HubStubFaultInjector::new(|_d: Duration| {}, &tl),
         Err(HubStubFaultError::AlreadyBound)
     ));
+}
+
+/// 受け口を呼んだ注入器は、apply が無くても破棄で結合を取り消さない（再結合で呼び出しの記録が消えない）。
+#[test]
+fn dropping_injector_after_delegated_call_keeps_binding() {
+    let tl = timeline();
+    let (mut inj, _) = injector(&tl);
+    let mut jwks = HubJwksEndpoint::new(&config());
+    assert_eq!(inj.serve_jwks(&tl, &mut jwks, NOW).unwrap().status, 200);
+    drop(inj);
+    assert!(matches!(
+        HubStubFaultInjector::new(|_: Duration| {}, &tl).unwrap_err(),
+        HubStubFaultError::AlreadyBound
+    ));
+}
+
+/// `with` のクロージャ内で遅れの `Wait` が走っても、同じハンドルを参照しない `Wait` なら止まらない。
+#[test]
+fn delay_through_handle_with_runs_non_reentrant_wait() {
+    let comp = HubStubComponent::new(config());
+    let handle = comp.handle();
+    let _running = Harness::start(HarnessConfig::new().with(Box::new(comp))).unwrap();
+    let mut tl = timeline();
+    let (mut inj, waits) = injector(&tl);
+    inj.apply(&mut tl, delay(HubStubPort::Jwks, 5)).unwrap();
+    let r = handle
+        .with(|s| inj.serve_jwks(&tl, &mut s.jwks, NOW))
+        .unwrap();
+    assert_eq!(r.unwrap().status, 200);
+    assert_eq!(*waits.borrow(), vec![Duration::from_millis(5)]);
 }

@@ -13,7 +13,7 @@
 //! - hub-stub は口ごとに最初に当たった 1 件の規則だけを使う。そのため口ごとに有効な遅れと拒否（各最大 1 件）を
 //!   1 つの規則へ合成する。分けると片方が黙って落ち、記録では注入したのに効かない状態になる。
 //! - 注入器は `new(wait, &timeline)` で 1 つの実行に結ぶ。別の実行の記録は `RunMismatch`、同じ実行への 2 つ目は `AlreadyBound`。
-//!   未使用（`apply` が一度も通らない）の注入器を破棄すると結合を取り消し、結び直せる。使った注入器は印を残す。
+//!   未使用（`apply` も受け口の委譲も一度も通らない）の注入器を破棄すると結合を取り消し、結び直せる。使った注入器は印を残す。
 //!   `finish` は注入器を消費し、有効な規則を次の実行（基準線を含む）へ持ち越さず、記録と呼び出しの記録を組で返す。
 //! - 事象には呼び出しの記録の件数（`FaultEvent::log_pos`）を添え、期間と呼び出しを順序で照合できる。
 //! - 記録が先、状態の変更が後。記録が拒否されたら状態を変えない。基準線では記録が拒否し、注入もしない（fail-closed）。
@@ -189,9 +189,9 @@ pub struct HubStubFaultInjector<W: Wait> {
     run_id: u64,
     inner: HubFaultInjector<W>,
     active: [PortFaults; 4],
-    /// 実行側の結合の印。未使用（一度も `apply` が通っていない）まま破棄されたら下ろす。
+    /// 実行側の結合の印。未使用（`apply` も受け口の委譲も通っていない）まま破棄されたら下ろす。
     bound: Arc<AtomicBool>,
-    /// `apply` が一度でも通ったか。
+    /// `apply` または受け口の委譲（内側の呼び出しの記録が積まれる操作）が一度でも通ったか。
     used: bool,
 }
 
@@ -221,7 +221,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
     /// 有効な規則と呼び出しの記録を、別の実行へ持ち越せない構造にするため（fail-closed）。
     /// 1 つの実行に結べる注入器は 1 つだけ。事象の呼び出し位置（`log_pos`）は注入器ごとの呼び出しの記録の件数なので、
     /// 複数あると順序の照合が崩れる。2 つ目は `AlreadyBound`。
-    /// 一度も `apply` が通らないまま注入器を破棄した場合は結合を取り消し、結び直すか直接の確定ができる。
+    /// 一度も `apply` も受け口の委譲も通らないまま注入器を破棄した場合は結合を取り消し、結び直すか直接の確定ができる。
     ///
     /// `wait` は遅れの渡し先で、`HubStubHandle::with` のクロージャ内で受け口を呼ぶとセッションのロックを握ったまま走る。
     /// 同じハンドルを参照する（再入する）ものを渡さない。
@@ -370,6 +370,8 @@ impl<W: Wait> HubStubFaultInjector<W> {
         now: u64,
     ) -> Result<Result<ReceivedIdentity, PresentationRejection>, HubStubCallError> {
         self.guard(timeline)?;
+        // 内側を呼ぶと呼び出しの記録が積まれる。以後は結合を取り消さない（再結合で記録と log_pos がずれるため）。
+        self.used = true;
         self.inner
             .present(inner, token, now)
             .map_err(HubStubCallError::Injected)
@@ -384,6 +386,8 @@ impl<W: Wait> HubStubFaultInjector<W> {
         now: u64,
     ) -> Result<Result<LogoutReceipt, LogoutRejection>, HubStubCallError> {
         self.guard(timeline)?;
+        // 内側を呼ぶと呼び出しの記録が積まれる。以後は結合を取り消さない（再結合で記録と log_pos がずれるため）。
+        self.used = true;
         self.inner
             .receive_logout(inner, token, now)
             .map_err(HubStubCallError::Injected)
@@ -398,6 +402,8 @@ impl<W: Wait> HubStubFaultInjector<W> {
         now: u64,
     ) -> Result<(), HubStubCallError> {
         self.guard(timeline)?;
+        // 内側を呼ぶと呼び出しの記録が積まれる。以後は結合を取り消さない（再結合で記録と log_pos がずれるため）。
+        self.used = true;
         self.inner
             .receive_heartbeat(inner, heartbeat, now)
             .map_err(HubStubCallError::Injected)
@@ -411,6 +417,8 @@ impl<W: Wait> HubStubFaultInjector<W> {
         now: u64,
     ) -> Result<JwksResponse, HubStubCallError> {
         self.guard(timeline)?;
+        // 内側を呼ぶと呼び出しの記録が積まれる。以後は結合を取り消さない（再結合で記録と log_pos がずれるため）。
+        self.used = true;
         self.inner
             .serve_jwks(inner, now)
             .map_err(HubStubCallError::Injected)
