@@ -111,7 +111,7 @@ fail() {
   echo "not ok - $1"
   shift
   local detail
-  for detail in "$@"; do
+  for detail in ${@+"$@"}; do
     echo "    ${detail}"
   done
 }
@@ -788,7 +788,7 @@ run_without_cmd() {
   bin="${work_dir}/nobin-${skip}"
   rm -rf "${bin}"
   mkdir -p "${bin}"
-  for c in "$@"; do
+  for c in ${@+"$@"}; do
     if [ "${c}" != "${skip}" ]; then
       ln -s "$(command -v "${c}")" "${bin}/${c}"
     fi
@@ -1014,8 +1014,18 @@ else
 fi
 
 # ---- scripts/msrv.sh: cargo metadata の解決結果から読む（表記の違い・複数行の文字列に左右されない。読めなければ 2）
+# 前提: cargo・jq・tomllib を持つ python3（3.11 以上）。CI（CI または GITHUB_ACTIONS が設定）では前提が足りなければ
+# skip せず失敗にする（検査が黙って素通りしないため）。ローカルでは skip する。
+msrv_prereq="ok"
+if ! command -v cargo > /dev/null 2>&1 || ! command -v jq > /dev/null 2>&1 \
+  || ! command -v python3 > /dev/null 2>&1 || ! python3 -I -c 'import tomllib' > /dev/null 2>&1; then
+  msrv_prereq="missing"
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "msrv: prerequisites (cargo, jq, python3 with tomllib) are required in CI" "missing prerequisite" ""
+  fi
+fi
 MSRV_SH="${HOOKS_DIR}/../msrv.sh"
-if command -v cargo > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
+if [ "${msrv_prereq}" = "ok" ]; then
   # msrv_ws <名前> <期待の終了状態> <期待の標準出力（空なら確かめない）> <ルート Cargo.toml> [メンバー crate の Cargo.toml]
   # 一時の workspace（メンバー m1 = 与えた内容）を作って msrv.sh を流す。
   msrv_ws() {
@@ -1057,6 +1067,17 @@ if command -v cargo > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
     $'[package]\nname = "m1"\nversion = "0.0.0"\nedition = "2024"\nrust-version.workspace = true' \
     $'[package]\nname = "m2"\nversion = "0.0.0"\nedition = "2024"\nrust-version = "1.101"'
   msrv_ws "missing rust-version everywhere exits 2" 2 "" "${ws_head}"
+  # 全メンバーが同じ別の版を書き、ルートと食い違う（P1。#47）
+  msrv_ws "all members sharing a version that differs from the root exit 2" 2 "" \
+    "${ws_head}"$'\nrust-version = "1.100"' \
+    $'[package]\nname = "m1"\nversion = "0.0.0"\nedition = "2024"\nrust-version = "1.99"'
+  msrv_ws "members equal to the root by their own value are accepted" 0 "1.100" \
+    "${ws_head}"$'\nrust-version = "1.100"' \
+    $'[package]\nname = "m1"\nversion = "0.0.0"\nedition = "2024"\nrust-version = "1.100"'
+  msrv_ws "a root without rust-version exits 2 even if the member declares one" 2 "" "${ws_head}" \
+    $'[package]\nname = "m1"\nversion = "0.0.0"\nedition = "2024"\nrust-version = "1.100"'
+  msrv_ws "a non-string root rust-version exits 2" 2 "" "${ws_head}"$'\nrust-version = 1.100' \
+    $'[package]\nname = "m1"\nversion = "0.0.0"\nedition = "2024"\nrust-version = "1.100"'
   rc=0
   "${HOOK_BASH}" "${MSRV_SH}" "${work_dir}/no-such-manifest.toml" > /dev/null 2> "${work_dir}/out" || rc=$?
   expect_rc "msrv: an unreadable manifest exits 2" 2 "${rc}"
@@ -1064,7 +1085,60 @@ if command -v cargo > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
   HOME="${real_home}" "${HOOK_BASH}" "${MSRV_SH}" > "${work_dir}/msrv-root.out" 2> "${work_dir}/out" || rc=$?
   expect_rc "msrv: the root Cargo.toml yields a version" 0 "${rc}"
 else
-  echo "ok - msrv: skipped (cargo or jq not found)"
+  echo "ok - msrv: skipped (cargo, jq or python3 with tomllib not found)"
+fi
+
+# ---- scripts/install-msrv.sh: 配布元の設定は 2 で止める・版の引き継ぎと一致確認（rustup・rustc は偽物に差し替える）
+INSTALL_MSRV_SH="${HOOKS_DIR}/../install-msrv.sh"
+if [ "${msrv_prereq}" = "ok" ]; then
+  # install_msrv_case <名前> <期待の終了状態> <偽 rustc の版の上書き（空なら RUSTUP_TOOLCHAIN をそのまま名乗る）>
+  #   <GITHUB_ENV に期待する行（空なら書かれないこと）> <rustup の呼び出しの記録の期待（空なら一度も呼ばれないこと）>
+  #   [環境変数 NAME=VALUE...]
+  # 偽の rustc は RUSTUP_TOOLCHAIN の値を版として返す（export が消えれば unset を返し、一致確認で落ちる）。
+  # 偽の rustup は引数を 1 呼び出し 1 行で記録する（配布元の拒否が rustup の呼び出しより前であること、
+  # 入れる版・既定にする版がパッチ版であることを確かめる）。偽のコマンドの中身は固定で、パスは環境変数で渡す
+  # （TMPDIR 由来の値をシェルのコードへ埋め込まない）。
+  install_msrv_case() {
+    local name="$1" want_rc="$2" override_ver="$3" want_env="$4" want_calls="$5" rc=0 bin gh_env calls got_calls
+    shift 5
+    install_seq=$((${install_seq:-0} + 1))
+    bin="${work_dir}/install-msrv-bin-${install_seq}"
+    gh_env="${work_dir}/install-msrv-ghenv-${install_seq}"
+    calls="${bin}/rustup-calls"
+    mkdir -p "${bin}"
+    : > "${gh_env}"
+    : > "${calls}"
+    cat > "${bin}/rustup" <<'EOF'
+#!/bin/sh
+echo "$*" >> "${FAKE_RUSTUP_CALLS}"
+exit 0
+EOF
+    cat > "${bin}/rustc" <<'EOF'
+#!/bin/sh
+echo "rustc ${FAKE_RUSTC_VER:-${RUSTUP_TOOLCHAIN:-unset}} (abcdef 2026-01-01)"
+EOF
+    chmod +x "${bin}/rustup" "${bin}/rustc"
+    env -u RUSTUP_DIST_SERVER -u RUSTUP_UPDATE_ROOT -u RUSTUP_TOOLCHAIN ${@+"$@"} \
+      FAKE_RUSTUP_CALLS="${calls}" FAKE_RUSTC_VER="${override_ver}" PATH="${bin}:${PATH}" HOME="${real_home}" GITHUB_ENV="${gh_env}" \
+      "${HOOK_BASH}" "${INSTALL_MSRV_SH}" > /dev/null 2> "${work_dir}/out" || rc=$?
+    got_calls="$(cat "${calls}")"
+    if [ "${rc}" -eq "${want_rc}" ] && [ "$(cat "${gh_env}")" = "${want_env}" ] && [ "${got_calls}" = "${want_calls}" ]; then
+      pass "install-msrv: ${name}"
+    else
+      fail "install-msrv: ${name}" "exit ${rc} (expected ${want_rc}), GITHUB_ENV: $(cat "${gh_env}"), rustup calls: ${got_calls} (expected: ${want_calls})" "stderr: $(cat "${work_dir}/out")"
+    fi
+  }
+  want_ver="$(HOME="${real_home}" "${HOOK_BASH}" "${MSRV_SH}")"
+  case "${want_ver}" in *.*.*) ;; *) want_ver="${want_ver}.0" ;; esac
+  want_calls="toolchain install ${want_ver} --profile minimal"$'\n'"default ${want_ver}"
+  install_msrv_case "the patch version is installed, made default, exported and written to GITHUB_ENV" 0 "" "RUSTUP_TOOLCHAIN=${want_ver}" "${want_calls}"
+  install_msrv_case "a rustc of another version exits 2" 2 "1.99.0" "" "${want_calls}"
+  install_msrv_case "RUSTUP_DIST_SERVER set exits 2 without calling rustup" 2 "" "" "" RUSTUP_DIST_SERVER=https://example.invalid
+  install_msrv_case "RUSTUP_UPDATE_ROOT set exits 2 without calling rustup" 2 "" "" "" RUSTUP_UPDATE_ROOT=https://example.invalid
+  install_msrv_case "empty RUSTUP_DIST_SERVER exits 2 without calling rustup" 2 "" "" "" RUSTUP_DIST_SERVER=
+  install_msrv_case "empty RUSTUP_UPDATE_ROOT exits 2 without calling rustup" 2 "" "" "" RUSTUP_UPDATE_ROOT=
+else
+  echo "ok - install-msrv: skipped (cargo, jq or python3 with tomllib not found)"
 fi
 
 echo "# passed: ${passed}, failed: ${failed}"

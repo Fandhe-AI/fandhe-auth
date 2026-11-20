@@ -26,7 +26,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
 
 `ci.yml` の Rust のジョブ（`build-test`・`lint`・`it-db-ci`）は、toolchain を MSRV の版で入れて流す（利用者の指示、2026-11-20）。
-入れるのは `scripts/install-msrv.sh` で、版は `scripts/msrv.sh` が全 workspace メンバーの `rust-version` から読む。
+入れるのは `scripts/install-msrv.sh` で、版は `scripts/msrv.sh` が読む（ルートの `[workspace.package].rust-version` を TOML の構造どおりに読み、全 workspace メンバーの `rust-version` と一致するときだけ採る。食い違いは終了コード 2）。
 MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・edition・整形」を正とし、ここには写さない。
 新しい stable での検査は無く、足すかは未定。入れ方の例外は「ジョブ・ワークフローを追加するときのチェックリスト」の 9 を参照する。
 
@@ -124,15 +124,15 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
       利用者が 2026-11-20 に認めた（理由: rustup の公式の配布を使う・配布物の検証は rustup が行う・版をパッチまで固定する）。
       次の条件をすべて満たすときだけ例外にできる
       - 版をパッチ版まで固定する（`rust-version` が `X.Y` なら `X.Y.0` に補う。`X.Y.Z` はそのまま）。補い方は `install-msrv.sh` が持つ
-      - 導入は `scripts/install-msrv.sh` を経る。ワークフローに rustup の呼び出しを直接書かない（手順 3 の「処理は `scripts/`」と同じ）
+      - 導入は `scripts/install-msrv.sh` を経る。ワークフローに toolchain の導入・切り替え（`rustup toolchain install`・`rustup default`・`rustup override`・`rustup update` 等）を直接書かない（手順 3 の「処理は `scripts/`」と同じ）。今の toolchain の表示（`rustup show active-toolchain`）は許す
+      - 後続のステップにも同じ版を使わせる。`install-msrv.sh` が `$GITHUB_ENV` に `RUSTUP_TOOLCHAIN=<版>` を書き、導入の直後に使われる `rustc` の版が MSRV と一致することを確かめる（違えば終了コード 2）
       - `latest`・`stable`・`beta`・`nightly` など、動く名前の追従にしない
-      - rustup の公式の配布元を使う。`RUSTUP_DIST_SERVER`・`RUSTUP_UPDATE_ROOT` を CI（ワークフロー・`scripts/`）で設定しない。配布元を変えるには利用者の承認が要る
+      - rustup の公式の配布元を使う。`RUSTUP_DIST_SERVER`・`RUSTUP_UPDATE_ROOT` を CI（ワークフロー・`scripts/`）で設定しない。`install-msrv.sh` は設定されていれば（空の値も含む）、rustup を呼ぶ前に終了コード 2 で止める。配布元を変えるには利用者の承認が要る
       - 他の外部ツール（`check` ジョブの検査ツール等）には広げない。それらは従来どおり版 + SHA256 の宣言と検証を要る
       - 例外の範囲を広げる・条件を緩めるのは、利用者の承認を待つ（承認は人が行う。ACPT-7）
-      - 残りの課題は #47（TASK-6）で追跡する: (1) ルートの宣言との照合、
-        (2) 後続のステップで toolchain を明示すること、(3) 配布元の条件をスクリプトで機械的に強めること
-        （`RUSTUP_DIST_SERVER`・`RUSTUP_UPDATE_ROOT` が設定されていたら `install-msrv.sh` を終了コード 2 で止める）。
-        解消するまで例外は暫定として扱う
+      - #47（TASK-6）で追跡していた残りの課題（ルートの宣言との照合・後続のステップでの toolchain の明示・配布元の条件の機械的な強制）は解消した。
+        ルートの照合は `scripts/msrv.sh`、後者 2 つは `scripts/install-msrv.sh` が持ち、`scripts/hooks/test-hooks.sh` で試験する。
+        試験は `cargo`・`jq`・`tomllib` を持つ `python3`（3.11 以上）を要し、CI（`CI`・`GITHUB_ACTIONS` が設定）では前提が足りなければ skip せず失敗にする
 10. 信頼できない入力（PR タイトル等）は `${{ }}` で `run` に直接展開せず `env` 経由で渡す（`pr-title` ジョブの方式）
 11. 時間予算: `ci.yml` は PR の wall-clock で 2 分以内を目安とする。超える場合は並列化・キャッシュ・
     変更検知による skip を検討し、PR 本文に変更前後の実測を書く
