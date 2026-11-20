@@ -35,9 +35,6 @@ pub enum ExternalStoreFaultError {
     NotActive,
     /// 記録が拒否した（基準線である等）。状態は変えていない。
     Record(FaultRecordError),
-    /// 遮断中に待ち行列へ溜まった接続を捨て切れず、解除できなかった。
-    /// 遮断は続いたままで記録も変えておらず、`release_block` は再試行できる。
-    ReleaseIncomplete,
     /// 遮断の経路では起きない想定の内部の誤り。
     Internal,
 }
@@ -49,9 +46,6 @@ impl fmt::Display for ExternalStoreFaultError {
             Self::AlreadyActive => f.write_str("external store fault error: already active"),
             Self::NotActive => f.write_str("external store fault error: not active"),
             Self::Record(e) => write!(f, "external store fault error: {e}"),
-            Self::ReleaseIncomplete => {
-                f.write_str("external store fault error: release incomplete")
-            }
             Self::Internal => f.write_str("external store fault error: internal"),
         }
     }
@@ -65,7 +59,6 @@ fn convert(e: DbFaultError) -> ExternalStoreFaultError {
         DbFaultError::AlreadyActive => ExternalStoreFaultError::AlreadyActive,
         DbFaultError::NotActive => ExternalStoreFaultError::NotActive,
         DbFaultError::Record(r) => ExternalStoreFaultError::Record(r),
-        DbFaultError::ReleaseIncomplete => ExternalStoreFaultError::ReleaseIncomplete,
         DbFaultError::InvalidParam => ExternalStoreFaultError::Internal,
     }
 }
@@ -125,9 +118,7 @@ impl ExternalStoreFaultProxy {
         self.inner.block(timeline).map_err(convert)
     }
 
-    /// 遮断を解除する。切れた接続は戻らないので、client はつなぎ直す。遮断中に待ち行列へ溜まった接続は
-    /// 解除前に捨てる。捨て切れないときは [`ExternalStoreFaultError::ReleaseIncomplete`] を返し、
-    /// 遮断を維持したまま記録も変えないので、同じ呼び出しを再試行できる。
+    /// 遮断を解除する。切れた接続は戻らないので、client はつなぎ直す。
     pub fn release_block(
         &mut self,
         timeline: &mut FaultTimeline,
