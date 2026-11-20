@@ -328,8 +328,10 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
     // 宣言した長さに届いた時点で読み終えている場合、続きの余分なバイトを短い猶予で 1 回だけ確かめる。
     // 接続は 1 命令で捨てる（`Connection: close`）ので、猶予内に届かないバイトは見ない（保証は猶予内の到着まで）。
     if head.content_length.is_some() && !eof {
-        let grace = remaining(deadline)?.min(EXTRA_BYTES_GRACE);
-        stream.set_read_timeout(Some(grace)).map_err(|_| failed())?;
+        // 本文は期限内に届き切っているので、期限が丁度切れても完全な応答は成功にする。確かめる窓は固定の猶予だけ。
+        stream
+            .set_read_timeout(Some(EXTRA_BYTES_GRACE))
+            .map_err(|_| failed())?;
         if matches!(stream.read(&mut chunk), Ok(n) if n > 0) {
             return Err(failed());
         }

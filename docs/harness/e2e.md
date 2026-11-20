@@ -72,7 +72,7 @@ WebAuthn の secure context と RP ID は PoC-2 の結果を ID で引き、試�
 
 2/6 の入口は暫定の `make e2e-chrome`（`scripts/e2e-chrome.sh`。`#[ignore]` の `chrome_registration` を流す。CI 外）。
 chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless=new` と、外部への通信を禁じる `--host-resolver-rules`・
-`--proxy-server`（解決できない proxy）・`--proxy-bypass-list`（`<-loopback>` と登録 origin の `host:port` だけ。許可外の
+`--proxy-server`（解決できない proxy）・`--proxy-bypass-list`（`<-loopback>` と登録 origin の `http://host:port`（スキーム付き）だけ。許可外の
 ループバックのポートも送信前に失敗させる。A10）の計 4 つだけで、
 `--disable-*`・`--no-sandbox` は足さない。`navigate` は移動後の URL も許可リストで確かめ、外れたら空白ページへ戻して誤りにする。
 chromedriver の起動はプロセスグループを使うため、Chrome 側の実装・公開経路・試験は `cfg(unix)` に限る。
@@ -91,8 +91,8 @@ WebDriver の応答は、ヘッダー名の token 検査・値と理由句の制
   先に取って手放す方式は、別のドライバと取り違える恐れがあるため採らない（A10）。
 - 起動待ちの期限は probe・待機を含めた全体の絶対期限で、期限後の ready は受理しない。命令の期限も書き込み・読み取りを
   通した全体の絶対期限で、時間切れの値が大きすぎて期限を作れない場合は誤りにする（panic しない）。
-- 子は新しいプロセスグループで起動し、停止・失敗・`Drop` で、セッションの削除（最善）→ グループへ SIGKILL（セッションは削除済みで
-  Chrome の一時領域は片付いているため SIGTERM の猶予は置かない）→ wait の順に chromedriver と配下の Chrome を後片付けする。セッション ID が無い失敗でも同じ。
+- 子は新しいプロセスグループで起動し、停止・失敗・`Drop` で、セッションの削除（最善）→ グループへ SIGKILL（
+  Chrome の一時領域はハーネスが所有し回収後に消すため SIGTERM の猶予は置かない）→ wait の順に chromedriver と配下の Chrome を後片付けする。セッション ID が無い失敗でも同じ。Chrome の一時領域は `--user-data-dir` でハーネスが作った 0700 の `/tmp` 配下に固定し、セッション確立の失敗でも回収後に消す。
 - ブラウザの `navigate` は `ChromeDriverConfig::with_allowed_origin` で起動前に登録した試験用 origin
   （`http://localhost:<port>`・`http://127.0.0.1:<port>`。ポートは先頭ゼロなしで 80 以外）の配下だけを許し、未登録なら全拒否（A10）。
   ブラウザ自体の通信（初回の移動・リダイレクト・サブリソース）も proxy の bypass list により登録 origin 以外は送信前に失敗する。
@@ -124,7 +124,7 @@ WebDriver の応答は、ヘッダー名の token 検査・値と理由句の制
 - 仮想 authenticator の options の値（2/6 の値は PoC の値）
 - make ターゲット名 `e2e-chrome`
 - Chrome の起動 flag は `--headless=new` と外部への通信を禁じる `--host-resolver-rules`・`--proxy-server`（解決できない proxy）・
-  `--proxy-bypass-list`（登録 origin の `host:port` だけを直接接続にする）。検証を外す flag（`DPOL-30` の走査語）は足していない。採否は人の確認待ち
+  `--proxy-bypass-list`（登録 origin の `http://host:port`（スキーム付き）だけを直接接続にする）。検証を外す flag（`DPOL-30` の走査語）は足していない。採否は人の確認待ち
 - it-harness・最小の組込み先への辺（足す段で許可表を人に確かめる）
 
 ## 依存の判断待ち（人が決める）

@@ -15,7 +15,9 @@
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
@@ -118,12 +120,14 @@ pub const HOST_RESOLVER_RULES_ARG: &str =
 pub const PROXY_SERVER_ARG: &str = "--proxy-server=http://proxy.invalid:9";
 
 /// `--proxy-bypass-list` の flag。`<-loopback>` で loopback の暗黙の除外を外し、登録した `host:port` だけを直接接続にする。
+/// 各規則は `http://host:port` のスキーム付き（同じ host:port の HTTPS を直接接続にしない）。
+/// 検証済みの origin だけを入れる（ワイルドカード・区切り文字を含む値は黙って捨てる。fail closed）。
 fn proxy_bypass_arg(allowed_origins: &[String]) -> String {
     let mut list = String::from("--proxy-bypass-list=<-loopback>");
     for o in allowed_origins {
-        if let Some(hostport) = o.strip_prefix("http://") {
+        if let Ok(valid) = validated_origin(o) {
             list.push(';');
-            list.push_str(hostport);
+            list.push_str(&valid);
         }
     }
     list
@@ -132,16 +136,28 @@ fn proxy_bypass_arg(allowed_origins: &[String]) -> String {
 /// `POST /session` の本文。Chrome の flag は `--headless=new` と、外部への通信を禁じる 3 つだけ（DPOL-30）。
 /// `allowed_origins` に登録した origin 以外へは、初回の移動・リダイレクト・サブリソースとも送信前に失敗する（A10）。
 pub fn new_session_request_for(allowed_origins: &[String]) -> Value {
+    new_session_request_with_profile(allowed_origins, None)
+}
+
+/// `profile_dir` があれば `--user-data-dir` で Chrome の一時領域をハーネスが所有する場所に固定する（後片付けはハーネスが行う）。
+fn new_session_request_with_profile(
+    allowed_origins: &[String],
+    profile_dir: Option<&Path>,
+) -> Value {
+    let mut args = vec![
+        "--headless=new".to_owned(),
+        HOST_RESOLVER_RULES_ARG.to_owned(),
+        PROXY_SERVER_ARG.to_owned(),
+        proxy_bypass_arg(allowed_origins),
+    ];
+    if let Some(dir) = profile_dir {
+        args.push(format!("--user-data-dir={}", dir.display()));
+    }
     json!({
         "capabilities": {
             "alwaysMatch": {
                 "browserName": "chrome",
-                "goog:chromeOptions": { "args": [
-                    "--headless=new",
-                    HOST_RESOLVER_RULES_ARG,
-                    PROXY_SERVER_ARG,
-                    proxy_bypass_arg(allowed_origins)
-                ] }
+                "goog:chromeOptions": { "args": args }
             }
         }
     })
@@ -247,7 +263,14 @@ impl ChromeHandle {
 
     /// 非同期スクリプトを実行する。crate 内の定数スクリプトだけが使う（任意のスクリプトを外へ開かない）。
     pub(crate) fn execute_async(&self, script: &str, args: &[Value]) -> Result<Value, E2eError> {
-        self.with_live(|l| l.session.execute_async(script, args))
+        self.with_live(|l| {
+            let r = l.session.execute_async(script, args);
+            if r.is_err() {
+                // 通信の失敗は結果不明（実行済みかもしれない）。同じセッションで続けず、停止処理で回収する。
+                l.unusable = true;
+            }
+            r
+        })
     }
 
     /// 仮想 authenticator の credential の要約。
@@ -261,6 +284,8 @@ pub struct ChromeDriverComponent {
     config: ChromeDriverConfig,
     handle: ChromeHandle,
     child: Option<Child>,
+    /// Chrome の一時領域（ハーネスが作り、プロセスの回収後にセッション ID に依らず消す）。
+    profile_dir: Option<PathBuf>,
 }
 
 impl ChromeDriverComponent {
@@ -273,6 +298,7 @@ impl ChromeDriverComponent {
             },
             config,
             child: None,
+            profile_dir: None,
         }
     }
 
@@ -299,6 +325,13 @@ impl ChromeDriverComponent {
         {
             result = Err(err(E2eErrorKind::StopFailed));
         }
+        // プロセスの回収後に一時領域を消す（セッションを確立できなかった場合も同じ）。
+        if let Some(dir) = self.profile_dir.take()
+            && let Err(e) = std::fs::remove_dir_all(&dir)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            result = Err(err(E2eErrorKind::StopFailed));
+        }
         result
     }
 
@@ -317,6 +350,8 @@ impl ChromeDriverComponent {
             .map_err(|_| fail())?;
         let stdout = child.stdout.take();
         self.child = Some(child);
+        let profile = make_profile_dir().map_err(|_| fail())?;
+        self.profile_dir = Some(profile.clone());
         let stdout = stdout.ok_or_else(fail)?;
 
         let (tx, rx) = mpsc::channel::<u16>();
@@ -356,7 +391,10 @@ impl ChromeDriverComponent {
         }
         let client = WebDriverClient::new(port, self.config.command_timeout);
         let (session, browser_version) = client
-            .new_session(&new_session_request_for(&self.config.allowed_origins))
+            .new_session(&new_session_request_with_profile(
+                &self.config.allowed_origins,
+                Some(&profile),
+            ))
             .map_err(|_| fail())?;
         let mut guard = self.handle.live.lock().map_err(|_| fail())?;
         *guard = Some(Live {
@@ -366,6 +404,23 @@ impl ChromeDriverComponent {
         });
         Ok(())
     }
+}
+
+static PROFILE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Chrome の一時領域を `/tmp` 直下に所有者だけの権限（0700）で作る。名前は pid・連番・時刻で一意にする（環境変数は読まない。DPOL-32）。
+fn make_profile_dir() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = PathBuf::from(format!(
+        "/tmp/fandhe-e2e-chrome-{}-{}-{nanos}",
+        std::process::id(),
+        PROFILE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    Ok(dir)
 }
 
 /// chromedriver が起動時に出す `ChromeDriver was started successfully on port N` から N を取る。
@@ -418,7 +473,8 @@ fn read_driver_output(mut stdout: impl Read, tx: &mpsc::Sender<u16>) {
 /// `kill` を 1 回実行する。起動できない・成功以外の終了は誤りにする（結果を捨てない）。
 fn send_signal(sig: &str, group: &str) -> std::io::Result<()> {
     let status = Command::new("kill")
-        .args([sig, "--", group])
+        // BSD の kill は `--` を pid として拒否するので使わない。`-KILL -<pgid>` は GNU・BSD の両方で通る。
+        .args([sig, group])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -432,7 +488,7 @@ fn send_signal(sig: &str, group: &str) -> std::io::Result<()> {
 
 /// 子のプロセスグループ（chromedriver と配下の Chrome）へ SIGKILL を送り、そのあとで子を wait する。
 /// 子を回収する前に signal を送るので、グループ ID（= 子の PID）は signal を送り終えるまで再利用されない
-/// （回収済みの PID を宛先にしない）。セッションは削除済みで Chrome の一時領域は片付いているため、SIGTERM の猶予は置かない。
+/// （回収済みの PID を宛先にしない）。Chrome の一時領域は回収後にハーネスが消すため、SIGTERM の猶予は置かない。
 /// signal の失敗は子を回収したうえで誤りとして返す。
 fn kill_group_and_reap(child: &mut Child) -> std::io::Result<()> {
     let group = format!("-{}", child.id());

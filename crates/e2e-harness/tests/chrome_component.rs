@@ -30,8 +30,23 @@ fn new_session_request_has_only_headless_and_outbound_restrictions() {
             "--headless=new",
             chrome::HOST_RESOLVER_RULES_ARG,
             chrome::PROXY_SERVER_ARG,
-            "--proxy-bypass-list=<-loopback>;localhost:8080"
+            "--proxy-bypass-list=<-loopback>;http://localhost:8080"
         ])
+    );
+}
+
+#[test]
+fn unvalidated_origins_never_reach_the_bypass_list() {
+    let v = chrome::new_session_request_for(&[
+        "*".to_owned(),
+        "http://localhost:8080;evil.example".to_owned(),
+        "http://*.example:80".to_owned(),
+        "http://127.0.0.1:9000".to_owned(),
+    ]);
+    let args = &v["capabilities"]["alwaysMatch"]["goog:chromeOptions"]["args"];
+    assert_eq!(
+        args[3],
+        serde_json::json!("--proxy-bypass-list=<-loopback>;http://127.0.0.1:9000")
     );
 }
 
