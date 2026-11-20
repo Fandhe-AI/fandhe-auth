@@ -274,8 +274,8 @@ impl DbFaultProxy {
         self.shared.accepted.load(Ordering::SeqCst)
     }
 
-    /// 転送器が accept した後に直ちに閉じた接続の数（上流なし・上流への接続の失敗・確立中の遮断）。
-    /// 遮断中の接続は待ち受けが閉じているのでカーネルの中で拒否され、ここでは数えない。
+    /// 転送器が accept した後に直ちに閉じた接続の数（遮断中に accept して切ったもの・上流なし・上流への接続の失敗・
+    /// 確立中の遮断）。カーネルの待ち行列にあってまだ accept していない接続は、遮断中でも数えない。
     pub fn refused_count(&self) -> u64 {
         self.shared.refused.load(Ordering::SeqCst)
     }
@@ -450,6 +450,13 @@ fn handle_conn(accepted: Accepted, shared: &Arc<Shared>, upstream: &Upstream) {
         id,
         block_gen,
     } = accepted;
+    // 上流への接続を始める前に、遮断の状態と世代を確かめる。遮断済みなら上流へつながずに終える（ORST-17）。
+    // 上流への接続を始めた後に遮断と重なった場合は、つながった直後の世代の確認で切る（上流への接続自体は
+    // 試みられ得る。この窓は文書の「残る限界」に書いた。#5983 で追う）。
+    if shared.halted() || shared.block_gen.load(Ordering::SeqCst) != block_gen {
+        shared.sever_conn(id);
+        return refuse(&client, shared);
+    }
     let Some(port) = upstream.port() else {
         shared.sever_conn(id);
         return refuse(&client, shared);
@@ -663,6 +670,40 @@ mod tests {
         shared.blocked.store(false, Ordering::SeqCst);
         handle_conn(accepted, &shared, &Upstream::Port(echo_upstream()));
         assert_eq!(shared.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    /// 上流への接続を始める前に遮断済みの世代なら、上流へつながずに終える（ORST-17）。
+    #[test]
+    fn handle_conn_does_not_connect_upstream_when_already_blocked() {
+        let shared = Arc::new(Shared::new());
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _client = connect(port);
+        let mut accepted = None;
+        for _ in 0..500 {
+            accepted = accept_one(&listener, &shared);
+            if accepted.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        let accepted = accepted.expect("accepted");
+        {
+            let mut conns = shared.conns.lock().unwrap();
+            shared.engage_block(&mut conns);
+        }
+        let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        up.set_nonblocking(true).unwrap();
+        let up_port = up.local_addr().unwrap().port();
+        handle_conn(accepted, &shared, &Upstream::Port(up_port));
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            up.accept().map(|_| ()).map_err(|e| e.kind()),
+            Err(ErrorKind::WouldBlock),
+            "upstream must not be contacted"
+        );
+        assert_eq!(shared.refused.load(Ordering::SeqCst), 1);
     }
 
     /// 遮断中に accept した接続は、`accept_one` が直ちに切る。

@@ -138,6 +138,7 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
     p.block(&mut tl).unwrap();
     assert!(roundtrip(&mut open, b"b").is_none(), "open conn is cut");
     assert_cut_while_blocked(p.listen_port());
+    assert!(p.refused_count() >= 1, "blocked conn is counted as refused");
 
     p.release_block(&mut tl).unwrap();
     let mut again = connect(p.listen_port());

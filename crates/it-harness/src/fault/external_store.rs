@@ -108,7 +108,7 @@ impl ExternalStoreFaultProxy {
     }
 
     /// 転送器が accept した後に直ちに閉じた接続の数（遮断中に accept したもの・上流のハンドルが空・
-    /// 上流への接続の失敗・確立中の遮断）。
+    /// 上流への接続の失敗・確立中の遮断）。カーネルの待ち行列にあってまだ accept していない接続は数えない。
     pub fn refused_count(&self) -> u64 {
         self.inner.refused_count()
     }
