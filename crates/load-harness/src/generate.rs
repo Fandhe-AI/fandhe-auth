@@ -341,7 +341,6 @@ where
 mod tests {
     //! #5984: 誤りの記録・停止・枠の取得の順序の単体試験。非公開の `Shared` に直接触る（試験用の公開口は作らない）。
     use super::*;
-    use std::sync::Barrier;
 
     fn next_of(s: &Shared) -> u64 {
         s.lock().next
@@ -372,41 +371,49 @@ mod tests {
         assert_eq!(next_of(&s), 1);
     }
 
-    /// 記録の後に枠が 1 件も通らない。各取得者が枠を 1 件取った後に記録を確定し、その後の取得を試みる。
-    /// 段を 2 つの待ち合わせで区切るので時間に依らず、取得は有限回で必ず終わる（停止処理が壊れても join が戻る）。
+    /// 記録の後に枠が 1 件も通らない。取得者は停止まで枠を取り続け、その最中に記録者が記録を確定する。
+    /// 記録を確定したロックの中で観測した件数と、全員が止まった後の最終の件数が一致する。記録と枠の更新が別のロックなら、
+    /// 記録の後に枠が通って一致しない。待ち合わせは使わず、取得者は記録で必ず止まる（起動に失敗しても記録して解放する）ので、
+    /// 試験は有限で終わる。競合の窓を狙うため複数回繰り返す。
     #[test]
-    fn no_claim_succeeds_after_fail_is_recorded() {
+    fn claims_in_flight_do_not_advance_after_fail_is_recorded() {
         const CLAIMERS: usize = 4;
-        const AFTER_TRIES: usize = 3;
-        let s = Shared::new();
-        let before = Barrier::new(CLAIMERS + 1);
-        let after = Barrier::new(CLAIMERS + 1);
-        let (snapshot, late_successes) = thread::scope(|scope| {
-            let hs: Vec<_> = (0..CLAIMERS)
-                .map(|_| {
-                    scope.spawn(|| {
-                        let first = s.claim(1_000);
-                        before.wait();
-                        after.wait();
-                        let late = (0..AFTER_TRIES).filter(|_| s.claim(1_000)).count();
-                        (first, late)
-                    })
-                })
-                .collect();
-            before.wait();
-            // 記録を確定したロックの中で件数を観測する。
-            let snapshot = s.fail_observing(LoadError::InvalidOutcome);
-            after.wait();
-            let mut late_successes = 0;
-            for h in hs {
-                let (first, late) = h.join().expect("claimer must not panic");
-                assert!(first, "claim before the failure must succeed");
-                late_successes += late;
-            }
-            (snapshot, late_successes)
-        });
-        assert_eq!(snapshot, CLAIMERS as u64);
-        assert_eq!(late_successes, 0, "claim succeeded after fail was recorded");
-        assert_eq!(next_of(&s), snapshot);
+        const ROUNDS: usize = 200;
+        const MAX_SPINS: u32 = 1_000_000;
+        for _ in 0..ROUNDS {
+            let s = Shared::new();
+            let (snapshot, spawn_failed) = thread::scope(|scope| {
+                let mut hs = Vec::new();
+                let mut spawn_failed = false;
+                for _ in 0..CLAIMERS {
+                    let r =
+                        thread::Builder::new().spawn_scoped(scope, || while s.claim(u64::MAX) {});
+                    match r {
+                        Ok(h) => hs.push(h),
+                        Err(_) => {
+                            spawn_failed = true;
+                            break;
+                        }
+                    }
+                }
+                // 取得が進み始めるのを有限回だけ待つ。進まなくても記録へ進む。
+                let mut spins = 0;
+                while !spawn_failed && next_of(&s) == 0 && spins < MAX_SPINS {
+                    thread::yield_now();
+                    spins += 1;
+                }
+                let snapshot = s.fail_observing(LoadError::InvalidOutcome);
+                for h in hs {
+                    h.join().expect("claimer must not panic");
+                }
+                (snapshot, spawn_failed)
+            });
+            assert!(!spawn_failed, "claimer thread failed to start");
+            assert_eq!(
+                next_of(&s),
+                snapshot,
+                "a claim succeeded after fail was recorded"
+            );
+        }
     }
 }
