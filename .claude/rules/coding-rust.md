@@ -39,6 +39,7 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 | 試験専用 | `fandhe-auth-it-harness`（`crates/it-harness`） | 結合試験のハーネスの枠（仮称・TASK-10。本体・Plugin からは依存しない。試験専用の load-harness だけが試験〔dev〕で依存する。TASK-12 (5/10)。許可表の行は人の確認待ち） | 同上 |
 | 試験専用 | `fandhe-auth-e2e-harness`（`crates/e2e-harness`） | passkey の E2E のハーネスの枠（仮称・TASK-11。どの crate からも依存しない。許可表の行は人の確認待ち） | 同上 |
 | 試験専用 | `fandhe-auth-load-harness`（`crates/load-harness`） | 計測・集計・負荷の生成の部品（仮称・TASK-12。どの crate からも依存されない。試験〔dev〕だけ it-harness・hub-stub に依存する。許可表の行は人の確認待ち） | 同上 |
+| 試験専用 | `fandhe-auth-trial-deps`（`crates/trial-deps`） | TASK-4 の依存選定の試し実装（仮称・#35。`publish = false`。どの crate からも依存しない） | 同上 |
 | 位置が未定 | `-db-contract`・`-types`・`-webauthn`・`-provider`・`-keys` | 契約 trait・共有型・WebAuthn アダプタ・Provider 層・鍵管理 | 独立 crate か `-core` の中かは未定（`PoC-15` の後に `LIB-15` の基準で決める。判定は人。`DPOL-38`・`DPOL-41`。TASK-4 の扱い〔2026-11-20 の追随〕の (4) が挙げる残りの対象〔構文木の走査・property test と fuzz・構造化ログと計測の口〕に無い） |
 
 - 「Hub の担当」の crate の名前は、将来の切り出し候補として spec に残るだけで、本体の最初のリリースに含まれない（LIB-14）。
@@ -125,7 +126,7 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 - 構造化ログ・計測は、本体の依存に置くのは出す口（facade）だけで、受ける側（subscriber・exporter・保存先）は組込み先が選ぶ（`D-2026-11-20-5`・`LIB-1`）。
   ログの出す口は `tracing`、計測の出す口は `metrics`（利用者の決定。`D-2026-11-20-8`）。
   試験でログを捕まえる受ける側の `tracing-subscriber` は、`SECR-23` の試験のためだけに dev-dependencies へ置いてよい。本番の依存の木には入れない（`D-2026-11-20-7` の K7）。
-  口の feature の選びは、最小の試し実装で決める（**未定**。TASK-4 の成果物。#35）。依存の版の固定の手順は **未定**。
+  口の feature の選びは、試し実装（`crates/trial-deps`）の後に K11 を記入して人が決める（**未定**。TASK-4 の成果物。#35）。依存の版の固定の手順は **未定**。
   秘密値を出さない要求は変えない（SECR-23・SECR-24・SECR-26・SECR-27）。
 - 監査は業務トランザクションの ROLLBACK の後に書く（AUDB-26）。
   本体が他へ渡すデータに秘密値を出さない（SECR-23・SECR-24・SECR-26・SECR-27。前段のログの `SECR-25` は → Hub `ARUN-78`）。
