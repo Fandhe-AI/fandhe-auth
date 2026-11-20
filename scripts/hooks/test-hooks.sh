@@ -434,6 +434,216 @@ check_bad_lock "skills-lock.json with an unexpected top-level key is rejected" '
   }
 }'
 
+check_bad_lock "skills-lock.json with a missing comma between members is rejected" '{
+  "version": 2
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a missing comma between skills is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+    "vendored-b": {
+      "source": "y"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a trailing comma is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    },
+  }
+}'
+check_bad_lock "skills-lock.json with a broken skill body is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x",
+      "hash":
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with an unquoted skill key body is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      source: "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with skills as an array is rejected" '{
+  "version": 2,
+  "skills": ["vendored-a"]
+}'
+check_bad_lock "skills-lock.json with a string skill value is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": "x"
+  }
+}'
+check_bad_lock "skills-lock.json with a string version is rejected" '{
+  "version": "2",
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with trailing garbage is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+} x'
+check_bad_lock "skills-lock.json with a second top-level value is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}
+{}'
+check_bad_lock "skills-lock.json with an escaped skill name is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored\/a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with an invalid string escape is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "a\qb"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with an unterminated string is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a duplicate version is rejected" '{
+  "version": 2,
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json that is empty is rejected" ''
+
+# 構造の記号を含む文字列値・1 行に詰めた JSON は正しく読める（行単位の深さの数え方では誤判定した形）
+check_good_lock() {
+  local desc="$1" content="$2"
+  make_detector "good${bad_n}" "${content}"
+  bad_n=$((bad_n + 1))
+  new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+  SCAN_BIN="${det_bin}" check_scan "${desc}" 0
+}
+check_good_lock "skills-lock.json with braces inside strings is accepted" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "a{b}c } {",
+      "note": "q\"{\\"
+    }
+  }
+}'
+check_good_lock "skills-lock.json packed on one line is accepted" '{"version":2,"skills":{"vendored-a":{"source":"x","n":[1,-2.5e3,true,null,{"k":[]}]}}}'
+
+# 検出器のあるディレクトリ名が改行で終わっていても、除外の一覧を読める（dirname のコマンド置換は末尾の改行を落とす）
+nl_root="${work_dir}/det-nl"
+nl_dir="${nl_root}/s/h"$'\n'
+mkdir -p "${nl_dir}"
+cp "${SECRET_SCAN}" "${nl_dir}/secret-scan.sh"
+printf '%s\n' "${lock_ok}" > "${nl_root}/skills-lock.json"
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${nl_dir}/secret-scan.sh" check_scan "detector in a directory whose name ends with a newline reads its list" 0
+
+# 同じ checkout（検出器と走査対象が同じ repo）では、除外の一覧はコミット済み（HEAD）の名前だけを使う（#6000）。
+# 未コミットの作業ツリー・index の編集で除外を足せない。
+same_lock_two='{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    },
+    "other": {
+      "source": "y"
+    }
+  }
+}'
+# same_checkout_repo [skills-lock.json の内容]: 検出器の複製と一覧をコミットした repo を作る
+same_checkout_repo() {
+  new_repo
+  mkdir -p scripts/hooks
+  cp "${SECRET_SCAN}" scripts/hooks/secret-scan.sh
+  if [ "$#" -ge 1 ]; then
+    printf '%s\n' "$1" > skills-lock.json
+  fi
+  git add -A
+  git commit -q -m "chore: add detector"
+}
+same_bin="scripts/hooks/secret-scan.sh"
+
+same_checkout_repo "${lock_ok}"; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a committed name is excluded" 0
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' "${same_lock_two}" > skills-lock.json
+stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a name added in the working tree only is scanned" 1 .agents/skills/other/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' "${same_lock_two}" > skills-lock.json
+git add skills-lock.json
+stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a name staged but not committed is scanned" 1 .agents/skills/other/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' "${same_lock_two}" > skills-lock.json
+stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_ARG=--tracked SCAN_BIN="${same_bin}" check_scan "same checkout (--tracked): a name added in the working tree only is scanned" 1 .agents/skills/other/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{"version":2,"skills":{"vendored-b":{"source":"x"}}}' > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a committed name removed in the working tree is scanned" 1 .agents/skills/vendored-a/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{ "version": 2, "skills": {' > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken working-tree list is rejected" 2
+
+same_checkout_repo
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a list absent from HEAD excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# CDPATH で相対パスの cd が別のディレクトリへ向かっても、除外の一覧の読み元を取り違えない
+decoy="${work_dir}/decoy"
+mkdir -p "${decoy}/scripts/hooks"
+printf '%s\n' "${lock_ok}" > "${decoy}/skills-lock.json"
+same_checkout_repo
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+CDPATH="${decoy}" SCAN_BIN="${same_bin}" check_scan "a CDPATH decoy does not supply the exclusion list" 1 .agents/skills/vendored-a/SKILL.md
+
 new_repo; stage leaked.txt "$(printf '%s\n%s' "keep" "x = ${token}")"; git commit -q -m "chore: leak"
 printf '%s\n' "keep" > leaked.txt; git add leaked.txt
 check_scan "removing a leaked secret is allowed" 0

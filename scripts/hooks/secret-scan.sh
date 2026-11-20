@@ -37,7 +37,10 @@
 #   PR が自分の変更で一覧に名前を足して検査を免れる経路を作らないため（CI は保護された main の検出器を使う。
 #   #51・#6000）。パスの形（*.lock・.claude/skills/・未登録の .agents/skills/ の下）では除外しない。
 #   名前は `[a-z0-9-]` の規則に合うものだけを通し、literal の pathspec にする（glob・`..`・`/` を持ち込ませない）。
-#   skills-lock.json が無ければ除外なしで全部走査する。読めない・形が想定と違う場合は終了コード 2（fail-closed）。
+#   skills-lock.json が無ければ除外なしで全部走査する。ファイル全体を JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
+#   検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のときは、作業ツリー・index の一覧ではなく
+#   コミット済み（HEAD）の一覧にある名前だけを使う（未コミットの編集で除外を足せない）。HEAD にまだ無い名前は、
+#   コミットされるまで走査される（PR では CI が保護された main の検出器で改めて走査する）。
 #   残る限界（TASK-6・#6000 で追跡。解消は人が方式を決める）: 除外はディレクトリ単位のため、登録済みの skill のディレクトリでは
 #   既存ファイルへの値の追記・新しく置いたファイル・他のパスからのリネームによる移動のいずれも、本文の走査から外れる。
 #   登録名の下の変更は、人のレビューで確かめる（内容に結び付けた除外は未実装）。
@@ -94,14 +97,23 @@ if [ "${summary}" -eq 1 ]; then
 fi
 
 # 除外の一覧の読み元は、このスクリプト自身の場所から決める（走査対象の repo ではない）。
-# 呼び出しは相対パスのことがあるため、cd の前に絶対パスへ解決する。末尾の改行は番兵（x）で保つ。
-if ! script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P && printf x)"; then
+# cd が CDPATH で別のディレクトリを選ばないよう先に外す。親パスは BASH_SOURCE からシェルの展開だけで取る
+# （dirname のコマンド置換は末尾の改行を落とす）。末尾の改行は番兵（x）で保つ。
+unset CDPATH
+_src="${BASH_SOURCE[0]}"
+case "${_src}" in
+  */*) _src_dir="${_src%/*}" ;;
+  *) _src_dir="." ;;
+esac
+[ -n "${_src_dir}" ] || _src_dir="/"
+if ! detector_root="$(cd -- "${_src_dir}/../.." && pwd -P && printf x)"; then
   echo "secret-scan: cannot resolve the detector location; aborting" >&4
   exit 2
 fi
-script_dir="${script_dir%x}"
-script_dir="${script_dir%$'\n'}"
-detector_lock="${script_dir}/../../skills-lock.json"
+unset _src _src_dir
+detector_root="${detector_root%x}"
+detector_root="${detector_root%$'\n'}"
+detector_lock="${detector_root}/skills-lock.json"
 
 # 呼び出し側の環境変数で pathspec の解釈（literal・glob・大文字小文字無視）が変わると、除外の範囲がずれる。
 unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
@@ -208,62 +220,271 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 
 # 本文の走査から外す名前を、検出器の skills-lock.json から読む。形は
 #   { "version": 2, "skills": { "<名前>": { ... }, ... } }
-# を 1 行ずつ読み、{ } の深さで追う（jq・python に依存しない）。診断には名前・パスを出さない（SECR-23）。
+# で、ファイル全体を JSON として厳格に解析する（bash だけ。jq・python に依存しない）。
+#   - 文法: 値は 1 つだけで後続なし・カンマの欠落と末尾カンマは不可・文字列のエスケープを解釈する。
+#   - 意味: トップは object で、キーは version（数値 2 だけ）と skills（空でない object）の各 1 回だけ。
+#     skills の名前は重複不可・エスケープなしで `[a-z0-9-]` の規則に合うもの・値は object。
+# 文字列中の { } は構造として数えない。診断には名前・パスを出さない（SECR-23）。
 skill_names=()
 lock_fail() {
   echo "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting" >&4
   exit 2
 }
+# 解析の状態（js: 全文・jn: 長さ・jp: 位置）。サブシェルを起こさず、失敗はその場で lock_fail で止める。
+js="" jn=0 jp=0 str_raw="" str_esc=0
+json_ws() {
+  while [ "${jp}" -lt "${jn}" ]; do
+    case "${js:jp:1}" in
+      ' ' | $'\t' | $'\n' | $'\r') jp=$((jp + 1)) ;;
+      *) break ;;
+    esac
+  done
+}
+# json_string: 位置の文字列を読み、引用符の中の生の文字列を str_raw（エスケープを含めば str_esc=1）に入れる。
+json_string() {
+  local rest chunk c e hex
+  str_raw="" str_esc=0
+  [ "${js:jp:1}" = '"' ] || lock_fail
+  jp=$((jp + 1))
+  while :; do
+    rest="${js:jp}"
+    chunk="${rest%%[\"\\]*}"
+    [ "${chunk}" != "${rest}" ] || lock_fail
+    [[ "${chunk}" != *[[:cntrl:]]* ]] || lock_fail
+    str_raw="${str_raw}${chunk}"
+    jp=$((jp + ${#chunk}))
+    c="${js:jp:1}"
+    if [ "${c}" = '"' ]; then
+      jp=$((jp + 1))
+      return 0
+    fi
+    str_esc=1
+    e="${js:$((jp + 1)):1}"
+    case "${e}" in
+      '"' | \\ | / | b | f | n | r | t)
+        str_raw="${str_raw}\\${e}"
+        jp=$((jp + 2))
+        ;;
+      u)
+        hex="${js:$((jp + 2)):4}"
+        [[ "${hex}" =~ ^[0-9A-Fa-f]{4}$ ]] || lock_fail
+        str_raw="${str_raw}\\u${hex}"
+        jp=$((jp + 6))
+        ;;
+      *) lock_fail ;;
+    esac
+  done
+}
+# json_value <深さ>: 任意の JSON 値 1 つを文法どおりに読み進める（値は使わない）。
+json_value() {
+  local c rest
+  [ "$1" -le 32 ] || lock_fail
+  json_ws
+  c="${js:jp:1}"
+  case "${c}" in
+    '{')
+      jp=$((jp + 1))
+      json_ws
+      if [ "${js:jp:1}" = '}' ]; then
+        jp=$((jp + 1))
+        return 0
+      fi
+      while :; do
+        json_ws
+        json_string
+        json_ws
+        [ "${js:jp:1}" = ':' ] || lock_fail
+        jp=$((jp + 1))
+        json_value $(($1 + 1))
+        json_ws
+        c="${js:jp:1}"
+        jp=$((jp + 1))
+        case "${c}" in
+          ',') ;;
+          '}') return 0 ;;
+          *) lock_fail ;;
+        esac
+      done
+      ;;
+    '[')
+      jp=$((jp + 1))
+      json_ws
+      if [ "${js:jp:1}" = ']' ]; then
+        jp=$((jp + 1))
+        return 0
+      fi
+      while :; do
+        json_value $(($1 + 1))
+        json_ws
+        c="${js:jp:1}"
+        jp=$((jp + 1))
+        case "${c}" in
+          ',') ;;
+          ']') return 0 ;;
+          *) lock_fail ;;
+        esac
+      done
+      ;;
+    '"') json_string ;;
+    *)
+      rest="${js:jp:64}"
+      if [[ "${rest}" =~ ^(-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?) ]] && [ -n "${BASH_REMATCH[1]}" ]; then
+        jp=$((jp + ${#BASH_REMATCH[1]}))
+      elif [ "${rest:0:4}" = true ] || [ "${rest:0:4}" = null ]; then
+        jp=$((jp + 4))
+      elif [ "${rest:0:5}" = false ]; then
+        jp=$((jp + 5))
+      else
+        lock_fail
+      fi
+      ;;
+  esac
+}
+# parse_skills: skills の object を読み、検証した名前を parsed_names へ足す。
+parse_skills() {
+  local name seen=" " c
+  json_ws
+  [ "${js:jp:1}" = '{' ] || lock_fail
+  jp=$((jp + 1))
+  json_ws
+  if [ "${js:jp:1}" = '}' ]; then
+    jp=$((jp + 1))
+    return 0
+  fi
+  while :; do
+    json_ws
+    json_string
+    [ "${str_esc}" -eq 0 ] || lock_fail
+    name="${str_raw}"
+    [[ "${name}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || lock_fail
+    case "${seen}" in
+      *" ${name} "*) lock_fail ;;
+    esac
+    seen="${seen}${name} "
+    parsed_names+=("${name}")
+    json_ws
+    [ "${js:jp:1}" = ':' ] || lock_fail
+    jp=$((jp + 1))
+    json_ws
+    [ "${js:jp:1}" = '{' ] || lock_fail
+    json_value 2
+    json_ws
+    c="${js:jp:1}"
+    jp=$((jp + 1))
+    case "${c}" in
+      ',') ;;
+      '}') return 0 ;;
+      *) lock_fail ;;
+    esac
+  done
+}
+# parse_lock <ファイル>: 全体を解析し、検証した名前を parsed_names に入れる。不正は lock_fail（終了コード 2）。
+parsed_names=()
+parse_lock() {
+  local size key c seen_version=0 seen_skills=0
+  parsed_names=()
+  js=""
+  IFS= read -r -d '' js < "$1" || true
+  # NUL を含むと bash の読み取りがそこで止まり、後ろが未検証になる。読めたバイト数とサイズを突き合わせる。
+  size="$(wc -c < "$1")"
+  size="${size//[[:space:]]/}"
+  [ "${#js}" -eq "${size}" ] || lock_fail
+  jn="${#js}"
+  jp=0
+  json_ws
+  [ "${js:jp:1}" = '{' ] || lock_fail
+  jp=$((jp + 1))
+  while :; do
+    json_ws
+    json_string
+    [ "${str_esc}" -eq 0 ] || lock_fail
+    key="${str_raw}"
+    json_ws
+    [ "${js:jp:1}" = ':' ] || lock_fail
+    jp=$((jp + 1))
+    json_ws
+    case "${key}" in
+      version)
+        [ "${seen_version}" -eq 0 ] || lock_fail
+        seen_version=1
+        [ "${js:jp:1}" = 2 ] || lock_fail
+        jp=$((jp + 1))
+        ;;
+      skills)
+        [ "${seen_skills}" -eq 0 ] || lock_fail
+        seen_skills=1
+        parse_skills
+        ;;
+      *) lock_fail ;;
+    esac
+    json_ws
+    c="${js:jp:1}"
+    jp=$((jp + 1))
+    case "${c}" in
+      ',') ;;
+      '}') break ;;
+      *) lock_fail ;;
+    esac
+  done
+  json_ws
+  [ "${jp}" -eq "${jn}" ] || lock_fail
+  if [ "${seen_version}" -ne 1 ] || [ "${seen_skills}" -ne 1 ] || [ "${#parsed_names[@]}" -eq 0 ]; then
+    lock_fail
+  fi
+}
 load_skill_names() {
-  local line depth=0 opens closes t version_ok=0 skills_seen=0 name n name_count=0
+  local repo_real rc name n head_names=" " keep
+  local -a work_names
   if [ ! -e "${detector_lock}" ] && [ ! -L "${detector_lock}" ]; then
     return 0
   fi
   if [ ! -f "${detector_lock}" ] || [ ! -r "${detector_lock}" ]; then
     lock_fail
   fi
-  while IFS= read -r line || [ -n "${line}" ]; do
-    t="${line//[^\{]/}"
-    opens="${#t}"
-    t="${line//[^\}]/}"
-    closes="${#t}"
-    if [[ "${line}" =~ ^[[:space:]]*$ ]]; then
-      continue
-    fi
-    case "${depth}" in
-      0)
-        [[ "${line}" =~ ^[[:space:]]*\{[[:space:]]*$ ]] || lock_fail
-        ;;
-      1)
-        if [[ "${line}" =~ ^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*2[[:space:]]*,?[[:space:]]*$ ]]; then
-          version_ok=1
-        elif [[ "${line}" =~ ^[[:space:]]*\"skills\"[[:space:]]*:[[:space:]]*\{[[:space:]]*$ ]]; then
-          [ "${skills_seen}" -eq 0 ] || lock_fail
-          skills_seen=1
-        elif ! [[ "${line}" =~ ^[[:space:]]*\}[[:space:]]*$ ]]; then
-          lock_fail
-        fi
-        ;;
-      2)
-        if [[ "${line}" =~ ^[[:space:]]*\"([^\"]*)\"[[:space:]]*:[[:space:]]*\{[[:space:]]*$ ]]; then
-          name="${BASH_REMATCH[1]}"
-          [[ "${name}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || lock_fail
-          for n in ${skill_names[@]+"${skill_names[@]}"}; do
-            [ "${n}" != "${name}" ] || lock_fail
-          done
-          skill_names+=("${name}")
-          name_count=$((name_count + 1))
-        elif ! [[ "${line}" =~ ^[[:space:]]*\},?[[:space:]]*$ ]]; then
-          lock_fail
-        fi
-        ;;
-    esac
-    depth=$((depth + opens - closes))
-    [ "${depth}" -ge 0 ] || lock_fail
-  done < "${detector_lock}"
-  if [ "${depth}" -ne 0 ] || [ "${version_ok}" -ne 1 ] || [ "${skills_seen}" -ne 1 ] || [ "${name_count}" -eq 0 ]; then
-    lock_fail
+  parse_lock "${detector_lock}"
+  work_names=("${parsed_names[@]}")
+  # 検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のとき、作業ツリーの
+  # skills-lock.json は走査対象の側にもあり、未コミットの編集で除外を足せてしまう（走査対象から読まない規則の
+  # ローカル版。.claude/rules/git-hooks.md の (g)）。コミット済み（HEAD）の一覧にある名前だけを使う
+  # （作業ツリーの名前との共通部分。常に作業ツリーの一覧の部分集合で、除外を広げない）。
+  # HEAD が無い・HEAD に一覧が無いときは除外なし。git の失敗は検査不能（2）。
+  if ! repo_real="$(pwd -P && printf x)"; then
+    echo "secret-scan: cannot resolve the repository root; aborting" >&4
+    exit 2
   fi
+  repo_real="${repo_real%x}"
+  repo_real="${repo_real%$'\n'}"
+  if [ "${repo_real}" != "${detector_root}" ]; then
+    skill_names=("${work_names[@]}")
+    return 0
+  fi
+  rc=0
+  g rev-parse -q --verify 'HEAD^{commit}' > /dev/null 2>&1 || rc=$?
+  if [ "${rc}" -eq 1 ]; then
+    return 0
+  elif [ "${rc}" -ne 0 ]; then
+    echo "secret-scan: cannot read HEAD; aborting" >&4
+    exit 2
+  fi
+  g ls-tree -z HEAD -- skills-lock.json > "${tmp_dir}/head-entry" || exit 2
+  if [ ! -s "${tmp_dir}/head-entry" ]; then
+    return 0
+  fi
+  g cat-file blob "HEAD:skills-lock.json" > "${tmp_dir}/head-lock" || exit 2
+  parse_lock "${tmp_dir}/head-lock"
+  for n in "${parsed_names[@]}"; do
+    head_names="${head_names}${n} "
+  done
+  skill_names=()
+  for name in "${work_names[@]}"; do
+    keep=0
+    case "${head_names}" in
+      *" ${name} "*) keep=1 ;;
+    esac
+    if [ "${keep}" -eq 1 ]; then
+      skill_names+=("${name}")
+    fi
+  done
 }
 load_skill_names
 
