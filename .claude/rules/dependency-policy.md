@@ -93,23 +93,34 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 # 記録した DB の版と監査に使った版がずれうる）。
 # 取得が成功した UTC 日時と、監査に使う DB の commit を、両ツールについて記録する。
 # `%cI` は DB の commit の日時で取得日時ではないため、取得日時は取得の成功の直後に `date -u` で別に取る。
-cargo deny fetch db                  # cargo-deny の DB を取得する（`fetch` の対象は db・index・all）
-DENY_FETCHED_AT="$(date -u +%FT%TZ)" # cargo deny fetch が成功した直後の UTC 日時
+# 失敗は後続へ素通りさせない。取得・commit の読み取り・日時の記録のどれが失敗しても、その場で止めて監査へ進まない。
+set -euo pipefail
+if ! cargo deny fetch db; then                  # cargo-deny の DB を取得する（`fetch` の対象は db・index・all）
+  echo "error: cargo deny fetch db failed" >&2; exit 2
+fi
+DENY_FETCHED_AT="$(date -u +%FT%TZ)"            # 取得が成功した場合だけ到達する。取得日時はここで取る
 # cargo-audit 0.22.2 の --help には取得だけの口が無い（サブコマンドは bin のみ）。cargo-audit 用の DB は、
 # 監査の直前に取得した置き場を --db で明示して渡す。置き場は実行ごとの新しい空のディレクトリにし、既定の
 # ~/.cargo/advisory-db や前回の残りを使わない（古い DB で成功する経路を残さない）。取得の具体の手順
 # （例: 空のディレクトリへの advisory-db の git clone）は TASK-679 で決める（未定）。暫定でもこの前提を外さない。
-# AUDIT_DB=<直前に取得した DB のディレクトリ>   # 取得が失敗したら監査へ進まず失敗にする
-# AUDIT_FETCHED_AT="$(date -u +%FT%TZ)"         # 取得が成功した直後の UTC 日時
-git -C "$AUDIT_DB" log -1 --format='%H'                               # cargo-audit が使う DB の commit
-git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H'  # cargo-deny の DB の commit
-# 記録: DENY_FETCHED_AT・AUDIT_FETCHED_AT と、上の 2 つの commit（DPOL-33）
+# 取得は deny と同じ形で、失敗したら止める（AUDIT_DB は取得に成功した新しいディレクトリ）:
+#   if ! <取得の手順を AUDIT_DB へ>; then echo "error: advisory db fetch for cargo audit failed" >&2; exit 2; fi
+#   AUDIT_FETCHED_AT="$(date -u +%FT%TZ)"       # 取得が成功した場合だけ到達する
+DENY_DB_DIR=~/.cargo/advisory-dbs/advisory-db-<hash>   # cargo-deny の DB の置き場（<hash> は取得で作られた実際のディレクトリ名）
+test -d "$DENY_DB_DIR" && test -d "$AUDIT_DB"  || { echo "error: advisory db dir missing" >&2; exit 2; }
+DENY_DB_COMMIT="$(git -C "$DENY_DB_DIR" log -1 --format='%H')"    # 失敗（空・非 0）なら set -e で止まる
+AUDIT_DB_COMMIT="$(git -C "$AUDIT_DB" log -1 --format='%H')"
+test -n "$DENY_DB_COMMIT" && test -n "$AUDIT_DB_COMMIT"  || { echo "error: db commit not recorded" >&2; exit 2; }
+# 記録: DENY_FETCHED_AT・AUDIT_FETCHED_AT と、上の 2 つの commit（DPOL-33）。`%cI` は commit の日時で取得日時ではないため使わない
 # 2 つのツールが同じ DB のスナップショットを共有できるかは未確認。両方の commit を記録し、食い違えば人が判断する（共有できると断定しない）
 
 # 取得なしで流す（DPOL-33・DPOL-34）。上で記録した DB だけを使い、ここでは取得しない
 cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
 cargo audit --no-fetch --db "$AUDIT_DB" --file Cargo.lock   # 直前に取得した DB を明示して渡す。cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
 git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換えが無いこと（依存を足した変更では差分を目視で確かめる）
+
+# 以下の cargo tree -i は「一致なし」で非 0 を返すのが合格の場合があるため、終了コードではなく出力の文言で判定する（下の注）
+set +e
 
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
 # SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形。無ければ空）
