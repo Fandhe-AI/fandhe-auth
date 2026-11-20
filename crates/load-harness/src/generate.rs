@@ -208,6 +208,10 @@ impl<'a> Shared<'a> {
     /// （確認より後に立った印は、その枠には効かない）。
     fn claim(&self, count: u64) -> bool {
         let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+        // 観測済みの停止は、呼び出し元が印を戻しても以後の枠を取らせない。
+        if self.cancelled.load(Ordering::SeqCst) {
+            return false;
+        }
         if self.cancel.load(Ordering::SeqCst) {
             self.cancelled.store(true, Ordering::SeqCst);
             return false;
@@ -368,4 +372,22 @@ where
         loop_model: LoopModel::Closed,
         samples,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 観測済みの停止は、呼び出し元が印を戻しても以後の枠を取らせない（`run_closed_loop_until` の停止契約）。
+    #[test]
+    fn observed_cancel_blocks_claims_after_reset() {
+        let cancel = AtomicBool::new(false);
+        let shared = Shared::new(&cancel);
+        assert!(shared.claim(10));
+        cancel.store(true, Ordering::SeqCst);
+        assert!(!shared.claim(10));
+        cancel.store(false, Ordering::SeqCst);
+        assert!(!shared.claim(10));
+        assert!(shared.cancelled.load(Ordering::SeqCst));
+    }
 }
