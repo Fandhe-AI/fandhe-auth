@@ -67,6 +67,7 @@ description: >
 | `no-vendored` | `scripts/check-openssl-vendored.sh` | 検査のみ。`openssl-sys` の `vendored` が依存解決に 0 件かを陰性対照つきで確かめる（DPOL-13・TASK-667）。終了コードの 1（違反）・2（検査不能）の区別はスクリプトの直接実行に適用される（make 経由ではレシピが 1 で終了しても make 自体は 2 を返す）。名前は暫定 |
 | `pg-check` | `scripts/dev-pg-check.sh` | 起動中の開発・検証用 PostgreSQL の起動の確かめ。起動・停止はしない。CI へは載せない（TASK-6）。名前は暫定。手順の正は `dev/postgres/README.md` |
 | `it-db` | `scripts/it-db.sh` | ハーネス（`crates/it-harness`）の Docker を使う結合試験（`#[ignore]`）の明示の入口。Docker 必須・CI 外（TASK-6）。パスワードは試験プロセスの中で生成する。名前は暫定 |
+| `it-db-ci` | `scripts/it-db-ci.sh` | CI の DB ジョブの入口。Docker・openssl 必須。枠の試験（`db_job_frame`）だけを `--ignored` で流し、一致 0 件は失敗（AUDB-6 の向き）。CI の `it-db-ci` ジョブと同一（TASK-6 5/10）。パスワードは試験プロセスの中で生成する。名前は暫定 |
 | `e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネス（`crates/e2e-harness`）の Chrome の仮想 authenticator の E2E（`#[ignore]`）の明示の入口。chromedriver 必須・CI 外（TASK-6）。結果は〔仮想〕で実機・Safari に数えない。名前は暫定 |
 
 派生リポジトリでターゲットを足す場合の契約:

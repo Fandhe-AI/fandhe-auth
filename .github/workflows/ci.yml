@@ -2,7 +2,7 @@
 #
 # ローカル（`make check`）・Git hooks（lefthook.yml）・CI が同じコマンド契約を共有する。
 # CI 側で独自のチェックを定義せず、scripts/ の実体を呼ぶ（make スキルの「入口は複数でも
-# 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブ、秘密情報の検査は secret-scan ジョブで流す（TASK-6）。
+# 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブ、秘密情報の検査は secret-scan ジョブ、DB の結合試験の枠は it-db-ci ジョブで流す（TASK-6）。
 # 言語固有のジョブを足すときは、必ず ci-complete の needs にも追加すること。
 # ジョブ・発火条件の追加・変更時は .claude/rules/github-actions.md に従う。
 #
@@ -243,6 +243,34 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
         run: bash "${WORKSPACE}/trusted/scripts/secret-scan-ci.sh" "${WORKSPACE}/target"
 
+  # DB を使う結合試験の枠（TASK-6 5/10。#52）。ローカルの `make it-db-ci` と同じ契約。
+  # DB は試験プロセスの中で crates/it-harness の Database が起動・停止する（パスワードは試験プロセスの中で
+  # 生成し、ステップ間・GITHUB_ENV・ファイルに渡さない。SECR-6）。services: は使わない（TLS の初期化
+  # スクリプトをマウントできず AUDP-9 の構成を再現できないため）。流すのは枠の試験だけで、他の #[ignore] は手で流す。
+  # 展開した値を出す docker compose config・docker inspect は呼ばない。キャッシュは未導入（#55）。
+  it-db-ci:
+    name: "make it-db-ci (DB integration frame)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show toolchain versions
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          cargo -V
+          docker version --format '{{.Server.Version}}'
+          docker compose version
+          openssl version
+
+      - name: make it-db-ci
+        run: make it-db-ci
+
   # squash merge では PR タイトルがそのままコミット件名になるため、commit-msg フックと
   # 同じスクリプトで Conventional Commits 形式を検証する（フックの CI 側の対）。
   # PR タイトルは任意文字列のため、${{ }} を run へ直接展開せず env 経由でファイルへ書き出す
@@ -282,6 +310,7 @@ jobs:
       - test-hooks
       - build-test
       - lint
+      - it-db-ci
       - secret-scan
       - pr-title
     steps:

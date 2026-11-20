@@ -6,12 +6,12 @@
 //!
 //! 閉ループ（固定数のワーカーが、前の試行を締めてから次の試行を取る）を仮置きで採る。開ループは作らない。
 //! ワーカーは 1 度に 1 試行だけ持つので、実測の最大同時実行数は設定の並行数を超えない。
+//! 誤りの記録と停止は枠の取得と同じロックで確定する（#5984。順序は [`run_closed_loop`] の doc）。
 //! 対象の経路を実際に呼ぶ部分は 6/10 の担当で、ここは対象を閉包として受けるだけ。合否は付けない（ACPT-7）。
 
 use std::cell::Cell;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, Once, PoisonError};
 use std::thread;
 
@@ -159,45 +159,81 @@ impl Drop for QuietGuard {
     }
 }
 
-/// ワーカー間で共有する試行の枠・停止の印・最初の誤り。
+/// ロックの下で持つ状態。`first_error` が `Some` であることが「停止中」そのもの（別の停止の印は持たない）。
+struct State {
+    next: u64,
+    first_error: Option<LoadError>,
+}
+
+/// ワーカー間で共有する試行の枠・最初の誤り。
+///
+/// 枠の取得（`claim`）と誤りの記録（`fail`）を同じ 1 つのロックで直列化する（#5984）。記録と停止は 1 つの代入で
+/// 同時に確定するので、「記録したが停止の印がまだ」「停止の印を読んだが枠の更新がまだ」という窓が無い。
+/// ロックは `claim`・`fail`・最後の取り出しの中だけで持つ。対象の呼び出しの間は持たない（ロックの競合を
+/// 計測の区間に入れないため）。
 struct Shared {
-    next: AtomicU64,
-    stop: AtomicBool,
-    first_error: Mutex<Option<LoadError>>,
+    state: Mutex<State>,
 }
 
 impl Shared {
     fn new() -> Self {
         Self {
-            next: AtomicU64::new(0),
-            stop: AtomicBool::new(false),
-            first_error: Mutex::new(None),
+            state: Mutex::new(State {
+                next: 0,
+                first_error: None,
+            }),
         }
     }
 
-    /// 最初の誤りだけを残し、他のワーカーが新しい枠を取らないよう停止の印を立てる。
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// 最初の誤りだけを残す。記録と同時に停止が確定し、以後の `claim` は `false` になる。
     fn fail(&self, e: LoadError) {
-        let mut g = self
-            .first_error
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if g.is_none() {
-            *g = Some(e);
+        self.fail_observing(e);
+    }
+
+    /// `fail` と同じ。記録を確定した同じロックの中で、その時点の取得済みの枠の件数を返す（#5984 の試験用）。
+    fn fail_observing(&self, e: LoadError) -> u64 {
+        let mut g = self.lock();
+        if g.first_error.is_none() {
+            g.first_error = Some(e);
         }
-        drop(g);
-        self.stop.store(true, Ordering::SeqCst);
+        g.next
     }
 
     /// 試行の枠を 1 つ取る。上限に達した・停止中・溢れたときは `false`。
     fn claim(&self, count: u64) -> bool {
-        if self.stop.load(Ordering::SeqCst) {
+        self.claim_after(count, || {}, || {})
+    }
+
+    /// `claim` と同じ。ロックを取る直前に `before_lock` を、停止の判定を通った直後（ロックを持ったまま、枠の更新の前）に
+    /// `after_check` を呼ぶ（#5984 の試験用の同期点。通常は何もしない）。
+    fn claim_after(
+        &self,
+        count: u64,
+        before_lock: impl FnOnce(),
+        after_check: impl FnOnce(),
+    ) -> bool {
+        before_lock();
+        let mut g = self.lock();
+        if g.first_error.is_some() || g.next >= count {
             return false;
         }
-        self.next
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                if v < count { v.checked_add(1) } else { None }
-            })
-            .is_ok()
+        after_check();
+        match g.next.checked_add(1) {
+            Some(n) => {
+                g.next = n;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 記録された最初の誤り。
+    fn first_error(&self) -> Option<LoadError> {
+        self.lock().first_error
     }
 }
 
@@ -264,11 +300,7 @@ where
             }
         }
     });
-    let err = *shared
-        .first_error
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    err.map_or(Ok(()), Err)
+    shared.first_error().map_or(Ok(()), Err)
 }
 
 /// 閉ループで対象を繰り返し呼ぶ。暖機の段（`warmup > 0` のときだけ）を回してから本計測の段を回す。
@@ -277,8 +309,19 @@ where
 ///
 /// 対象は試行の中で区間を測り、結果の種類を返す。本計測で `Excluded` を返すと誤り（fail-closed）。
 ///
+/// 誤りの記録・停止・枠の取得の順序（#5984。人の確認待ちの仮置き、ACPT-7）:
+/// - 枠の取得と誤りの記録は同じロックの下で全順序に並ぶ。記録と停止は同時に確定する。
+/// - 記録より後に枠を取ろうとしたワーカーは必ず取れない。記録の後に新しく取得できる枠は 0 件（保証するのは枠の取得だけ）。
+/// - 記録より前に取得済みの枠の試行は止めない。対象の呼び出しまで進んで締めるか誤りで抜ける。記録時点で未完了の
+///   試行は各ワーカー最大 1 件で、設定の並行数が上限。対象の閉包の panic はワーカー内の `catch_unwind` が捕捉し、
+///   その場で記録する（上の保証が及ぶ）。join で初めて記録されるのは、ワーカー内で捕捉されずにスレッドを終了させた
+///   panic（`begin_trial`・`finish` 等、対象の閉包の外）だけで、検出・記録までに他のワーカーが新しく取得して進める
+///   件数の累計は上限を保証しない。
+///   記録の後に `begin_trial` や対象の呼び出しへ進む試行があり得る（取得済みの枠だけ）。
+/// - 返す誤りは最初の 1 件だけ。
+///
 /// # Errors
-/// 部品の誤り・スレッドの生成の失敗・panic・件数の不一致。誤りが出たら新しい試行を止め、
+/// 部品の誤り・スレッドの生成の失敗・panic・件数の不一致。誤りが出たら上の順序で新しい試行を止め、
 /// 立てたワーカーはすべて join してから最初の誤りを返す。
 pub fn run_closed_loop<F>(
     meter: RunMeter,
@@ -307,4 +350,196 @@ where
         loop_model: LoopModel::Closed,
         samples,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! #5984: 誤りの記録・停止・枠の取得の順序の単体試験。非公開の `Shared` に直接触る（試験用の公開口は作らない）。
+    use super::*;
+    use std::time::Duration;
+
+    /// 同期の待ちの明示の期限。到達しなければ同期の失敗として断定で落とす。
+    const DEADLINE: Duration = Duration::from_secs(30);
+
+    fn next_of(s: &Shared) -> u64 {
+        s.lock().next
+    }
+
+    #[test]
+    fn fail_keeps_first_error() {
+        let s = Shared::new();
+        s.fail(LoadError::InvalidOutcome);
+        s.fail(LoadError::WorkerPanicked);
+        assert_eq!(s.first_error(), Some(LoadError::InvalidOutcome));
+    }
+
+    #[test]
+    fn claim_stops_at_count() {
+        let s = Shared::new();
+        assert!(s.claim(3) && s.claim(3) && s.claim(3));
+        assert!(!s.claim(3));
+        assert_eq!(next_of(&s), 3);
+    }
+
+    #[test]
+    fn claim_after_fail_does_not_advance() {
+        let s = Shared::new();
+        assert!(s.claim(10));
+        s.fail(LoadError::SpawnFailed);
+        assert!(!s.claim(10));
+        assert_eq!(next_of(&s), 1);
+    }
+
+    /// 同期点を制御した順序の試験。取得者は枠のロックを取る直前の同期点で止まり、その間に実際の `fail` を呼んで
+    /// 記録を確定してから再開する。再開した取得は記録の後に走るので、枠を進められず `false` になる。
+    /// 停止の判定が枠の取得に無ければ、記録の後でも枠が進む。到達と再開はチャネルで通知し、待ちは明示の期限
+    /// （`DEADLINE`）で打ち切る。期限に達したら同期の失敗として断定で落とす（実行順で成否は変わらない）。
+    #[test]
+    fn claim_resumed_after_fail_does_not_advance() {
+        use std::sync::mpsc;
+        let s = Shared::new();
+        let s = &s;
+        let (reached_tx, reached_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (claimed, was_released) = thread::scope(|scope| {
+            let h = thread::Builder::new()
+                .spawn_scoped(scope, move || {
+                    let mut released = false;
+                    let claimed = s.claim_after(
+                        u64::MAX,
+                        || {
+                            let _ = reached_tx.send(());
+                            // 記録側の明示の通知を受けた場合だけ再開する。期限切れは同期の失敗として残す。
+                            released = release_rx.recv_timeout(DEADLINE).is_ok();
+                        },
+                        || {},
+                    );
+                    (claimed, released)
+                })
+                .expect("claimer thread must start");
+            let reached = reached_rx.recv_timeout(DEADLINE).is_ok();
+            if reached {
+                // 実際の fail の経路で記録してから、明示の通知で止めていた取得を再開する。
+                s.fail(LoadError::InvalidOutcome);
+            }
+            // 到達しなかったときも、取得者が期限まで待ち続けないよう通知は送る（失敗は下の断定で報告する）。
+            let _ = release_tx.send(());
+            let r = h.join().expect("claimer must not panic");
+            assert!(reached, "claimer did not reach the sync point");
+            r
+        });
+        assert!(was_released, "claimer was not released by the recorder");
+        assert!(!claimed, "a claim succeeded after fail was recorded");
+        assert_eq!(next_of(s), 0);
+    }
+
+    /// 停止の判定と枠の更新の直列化の試験。取得者は停止の判定を通った直後（更新の前）の同期点で止まり、その間に
+    /// 記録者が実際の `fail_observing` を呼ぶ。判定と更新が同じロックなら記録者は取得の更新を待ち、記録を確定した
+    /// 時点の件数に更新が含まれる。判定がロックの外にある実装では記録者が先に抜け、その後に更新が走るので、
+    /// 記録時点の件数と最終の件数が食い違う。取得者の待ちは期限付きで、直列化が正しいと記録者は抜けないため、
+    /// 正しい実装ではこの待ちは期限まで続く（`WINDOW`。成否は実行順に依らない）。
+    #[test]
+    fn stop_check_and_claim_update_are_serialized() {
+        use std::sync::mpsc;
+        const WINDOW: Duration = Duration::from_millis(200);
+        let s = Shared::new();
+        let s = &s;
+        let (reached_tx, reached_rx) = mpsc::channel::<()>();
+        let (recorded_tx, recorded_rx) = mpsc::channel::<()>();
+        let (claimed, snapshot) = thread::scope(|scope| {
+            let claimer = thread::Builder::new()
+                .spawn_scoped(scope, move || {
+                    s.claim_after(
+                        u64::MAX,
+                        || {},
+                        || {
+                            let _ = reached_tx.send(());
+                            // 記録者が抜けるのを窓の間だけ待つ。抜けなければ（直列化されていれば）そのまま更新へ進む。
+                            let _ = recorded_rx.recv_timeout(WINDOW);
+                        },
+                    )
+                })
+                .expect("claimer thread must start");
+            let reached = reached_rx.recv_timeout(DEADLINE).is_ok();
+            let recorder = thread::Builder::new()
+                .spawn_scoped(scope, || {
+                    let n = s.fail_observing(LoadError::InvalidOutcome);
+                    let _ = recorded_tx.send(());
+                    n
+                })
+                .expect("recorder thread must start");
+            let snapshot = recorder.join().expect("recorder must not panic");
+            let claimed = claimer.join().expect("claimer must not panic");
+            assert!(reached, "claimer did not reach the sync point");
+            (claimed, snapshot)
+        });
+        assert!(claimed, "the in-flight claim should have been granted");
+        assert_eq!(
+            next_of(s),
+            snapshot,
+            "a claim advanced the slot after fail was recorded"
+        );
+    }
+
+    /// 記録の後に枠が 1 件も通らない。取得者は停止まで枠を取り続け、その最中に記録者が記録を確定する。
+    /// 記録を確定したロックの中で観測した件数と、全員が止まった後の最終の件数が一致する。記録と枠の更新が別のロックなら、
+    /// 記録の後に枠が通って一致しない。取得が進んだことは取得者からのチャネルの通知で確かめ（待ちは `DEADLINE`）、
+    /// 取得者は記録で必ず止まる（起動に失敗しても記録して解放する）ので、試験は有限で終わる。競合の窓を狙うため複数回繰り返す。
+    #[test]
+    fn claims_in_flight_do_not_advance_after_fail_is_recorded() {
+        use std::sync::mpsc;
+        const CLAIMERS: usize = 4;
+        const ROUNDS: usize = 200;
+        const MAX_CLAIMS: u32 = 5_000_000;
+        for _ in 0..ROUNDS {
+            let s = Shared::new();
+            let (snapshot, spawn_failed, progressed) = thread::scope(|scope| {
+                let (progress_tx, progress_rx) = mpsc::channel::<()>();
+                let mut hs = Vec::new();
+                let mut spawn_failed = false;
+                for _ in 0..CLAIMERS {
+                    let tx = progress_tx.clone();
+                    // 停止の判定が欠けても終わるよう反復に上限を置き、止まったかどうかを返す。
+                    let r = thread::Builder::new().spawn_scoped(scope, || {
+                        let tx = tx;
+                        let mut notified = false;
+                        (0..MAX_CLAIMS).any(|_| {
+                            let ok = s.claim(u64::MAX);
+                            if ok && !notified {
+                                notified = true;
+                                let _ = tx.send(());
+                            }
+                            !ok
+                        })
+                    });
+                    match r {
+                        Ok(h) => hs.push(h),
+                        Err(_) => {
+                            spawn_failed = true;
+                            break;
+                        }
+                    }
+                }
+                drop(progress_tx);
+                // 取得が進んだ通知を明示の期限まで待つ。進まなくても取得者を止めるため記録へ進むが、その回は後で失敗にする。
+                let progressed = !hs.is_empty() && progress_rx.recv_timeout(DEADLINE).is_ok();
+                let snapshot = s.fail_observing(LoadError::InvalidOutcome);
+                let all_stopped = hs
+                    .into_iter()
+                    .all(|h| h.join().expect("claimer must not panic"));
+                assert!(
+                    all_stopped,
+                    "a claimer did not stop after fail was recorded"
+                );
+                (snapshot, spawn_failed, progressed)
+            });
+            assert!(!spawn_failed, "claimer thread failed to start");
+            assert!(progressed, "no claim was observed before the record");
+            assert_eq!(
+                next_of(&s),
+                snapshot,
+                "a claim succeeded after fail was recorded"
+            );
+        }
+    }
 }

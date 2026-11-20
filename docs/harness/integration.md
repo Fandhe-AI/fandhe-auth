@@ -64,7 +64,8 @@ console の stub の起動: `ConsoleStubComponent::new(ConsoleStubConfig, AgentC
 
 CI の runner に DB は無い。Docker を使う試験は `#[ignore]` にして `make test` から分け（「ignored」と数えられ、
 黙って合格にはならない）、`make it-db` で明示に流す。Docker の有無で自動に飛ばす分岐・feature は作らない
-（`DPOL-30`〜`DPOL-32`）。DB を使う試験を CI に載せるかは `TASK-6` の範囲。
+（`DPOL-30`〜`DPOL-32`）。CI の DB ジョブ（`it-db-ci`。`#52`）は枠の試験 `db_job_frame` だけを `make it-db-ci` で流す。
+他の `#[ignore]` の試験を CI に載せるかは人が決める（`TASK-6`）。
 
 ## stub の扱い
 
@@ -152,6 +153,7 @@ UTF-8・LF の 1 行 1 項目 `key: value`。キーは ASCII 固定。
 
 - `make test`: Docker 不要。サンプルを含む。CI の build-test ジョブと同じ契約。
 - `make it-db`: Docker 必須。`#[ignore]` の試験を流す。CI の外。
+- `make it-db-ci`: Docker・Docker Compose・openssl 必須。枠の試験 `db_job_frame` だけを流す。CI の DB ジョブの入口。一致 0 件は失敗。
 - Docker の有無で自動に飛ばす仕組みは作らない（`DPOL-30`〜`DPOL-32`）。
 
 ### 守ること
