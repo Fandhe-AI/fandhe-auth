@@ -40,7 +40,7 @@ fn baseline_uses_same_keys_with_zero_counts() {
 }
 
 #[test]
-fn all_categories_in_one_record() {
+fn six_non_hub_stub_categories_in_one_record() {
     let ms = |n| Duration::from_millis(n);
     let kinds = [
         FaultKind::DbBlock,
