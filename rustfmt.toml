@@ -1,5 +1,5 @@
 # rustfmt の設定（TASK-3 (5/6)）。
-# 暫定。人が確定する。ルートの Cargo.toml の workspace.package.edition と同じ値にそろえる。
+# edition の値は D-2026-11-20-12 で決まった（2024）。ルートの Cargo.toml の workspace.package.edition と同じ値にそろえる。
 # 単体の rustfmt（編集時のフック等）が edition を 2015 として解釈しないよう、ここにも持つ。
-# stable の項目だけを使う。それ以外の整形の値は人が決める。
+# stable の項目だけを使う。edition 以外の整形の値は暫定で、人が決める。
 edition = "2024"

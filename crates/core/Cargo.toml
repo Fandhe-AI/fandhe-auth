@@ -3,6 +3,7 @@ name = "fandhe-auth-core"
 description = "fandhe-auth の I/O を持たないドメイン"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

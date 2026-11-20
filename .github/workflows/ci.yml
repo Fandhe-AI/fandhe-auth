@@ -121,8 +121,9 @@ jobs:
 
   # Rust の workspace のビルドと試験（TASK-6）。ローカルの `make build`・`make test` と同じ契約。
   # --locked で Cargo.lock の外を解決しない。--all-features は付けない（DPOL-31）。
-  # toolchain は runner 既定の rustup の stable を使う（暫定。版・MSRV は TASK-4 で人が決め、
-  # rust-toolchain.toml が入ったら追随する）。キャッシュは未導入（効果を測ってから入れる）。
+  # toolchain は MSRV の版（Cargo.toml の rust-version）を rustup で入れて使う。MSRV の値は D-2026-11-20-12、
+  # CI を MSRV で流すのは利用者の指示（2026-11-20）。新しい stable での検査はしていない（足すかは未定）。
+  # rust-toolchain.toml の有無は未定（決める TASK は spec に無い）。キャッシュは未導入（効果を測ってから入れる）。
   build-test:
     name: "make build + make test"
     runs-on: ubuntu-latest
@@ -132,6 +133,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install MSRV toolchain
+        # MSRV（Cargo.toml の rust-version。値は D-2026-11-20-12）の版を入れて既定にする。CI を MSRV で流すのは
+        # 利用者の指示（2026-11-20）で、新しい stable での検査はしていない（足すかは未定）。処理は scripts/ に置く。
+        run: scripts/install-msrv.sh
 
       - name: Show Rust toolchain versions
         run: |
@@ -150,7 +156,8 @@ jobs:
   # clippy の警告（-D warnings）・crate 間の依存の向きの検査・vendored の検査（DPOL-13）のどれかが非 0 なら失敗する。
   # --all-features は付けない（DPOL-31）。依存の列挙（check-crate-deps.sh）と vendored の参考走査（check-openssl-vendored.sh の走査 B）にだけ使い、
   # ビルド・clippy・合否判定では使わない。
-  # toolchain は runner 既定の rustup の stable（暫定。版・MSRV は TASK-4 で人が決める）。
+  # toolchain は MSRV の版（Cargo.toml の rust-version）を rustup で入れて使う。MSRV の値は D-2026-11-20-12、
+  # CI を MSRV で流すのは利用者の指示（2026-11-20）。新しい stable での検査はしていない（足すかは未定）。
   # キャッシュは未導入。build-test とは needs を張らず並列に流す。
   lint:
     name: "make lint (rustfmt + clippy + crate-deps)"
@@ -161,6 +168,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install MSRV toolchain
+        # MSRV（Cargo.toml の rust-version。値は D-2026-11-20-12）の版を入れて既定にする。CI を MSRV で流すのは
+        # 利用者の指示（2026-11-20）で、新しい stable での検査はしていない（足すかは未定）。処理は scripts/ に置く。
+        run: scripts/install-msrv.sh rustfmt clippy
 
       - name: Show Rust toolchain versions
         run: |
@@ -248,6 +260,7 @@ jobs:
   # 生成し、ステップ間・GITHUB_ENV・ファイルに渡さない。SECR-6）。services: は使わない（TLS の初期化
   # スクリプトをマウントできず AUDP-9 の構成を再現できないため）。流すのは枠の試験だけで、他の #[ignore] は手で流す。
   # 展開した値を出す docker compose config・docker inspect は呼ばない。キャッシュは未導入（#55）。
+  # toolchain は MSRV の版（build-test・lint と同じ。scripts/install-msrv.sh）。
   it-db-ci:
     name: "make it-db-ci (DB integration frame)"
     runs-on: ubuntu-latest
@@ -257,6 +270,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install MSRV toolchain
+        # MSRV（Cargo.toml の rust-version。値は D-2026-11-20-12）の版を入れて既定にする。CI を MSRV で流すのは
+        # 利用者の指示（2026-11-20）で、新しい stable での検査はしていない（足すかは未定）。処理は scripts/ に置く。
+        run: scripts/install-msrv.sh
 
       - name: Show toolchain versions
         run: |
