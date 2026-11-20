@@ -208,12 +208,12 @@ fn run_stages_calls_hub_stub_jwks_on_harness() {
         None => CallResult::Unavailable,
     };
     let r = run_stages(|| Box::new(StdMonotonicClock::new()), &spec, &plan, call).unwrap();
-    assert_eq!(r.stages.len(), 2);
-    for st in &r.stages {
-        for run in &st.runs {
-            assert_eq!(run.summary.executed, st.config.load().trials_planned());
-            assert_eq!(run.summary.success, st.config.load().trials_planned());
-            assert_eq!(run.summary.excluded, st.config.load().warmup());
+    assert_eq!(r.stages().len(), 2);
+    for st in r.stages() {
+        for run in st.runs() {
+            assert_eq!(run.executed, st.config().load().trials_planned());
+            assert_eq!(run.success, st.config().load().trials_planned());
+            assert_eq!(run.excluded, st.config().load().warmup());
         }
     }
     // 経路を実際に呼んだ証拠: 暖機を含む全試行数（11 x 2 + 22 x 2）に一致する。

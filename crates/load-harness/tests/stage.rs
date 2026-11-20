@@ -81,26 +81,24 @@ fn results_are_kept_per_stage() {
     let cfgs = vec![sc(1, 5, 1, 2), sc(2, 6, 0, 3), sc(4, 8, 2, 1)];
     let plan = StagePlan::new(cfgs.clone(), MetricKey::P99Ns).unwrap();
     let r = run_stages(|| step_clock(10), &spec(), &plan, || CallResult::Ok).unwrap();
-    assert_eq!(r.stages.len(), 3);
-    assert_eq!(r.target.as_str(), "route_a");
-    for (i, st) in r.stages.iter().enumerate() {
-        assert_eq!(st.stage, u64::try_from(i).unwrap() + 1);
-        assert_eq!(st.config, cfgs[i]);
-        assert_eq!(u64::try_from(st.runs.len()).unwrap(), cfgs[i].repetitions());
-        for run in &st.runs {
+    assert_eq!(r.stages().len(), 3);
+    assert_eq!(r.target().as_str(), "route_a");
+    for (i, st) in r.stages().iter().enumerate() {
+        assert_eq!(st.stage(), u64::try_from(i).unwrap() + 1);
+        assert_eq!(*st.config(), cfgs[i]);
+        assert_eq!(
+            u64::try_from(st.runs().len()).unwrap(),
+            cfgs[i].repetitions()
+        );
+        for run in st.runs() {
             let l = cfgs[i].load();
-            assert_eq!(run.summary.executed, l.trials_planned());
-            assert_eq!(run.summary.excluded, l.warmup());
-            assert!(run.summary.max_in_flight <= l.concurrency());
+            assert_eq!(run.executed, l.trials_planned());
+            assert_eq!(run.excluded, l.warmup());
+            assert!(run.max_in_flight <= l.concurrency());
         }
-        assert!(st.worst_run.is_some());
+        assert!(st.worst_run().is_some());
     }
-    assert!(
-        r.stages[0]
-            .runs
-            .iter()
-            .all(|x| x.summary.max_in_flight == 1)
-    );
+    assert!(r.stages()[0].runs().iter().all(|x| x.max_in_flight == 1));
 }
 
 #[test]
@@ -190,14 +188,14 @@ fn worst_run_picks_largest_and_smallest_on_tie() {
         || CallResult::Ok,
     )
     .unwrap();
-    assert_eq!(r.stages[0].worst_run, Some(2));
+    assert_eq!(r.stages()[0].worst_run(), Some(2));
 }
 
 #[test]
 fn all_timeouts_give_none_and_none_tokens() {
     let plan = StagePlan::new(vec![sc(1, 3, 0, 1)], MetricKey::P99Ns).unwrap();
     let r = run_stages(|| step_clock(10), &spec(), &plan, || CallResult::TimedOut).unwrap();
-    assert_eq!(r.stages[0].worst_run, None);
+    assert_eq!(r.stages()[0].worst_run(), None);
     let text = r.to_string();
     assert!(
         text.contains("worst_run: 1 by=p99_ns interval=op run=none class=measured refs=measured\n")

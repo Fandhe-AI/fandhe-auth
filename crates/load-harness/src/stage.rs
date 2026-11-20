@@ -23,7 +23,7 @@ use std::fmt;
 use crate::aggregate::{AggregateError, IntervalStats, MetricKey, RunSummary, worst_run};
 use crate::generate::LoadConfig;
 use crate::meter::{IntervalName, MonotonicClock};
-use crate::target::{CallResult, TargetError, TargetName, TargetRun, TargetSpec, run_target};
+use crate::target::{CallResult, TargetError, TargetName, TargetSpec, run_target};
 
 /// 段階の数の上限（仮置きの安全弁。要件の値・PoC の値ではない）。
 pub const MAX_STAGES: u64 = 64;
@@ -129,25 +129,64 @@ impl StagePlan {
     }
 }
 
-/// 1 段階の結果。
+/// 1 段階の結果。フィールドは非公開で、読み取りだけを許す
+/// （回の削除・並べ替えで `Display` の番号と `worst_run` がずれないようにする。`load.md` の 3・4）。
+/// 回ごとに持つのは集計 [`RunSummary`] だけで、生標本は回の終了時に捨てる
+/// （試行数に比例してメモリを持たないため）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StageResult {
-    /// 段階の通し番号（1 始まり）。
-    pub stage: u64,
-    pub config: StageConfig,
-    /// 回の結果。添字 + 1 が段階の中の回の通し番号。
-    pub runs: Vec<TargetRun>,
-    /// 段階の中の最悪の回の通し番号（1 始まり）。どの回も標本が無いとき `None`。
-    pub worst_run: Option<u64>,
+    stage: u64,
+    config: StageConfig,
+    runs: Vec<RunSummary>,
+    worst_run: Option<u64>,
 }
 
-/// 段階を変える実行の結果。段階ごとに分けて持つ。
+impl StageResult {
+    /// 段階の通し番号（1 始まり）。
+    pub fn stage(&self) -> u64 {
+        self.stage
+    }
+
+    pub fn config(&self) -> &StageConfig {
+        &self.config
+    }
+
+    /// 回の集計。添字 + 1 が段階の中の回の通し番号。
+    pub fn runs(&self) -> &[RunSummary] {
+        &self.runs
+    }
+
+    /// 段階の中の最悪の回の通し番号（1 始まり）。どの回も標本が無いとき `None`。
+    pub fn worst_run(&self) -> Option<u64> {
+        self.worst_run
+    }
+}
+
+/// 段階を変える実行の結果。段階ごとに分けて持つ。フィールドは非公開で読み取りだけを許す。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StagedRun {
-    pub target: TargetName,
-    pub interval: IntervalName,
-    pub by: MetricKey,
-    pub stages: Vec<StageResult>,
+    target: TargetName,
+    interval: IntervalName,
+    by: MetricKey,
+    stages: Vec<StageResult>,
+}
+
+impl StagedRun {
+    pub fn target(&self) -> &TargetName {
+        &self.target
+    }
+
+    pub fn interval(&self) -> &IntervalName {
+        &self.interval
+    }
+
+    pub fn by(&self) -> MetricKey {
+        self.by
+    }
+
+    pub fn stages(&self) -> &[StageResult] {
+        &self.stages
+    }
 }
 
 /// 段階を計画の順に 1 つずつ回す。各回の時計は `new_clock` で作る（回ごとに新しい計測を始めるため）。
@@ -167,15 +206,15 @@ where
     let mut stages = Vec::with_capacity(plan.stages.len());
     for (si, cfg) in plan.stages.iter().enumerate() {
         let stage = number(si)?;
-        let mut runs: Vec<TargetRun> = Vec::new();
+        // 生標本は持たず、回ごとに集計だけを残す。
+        let mut runs: Vec<RunSummary> = Vec::new();
         for ri in 0..cfg.repetitions {
             let run = ri.checked_add(1).ok_or(StageError::CounterOverflow)?;
             let r = run_target(new_clock(), spec, &cfg.load, &call)
                 .map_err(|error| StageError::Target { stage, run, error })?;
-            runs.push(r);
+            runs.push(r.summary);
         }
-        let summaries: Vec<RunSummary> = runs.iter().map(|r| r.summary.clone()).collect();
-        let worst = worst_run(&summaries, plan.by, spec.interval())
+        let worst = worst_run(&runs, plan.by, spec.interval())
             .map_err(|error| StageError::Aggregate { stage, error })?;
         stages.push(StageResult {
             stage,
@@ -241,7 +280,7 @@ impl fmt::Display for StagedRun {
                 // 回の数は繰り返しの上限（1024）以下なので溢れない。溢れたら出力を誤りにする。
                 let n = number(i).map_err(|_| fmt::Error)?;
                 let id = format!("{}.{}", st.stage, n);
-                let s = &r.summary;
+                let s = r;
                 writeln!(
                     f,
                     "run: {id} class=measured refs=measured concurrency_observed_max={} executed={} success={} failure={} timeout={} excluded={}",
