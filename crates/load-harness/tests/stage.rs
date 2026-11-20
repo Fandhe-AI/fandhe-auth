@@ -339,3 +339,54 @@ fn plan_and_result_debug_hide_interval_names() {
     assert!(!res_out.contains(canary));
     assert_eq!(res_out, "StageResult(..)");
 }
+
+#[test]
+fn multi_stage_display_numbers_runs_per_stage_and_worst_run_stays_in_stage() {
+    // load.md の 3・4: run の番号は「段階.回」で段階ごとに 1 から始まり、worst_run は同じ段階内の回を指す。
+    let plan = StagePlan::new(
+        vec![sc(1, 2, 0, 3), sc(1, 3, 0, 2)],
+        MetricKey::MaxNs,
+        limits(),
+        vocab(),
+    )
+    .unwrap();
+    // 回の実行順（段階 1 の 3 回、段階 2 の 2 回）に対応する時計の刻み。最大が段階 1 は 2 回目、段階 2 は 1 回目。
+    let steps = [10, 30, 20, 50, 40];
+    let n = AtomicU64::new(0);
+    let r = run_stages(
+        || {
+            let i = usize::try_from(n.fetch_add(1, Ordering::SeqCst)).unwrap();
+            step_clock(steps[i])
+        },
+        &spec(),
+        &plan,
+        || CallResult::Ok,
+    )
+    .unwrap();
+    let text = r.to_string();
+    let heads: Vec<String> = text
+        .lines()
+        .filter(|l| l.starts_with("stage: ") || l.starts_with("run: "))
+        .map(|l| l.split(' ').take(2).collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(
+        heads,
+        [
+            "stage: 1", "run: 1.1", "run: 1.2", "run: 1.3", "stage: 2", "run: 2.1", "run: 2.2"
+        ]
+    );
+    let worst: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("worst_run: "))
+        .collect();
+    assert_eq!(
+        worst,
+        [
+            "worst_run: 1 by=max_ns interval=op run=2 class=measured refs=measured",
+            "worst_run: 2 by=max_ns interval=op run=1 class=measured refs=measured",
+        ]
+    );
+    // 第 2 段階の metric 行は第 2 段階の番号で出る。
+    assert!(text.contains("metric: 2.1 interval=op class=measured n=3 "));
+    assert!(text.contains("metric: 2.2 interval=op class=measured n=3 "));
+}
