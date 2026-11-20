@@ -3,6 +3,7 @@ name = "fandhe-auth-trial-deps"
 description = "依存の試し実装（試験専用。TASK-4 (6/6)。名前・置き場は仮称）"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 # 陽性対照を持つ試験専用の crate なので、ルートの暫定の値に依らせず明示で公開しない。

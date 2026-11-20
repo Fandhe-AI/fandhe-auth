@@ -50,7 +50,7 @@ exclude = ["crates/trial-deps/fuzz"]
 [workspace.package]
 version = "0.0.0"
 # MSRV は 1.100、edition は 2024（利用者の決定 D-2026-11-20-12）。MSRV の値は CI も読む
-# （scripts/msrv.sh。.github/workflows/ci.yml の build-test・lint）ので、変えるときはここだけを直す。
+# （scripts/msrv.sh。.github/workflows/ci.yml の build-test・lint・it-db-ci が scripts/install-msrv.sh 経由で入れる）ので、変えるときはここだけを直す。
 edition = "2024"
 rust-version = "1.100"
 license = "MIT OR Apache-2.0" # DPOL-26

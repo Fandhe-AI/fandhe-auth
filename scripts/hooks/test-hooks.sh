@@ -1013,6 +1013,34 @@ else
   echo "ok - crate-deps: skipped (cargo not found)"
 fi
 
+# ---- scripts/msrv.sh: [workspace.package] の表の rust-version だけを読む（空白なしの表記も可。取れなければ 2）
+MSRV_SH="${HOOKS_DIR}/../msrv.sh"
+# msrv_case <名前> <期待の終了状態> <期待の標準出力（空なら確かめない）> <Cargo.toml の内容>
+msrv_case() {
+  local name="$1" want_rc="$2" want_out="$3" body="$4" rc=0 out
+  printf '%s\n' "${body}" > "${work_dir}/msrv-manifest.toml"
+  out="$("${HOOK_BASH}" "${MSRV_SH}" "${work_dir}/msrv-manifest.toml" 2> "${work_dir}/out")" || rc=$?
+  if [ "${rc}" -eq "${want_rc}" ] && { [ -z "${want_out}" ] || [ "${out}" = "${want_out}" ]; }; then
+    pass "msrv: ${name}"
+  else
+    fail "msrv: ${name}" "exit ${rc} (expected ${want_rc}), stdout: ${out}" "stderr: $(cat "${work_dir}/out")"
+  fi
+}
+msrv_case "spaced form is read" 0 "1.100" $'[workspace.package]\nedition = "2024"\nrust-version = "1.100"'
+msrv_case "form without spaces is read" 0 "1.100" $'[workspace.package]\nrust-version="1.100"'
+msrv_case "trailing comment is ignored" 0 "1.100" $'[workspace.package]\nrust-version = "1.100" # msrv'
+msrv_case "a rust-version in another table is not read" 2 "" $'[package]\nrust-version = "1.50"\n[workspace.package]\nedition = "2024"'
+msrv_case "workspace table value wins over another table" 0 "1.100" $'[package]\nrust-version = "1.50"\n[workspace.package]\nrust-version = "1.100"'
+msrv_case "missing rust-version exits 2" 2 "" $'[workspace.package]\nedition = "2024"'
+msrv_case "two rust-version lines exit 2" 2 "" $'[workspace.package]\nrust-version = "1.100"\nrust-version = "1.101"'
+msrv_case "inherited form (workspace = true) exits 2" 2 "" $'[workspace.package]\nrust-version.workspace = true'
+rc=0
+"${HOOK_BASH}" "${MSRV_SH}" "${work_dir}/no-such-manifest.toml" > /dev/null 2> "${work_dir}/out" || rc=$?
+expect_rc "msrv: an unreadable manifest exits 2" 2 "${rc}"
+rc=0
+"${HOOK_BASH}" "${MSRV_SH}" > "${work_dir}/msrv-root.out" 2> "${work_dir}/out" || rc=$?
+expect_rc "msrv: the root Cargo.toml yields a version" 0 "${rc}"
+
 echo "# passed: ${passed}, failed: ${failed}"
 if [ "${failed}" -ne 0 ]; then
   exit 1
