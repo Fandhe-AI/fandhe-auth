@@ -284,6 +284,28 @@ judgment:
 - ハーネスの上で動くこと: 試験（dev）だけ `it-harness`・`hub-stub` に依存する（`tests/on_it_harness.rs`。Docker・ネットワークなし）。許可表の行は人の確認待ち。
 - 記録の出力（`fandhe-auth-load-record/1`）を担当する段は未決のまま持ち越す。
 
+## 負荷の対象の呼び出し（6/10）
+
+`TASK-12` の 6/10（#117）。`crates/load-harness` の `target` に、対象の経路を名前・区間と組で呼び、結果を記録の構造体に残す部品を置いた。
+名前・語・値はすべて仮置きで、人が確認する。機材と構成の取得（7/10）・段階を変える実行（8/10）は含まない。合否は付けない（`ACPT-7`）。
+
+- API: `TargetName::new`（規則は区間名と同じ）、`TargetSpec::new(name, interval)`、`run_target(clock, &spec, &config, call)`、結果 `TargetRun`（経路・区間・`LoadRun`・`RunSummary`）、誤り `TargetError`（`Load`・`Aggregate`・`Meter`）。
+- 呼び出しの結果 `CallResult` から `Outcome` への写し（固定。1 か所）:
+
+  | `CallResult` | `Outcome` |
+  | --- | --- |
+  | `Ok` | `Success` |
+  | `Rejected` | `Failure(rejected)` |
+  | `Unavailable` | `Failure(unavailable)` |
+  | `TimedOut` | `Timeout` |
+
+  対象から `Excluded` を返す道は作らない（除外は生成器だけが付ける）。
+- 対象の中の計測の誤りは、最初の誤りを残して生成器に試行を止めさせ、戻ったら `TargetError::Meter`（元の種類を保つ）で返す。panic・`unwrap` は使わない。この停止は生成器の `InvalidOutcome` の拒否に依る。
+- 結果の記録: 呼び出しごとの種類と区間の時間を `TargetRun` に残すところまで。`fandhe-auth-load-record/1` のファイルへの出力は未提供で、担当の段は未決。
+- 対象は stub だけ（`TODO(TASK-716)`。実物の経路は最小の組込み先の完成後）。stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）。
+  `tests/on_it_harness.rs` で it-harness の上の Hub の stub の JWKS の配信を呼ぶ。stub は Mutex でワーカーを直列化するため、測った時間に意味は無く、試験は件数だけを見る。
+- 依存の辺は変えない（通常の依存は 0。試験の依存は 5/10 のまま）。
+
 ## 未決・人の確認待ち
 
 - 文書名・節立て
@@ -303,3 +325,5 @@ judgment:
 - 失敗の時間の分布（`failure_metric`）の扱いと、同じ値が並んだときの最悪の回の選び方
 - 閉ループのときの並行数の不変条件（5/10 の決定に依る）
 - 版の情報を実行の記録側に寄せ、`run_record_file` で結ぶこと
+- 6/10 の仮置き: `CallResult` の 4 種、失敗の種類名 `rejected`・`unavailable`、`TargetName` の規則、API の名前（`target`・`run_target`・`TargetSpec`・`TargetRun`・`TargetError`）
+- 「結果が記録される」の読み: `TargetRun` の構造体まで。ファイルへの出力を担当する段は未決（人が決める。受け入れ条件を満たしたかの判定も人）

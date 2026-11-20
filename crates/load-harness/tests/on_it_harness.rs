@@ -11,8 +11,8 @@ use fandhe_auth_hub_stub::assertion::AssertionSigningKey;
 use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
 use fandhe_auth_it_harness::{Harness, HarnessConfig, HubStubComponent};
 use fandhe_auth_load_harness::{
-    FailureKind, IntervalName, LoadConfig, Outcome, RunMeter, StdMonotonicClock, Trial,
-    run_closed_loop, summarize_run,
+    CallResult, FailureKind, IntervalName, LoadConfig, Outcome, RunMeter, StdMonotonicClock,
+    TargetName, TargetSpec, Trial, run_closed_loop, run_target, summarize_run,
 };
 
 const T0: u64 = 1_000;
@@ -86,4 +86,40 @@ fn loads_hub_stub_on_harness_then_sees_stop() {
     let run = run_closed_loop(new_meter(&name), &config, target).unwrap();
     assert_eq!(run.samples.failure, 6);
     assert_eq!(run.samples.failure_kinds[&unavailable], 6);
+}
+
+#[test]
+fn run_target_calls_hub_stub_jwks_on_harness() {
+    let hub = HubStubComponent::new(hub_config());
+    let handle = hub.handle();
+    let running = Harness::start(HarnessConfig::new().with(Box::new(hub))).unwrap();
+    let key = AssertionSigningKey::generate("kid-load-target.test").unwrap();
+    handle.with(|s| s.jwks.publish(&key)).unwrap();
+
+    let spec = TargetSpec::new(
+        TargetName::new("hub_stub_jwks").unwrap(),
+        IntervalName::new("stub_jwks").unwrap(),
+    );
+    let call = || match handle.with(|s| s.jwks.serve(T0)) {
+        Some(r) if r.status == 200 => CallResult::Ok,
+        Some(_) => CallResult::Rejected,
+        None => CallResult::Unavailable,
+    };
+
+    let config = LoadConfig::new(4, 40, 4).unwrap();
+    let r = run_target(Box::new(StdMonotonicClock::new()), &spec, &config, call).unwrap();
+    let s = &r.run.samples;
+    assert_eq!((s.executed, s.success, s.excluded), (40, 40, 4));
+    assert!((1..=4).contains(&s.max_in_flight));
+    assert_eq!(r.summary.success_metrics[spec.interval()].n, 40);
+    // 経路を実際に呼んだ証拠: stub 側の記録が暖機を含む全件に一致する。
+    assert_eq!(handle.with(|s| s.jwks.records().len()), Some(44));
+    let dbg = format!("{r:?}");
+    assert!(!dbg.contains(HOST_MARK) && !dbg.contains(CLIENT_MARK));
+
+    running.stop().unwrap();
+
+    let config = LoadConfig::new(2, 6, 0).unwrap();
+    let r = run_target(Box::new(StdMonotonicClock::new()), &spec, &config, call).unwrap();
+    assert_eq!(r.run.samples.failure, 6);
 }
