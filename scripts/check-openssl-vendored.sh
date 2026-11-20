@@ -23,14 +23,22 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
-require_cmd cargo
+require_cmd cargo || exit 2
+require_cmd mktemp || exit 2
 
 cd "${ROOT_DIR}"
 
 # 偽 crate は repo の target/ の下に作る。誰でも書ける /tmp の下だと、親の .cargo/config.toml
 # （build.rustc-wrapper 等）を別の利用者に置かれて任意のコードが実行され得るため。
-mkdir -p "${ROOT_DIR}/target"
-WORK="$(mktemp -d "${ROOT_DIR}/target/openssl-vendored.XXXXXX")"
+# 準備の失敗は検査不能（2）。set -e の 1 では「違反」と区別できないため明示する。
+if ! mkdir -p "${ROOT_DIR}/target"; then
+  log "error: cannot create target/; cannot inspect"
+  exit 2
+fi
+if ! WORK="$(mktemp -d "${ROOT_DIR}/target/openssl-vendored.XXXXXX")"; then
+  log "error: cannot create work dir; cannot inspect"
+  exit 2
+fi
 cleanup() { rm -rf "${WORK}"; }
 trap cleanup EXIT
 
@@ -84,7 +92,7 @@ selftest() {
   local f="${WORK}/fx" t a b r
   mkdir -p "${f}"
   mkpkg "${f}/openssl-src" "openssl-src" ""
-  mkpkg "${f}/openssl-sys" "openssl-sys" $'[features]\nvendored = ["dep:openssl-src"]\n[dependencies]\nopenssl-src = { path = "../openssl-src", optional = true }'
+  mkpkg "${f}/openssl-sys" "openssl-sys" $'[features]\nvendored = ["dep:openssl-src"]\n[build-dependencies]\nopenssl-src = { path = "../openssl-src", optional = true }'
   mkpkg "${f}/openssl" "openssl" $'[features]\nvendored = ["openssl-sys/vendored"]\n[dependencies]\nopenssl-sys = { path = "../openssl-sys" }'
 
   # F1: openssl-sys の vendored を直接有効にする → R1
@@ -111,7 +119,7 @@ selftest() {
   mkpkg "${f}/f5" "f5" $'[features]\nx = ["openssl-sys/vendored"]\n[dependencies]\nopenssl-sys = { path = "../openssl-sys" }'
   a="$(run_tree "${f}/f5" offline)"
   b="$(run_tree "${f}/f5" offline --all-features)"
-  expect_count F5A R1 "${a}" eq0
+  for r in R1 R2 R3; do expect_count F5A "${r}" "${a}" eq0; done
   expect_count F5B R3 "${b}" ge1
 
   log "selftest ok (F1-F5)"
