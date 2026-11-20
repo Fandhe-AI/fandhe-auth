@@ -94,12 +94,14 @@ PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を�
 `FaultTimeline` と結ぶ。判定・内側を呼ばない約束（jti を既受信にしない・最終受信時刻を進めない・JWKS のキャッシュを変えない）は
 hub-stub の実装をそのまま使い、作り直さない。
 
-- 入口: `new(wait)`・`apply`・`release`・`present`・`receive_logout`・`receive_heartbeat`・`serve_jwks`・`call_log`・`active_count`。
+- 入口: `new(wait, &timeline)`（1 つの実行に結ぶ）・`finish`（注入器を消費。別の実行の記録は `RunMismatch`）・`apply`・`release`・`present`・`receive_logout`・`receive_heartbeat`・`serve_jwks`・`call_log`・`active_count`。
   受け口は呼び出しごとに借りる（`HubStubSession` に足さない）。種類は `hub_stub_delay`・`hub_stub_refusal`。
 - 「TASK-7 の設定の仕組み」は `HubFaultConfig`・`FaultRule`・`CallWindow` と `set_faults` と読む。`HubStubConfig` には欄を足さない。
 - 開始は `CallWindow { first: 1, last: None }`（以降すべて）の規則を入れた設定の差し替え、解除はその規則を除いた設定の差し替え。
 - 同じ口の遅れと拒否（各最大 1 件）は 1 つの規則に合成する。hub-stub は最初に当たった 1 件だけを使うため、分けると片方が落ちる。
 - 記録（`Applied`・`Released`）が先、設定の差し替えが後。基準線・記録の拒否では状態を変えない（fail-closed）。
+- 事象に呼び出しの記録の件数（`log_pos`）を添える。呼び出し `i` は `log_pos <= i` の事象より後・次の事象より前に起きたと読み、同じ障害を二度適用・解除しても期間と呼び出しを順序で照合できる。
+- 注入器は実行をまたいで使わない。基準線・次の実行には新しい注入器を作る（有効な規則と呼び出しの記録を持ち越さない。fail-closed）。
 - 解除は開始と同じ種類・値でだけ受ける。二重の開始は `AlreadyActive`、無い解除は `NotActive`。
 - `MalformedBody` は JWKS の口だけ。`FaultKind::validate` が他の口を拒否する（1/8 の挙動を狭めた）。
 - 遅れは `Wait` のフックへ渡すだけ。眠る実装は出さない。
@@ -122,7 +124,7 @@ run_started_at: <RFC 3339 UTC>
 recorded_at: <RFC 3339 UTC>
 injection_count: <N>
 unreleased_count: <M>
-injection: <seq> <applied|released> <category> target=<target> at=<UTC> offset_ms=<n>[ パラメータ]
+injection: <seq> <applied|released> <category> target=<target> at=<UTC> offset_ms=<n>[ パラメータ][ log_pos=<n>]
 note: ...
 ```
 
@@ -133,7 +135,7 @@ note: ...
 ## 時計
 
 時刻はハーネスのプロセスの基準の時計で押す（壁時計 `at`〔秒〕と、実行開始からの単調時計の `offset_ms`）。
-試験対象に注入したずれた時計や stub の引数の `now` は使わない。hub-stub の `InjectionLog.at` は記録に入れず、`call_log()` で別に読む（5/8。順序で対応）。
+試験対象に注入したずれた時計や stub の引数の `now` は使わない。hub-stub の `InjectionLog.at` は記録に入れず、`call_log()` で別に読む（5/8。事象の `log_pos` と呼び出しの順序で対応）。
 
 ## 未決・人の確認待ち
 

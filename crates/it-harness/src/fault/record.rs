@@ -84,11 +84,16 @@ pub struct FaultEvent {
     pub at: UtcTimestamp,
     /// 実行の開始からの単調時計の経過（ミリ秒）。
     pub offset_ms: u64,
+    /// 事象を積んだ時点の、呼び出しの記録（hub-stub の `InjectionLog`）の件数。`None` は呼び出しの記録を持たない種類。
+    /// 呼び出し `i`（0 始まり）は、`log_pos <= i` の事象より後・次の事象より前に起きた。
+    /// 同じ口へ同じ障害を二度適用・解除しても、どの期間の呼び出しかを照合できる（TASK-13 の 5/8）。
+    pub log_pos: Option<usize>,
 }
 
 /// 事象を積む入口。`Instant` の原点と開始時刻を持つ。
 #[derive(Debug, Clone)]
 pub struct FaultTimeline {
+    run_id: u64,
     mode: RunMode,
     started_at: UtcTimestamp,
     origin: Instant,
@@ -110,7 +115,9 @@ impl FaultTimeline {
     fn new(mode: RunMode, origin: Instant, started: SystemTime) -> Result<Self, FaultRecordError> {
         let started_at = UtcTimestamp::from_system_time(started)
             .map_err(|_| FaultRecordError::ClockBeforeEpoch)?;
+        static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
         Ok(Self {
+            run_id: RUN_SEQ.fetch_add(1, Ordering::Relaxed),
             mode,
             started_at,
             origin,
@@ -119,16 +126,31 @@ impl FaultTimeline {
         })
     }
 
+    /// この実行の識別（プロセス内で一意）。注入器を単一の実行へ結ぶために使う。
+    pub(crate) fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
     /// ハーネスの時計で現在の時刻を押して積む。
     pub fn record_now(
         &mut self,
         kind: FaultKind,
         phase: FaultPhase,
     ) -> Result<(), FaultRecordError> {
+        self.record_now_with_log_pos(kind, phase, None)
+    }
+
+    /// `record_now` に、呼び出しの記録の件数（`FaultEvent::log_pos`）を添える。
+    pub fn record_now_with_log_pos(
+        &mut self,
+        kind: FaultKind,
+        phase: FaultPhase,
+        log_pos: Option<usize>,
+    ) -> Result<(), FaultRecordError> {
         let at = UtcTimestamp::from_system_time(SystemTime::now())
             .map_err(|_| FaultRecordError::ClockBeforeEpoch)?;
         let ms = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-        self.record_at(kind, phase, at, ms)
+        self.push(kind, phase, at, ms, log_pos)
     }
 
     /// 時刻を引数で渡して積む（試験用の決定的な入口）。
@@ -142,6 +164,17 @@ impl FaultTimeline {
         phase: FaultPhase,
         at: UtcTimestamp,
         offset_ms: u64,
+    ) -> Result<(), FaultRecordError> {
+        self.push(kind, phase, at, offset_ms, None)
+    }
+
+    fn push(
+        &mut self,
+        kind: FaultKind,
+        phase: FaultPhase,
+        at: UtcTimestamp,
+        offset_ms: u64,
+        log_pos: Option<usize>,
     ) -> Result<(), FaultRecordError> {
         if self.mode == RunMode::Baseline {
             return Err(FaultRecordError::EventsInBaseline);
@@ -174,6 +207,7 @@ impl FaultTimeline {
             phase,
             at,
             offset_ms,
+            log_pos,
         });
         Ok(())
     }
@@ -262,7 +296,7 @@ impl fmt::Display for FaultRecord {
                 FaultPhase::Applied => "applied",
                 FaultPhase::Released => "released",
             };
-            writeln!(
+            write!(
                 f,
                 "injection: {} {phase} {} target={} at={} offset_ms={}{}",
                 i + 1,
@@ -272,6 +306,10 @@ impl fmt::Display for FaultRecord {
                 e.offset_ms,
                 e.kind
             )?;
+            if let Some(n) = e.log_pos {
+                write!(f, " log_pos={n}")?;
+            }
+            writeln!(f)?;
         }
         writeln!(
             f,
