@@ -449,7 +449,7 @@ fn recorded_offsets_are_not_after_call_return() {
 }
 
 /// ORST-17・#5983: 遮断中に connect して読まずに置いた接続は、解除の後に往復しても上流へ届かない。
-/// accept のスレッドが先に切っても、解除の排出で切っても合格（「届かない」だけを固定する）。
+/// 遮断中に切られたことを確かめてから解除する（排出の経路は単体試験で確かめる）。
 #[test]
 fn conn_queued_during_block_never_reaches_upstream_after_release() {
     use std::sync::atomic::Ordering;
@@ -458,6 +458,12 @@ fn conn_queued_during_block_never_reaches_upstream_after_release() {
     let mut tl = timeline();
     p.block(&mut tl).unwrap();
     let mut queued = connect(p.listen_port());
+    // 待ち行列への到達の順序を仮定しない。遮断中の accept のスレッドが切って数えるまで待ってから解除する。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while p.refused_count() < 1 {
+        assert!(Instant::now() < deadline, "queued conn never refused");
+        thread::sleep(Duration::from_millis(5));
+    }
     p.release_block(&mut tl).unwrap();
     let _ = queued.write_all(b"late");
     // 対象の接続が切れるのを期限付きで待つ（転送されていれば切れず、読みはタイムアウトになる）。

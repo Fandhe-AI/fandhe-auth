@@ -30,6 +30,7 @@
 //! - 上流への接続の開始の保証は「事前確認の時点」までで、確認の後（ポートの取得・`connect_timeout`）に `block` が
 //!   完了しても上流への TCP の試行は起こり得る。ただし client のバイトは上流へ送らず切る。
 //! - `release_block`: ロック → 待ち受けの待ち行列を上限まで排出して切る → `Released` を記録 → 解く。
+//!   排出の後も、解除処理がロックを解放するまで accept のスレッドは進まない（ロックの解放の後に始まった接続は上流へ届く）。
 //!   `Ok(())` で戻った場合に限り、解除の前に待ち行列にあった接続は上流へ届かない（排出の上限を超えた分は保証外。
 //!   `docs/harness/fault-injection.md`）。`Err`（`DrainFailed`・記録の拒否）では遮断のままで、新規接続も切る。
 //!   待ち行列の空を確かめられない accept の失敗（`WouldBlock` 以外。fd 枯渇等）では `Released` を記録せず遮断のまま
@@ -341,15 +342,19 @@ impl DbFaultProxy {
         timeline: &mut FaultTimeline,
         drain: impl FnOnce(&TcpListener, &Shared) -> Drain,
     ) -> Result<(), DbFaultError> {
-        self.release_block_inner(timeline, drain, |_| {})
+        let kind = self.block_kind;
+        self.release_block_inner(timeline, drain, move |tl, _| {
+            tl.record_now(kind, FaultPhase::Released)
+        })
     }
 
-    /// 本体。`before_record` は `Released` の記録の直前（まだ遮断中）に呼ぶ。状態変更と記録の順序を試験で観測する口（ORST-17）。
+    /// 本体。`record` は `Released` を積む処理で、まだ遮断中の時点で呼ぶ。記録そのものを差し替えられるので、
+    /// 記録を呼ぶ時点の遮断の状態を試験で観測できる（ORST-17）。
     fn release_block_inner(
         &mut self,
         timeline: &mut FaultTimeline,
         drain: impl FnOnce(&TcpListener, &Shared) -> Drain,
-        before_record: impl FnOnce(&Shared),
+        record: impl FnOnce(&mut FaultTimeline, &Shared) -> Result<(), FaultRecordError>,
     ) -> Result<(), DbFaultError> {
         if !self.block_active {
             return Err(DbFaultError::NotActive);
@@ -359,7 +364,7 @@ impl DbFaultProxy {
             .conns
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        // ロックを持つ間は accept のスレッドが進めないので、排出の後に新しく転送される接続は無い。
+        // ロックを持つ間は accept のスレッドが進めない。排出の後も、解除処理がロックを解放するまで進まない。
         // `WouldBlock` 以外の失敗は待ち行列の空を確かめられていない。`Released` を記録せず遮断を保つ（fail-closed）。
         // 割り込みの再試行を使い切った場合も空を確かめられていないので同じ扱い（件数の上限到達とは分ける）。
         // 停止後は待ち受けが無い。空を確かめられないので失敗として扱う（fail-closed）。
@@ -372,10 +377,7 @@ impl DbFaultProxy {
         ) {
             return Err(DbFaultError::DrainFailed);
         }
-        before_record(&self.shared);
-        timeline
-            .record_now(self.block_kind, FaultPhase::Released)
-            .map_err(DbFaultError::Record)?;
+        record(timeline, &self.shared).map_err(DbFaultError::Record)?;
         self.shared.blocked.store(false, Ordering::SeqCst);
         drop(conns);
         self.block_active = false;
@@ -1001,7 +1003,22 @@ mod tests {
         let mut c1 = connect(p.listen_port());
         let mut c2 = connect(p.listen_port());
         assert_eq!(p.refused_count(), 0);
-        p.release_block(&mut tl).unwrap();
+        // 2 本が待ち行列に届くまで排出を繰り返す（connect の成功の直後に届いている仮定を置かない）。
+        p.release_block_with(&mut tl, |l, sh| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut total = 0;
+            while total < 2 && Instant::now() < deadline {
+                match drain_backlog(l, sh) {
+                    Drain::Done(n) => total += n,
+                    other => return other,
+                }
+                if total < 2 {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+            Drain::Done(total)
+        })
+        .unwrap();
         assert_eq!(p.refused_count(), 2);
         assert_eq!(p.accepted_count(), 0);
         assert_eq!(echo_or_cut(&mut c1, b"a"), None);
@@ -1123,12 +1140,15 @@ mod tests {
         let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
         let mut tl = timeline();
         p.block(&mut tl).unwrap();
+        let kind = p.block_kind;
         let mut observed = None;
         let r = p.release_block_inner(
             &mut tl,
             |_, _| Drain::Done(0),
-            |sh| {
+            |tl, sh| {
+                // 記録を呼ぶ時点の遮断の状態を見て、そのまま本物の記録を積む。
                 observed = Some(sh.blocked.load(Ordering::SeqCst));
+                tl.record_now(kind, FaultPhase::Released)
             },
         );
         assert!(r.is_ok());
