@@ -150,7 +150,7 @@ Hub が組み込むライブラリ（本体）で、型・判定・拡張契約�
 | P1 | `cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` を通さない。make ターゲットができた後は make を正とする | `verification.md` |
 | P1 | `Cargo.lock` をコミットしない、版の固定が方針と異なる（本体は `Cargo.lock` のコミットと `webauthn-rs` 等の版の記録。相手側の部品の版固定は Hub の担当） | DPOL-4・DPOL-10・PKEY-4（`DPOL-9`・`CSRF-13` は → Hub `ARUN-17`） |
 | P1 | 自身の crate に `license = "MIT OR Apache-2.0"` が無い。git 依存・crates.io 以外の registry | DPOL-25・26 |
-| P1 | 未定の値（`tracing`・`metrics` の feature の選び、K11 の測り方と閾値など。`D-2026-11-20-7`・`D-2026-11-20-8`）を決まったものとして書く（未定は「未定（TASK-n で決める）」と書く）。決定済みの MSRV 1.100・edition 2024（`D-2026-11-20-12`）と食い違う値を書く | `coding-rust.md`・`spec-reference.md` |
+| P1 | 未定の値（依存の版の固定の手順、`deny.toml` の中身・bans に足す名前〔TASK-668〕、`SECR-21` の構文木の走査の置き場〔`D-2026-11-20-10`〕など。`tracing`・`metrics` の feature の選びと K11 の判定は `D-2026-11-20-14` で決定済み）を決まったものとして書く（未定は「未定（TASK-n で決める）」と書く）。決定済みの MSRV 1.100・edition 2024（`D-2026-11-20-12`）と食い違う値を書く | `coding-rust.md`・`spec-reference.md` |
 | P1 | 本番の依存の木に `tracing-subscriber`・`proptest`・`cargo-fuzz`・`libfuzzer-sys` などの試験の道具が入る（dev-dependencies か別の workspace に置く。`D-2026-11-20-7` の K7・`D-2026-11-20-8`・`D-2026-11-20-9`）。本体が受ける側（subscriber・exporter）を選ぶ（`D-2026-11-20-5`） | `coding-rust.md`・`dependency-policy.md` |
 | P2 | 新しく書くログ・誤り応答の文言が英語でない（`D-2026-11-20-13`。外に返す誤り応答の形は THRT-1 等に従う） | `japanese-style.md` |
 

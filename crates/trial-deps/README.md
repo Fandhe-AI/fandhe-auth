@@ -13,13 +13,17 @@
   - `TASK-513`: 派生 `Debug` の入れ物の試験（`SECR-13`）と、乱数の probe の本番版
   - `TASK-500`: 陽性対照、つまり検出力の確認（`AAUD-30`・`AAUD-31`）
   - `TASK-511`: `SECR-11` の property test（`prop_debug`）と fuzz
+  - `SECR-29` の例外: この crate の試験の型（`prop_debug` の入力の型・`SECR-23` の試験の捕獲の型）は、crate を消すまで `SECR-10`・`SECR-29` の一覧の対象外（`D-2026-11-20-14` の (4)(e)）。
+    条件は `.claude/rules/secret-values.md` の例外の箇条に従う: 秘密値の型を包まない。`prop_debug` の `Input` は `Debug` が固定の文字列である間。捕獲の型 5 つは `Debug` を実装しない間。条件を外れた型は一覧に戻す
+  - `TASK-518`: `log` crate を経由した記録も本番の `SECR-23` の試験で捕まえる（`D-2026-11-20-14` の (4)(f)。この crate は直さない）
 - 消す条件: 採った道具と試験の形を、本番の TASK（500・511・513・514・518・116・117）が引き取ったら、この crate は消す。
-- feature は、利用者の方針（2026-11-20。安全な最新の安定版・必要最小の feature）で必要最小に絞った暫定。K11 の記入後に人が確定する（`D-2026-11-20-7`）。
+- feature は、利用者の方針（2026-11-20。安全な最新の安定版・必要最小の feature）で必要最小に絞った。この組は `D-2026-11-20-14` の (4)(b)(c) で決まった（試し実装の時点の組）。
   - `tracing`: `default-features = false` + `std`
   - `metrics`: 既定（`[features]` が無い）
   - `tracing-subscriber`: `default-features = false` + `fmt`（明示）。`fmt` が `registry`・`std` を暗黙に有効にする
   - `proptest`: `default-features = false` + `std`
   - `syn`: `default-features = false` + `full`・`parsing`
+  - `libfuzzer-sys`: 既定（`fuzz/Cargo.toml` の `0.4.13`。fuzz は別の workspace）
 - 採用 crate の根拠は `D-2026-11-20-8`〜`10`。
 - ここでの合格は〔仮想〕の確認で、spec の「確定」ではない（`ACPT-7`）。
 
@@ -59,15 +63,15 @@ nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly �
 
 ## K11 と feature の選び
 
-- K11 の測り方・ターゲット・閾値は未定で、人が決める（`D-2026-11-20-7`）。この README には測定の手順も、値を入れる表も置かない。
-- 測定手順の下書きは PR 本文で渡す。
-- 口の feature の選び（`tracing`・`metrics`・dev の道具）は未定で、K11 を人が決めた後に確定する。いまの feature は、利用者の方針（2026-11-20）で必要最小に絞った暫定である（組は上の「位置づけ」）。
+- K11 の見方は `D-2026-11-20-14` の (4)(d) で決まった（`D-2026-11-20-7` の時点では未定だった）。この README には測定の手順も、値を入れる表も置かない。
+- K11 の測定の記録は、spec の `D-2026-11-20-14` の (1) にある。
+- 口の feature の選び（`tracing`・`metrics`・dev の道具）は、`D-2026-11-20-14` の (4)(b)(c) で決まった。組は上の「位置づけ」に列挙している（試し実装の時点の組）。
 
 ## 確かめた事実
 
 各 crate の `[features]` を読んだ事実:
 
-- `tracing`: default は `std`・`attributes`。`attributes` は proc-macro の `tracing-attributes` を引く。`#[instrument]` を本体が使うかが論点になる。
+- `tracing`: default は `std`・`attributes`。`attributes` は proc-macro の `tracing-attributes` を引く。`#[instrument]` を本体が使うかは試し実装の時点の論点で、`D-2026-11-20-14` の (4)(b) で口は `std` だけ（`#[instrument]` は使わない）と決まった。
   ほかに `max_level_*`・`release_max_level_*` がある。
 - `tracing` の default のままなら、`attributes` が `tracing-attributes`（proc-macro）を経由して `syn` 2.x を normal で引く。
   この crate は `default-features = false` + `std` にして `attributes` を外した（マクロだけを使い、`#[instrument]` は使わない）。

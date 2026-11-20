@@ -50,7 +50,14 @@ tools:
   ログの口は `tracing`、計測の口は `metrics`、`tracing-subscriber` は dev-dependencies だけ（`D-2026-11-20-8`）。
   ログ・誤り応答の文言は英語（`D-2026-11-20-13`）。許可リストへ NCSA を足す（`D-2026-11-20-9`。`DPOL-22`）
 - **未定の値を決めない**: formatter / lint の設定、ビルド手順は TASK-3（原文）で決める。toolchain の固定（`rust-toolchain.toml`）は未定（決める TASK は未定）。
-  `deny.toml` の中身・CI の時間予算・feature の選び・K11 の閾値も未定。決まっていない値は置かずに報告する（仮に置く場合は「未定（TASK-n で決める）」とコメントする）
+  `deny.toml` の中身（TASK-668）・CI の時間予算（`ci.yml` の 2 分は目安。`../../rules/github-actions.md`）・依存の版の固定の手順も未定。
+  決まっていない値は置かずに報告する（仮に置く場合は「未定（TASK-n で決める）」とコメントする）
+- **依存の feature と K11**（`D-2026-11-20-14` (4)）: 版は安全な最新の安定版（pre-release を除く）、
+  最新の安定版が依存の `rust-version` で MSRV を超える、または既知の advisory があるときは、条件を満たす旧版を勝手に選ばず、上げずに呼び出し元（利用者）へ報告する（扱いは未定。`../../rules/dependency-policy.md` の「版と feature の選び方」）、
+  feature は `default-features = false` から要るものだけを足す。
+  口は `tracing` が `std` だけ・`metrics` が既定。試験の道具は、試し実装（`crates/trial-deps`）で選んだ組として `tracing-subscriber` が `fmt` だけ・`proptest` が `std` だけ・`syn` が `full`・`parsing` だけ・`libfuzzer-sys` が既定。
+  `TASK-518` で `log` を捕まえるために要る feature は、K11 の 4 つで確かめて足してよい（`../../rules/dependency-policy.md` の「版と feature の選び方」）。
+  K11 は数の閾値ではなく「最新の安定版・既知の advisory 0 件・feature は必要最小・依存の `rust-version` が MSRV 以下」の 4 つで見る。ここに無い crate の選びは決まっていないため、利用者に確かめる
 - **unsafe**: 各 crate の `#![forbid(unsafe_code)]` を既定とする。workspace 側で lint として足す場合も例外は利用者の承認
 - **依存監査**: CI で advisories・bans・licenses・sources の 4 検査と `cargo-audit` を、例外を含まない厳格版の設定で実行し、全成功しない変更をマージさせない（DPOL-33〜35）。
   advisory DB は実行前に 1 回取得し、各実行は取得なし（`--disable-fetch`・`--no-fetch`）・`Cargo.lock` を書き換えない（`--locked`）で流す（DPOL-33）
@@ -97,7 +104,8 @@ CI は push しないと動かないため、workflow の変更は「未実行�
 
 - [ ] Makefile・hooks・CI で処理を二重定義していない
 - [ ] 追加した CI ジョブを `ci-complete` の `needs` に足した（該当時）
-- [ ] 未定の値（toolchain の固定・lint 設定・CI の周期・feature の選び）を断定していない
+- [ ] 未定の値（toolchain の固定・lint 設定・CI の周期・`deny.toml` の中身・依存の版の固定の手順）を断定していない
+- [ ] 依存の feature を足すとき、`D-2026-11-20-14` と `dependency-policy.md` の扱い（`TASK-518` の例外を含む）に合っている（`default-features = false`・必要最小）
 - [ ] `deny.toml` に人の承認の無い例外を入れていない
 - [ ] `make check`・`make test-hooks` の結果を書いた
 - [ ] 呼び出し元の指示が無い限り commit・push・PR を行っていない
