@@ -81,7 +81,7 @@ fn huge_content_length_is_rejected_without_panic() {
         )
         .into_bytes();
         let (port, h, _rx) = fake_driver(resp);
-        let err = client(port).request("GET", "/status", None).unwrap_err();
+        let err = client(port).status().unwrap_err();
         assert_eq!(err.kind(), E2eErrorKind::CommandFailed);
         h.join().unwrap();
     }
@@ -90,7 +90,7 @@ fn huge_content_length_is_rejected_without_panic() {
 #[test]
 fn request_returns_value_on_success() {
     let (port, h, rx) = fake_driver(http("200 OK", r#"{"value":{"ready":true}}"#));
-    let v = client(port).request("GET", "/status", None).unwrap();
+    let v = client(port).status().unwrap();
     assert_eq!(v["ready"], true);
     let req = rx.recv().unwrap();
     assert!(req.starts_with("GET /status HTTP/1.1"));
@@ -104,7 +104,7 @@ fn webdriver_error_response_is_command_failed() {
         "404 Not Found",
         r#"{"value":{"error":"no such window","message":"x"}}"#,
     ));
-    let e = client(port).request("GET", "/x", None).unwrap_err();
+    let e = client(port).status().unwrap_err();
     assert_eq!(e.kind(), E2eErrorKind::CommandFailed);
     h.join().unwrap();
 }
@@ -112,7 +112,7 @@ fn webdriver_error_response_is_command_failed() {
 #[test]
 fn error_value_with_2xx_status_is_command_failed() {
     let (port, h, _) = fake_driver(http("200 OK", r#"{"value":{"error":"e"}}"#));
-    assert!(client(port).request("GET", "/x", None).is_err());
+    assert!(client(port).status().is_err());
     h.join().unwrap();
 }
 
@@ -120,7 +120,7 @@ fn error_value_with_2xx_status_is_command_failed() {
 fn chunked_response_is_rejected() {
     let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\n{}\r\n0\r\n\r\n".to_vec();
     let (port, h, _) = fake_driver(raw);
-    assert!(client(port).request("GET", "/x", None).is_err());
+    assert!(client(port).status().is_err());
     h.join().unwrap();
 }
 
@@ -128,14 +128,14 @@ fn chunked_response_is_rejected() {
 fn oversize_response_is_rejected() {
     let big = "a".repeat(1024 * 1024 + 10);
     let (port, h, _) = fake_driver(http("200 OK", &format!(r#"{{"value":"{big}"}}"#)));
-    assert!(client(port).request("GET", "/x", None).is_err());
+    assert!(client(port).status().is_err());
     let _ = h.join();
 }
 
 #[test]
 fn broken_json_is_rejected() {
     let (port, h, _) = fake_driver(http("200 OK", "{not json"));
-    assert!(client(port).request("GET", "/x", None).is_err());
+    assert!(client(port).status().is_err());
     h.join().unwrap();
 }
 
@@ -145,12 +145,10 @@ fn error_display_has_no_url_port_or_path() {
         "500 Internal Server Error",
         r#"{"value":{"error":"e"}}"#,
     ));
-    let e = client(port)
-        .request("GET", "/secret-path", None)
-        .unwrap_err();
+    let e = client(port).status().unwrap_err();
     let shown = format!("{e} {e:?}");
     assert!(!shown.contains(&port.to_string()));
-    assert!(!shown.contains("secret-path"));
+    assert!(!shown.contains("/status"));
     assert!(!shown.contains("127.0.0.1"));
     h.join().unwrap();
 }
@@ -240,7 +238,7 @@ fn slow_driver_is_cut_off_by_the_whole_command_deadline() {
     });
     let started = Instant::now();
     let e = WebDriverClient::new(port, Duration::from_millis(500))
-        .request("GET", "/status", None)
+        .status()
         .unwrap_err();
     assert_eq!(e.kind(), E2eErrorKind::CommandFailed);
     assert!(
@@ -254,9 +252,7 @@ fn slow_driver_is_cut_off_by_the_whole_command_deadline() {
 #[test]
 fn unrepresentable_timeout_is_an_error_not_a_panic() {
     // 期限を表せない timeout は panic せず CommandFailed にする。
-    let e = WebDriverClient::new(1, Duration::MAX)
-        .request("GET", "/status", None)
-        .unwrap_err();
+    let e = WebDriverClient::new(1, Duration::MAX).status().unwrap_err();
     assert_eq!(e.kind(), E2eErrorKind::CommandFailed);
 }
 
@@ -285,4 +281,84 @@ fn debug_output_has_no_session_id_authenticator_id_or_port() {
         assert!(shown.contains("<redacted>"), "{shown}");
     }
     h.join().unwrap();
+}
+
+/// 応答の先頭行・ヘッダを指定して返す偽のドライバの応答。本文は `{"value":{}}`（12 バイト）。
+fn raw(status_line: &str, headers: &[&str]) -> Vec<u8> {
+    let body = r#"{"value":{}}"#;
+    let mut s = format!("{status_line}\r\n");
+    for h in headers {
+        s.push_str(h);
+        s.push_str("\r\n");
+    }
+    s.push_str("Connection: close\r\n\r\n");
+    s.push_str(body);
+    s.into_bytes()
+}
+
+#[test]
+fn malformed_status_line_is_rejected() {
+    // 前提: ステータス行が `HTTP/1.1 NNN` の形でない応答。期待: fail-closed で CommandFailed。
+    for line in [
+        "HTTP/1.0 200 OK",
+        "FOO 200 OK",
+        "200 OK",
+        "HTTP/1.1 abc OK",
+        "HTTP/1.1 20 OK",
+        "HTTP/1.1 2000 OK",
+        "HTTP/1.1 +200 OK",
+        "HTTP/1.1",
+        "HTTP/1.1  200 OK",
+    ] {
+        let (port, h, _) = fake_driver(raw(line, &["Content-Length: 12"]));
+        let e = client(port).status().unwrap_err();
+        assert_eq!(e.kind(), E2eErrorKind::CommandFailed, "{line:?}");
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn well_formed_status_line_is_accepted() {
+    for line in ["HTTP/1.1 200 OK", "HTTP/1.1 200"] {
+        let (port, h, _) = fake_driver(raw(line, &["Content-Length: 12"]));
+        assert!(client(port).status().is_ok(), "{line:?}");
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn conflicting_content_lengths_are_rejected() {
+    // 前提: Content-Length が 2 つあり値が食い違う（先頭は本文の長さと合う）。期待: 拒否。
+    for second in ["Content-Length: 13", "content-length: 5"] {
+        let (port, h, _) = fake_driver(raw("HTTP/1.1 200 OK", &["Content-Length: 12", second]));
+        let e = client(port).status().unwrap_err();
+        assert_eq!(e.kind(), E2eErrorKind::CommandFailed, "{second:?}");
+        h.join().unwrap();
+    }
+    // 順序を逆にしても拒否する。
+    let (port, h, _) = fake_driver(raw(
+        "HTTP/1.1 200 OK",
+        &["Content-Length: 13", "Content-Length: 12"],
+    ));
+    assert!(client(port).status().is_err());
+    h.join().unwrap();
+}
+
+#[test]
+fn identical_duplicate_content_lengths_are_accepted() {
+    let (port, h, _) = fake_driver(raw(
+        "HTTP/1.1 200 OK",
+        &["Content-Length: 12", "Content-Length: 12"],
+    ));
+    assert!(client(port).status().is_ok());
+    h.join().unwrap();
+}
+
+#[test]
+fn non_digit_content_length_is_rejected() {
+    for v in ["+12", "-1", "0x0c", "1_2"] {
+        let (port, h, _) = fake_driver(raw("HTTP/1.1 200 OK", &[&format!("Content-Length: {v}")]));
+        assert!(client(port).status().is_err(), "{v:?}");
+        let _ = h.join();
+    }
 }

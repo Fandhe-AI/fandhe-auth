@@ -46,6 +46,31 @@ fn validated_id(raw: &str) -> Result<String, E2eError> {
     }
 }
 
+/// 要求のメソッド。列挙にして、任意の文字列を要求行へ埋め込めないようにする（A03）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpMethod {
+    Get,
+    Post,
+    Delete,
+}
+
+impl HttpMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// 要求行に埋める path の検査。`/` で始まり、可視の ASCII（0x21〜0x7e）だけを受ける。
+/// 空白・制御文字・改行・非 ASCII は拒否する（要求行・ヘッダーへの注入を防ぐ。A03）。
+fn validated_path(path: &str) -> Result<&str, E2eError> {
+    let ok = path.starts_with('/') && path.bytes().all(|b| (0x21..=0x7e).contains(&b));
+    if ok { Ok(path) } else { Err(failed()) }
+}
+
 /// `Debug` で値の代わりに出す固定の文字列（SECR-11）。
 const REDACTED: &str = "<redacted>";
 
@@ -102,12 +127,17 @@ impl WebDriverClient {
     }
 
     /// 1 命令を送り、応答の `value` を返す。WebDriver の誤り応答・非 2xx・形の不一致は `CommandFailed`。
-    pub fn request(
+    ///
+    /// 非公開。公開の入口は定義済みの操作（`status`・`new_session` と [`WebDriverSession`] の各操作）だけで、
+    /// 仮想 credential の秘密鍵を含み得る応答を生の `Value` として公開しない（A03・SECR-11）。
+    fn request(
         &self,
-        method: &str,
+        method: HttpMethod,
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, E2eError> {
+        let path = validated_path(path)?;
+        let method = method.as_str();
         let payload = match body {
             Some(v) => serde_json::to_vec(v).map_err(|_| failed())?,
             None => Vec::new(),
@@ -143,9 +173,14 @@ impl WebDriverClient {
         parse_response(&mut stream, deadline)
     }
 
+    /// `GET /status` の応答の `value`。
+    pub fn status(&self) -> Result<Value, E2eError> {
+        self.request(HttpMethod::Get, "/status", None)
+    }
+
     /// `GET /status` の `ready` が真か。
     pub fn is_ready(&self) -> bool {
-        self.request("GET", "/status", None)
+        self.request(HttpMethod::Get, "/status", None)
             .ok()
             .and_then(|v| v.get("ready").and_then(Value::as_bool))
             .unwrap_or(false)
@@ -156,7 +191,7 @@ impl WebDriverClient {
         &self,
         capabilities: &Value,
     ) -> Result<(WebDriverSession, String), E2eError> {
-        let v = self.request("POST", "/session", Some(capabilities))?;
+        let v = self.request(HttpMethod::Post, "/session", Some(capabilities))?;
         let id = v
             .get("sessionId")
             .and_then(Value::as_str)
@@ -204,9 +239,7 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
             && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
         {
             header_end = Some(pos + 4);
-            content_length = header_value(&buf[..pos], "content-length")
-                .map(|v| v.parse::<usize>().map_err(|_| failed()))
-                .transpose()?;
+            content_length = content_length_of(&buf[..pos])?;
             // 上限を超える Content-Length は読む前に拒否する（end + cl の overflow も防ぐ）。
             if content_length.is_some_and(|cl| cl > MAX_RESPONSE_BYTES) {
                 return Err(failed());
@@ -219,12 +252,7 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
     if header_value(head, "transfer-encoding").is_some() {
         return Err(failed());
     }
-    let status = std::str::from_utf8(head)
-        .ok()
-        .and_then(|h| h.lines().next())
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(failed)?;
+    let status = parse_status_line(head)?;
     let body = &buf[end..];
     let body = match content_length {
         Some(cl) if body.len() >= cl => &body[..cl],
@@ -237,6 +265,49 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
         return Err(failed());
     }
     Ok(value)
+}
+
+/// ステータス行を `HTTP/1.1 NNN[ 理由]` の形に限って読む。形が違えば誤り（fail-closed）。
+fn parse_status_line(head: &[u8]) -> Result<u16, E2eError> {
+    let text = std::str::from_utf8(head).map_err(|_| failed())?;
+    let line = text.split("\r\n").next().ok_or_else(failed)?;
+    let rest = line.strip_prefix("HTTP/1.1 ").ok_or_else(failed)?;
+    let code = rest.split(' ').next().unwrap_or("");
+    if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(failed());
+    }
+    code.parse::<u16>().map_err(|_| failed())
+}
+
+/// `Content-Length` を読む。複数あって値が食い違えば誤り。数字以外（`+`・`0x` 等）も誤り。
+fn content_length_of(head: &[u8]) -> Result<Option<usize>, E2eError> {
+    let mut found: Option<usize> = None;
+    for v in header_values(head, "content-length") {
+        if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(failed());
+        }
+        let n = v.parse::<usize>().map_err(|_| failed())?;
+        match found {
+            Some(prev) if prev != n => return Err(failed()),
+            _ => found = Some(n),
+        }
+    }
+    Ok(found)
+}
+
+fn header_values(head: &[u8], name: &str) -> Vec<String> {
+    let Ok(text) = std::str::from_utf8(head) else {
+        return Vec::new();
+    };
+    text.split("\r\n")
+        .skip(1)
+        .filter_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| v.trim().to_owned())
+        })
+        .collect()
 }
 
 fn header_value(head: &[u8], name: &str) -> Option<String> {
@@ -275,14 +346,18 @@ impl WebDriverSession {
     /// セッションを閉じる。
     pub fn delete(&self) -> Result<(), E2eError> {
         self.client
-            .request("DELETE", &format!("/session/{}", self.id), None)
+            .request(HttpMethod::Delete, &format!("/session/{}", self.id), None)
             .map(|_| ())
     }
 
     /// URL へ移動する。
     pub fn navigate(&self, url: &str) -> Result<(), E2eError> {
         self.client
-            .request("POST", &self.path("/url"), Some(&json!({ "url": url })))
+            .request(
+                HttpMethod::Post,
+                &self.path("/url"),
+                Some(&json!({ "url": url })),
+            )
             .map(|_| ())
     }
 
@@ -291,7 +366,7 @@ impl WebDriverSession {
         let ms = u64::try_from(timeout.as_millis()).map_err(|_| failed())?;
         self.client
             .request(
-                "POST",
+                HttpMethod::Post,
                 &self.path("/timeouts"),
                 Some(&json!({ "script": ms })),
             )
@@ -299,9 +374,10 @@ impl WebDriverSession {
     }
 
     /// 非同期スクリプトを実行する。スクリプトは試験の定数で、外部入力を連結しない。
-    pub fn execute_async(&self, script: &str, args: &[Value]) -> Result<Value, E2eError> {
+    /// 応答は生の `Value` のため crate の外へ公開しない（呼ぶのは `register_once` 等の定義済みの手順）。
+    pub(crate) fn execute_async(&self, script: &str, args: &[Value]) -> Result<Value, E2eError> {
         self.client.request(
-            "POST",
+            HttpMethod::Post,
             &self.path("/execute/async"),
             Some(&json!({ "script": script, "args": args })),
         )
@@ -313,7 +389,7 @@ impl WebDriverSession {
         options: &VirtualAuthenticatorOptions,
     ) -> Result<AuthenticatorId, E2eError> {
         let v = self.client.request(
-            "POST",
+            HttpMethod::Post,
             &self.path("/webauthn/authenticator"),
             Some(&options.to_webdriver_json()),
         )?;
@@ -323,7 +399,7 @@ impl WebDriverSession {
     /// 仮想 authenticator の credential の要約を返す。秘密鍵の欄は読み捨てる。
     pub fn credentials(&self, id: &AuthenticatorId) -> Result<Vec<CredentialSummary>, E2eError> {
         let v = self.client.request(
-            "GET",
+            HttpMethod::Get,
             &self.path(&format!("/webauthn/authenticator/{}/credentials", id.0)),
             None,
         )?;
@@ -344,5 +420,34 @@ impl WebDriverSession {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn unsafe_paths_are_rejected_before_anything_is_sent() {
+        // A03: 空白・制御文字・改行を含む path は、接続する前に拒否する（要求行・ヘッダーへの注入を防ぐ）。
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        l.set_nonblocking(true).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let c = WebDriverClient::new(port, Duration::from_secs(1));
+        for bad in [
+            "",
+            "status",
+            "/a b",
+            "/a\r\nX-Injected: 1",
+            "/a\nb",
+            "/a\tb",
+            "/a\0b",
+            "/a\x7fb",
+            "/日本語",
+        ] {
+            assert!(c.request(HttpMethod::Get, bad, None).is_err(), "{bad:?}");
+        }
+        assert!(l.accept().is_err(), "接続が来てはならない");
     }
 }

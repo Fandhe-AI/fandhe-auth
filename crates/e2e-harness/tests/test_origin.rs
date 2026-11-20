@@ -43,3 +43,78 @@ fn origin_is_localhost_with_port() {
     let o = TestOrigin::start();
     assert_eq!(o.origin(), format!("http://localhost:{}", o.port()));
 }
+
+/// 生のバイト列を送り、書き込み側を閉じて、応答を読む。
+fn raw(port: u16, bytes: &[u8]) -> String {
+    let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    s.write_all(bytes).unwrap();
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    out
+}
+
+#[test]
+fn host_in_the_body_is_not_accepted() {
+    // 前提: ヘッダーの Host が無く、終端より後ろ（本文）に正しい Host の行がある。期待: 400。
+    let o = TestOrigin::start();
+    let req = format!(
+        "GET / HTTP/1.1\r\nConnection: close\r\n\r\nHost: localhost:{}\r\n",
+        o.port()
+    );
+    assert!(raw(o.port(), req.as_bytes()).starts_with("HTTP/1.1 400"));
+}
+
+#[test]
+fn request_without_header_terminator_is_rejected() {
+    // 前提: 終端（空行）が上限の中に無い。期待: 正しい Host があっても 400（受理しない）。
+    let o = TestOrigin::start();
+    let req = format!("GET / HTTP/1.1\r\nHost: localhost:{}\r\n", o.port());
+    assert!(raw(o.port(), req.as_bytes()).starts_with("HTTP/1.1 400"));
+    // 上限を超えるヘッダーで終端が無い場合も 400。
+    let mut big = format!("GET / HTTP/1.1\r\nHost: localhost:{}\r\n", o.port()).into_bytes();
+    big.extend_from_slice(&vec![b'a'; 20 * 1024]);
+    assert!(raw(o.port(), &big).starts_with("HTTP/1.1 400"));
+}
+
+#[test]
+fn duplicate_or_conflicting_host_headers_are_rejected() {
+    let o = TestOrigin::start();
+    let good = format!("localhost:{}", o.port());
+    for hosts in [
+        vec![good.as_str(), "evil.example"],
+        vec!["evil.example", good.as_str()],
+        vec![good.as_str(), good.as_str()],
+    ] {
+        let mut req = String::from("GET / HTTP/1.1\r\n");
+        for h in &hosts {
+            req.push_str(&format!("Host: {h}\r\n"));
+        }
+        req.push_str("Connection: close\r\n\r\n");
+        assert!(
+            raw(o.port(), req.as_bytes()).starts_with("HTTP/1.1 400"),
+            "{hosts:?}"
+        );
+    }
+}
+
+#[test]
+fn exactly_one_correct_host_header_is_accepted() {
+    let o = TestOrigin::start();
+    let req = format!(
+        "GET / HTTP/1.1\r\nhost:   localhost:{}\r\nConnection: close\r\n\r\n",
+        o.port()
+    );
+    assert!(raw(o.port(), req.as_bytes()).starts_with("HTTP/1.1 200"));
+}
+
+#[test]
+fn stalled_connections_do_not_block_a_following_request() {
+    // 前提: 何も送らず開きっぱなしの接続が複数ある。期待: 続く正しい要求は応じられる（接続ごとの別スレッド）。
+    let o = TestOrigin::start();
+    let _held: Vec<TcpStream> = (0..8)
+        .map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, o.port())).unwrap())
+        .collect();
+    let r = get(o.port(), &format!("localhost:{}", o.port()), "GET", "/");
+    assert!(r.starts_with("HTTP/1.1 200"));
+}

@@ -98,12 +98,11 @@ fn failed_start_kills_the_whole_process_group() {
     let dir = temp_dir("group");
     let pid_file = dir.join("grandchild.pid");
     let script = dir.join("fake-driver");
+    // スクリプトは固定の文字列で、試験用のパスを本文に埋め込まない（A03）。pid の置き場は
+    // スクリプト自身の場所（`$0`）からの相対で、引用して参照する。
     fs::write(
         &script,
-        format!(
-            "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nexec sleep 30\n",
-            pid_file.display()
-        ),
+        "#!/bin/sh\nsleep 30 &\necho $! > \"$(dirname \"$0\")/grandchild.pid\"\nexec sleep 30\n",
     )
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();

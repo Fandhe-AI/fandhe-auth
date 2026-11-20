@@ -46,12 +46,20 @@ JSON は `serde_json` で扱う（下の「依存」）。Chrome の実体と登
 
 ## 登録 1 件の定義（2/6）
 
-`register_once` が次を満たすことを「登録 1 件が通る」とする。サーバー側の登録応答の検証（`webauthn-rs`）は
-RelyingParty の実体（`TASK-716`）待ちで含めない。PKEY の振る舞いを満たしたとは主張しない。
+登録 1 件が通るとは、次の 1・2 を `register_once` が検査し、3 を登録試験の側が検査することをいう。
+サーバー側の登録応答の検証（`webauthn-rs`）は RelyingParty の実体（`TASK-716`）待ちで含めない。
+PKEY の振る舞いを満たしたとは主張しない。
+
+`register_once` が検査する範囲（`RegistrationOutcome::succeeded`）:
 
 1. 試験用 origin で `navigator.credentials.create()` が resolve し、`type` が `public-key`、attestation が空でない
 2. `clientDataJSON` の `type`・`origin`・`challenge` が期待と一致（ページ内で比べ、真偽と長さだけを返す）
-3. 仮想 authenticator の credential がちょうど 1 件で、`rpId` が `localhost`
+
+失敗したときの `DOMException.name` は既知の名前の列挙（`RegistrationErrorName`）に写し、未知の値は `Other` に畳む（`SECR-23`）。
+
+登録試験の側（`tests/chrome_registration.rs`）が検査する範囲。`register_once` は検査しない:
+
+3. `handle.credentials()` の要約で、仮想 authenticator の credential がちょうど 1 件で、`rpId` が `localhost`
 
 ## 試験用ページと origin の置き場（人が決める）
 

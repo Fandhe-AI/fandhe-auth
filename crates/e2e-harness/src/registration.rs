@@ -49,6 +49,48 @@ const expectedOrigin = arguments[1];
 })();
 "#;
 
+/// `create()` の失敗の `DOMException.name` のうち、既知のものだけの列挙。
+///
+/// ブラウザが返す文字列をそのまま持たず、未知の値は固定の `Other` に畳む（SECR-23。出力・失敗メッセージに生の文字列を出さない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegistrationErrorName {
+    NotAllowed,
+    InvalidState,
+    Security,
+    NotSupported,
+    Abort,
+    Constraint,
+    Data,
+    Encoding,
+    Network,
+    Timeout,
+    Unknown,
+    Type,
+    /// 既知の名前に当たらない値。
+    Other,
+}
+
+impl RegistrationErrorName {
+    fn from_dom_name(name: &str) -> Self {
+        match name {
+            "NotAllowedError" => Self::NotAllowed,
+            "InvalidStateError" => Self::InvalidState,
+            "SecurityError" => Self::Security,
+            "NotSupportedError" => Self::NotSupported,
+            "AbortError" => Self::Abort,
+            "ConstraintError" => Self::Constraint,
+            "DataError" => Self::Data,
+            "EncodingError" => Self::Encoding,
+            "NetworkError" => Self::Network,
+            "TimeoutError" => Self::Timeout,
+            "UnknownError" => Self::Unknown,
+            "TypeError" => Self::Type,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// 登録 1 件の結果。真偽と長さだけで、credential の値を持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationOutcome {
@@ -58,7 +100,7 @@ pub struct RegistrationOutcome {
     client_data_type_ok: bool,
     origin_ok: bool,
     challenge_ok: bool,
-    error_name: Option<String>,
+    error_name: Option<RegistrationErrorName>,
 }
 
 impl RegistrationOutcome {
@@ -72,9 +114,9 @@ impl RegistrationOutcome {
             && self.challenge_ok
     }
 
-    /// `create()` が失敗したときの `DOMException.name`。
-    pub fn error_name(&self) -> Option<&str> {
-        self.error_name.as_deref()
+    /// `create()` が失敗したときの `DOMException.name`（既知の名前の列挙。未知は `Other`）。
+    pub fn error_name(&self) -> Option<RegistrationErrorName> {
+        self.error_name
     }
 
     /// 証拠の種類。常に〔仮想〕で、実機・Safari に数えない（ACPT-7・ACPT-8）。
@@ -102,7 +144,9 @@ impl RegistrationOutcome {
                 client_data_type_ok: false,
                 origin_ok: false,
                 challenge_ok: false,
-                error_name: Some(v.get("errorName")?.as_str()?.chars().take(64).collect()),
+                error_name: Some(RegistrationErrorName::from_dom_name(
+                    v.get("errorName")?.as_str()?,
+                )),
             })
         }
     }
@@ -119,4 +163,34 @@ pub fn register_once(
         E2eErrorKind::CommandFailed,
         E2eComponentKind::BrowserDriver,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_error_name_is_not_kept_or_printed() {
+        // SECR-23: ブラウザが返す文字列をそのまま持たない・出力しない。
+        let v = json!({ "ok": false, "errorName": "leaky-value-123" });
+        let o = RegistrationOutcome::from_value(&v).unwrap();
+        let shown = format!("{o:?} {:?}", o.error_name());
+        assert!(!shown.contains("leaky-value-123"), "{shown}");
+        assert_eq!(o.error_name(), Some(RegistrationErrorName::Other));
+    }
+
+    #[test]
+    fn known_error_names_map_to_the_enum() {
+        for (raw, want) in [
+            ("NotAllowedError", RegistrationErrorName::NotAllowed),
+            ("InvalidStateError", RegistrationErrorName::InvalidState),
+            ("SecurityError", RegistrationErrorName::Security),
+            ("NotSupportedError", RegistrationErrorName::NotSupported),
+            ("AbortError", RegistrationErrorName::Abort),
+        ] {
+            let o =
+                RegistrationOutcome::from_value(&json!({ "ok": false, "errorName": raw })).unwrap();
+            assert_eq!(o.error_name(), Some(want), "{raw}");
+        }
+    }
 }

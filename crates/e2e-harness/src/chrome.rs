@@ -9,7 +9,7 @@
 //! 誤り・停止・`Drop` のすべてで、セッションの削除（最善）→ 子のプロセスグループへ `SIGKILL` → 期限付きの wait を行う。
 //! セッションの削除に失敗しても、セッション ID が無くても、配下の Chrome ごとグループで止める。
 //!
-//! unix 限定（`process_group` と `kill -KILL -<pgid>` を使う）。Linux・macOS で同じ手順で動く。
+//! unix 限定（`process_group` と `kill -s KILL -- -<pgid>`（`sh` の組み込み）を使う）。Linux・macOS で同じ手順で動く。
 //!
 //! 受け入れた制限（試験の環境で許容する。人の確認待ち）: 空きポートを取って手放してから子に渡すため、その間に別の
 //! プロセスが同じポートを取ると取り違え得る。ブラウザの送信先は制限しない（試験用ページは loopback の試験用 origin だけを開く）。
@@ -131,8 +131,8 @@ impl ChromeHandle {
         self.session()?.set_script_timeout(timeout)
     }
 
-    /// 非同期スクリプトを実行する。
-    pub fn execute_async(&self, script: &str, args: &[Value]) -> Result<Value, E2eError> {
+    /// 非同期スクリプトを実行する。応答は生の `Value` のため crate の外へ公開しない。
+    pub(crate) fn execute_async(&self, script: &str, args: &[Value]) -> Result<Value, E2eError> {
         self.session()?.execute_async(script, args)
     }
 
@@ -175,7 +175,10 @@ impl ChromeDriverComponent {
         if let Some(mut child) = self.child.take() {
             // 回収の前にグループへ送る（未回収の子がグループ ID を保つので、別のプロセスを宛先にしない）。
             // chromedriver が配下の Chrome を残しても、同じグループごと止める。
-            let _ = kill_group(child.id());
+            // 送信に失敗したら配下の終了を確かめられないので、`StopFailed` にする（グループが既に無い場合は成功）。
+            if kill_group(child.id()).is_err() {
+                result = Err(err(E2eErrorKind::StopFailed));
+            }
             let _ = child.kill();
             if wait_until(&mut child, STOP_TIMEOUT).is_err() {
                 // 終了を確かめられない子は手放さず、stop()・Drop で再試行できるようにする。
@@ -215,11 +218,15 @@ impl ChromeDriverComponent {
                 .filter(|d| !d.is_zero())
                 .ok_or_else(fail)?;
             let probe = WebDriverClient::new(port, left.min(self.config.command_timeout));
-            if probe.is_ready() && Instant::now() < deadline {
-                break;
-            }
+            let ready = probe.is_ready() && Instant::now() < deadline;
+            // ready を受理する前に子の生存を確かめる。子が終了していたら、応答したのは別のプロセスの可能性があり、
+            // 起動の失敗にする（ポートの所有の完全な照合ではない。試験環境の上の攻撃者の仮定は P2 以下）。
             match self.child.as_mut().map(Child::try_wait) {
-                Some(Ok(None)) => {}
+                Some(Ok(None)) => {
+                    if ready {
+                        break;
+                    }
+                }
                 Some(Ok(Some(_))) => {
                     // try_wait が回収済み。PID が再利用され得るので、teardown がグループへ送らないよう手放す
                     // （`POST /session` の前で、配下の Chrome は居ない）。
@@ -270,20 +277,71 @@ impl Drop for ChromeDriverComponent {
     }
 }
 
-/// プロセスグループ `pgid` へ `SIGKILL` を送る。`-KILL -<pgid>` は GNU・BSD の `kill` の両方で通る
-/// （BSD の `kill` は `--` を pid として拒否するので使わない）。
-fn kill_group(pgid: u32) -> std::io::Result<()> {
-    let status = Command::new("kill")
-        .args(["-KILL", &format!("-{pgid}")])
+/// `kill` の実行時間の上限。ハーネスの安全上の値で、要件の値ではない。
+const KILL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `kill` の結果の分類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillOutcome {
+    /// 送れた。
+    Sent,
+    /// グループが既に無い（ESRCH 相当）。止まっているので成功として扱う。
+    Gone,
+    /// 送れなかった（権限・実行失敗・期限切れ等）。配下の終了を確かめられない。
+    Failed,
+}
+
+/// `kill` の終了状態と stderr から結果を分ける。ロケールは `LC_ALL=C` で固定して呼ぶ。
+fn classify_kill(success: bool, stderr: &str) -> KillOutcome {
+    if success {
+        KillOutcome::Sent
+    } else if stderr.to_ascii_lowercase().contains("no such process") {
+        KillOutcome::Gone
+    } else {
+        KillOutcome::Failed
+    }
+}
+
+/// プロセスグループ `pgid` へ `SIGKILL` を送る（`kill -s KILL -- -<pgid>`）。
+/// `sh`（`kill`）は spawn して期限付きで待つ（無期限に待たない）。期限を過ぎたら `kill` 自体を止めて失敗にする。
+fn kill_group(pgid: u32) -> Result<(), E2eError> {
+    match run_kill(pgid) {
+        KillOutcome::Sent | KillOutcome::Gone => Ok(()),
+        KillOutcome::Failed => Err(err(E2eErrorKind::StopFailed)),
+    }
+}
+
+fn run_kill(pgid: u32) -> KillOutcome {
+    // 外部の `kill` コマンドは実装により終了コードが一定でない（procps は成功でも 1、存在しないグループで 0 を返す）。
+    // `sh` の組み込みの `kill` を固定のスクリプトで呼び、pgid は引数で渡す（A03。dash・bash で終了コードと文言が揃う）。
+    let Ok(mut child) = Command::new("sh")
+        .args(["-c", "kill -s KILL -- \"-$1\"", "sh", &pgid.to_string()])
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other("kill failed"))
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        return KillOutcome::Failed;
+    };
+    let deadline = Instant::now() + KILL_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if Instant::now() < deadline => sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return KillOutcome::Failed;
+            }
+        }
+    };
+    // 終了後なので stderr は読み切れる（出力は 1 行程度）。
+    let mut text = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut e, &mut text);
     }
+    classify_kill(status.success(), &text)
 }
 
 /// 子の終了を `timeout` まで待って回収する。期限内に終わらなければ誤り（子は回収しない）。
@@ -297,5 +355,41 @@ fn wait_until(child: &mut Child, timeout: Duration) -> std::io::Result<()> {
             return Err(std::io::Error::other("child did not exit"));
         }
         sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_outcome_separates_gone_from_failed() {
+        assert_eq!(classify_kill(true, ""), KillOutcome::Sent);
+        assert_eq!(
+            classify_kill(false, "kill: (123) - No such process"),
+            KillOutcome::Gone
+        );
+        assert_eq!(
+            classify_kill(false, "kill: (123) - Operation not permitted"),
+            KillOutcome::Failed
+        );
+        assert_eq!(classify_kill(false, ""), KillOutcome::Failed);
+    }
+
+    #[test]
+    fn kill_group_of_a_vanished_group_is_ok_and_live_group_is_killed() {
+        // 終了・回収済みのグループ（ESRCH）は成功。
+        let mut gone = Command::new("true").process_group(0).spawn().unwrap();
+        let pgid = gone.id();
+        gone.wait().unwrap();
+        assert!(kill_group(pgid).is_ok());
+        // 生きているグループは止まる。
+        let mut live = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        assert!(kill_group(live.id()).is_ok());
+        assert!(wait_until(&mut live, Duration::from_secs(5)).is_ok());
     }
 }

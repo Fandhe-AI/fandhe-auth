@@ -7,9 +7,9 @@
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct TestOrigin {
     port: u16,
@@ -62,28 +62,86 @@ impl Drop for TestOrigin {
     }
 }
 
+/// ヘッダー部の上限。ハーネスの安全上の値で、要件の値ではない。
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+/// 1 接続がヘッダーを送り終えるまでの期限（スローロリス対策。試験用の安い上限）。
+const HEADER_DEADLINE: Duration = Duration::from_secs(2);
+/// 同時に処理する接続数の上限。超えた接続は黙って閉じる。
+const MAX_CONNECTIONS: usize = 64;
+
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// 接続数の計上。`Drop` で必ず戻す。
+struct Slot;
+
+impl Slot {
+    fn acquire() -> Option<Slot> {
+        if ACTIVE.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            ACTIVE.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Slot)
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// ヘッダー部（`\r\n\r\n` の前）だけを見て、`Host` がちょうど 1 つで `expected` と等しいか。
+/// 終端が無い・`Host` が 0 件か 2 件以上・値が違う場合は false（DNS rebinding 対策）。
+fn host_is_exact(head: &str, expected: &str) -> bool {
+    let mut hosts = head.split("\r\n").skip(1).filter_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case("host").then(|| v.trim())
+    });
+    matches!((hosts.next(), hosts.next()), (Some(h), None) if h == expected)
+}
+
 fn handle(mut s: TcpStream, port: u16) {
-    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+    let Some(_slot) = Slot::acquire() else {
+        return;
+    };
+    let deadline = Instant::now() + HEADER_DEADLINE;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
-    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 16 * 1024 {
+    // ヘッダーの終端が上限の中に無ければ受理しない。期限は接続全体で数える。
+    let end = loop {
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos;
+        }
+        let Some(left) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+        else {
+            return;
+        };
+        let _ = s.set_read_timeout(Some(left));
+        if buf.len() >= MAX_HEADER_BYTES {
+            reject(&mut s);
+            return;
+        }
         match s.read(&mut chunk) {
-            Ok(0) | Err(_) => return,
+            Ok(0) | Err(_) => {
+                // 終端なしで閉じられた・止まった要求は受理しない。
+                reject(&mut s);
+                return;
+            }
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
+    };
+    if end > MAX_HEADER_BYTES {
+        reject(&mut s);
+        return;
     }
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines = text.lines();
-    let request_line = lines.next().unwrap_or("");
+    let text = String::from_utf8_lossy(&buf[..end]).into_owned();
+    let request_line = text.split("\r\n").next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-    let host = lines
-        .find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case("host").then(|| v.trim())
-        })
-        .unwrap_or("");
-    let (status, body) = if host != format!("localhost:{port}") {
+    let host_ok = host_is_exact(&text, &format!("localhost:{port}"));
+    let (status, body) = if !host_ok {
         ("400 Bad Request", "")
     } else if method != "GET" {
         ("405 Method Not Allowed", "")
@@ -100,4 +158,9 @@ fn handle(mut s: TcpStream, port: u16) {
         body.len()
     );
     let _ = s.write_all(resp.as_bytes());
+}
+
+fn reject(s: &mut TcpStream) {
+    let _ =
+        s.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
 }
