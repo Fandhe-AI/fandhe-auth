@@ -1,0 +1,26 @@
+# 別 workspace（cargo-fuzz の慣例。nightly で build する）。ルートの workspace には含めない。
+# 試験専用（TASK-4 (6/6)・#35）。名前・置き場は仮称で、人が確定する。
+[package]
+name = "fandhe-auth-trial-deps-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0" # DPOL-26
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# 別 workspace のため、ルートの [workspace.lints] は及ばない。代わりに対象のファイルの先頭で
+# #![forbid(unsafe_code)] を置く（利用者の決定 2026-11-13）。試験専用で公開しない。
+[dependencies]
+libfuzzer-sys = "0.4.13"
+fandhe-auth-secret = { path = "../../secret" }
+
+[[bin]]
+name = "secret_debug"
+path = "fuzz_targets/secret_debug.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
