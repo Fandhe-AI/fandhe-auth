@@ -3,7 +3,7 @@
 //! 役割: DB の遮断と遅延・インスタンスの停止・DB の外の保存先の遮断・Hub の stub の遅れと拒否・時計のずれ
 //! の種類を 1 か所で数え、種類ごとの対象とパラメータの形を決める。呼び出し元は結合試験（試験ビルド）と、
 //! 後続の段（2/8〜7/8）の注入の実装。注入の仕組み自体はここに無い（各段が `fault/` にファイルを足す）。
-//! 記録の形式は [`record`]。2/8 で DB の遮断と遅延の注入（[`db`]）を置いた。
+//! 記録の形式は [`record`]。2/8 で DB の遮断と遅延の注入（[`db`]）を、3/8 でインスタンスの停止の注入（`instance`。Unix 限定）を置いた。
 //!
 //! 設計上の約束:
 //! - 種類は網羅の `match` で名前と対象を引く。種類を足して書き忘れるとコンパイルできない。
@@ -19,9 +19,13 @@ use std::fmt;
 use std::time::Duration;
 
 pub mod db;
+#[cfg(unix)]
+pub mod instance;
 pub mod record;
 
 pub use db::{DbFaultError, DbFaultProxy};
+#[cfg(unix)]
+pub use instance::{InstanceExit, InstanceFaultError, InstanceFaultHandle};
 pub use record::{
     FAULT_RECORD_FORMAT, FaultEvent, FaultRecord, FaultRecordError, FaultTimeline, RunMode,
 };
