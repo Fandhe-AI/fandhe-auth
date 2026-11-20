@@ -22,6 +22,8 @@ pub enum E2eErrorKind {
     CommandFailed,
     /// 起動前または停止後のドライバに操作した。
     NotRunning,
+    /// 構成要素が対象とするブラウザが、構成のブラウザと一致しない。起動前に拒否する。
+    BrowserMismatch,
 }
 
 /// ハーネスの誤り。種類と構成要素の種類だけを持ち、秘密値・URL・パス・ポートを載せない（SECR-11・SECR-23）。
@@ -90,6 +92,9 @@ pub struct E2eHarness;
 
 impl E2eHarness {
     /// 決まった順で起動する。重複は起動前に拒否し、途中で失敗したら起動済みを逆順に停止してから誤りを返す。
+    ///
+    /// ブラウザの食い違いは起動前に `BrowserMismatch` で拒否する。独自の `BrowserDriver` 実装は、
+    /// `E2eComponent::browser()` で `Some(config.browser)` を返す必要がある（`browser()` は必須のメソッドで、`None` を返すと拒否される）。
     pub fn start(config: E2eConfig) -> Result<RunningE2e, E2eError> {
         let E2eConfig {
             operation,
@@ -99,6 +104,18 @@ impl E2eHarness {
         for (i, c) in components.iter().enumerate() {
             if components[..i].iter().any(|p| p.kind() == c.kind()) {
                 return Err(E2eError::new(E2eErrorKind::Duplicate, c.kind()));
+            }
+        }
+        // ドライバのブラウザと構成のブラウザが食い違う構成は起動前に拒否する（Chrome の構成に geckodriver 等）。
+        for c in &components {
+            // BrowserDriver は Some(config.browser) を必須とする（browser() 未実装の None を通さない）。
+            // ブラウザに結び付かない要素だけが None を許す。
+            let ok = match (c.kind(), c.browser()) {
+                (E2eComponentKind::BrowserDriver, b) => b == Some(browser),
+                (_, b) => b.is_none_or(|b| b == browser),
+            };
+            if !ok {
+                return Err(E2eError::new(E2eErrorKind::BrowserMismatch, c.kind()));
             }
         }
         components.sort_by_key(|c| c.kind().rank());

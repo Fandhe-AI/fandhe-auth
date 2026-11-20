@@ -15,9 +15,11 @@
 //! 安全: 検証を外す意味の分岐・feature は作らない（DPOL-30〜32）。誤りの値に秘密値・URL・パスを載せない
 //! （SECR-11・SECR-23）。仮想 authenticator の合格を実機・Safari の合格に数えない（ACPT-7・ACPT-8）。
 //!
-//! 2/6 の実体: Chrome（chromedriver）の [`chrome::ChromeDriverComponent`] と、passkey の登録 1 件の手順
-//! [`registration::register_once`]。chromedriver を新しいプロセスグループで起動して配下の Chrome ごと止めるため、
+//! 2/6 の実体: Chrome（chromedriver）の `chrome::ChromeDriverComponent` と、passkey の登録 1 件の手順
+//! `registration::register_once`。chromedriver を新しいプロセスグループで起動して配下の Chrome ごと止めるため、
 //! この 2 つは unix（Linux・macOS 等）に限る（`cfg(unix)`）。
+//! 3/6 の実体: Firefox（geckodriver）の `firefox::GeckoDriverComponent`。起動・停止は Chrome と共通の
+//! `driver_process`（unix のみ）に切り出した（振る舞いは 2/6 のまま）。
 //! RP 側の実体は `TASK-716` 待ちで置かない。構成の下書きは `docs/harness/e2e.md`。
 
 #![forbid(unsafe_code)]
@@ -26,6 +28,10 @@ pub mod browser;
 #[cfg(unix)]
 pub mod chrome;
 pub mod component;
+#[cfg(unix)]
+pub mod driver_process;
+#[cfg(unix)]
+pub mod firefox;
 pub mod harness;
 #[cfg(unix)]
 pub mod registration;
@@ -37,6 +43,10 @@ pub use browser::{AuthenticatorKind, Browser, Evidence};
 #[cfg(unix)]
 pub use chrome::{ChromeDriverComponent, ChromeDriverConfig, ChromeHandle};
 pub use component::{E2eComponent, E2eComponentKind};
+#[cfg(unix)]
+pub use driver_process::DriverHandle;
+#[cfg(unix)]
+pub use firefox::{FirefoxHandle, GeckoDriverComponent, GeckoDriverConfig};
 pub use harness::{E2eConfig, E2eError, E2eErrorKind, E2eHarness, RunningE2e};
 #[cfg(unix)]
 pub use registration::{RegistrationErrorName, RegistrationOutcome, register_once};

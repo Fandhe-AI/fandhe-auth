@@ -10,7 +10,7 @@
 pub enum Browser {
     /// Chrome（chromedriver。2/6 で結線）。
     Chrome,
-    /// Firefox（geckodriver。3/6 で結線）。
+    /// Firefox（geckodriver。3/6 で結線済み）。
     Firefox,
 }
 

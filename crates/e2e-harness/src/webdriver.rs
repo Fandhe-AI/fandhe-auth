@@ -461,7 +461,16 @@ impl WebDriverSession {
             &self.path("/webauthn/authenticator"),
             Some(&options.to_webdriver_json()),
         )?;
-        AuthenticatorId::new(v.as_str().ok_or_else(failed)?)
+        // chromedriver は文字列、geckodriver は数値で返しうる。両方を受理する。
+        match &v {
+            Value::String(s) => AuthenticatorId::new(s),
+            // 負数・小数は authenticator の ID として受理しない（符号なし整数だけ）。
+            Value::Number(n) => n
+                .as_u64()
+                .ok_or_else(failed)
+                .and_then(|u| AuthenticatorId::new(&u.to_string())),
+            _ => Err(failed()),
+        }
     }
 
     /// 仮想 authenticator の credential の要約を返す。秘密鍵の欄は読み捨てる。
