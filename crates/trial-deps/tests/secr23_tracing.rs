@@ -4,10 +4,13 @@
 //! 陽性対照で、捕獲が値を検出できること（検出力）も確かめる。ここは〔仮想〕の確認で、
 //! 本番の試験は TASK-518（SECR-23・SECR-26 の走査）。
 //!
-//! 注記: `PROBE` は固定のリテラルで、assert のメッセージは捕獲した出力をそのまま出す。
-//! 本番版（TASK-513 の probe・TASK-518）では、実行時に作る値を使い、一致の有無だけを出す形にする。
+//! probe は試験ごとに実行時に作り（コミットしない。`secret-values.md` の試験の値）、assert のメッセージには
+//! 一致の有無と出力の長さだけを出す。捕獲した出力・値は失敗時にも出さない（SECR-23・SECR-26）。
+//! 本番の probe（乱数 32 バイト・4 つの形の照合）は TASK-513・TASK-518 が引き取る。
 //! 陽性対照（検出力の確認。AAUD-30・AAUD-31）の本番版は TASK-500、入れ物の試験（SECR-13）は TASK-513 が引き取る。
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -17,8 +20,14 @@ use fandhe_auth_trial_deps::logging::{
 };
 use tracing_subscriber::fmt::MakeWriter;
 
-/// 試験用の値。実在の秘密ではない。
-const PROBE: &str = "probe-value-0123456789";
+/// 試験用の値を実行時に作る。実在の秘密ではない。呼ぶたびに別の値になる。
+/// `RandomState` ごとに鍵が違うことを使い、新しい依存を足さない。
+fn make_probe() -> String {
+    let parts: Vec<String> = (0..3u64)
+        .map(|i| format!("{:016x}", RandomState::new().hash_one(i)))
+        .collect();
+    format!("probe-{}", parts.join(""))
+}
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -57,22 +66,42 @@ fn capture(f: impl FnOnce()) -> String {
 /// SECR-23・SECR-11: `?` 形式の欄に `SecretString` を出しても値が無い。
 #[test]
 fn secr23_secret_debug_field_has_no_value() {
-    let s = SecretString::new(PROBE);
+    let probe = make_probe();
+    let s = SecretString::new(&probe);
     let out = capture(|| log_secret_debug_field(&s));
-    assert!(out.contains("<redacted>"), "output: {out}");
-    assert!(!out.contains(PROBE), "output: {out}");
+    assert!(
+        out.contains("<redacted>"),
+        "redacted marker present: false (output len={})",
+        out.len()
+    );
+    let leaked = out.contains(&probe);
+    assert!(
+        !leaked,
+        "probe found in output: {leaked} (output len={})",
+        out.len()
+    );
 }
 
 /// SECR-23・SECR-13: 派生 `Debug` の入れ物に入れても値が無い。
 #[test]
 fn secr23_derived_debug_holder_has_no_value() {
+    let probe = make_probe();
     let holder = TokenHolder {
         label: "holder-label".to_owned(),
-        token: SecretString::new(PROBE),
+        token: SecretString::new(&probe),
     };
     let out = capture(|| log_holder_debug_field(&holder));
-    assert!(out.contains("<redacted>"), "output: {out}");
-    assert!(!out.contains(PROBE), "output: {out}");
+    assert!(
+        out.contains("<redacted>"),
+        "redacted marker present: false (output len={})",
+        out.len()
+    );
+    let leaked = out.contains(&probe);
+    assert!(
+        !leaked,
+        "probe found in output: {leaked} (output len={})",
+        out.len()
+    );
 }
 
 /// 陽性対照: `expose()` の値を出す経路では捕獲が値を検出できる（捕獲の検出力の確認）。
@@ -81,7 +110,13 @@ fn secr23_derived_debug_holder_has_no_value() {
 fn secr23_positive_control_detects_exposed_value() {
     // 注記: この expose() は試験専用の呼び出し。SECR-16 の呼び出し箇所の一覧（TASK-515）を作るときは、
     // 試験専用の例外として載せるか、それより前に本 crate を消す。
-    let s = SecretString::new(PROBE);
+    let probe = make_probe();
+    let s = SecretString::new(&probe);
     let out = capture(|| tracing::info!(leaked = s.expose(), "positive control emitted"));
-    assert!(out.contains(PROBE), "capture failed to detect: {out}");
+    let detected = out.contains(&probe);
+    assert!(
+        detected,
+        "capture detected probe: {detected} (output len={})",
+        out.len()
+    );
 }

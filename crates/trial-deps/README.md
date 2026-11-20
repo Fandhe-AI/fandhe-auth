@@ -43,8 +43,10 @@ fuzz は別 workspace（`fuzz/`）で、`make build`・`make test`・`make lint`
 CI に載せるかは `TASK-117` で決める。
 
 ```bash
-cd crates/trial-deps/fuzz && cargo +nightly fuzz build && cargo +nightly fuzz run secret_debug -- -max_total_time=<秒>
+cd crates/trial-deps/fuzz && cargo +nightly fuzz build && cargo +nightly fuzz run secret_debug -- -max_total_time=10
 ```
+
+`-max_total_time` の値は秒数で、`10` は例である。変えてよい。
 
 実行の記録には `rustc +nightly -V` の出力を控える。記録の保存先は未定（`D-2026-11-20-9`）で、人が決める。
 
@@ -62,20 +64,46 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
 1. 厳格版を repo の外へ写す（`docs/spec` は submodule なので書き換えない）。
 2. 写しの許可リストに `"NCSA"` を足す（`libfuzzer-sys` 向け。`D-2026-11-20-9`）。他は変えない。
 3. 先に `cargo deny fetch` を 1 回流し、advisory DB の commit と取得日を控える（`DPOL-33`）。
-4. ルートに対して流す。
+4. 一時の設定のパスを変数に入れ（`DENY_CONFIG`）、ルートに対して流す。
 
     ```bash
-    cargo deny --locked check --config <一時の設定のパス> --disable-fetch
+    cargo deny --locked check --config "$DENY_CONFIG" --disable-fetch
     ```
 
 5. fuzz 側は `--manifest-path` を付けて流す。`libfuzzer-sys` の NCSA の通過を確かめるのは、こちらである。
 
     ```bash
-    cargo deny --locked --manifest-path crates/trial-deps/fuzz/Cargo.toml check --config <一時の設定のパス> --disable-fetch
+    cargo deny --locked --manifest-path crates/trial-deps/fuzz/Cargo.toml check --config "$DENY_CONFIG" --disable-fetch
     ```
 
 判定は基線との差で行う。依存を足す前の HEAD で同じ設定を流した出力と、足した後の出力を比べる。
 通過は判断材料であり、例外の追加は人が決める（`DPOL-35`）。
+
+## cargo audit
+
+`cargo deny` の手順の後に流す（`DPOL-33`・`DPOL-34`）。
+
+1. advisory DB を 1 回取得する。`cargo audit` には `fetch` のサブコマンドが無いので、`--no-fetch` を付けない 1 回目の実行で取得する。
+
+    ```bash
+    cargo audit --file Cargo.lock
+    ```
+
+2. DB の commit と日付を控える。
+
+    ```bash
+    git -C ~/.cargo/advisory-db log -1 --format='%h %cd'
+    ```
+
+3. ルートの `Cargo.lock` と fuzz 側の `Cargo.lock` の両方に流す。以降は取得を止めて、同じ DB で照合する。
+
+    ```bash
+    cargo audit --no-fetch --file Cargo.lock
+    cargo audit --no-fetch --file crates/trial-deps/fuzz/Cargo.lock
+    ```
+
+fuzz 側は別 workspace なので、ルートの `Cargo.lock` の監査では拾えない。2 つの lock を別々に流す。
+結果の判定と例外の追加は人が決める（`DPOL-35`）。
 
 ## K11 と feature の測定手順
 
@@ -83,13 +111,25 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
 
 1. repo の外に一時ディレクトリを作る。ルートの `Cargo.toml` は触らない。
 2. 組ごとに、最小の `Cargo.toml` を 1 つ作る。依存は測る crate 1 つだけにし、feature の組を指定する。
-3. 次のコマンドで数える。dev の道具（`tracing-subscriber`・`proptest`・`syn`）は `-e normal,dev` に替えて別に数える。
+3. 次のコマンドで数える。`-e normal,build` を起点にし、測定用のルートのパッケージ（手順 2 で作ったもの。`PROBE_NAME` に入れる名前）を数から除く。
+  測る crate 自身も、推移依存ではないので数から除く。
 
     ```bash
-    cargo tree -e normal --prefix none --format '{p}' | sort -u | wc -l
+    cargo tree -e normal,build --prefix none --format '{p}' | sort -u | grep -v "^$PROBE_NAME " | wc -l
     ```
 
-4. MSRV は `cargo tree` の結果から人が確認する。ライセンスは `cargo deny list` の結果を使う。
+    測る crate 自身の 1 行は、出力から引いて「推移依存の数」とする。dev の道具（`tracing-subscriber`・`proptest`・`syn`）は、
+    `-e normal,build,dev` に替えて同じ数え方で別に数える。表の「推移依存の数」の列は `normal,build` の値で、`dev` 込みの値は別の測定として分けて記入する。
+
+4. MSRV は、解決したパッケージの `rust_version` を `cargo metadata` から引く。宣言の無い依存は `未宣言` と出る。
+
+    ```bash
+    cargo metadata --format-version 1 | jq -r '.packages[] | "\(.name) \(.version) \(.rust_version // "未宣言")"'
+    ```
+
+    `packages` には全プラットフォーム分の依存が入る。`未宣言` の依存は、MSRV の toolchain（1.100）でビルドして確かめる。
+    構成の MSRV は、各依存の宣言の最大値を人が読み取る。
+5. ライセンスは `cargo deny list` の結果を使う。
 
 組の候補（各 crate の `[features]` を読んだ事実による）:
 

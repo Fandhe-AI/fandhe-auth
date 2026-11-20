@@ -7,8 +7,9 @@ use fandhe_auth_secret::SecretString;
 /// 秘密値を派生 `Debug` の入れ物に入れた試験用の構造体。
 /// 派生 `Debug` を付けても値が出ないこと（SECR-13・SECR-30）を確かめるために使う。
 ///
-/// 注記: 秘密値を持つ試験用の型で、SECR-10・SECR-29 の型の一覧には載せない。TASK-512・TASK-514 の走査が
-/// 入る前に本 crate を消すか、走査を入れるときに一覧の外の型としての扱いを決める。
+/// 注記: 秘密値を持つ試験の入れ物で、SECR-10・SECR-29 の型の一覧の対象である。
+/// 一覧はまだ repo に無い。一覧を作るときにこの型を載せる。その前に本 crate を消すなら不要。
+// TODO(TASK-512): 型の一覧の作成時に TokenHolder を載せる
 #[derive(Debug)]
 pub struct TokenHolder {
     /// 入れ物の名前。秘密値ではない。
