@@ -202,6 +202,7 @@ const ARCH_VOCAB: &[&str] = &[
     "mips32r6",
     "mips64r6",
     "powerpc64le",
+    "arm64ec",
     "xtensa",
     "avr",
     "msp430",

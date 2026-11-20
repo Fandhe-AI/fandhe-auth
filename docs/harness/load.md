@@ -319,7 +319,7 @@ judgment:
   `MachineProbe`・`StdMachineProbe`、`ComponentConditions`（`new` が重複と stub の印の食い違いを誤りにする）、`ConditionComponent`、`ConditionError`。
   `Display` は形式の 5 の行（`condition_machine` 6 行・`condition_component` 4 行・stub があるときだけ `note:`・`condition_loop`）を出す。
 - 取得元: `cpu_count` は `available_parallelism`（使える並列数。物理 CPU 数ではない）、`memory_mib` は Linux の `/proc/meminfo` の `MemTotal`
-  （固定パス・64 KiB の上限・整数だけ。コンテナではホストの総量）、`arch`・`os_family` は `std::env::consts`、`build_profile` は確かめる手段が無いため常に `unknown`（`debug_assertions` はプロファイルで上書きされ誤記録になる。確かな値は `new` で明示）。
+  （固定パス・64 KiB の上限・整数だけ。コンテナではホストの総量）、`arch`・`os_family` は `std::env::consts`（`arch` の許可語彙は `arm64ec`〔Windows ARM64EC〕を含む）、`build_profile` は確かめる手段が無いため常に `unknown`（`debug_assertions` はプロファイルで上書きされ誤記録になる。確かな値は `new` で明示）。
   `virtualization` は判別の方法が未決のため常に `unknown`。
 - 取れない（`None`）値は `unknown`。`arch`・`os_family` は固定の許可語彙だけを受け、語彙の外の値は `detect_with`・`detect`・`new` のどれでも `InvalidMachineValue` の誤りで返す（`unknown` に置き換えない）。ホスト名・機材の名前・パスは取得も記録もしない。
 - 条件は記録の単位で 1 つ持ち、`TargetRun`・`LoadRun` には入れない（8/10 の段階を変える実行で重複しないため）。構成は呼び出し元が起動したものを明示で渡し、渡さない種類は `not_started`。

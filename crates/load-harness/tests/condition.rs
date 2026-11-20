@@ -168,6 +168,14 @@ fn probe_values_outside_vocab_are_errors_without_leaking() {
     .to_string();
     assert!(ok.contains("arch x86_64 "));
     assert!(ok.contains("os_family linux "));
+    // 標準の取得元が返す arm64ec（Windows ARM64EC）は語彙に入れて受理する。
+    let ec = MachineCondition::detect_with(&FakeProbe {
+        arch: Some("arm64ec".to_owned()),
+        os: Some("windows".to_owned()),
+    })
+    .unwrap()
+    .to_string();
+    assert!(ec.contains("arch arm64ec "));
     // 取得不能（None）は unknown。
     let none = MachineCondition::detect_with(&FakeProbe::unknown())
         .unwrap()
