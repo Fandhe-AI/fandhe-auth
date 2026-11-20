@@ -182,6 +182,8 @@ struct Live {
 #[derive(Clone)]
 pub struct ChromeHandle {
     live: Arc<Mutex<Option<Live>>>,
+    /// 起動したドライバの子プロセス。命令の前に生きていることを確かめ、終了後に再利用されたポートへ送らない（A10）。
+    driver: Arc<Mutex<Option<Child>>>,
     allowed_origins: Arc<Vec<String>>,
 }
 
@@ -200,6 +202,12 @@ impl ChromeHandle {
             .as_mut()
             .ok_or_else(|| err(E2eErrorKind::NotRunning))?;
         if live.unusable {
+            return Err(err(E2eErrorKind::CommandFailed));
+        }
+        // 所有するドライバが生きていると確かめられないとき（終了済み・状態を取れない）は、同じポートの別プロセスへ
+        // 命令を送らないよう、以後の送信を拒否する（A10）。
+        if !driver_is_alive(&self.driver) {
+            live.unusable = true;
             return Err(err(E2eErrorKind::CommandFailed));
         }
         f(live)
@@ -227,7 +235,15 @@ impl ChromeHandle {
         &self,
         options: &VirtualAuthenticatorOptions,
     ) -> Result<AuthenticatorId, E2eError> {
-        self.with_live(|l| l.session.add_virtual_authenticator(options))
+        self.with_live(|l| {
+            let r = l.session.add_virtual_authenticator(options);
+            if r.is_err() {
+                // 追加の結果が不明（時間切れ・id の検証失敗）。追加済みの authenticator が残り得るので、
+                // 同じセッションで続けず、停止処理で回収する。
+                l.unusable = true;
+            }
+            r
+        })
     }
 
     /// URL へ移動する。起動前に登録した試験用 origin の配下だけを許し、それ以外は `CommandFailed`（A10）。
@@ -288,7 +304,8 @@ impl ChromeHandle {
 pub struct ChromeDriverComponent {
     config: ChromeDriverConfig,
     handle: ChromeHandle,
-    child: Option<Child>,
+    /// ドライバの子プロセス（ハンドルと共有する。回収を確かめるまで保持する）。
+    driver: Arc<Mutex<Option<Child>>>,
     /// Chrome の一時領域（ハーネスが作り、プロセスの回収後にセッション ID に依らず消す）。
     profile_dir: Option<PathBuf>,
 }
@@ -296,13 +313,15 @@ pub struct ChromeDriverComponent {
 impl ChromeDriverComponent {
     /// 作る。起動はしない。
     pub fn new(config: ChromeDriverConfig) -> Self {
+        let driver = Arc::new(Mutex::new(None));
         Self {
             handle: ChromeHandle {
                 live: Arc::new(Mutex::new(None)),
+                driver: Arc::clone(&driver),
                 allowed_origins: Arc::new(config.allowed_origins.clone()),
             },
+            driver,
             config,
-            child: None,
             profile_dir: None,
         }
     }
@@ -320,19 +339,33 @@ impl ChromeDriverComponent {
             Err(poisoned) => poisoned.into_inner().take(),
         };
         // セッションの削除は最善を尽くすだけ。失敗してもプロセスグループの終了へ進む。
+        // 所有するドライバが生きていると確かめられないときは送らない（再利用されたポートへ送らない。A10）。
         if let Some(live) = live
+            && driver_is_alive(&self.driver)
             && live.session.delete().is_err()
         {
             result = Err(err(E2eErrorKind::StopFailed));
         }
-        if let Some(mut child) = self.child.take()
-            && kill_group_and_reap(&mut child).is_err()
-        {
-            result = Err(err(E2eErrorKind::StopFailed));
-        }
+        // 終了を確かめるまで子を保持する。グループへの signal が失敗したら子を残し、stop()・Drop で再試行できるようにする
+        // （プロセスが残ったままの一時領域の削除をしない）。
+        let reaped = {
+            let mut g = lock_driver(&self.driver);
+            match g.as_mut() {
+                Some(child) => {
+                    if kill_group_and_reap(child).is_ok() {
+                        *g = None;
+                        true
+                    } else {
+                        result = Err(err(E2eErrorKind::StopFailed));
+                        false
+                    }
+                }
+                None => true,
+            }
+        };
         // プロセスの回収後に一時領域を消す（セッションを確立できなかった場合も同じ）。
         // 削除の成功か NotFound を確かめるまでパスを保持し、stop()・Drop で再試行できるようにする。
-        if let Some(dir) = self.profile_dir.as_ref() {
+        if reaped && let Some(dir) = self.profile_dir.as_ref() {
             match std::fs::remove_dir_all(dir) {
                 Ok(()) => self.profile_dir = None,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.profile_dir = None,
@@ -356,7 +389,7 @@ impl ChromeDriverComponent {
             .spawn()
             .map_err(|_| fail())?;
         let stdout = child.stdout.take();
-        self.child = Some(child);
+        *lock_driver(&self.driver) = Some(child);
         let profile = make_profile_dir().map_err(|_| fail())?;
         self.profile_dir = Some(profile.clone());
         let stdout = stdout.ok_or_else(fail)?;
@@ -380,15 +413,18 @@ impl ChromeDriverComponent {
             }
             // 子が先に終わっていたら、ここで回収済みになる。セッション前なので Chrome は居らず、
             // グループへの signal は不要（回収後の PID を signal の宛先にしない）。
-            match self.child.as_mut().map(Child::try_wait) {
-                Some(Ok(None)) => {}
-                // 回収済み。宛先にする PID が無いので子を手放す。
-                Some(Ok(Some(_))) => {
-                    self.child = None;
-                    return Err(fail());
+            {
+                let mut g = lock_driver(&self.driver);
+                match g.as_mut().map(Child::try_wait) {
+                    Some(Ok(None)) => {}
+                    // 回収済み。宛先にする PID が無いので子を手放す。
+                    Some(Ok(Some(_))) => {
+                        *g = None;
+                        return Err(fail());
+                    }
+                    // 状態を取れない。子は残し、呼び出し元の teardown に任せる。
+                    _ => return Err(fail()),
                 }
-                // 状態を取れない。子は残し、呼び出し元の teardown に任せる。
-                _ => return Err(fail()),
             }
             let left = deadline
                 .checked_duration_since(Instant::now())
@@ -410,6 +446,27 @@ impl ChromeDriverComponent {
             unusable: false,
         });
         Ok(())
+    }
+}
+
+/// ドライバの子の保持先を取る。毒された lock でも中身を使う（後片付けを止めない）。
+fn lock_driver(driver: &Mutex<Option<Child>>) -> std::sync::MutexGuard<'_, Option<Child>> {
+    driver
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 所有するドライバの子がまだ動いているか。終了を観測した・状態を取れない・子が無いときは `false`。
+/// 終了を観測したら回収済みなので子を手放す（回収後の PID を signal の宛先にしない）。
+fn driver_is_alive(driver: &Mutex<Option<Child>>) -> bool {
+    let mut g = lock_driver(driver);
+    match g.as_mut().map(Child::try_wait) {
+        Some(Ok(None)) => true,
+        Some(Ok(Some(_))) => {
+            *g = None;
+            false
+        }
+        _ => false,
     }
 }
 
@@ -496,14 +553,14 @@ fn send_signal(sig: &str, group: &str) -> std::io::Result<()> {
 /// 子のプロセスグループ（chromedriver と配下の Chrome）へ SIGKILL を送り、そのあとで子を wait する。
 /// 子を回収する前に signal を送るので、グループ ID（= 子の PID）は signal を送り終えるまで再利用されない
 /// （回収済みの PID を宛先にしない）。Chrome の一時領域は回収後にハーネスが消すため、SIGTERM の猶予は置かない。
-/// signal の失敗は子を回収したうえで誤りとして返す。
+/// グループへの signal が失敗したら、子自身は止めるが回収しない（PID を確保したままにし、呼び出し元が子を保持して再試行できる。
+/// 回収すると、残った Chrome のグループの PID が再利用され得る）。
 fn kill_group_and_reap(child: &mut Child) -> std::io::Result<()> {
     let group = format!("-{}", child.id());
     let sent = send_signal("-KILL", &group);
-    // グループ全体が送れなくても、子自身は止めて回収する。
     let _ = child.kill();
-    let waited = child.wait().map(|_| ());
-    sent.and(waited)
+    sent?;
+    child.wait().map(|_| ())
 }
 
 impl E2eComponent for ChromeDriverComponent {
@@ -512,7 +569,7 @@ impl E2eComponent for ChromeDriverComponent {
     }
 
     fn start(&mut self) -> Result<(), E2eError> {
-        if self.child.is_some() {
+        if lock_driver(&self.driver).is_some() {
             return Err(err(E2eErrorKind::StartFailed));
         }
         // 前回の一時領域の削除に失敗して残っていれば、再試行して消えるまで起動しない（パスを上書きして取りこぼさない）。
@@ -521,8 +578,11 @@ impl E2eComponent for ChromeDriverComponent {
         }
         let result = self.try_start();
         if result.is_err() {
-            // 途中で失敗したらセッション・子プロセスを残さない。
-            let _ = self.teardown();
+            // 途中で失敗したらセッション・子プロセスを残さない。後片付けも失敗したら、残っていることを
+            // 呼び出し元へ知らせる（子と一時領域は保持しており、stop()・Drop で再試行する）。
+            if self.teardown().is_err() {
+                return Err(err(E2eErrorKind::StopFailed));
+            }
         }
         result
     }

@@ -35,6 +35,12 @@ pub struct TestOrigin {
 
 impl TestOrigin {
     pub fn start() -> Self {
+        Self::start_with_body(DEFAULT_BODY)
+    }
+
+    /// `GET /` に返す HTML を差し替えて起動する（試験用の定数の HTML だけを渡す。外部入力を連結しない）。
+    pub fn start_with_body(body: &str) -> Self {
+        let body: Arc<str> = Arc::from(body);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -53,9 +59,10 @@ impl TestOrigin {
                         continue;
                     }
                     let slot = Slot(Arc::clone(&active));
+                    let body = Arc::clone(&body);
                     std::thread::spawn(move || {
                         let _slot = slot;
-                        handle(s, port);
+                        handle(s, port, &body);
                     });
                 }
             }
@@ -88,7 +95,9 @@ impl Drop for TestOrigin {
     }
 }
 
-fn handle(mut s: TcpStream, port: u16) {
+const DEFAULT_BODY: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>e2e</title></head><body>e2e</body></html>";
+
+fn handle(mut s: TcpStream, port: u16, page: &str) {
     let deadline = Instant::now() + CONNECTION_DEADLINE;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -141,10 +150,7 @@ fn handle(mut s: TcpStream, port: u16) {
     } else if path != "/" {
         ("404 Not Found", "")
     } else {
-        (
-            "200 OK",
-            "<!doctype html><html><head><meta charset=\"utf-8\"><title>e2e</title></head><body>e2e</body></html>",
-        )
+        ("200 OK", page)
     };
     let resp = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

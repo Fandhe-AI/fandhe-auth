@@ -252,8 +252,9 @@ fn parse_head(head: &[u8]) -> Result<Head, E2eError> {
         return Err(failed());
     }
     let status = code.parse::<u16>().map_err(|_| failed())?;
-    // 理由句は空でもよいが、制御文字（CR・LF・NUL 等）は含めない。
-    if parts.next().is_some_and(has_control_char) {
+    // 理由句の区切り（3 番目の要素）は必須。理由句そのものは空でもよいが、制御文字（CR・LF・NUL 等）は含めない（A03）。
+    let reason = parts.next().ok_or_else(failed)?;
+    if has_control_char(reason) {
         return Err(failed());
     }
     let mut content_length: Option<usize> = None;
@@ -302,6 +303,8 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
             .set_read_timeout(Some(remaining(deadline)?))
             .map_err(|_| failed())?;
         let n = stream.read(&mut chunk).map_err(|_| failed())?;
+        // 最後の読み取りの後にも絶対期限を確かめる（期限を過ぎて届いた応答を受理しない）。
+        remaining(deadline)?;
         if n == 0 {
             eof = true;
             break;
@@ -329,7 +332,7 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
     // 接続は 1 命令で捨てる（`Connection: close`）ので、猶予内に届かないバイトは見ない（保証は猶予内の到着まで）。
     if head.content_length.is_some() && !eof {
         // 確かめる窓は固定の猶予と残り時間の小さい方（絶対期限を超えない）。期限が尽きていたら確かめず、
-        // 本文が届き切った完全な応答は成功にする（保証は期限内の到着まで）。
+        // 下の受理時点の確認で誤りにする。
         if let Some(left) = deadline
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
@@ -342,6 +345,8 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
             }
         }
     }
+    // 結果を受理する時点でも絶対期限を確かめる。期限を過ぎた応答は成功にしない。
+    remaining(deadline)?;
     let body = &buf[end..];
     let body = match head.content_length {
         // 宣言より多い・少ない本文は曖昧なフレーミングとして拒否する。

@@ -242,6 +242,35 @@ fn ambiguous_or_malformed_framing_is_rejected() {
     assert_rejected(format!("HTTP/1.1 200 O\x01K\r\nContent-Length: {n}\r\n\r\n{b}").as_bytes());
     // 宣言より長い本文。
     assert_rejected(&ok(&format!("Content-Length: {}", n - 1)));
+    // 理由句の区切り（SP）が無いステータス行（A03）。
+    assert_rejected(format!("HTTP/1.1 200\r\nContent-Length: {n}\r\n\r\n{b}").as_bytes());
+}
+
+#[test]
+fn empty_reason_phrase_with_separator_is_accepted() {
+    let b = r#"{"value":{}}"#;
+    let raw = format!("HTTP/1.1 200 \r\nContent-Length: {}\r\n\r\n{b}", b.len());
+    let (port, h, _) = fake_driver(raw.into_bytes());
+    assert!(client(port).request(Method::Get, "/x", None).is_ok());
+    let _ = h.join();
+}
+
+#[test]
+fn response_completed_after_the_deadline_is_rejected() {
+    // 期限の後に届いた完全な応答は成功にしない（命令の絶対期限）。
+    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = l.local_addr().unwrap().port();
+    let h = std::thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = s.read(&mut buf);
+        std::thread::sleep(Duration::from_millis(400));
+        let _ = s.write_all(&http("200 OK", r#"{"value":{}}"#));
+    });
+    let c = WebDriverClient::new(port, Duration::from_millis(200));
+    let r = c.request(Method::Get, "/x", None);
+    assert_eq!(r.unwrap_err().kind(), E2eErrorKind::CommandFailed);
+    let _ = h.join();
 }
 
 #[test]
