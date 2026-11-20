@@ -46,7 +46,7 @@ JSON は `serde_json` で扱う（下の「依存」）。Chrome の実体と登
 
 ## 登録 1 件の定義（2/6）
 
-登録 1 件が通るとは、次の 1・2 を `register_once` が検査し、3 を登録試験の側が検査することをいう。
+登録 1 件が通るとは、次の 1〜3 を `register_once` が検査し、4 を登録試験の側が検査することをいう。
 サーバー側の登録応答の検証（`webauthn-rs`）は RelyingParty の実体（`TASK-716`）待ちで含めない。
 PKEY の振る舞いを満たしたとは主張しない。
 
@@ -102,8 +102,8 @@ PKEY の振る舞いを満たしたとは主張しない。
 ### 暫定の結果行（4/6。正式な形式は 5/6）
 
 試験が標準出力に 1 行出す（`tests/support/passkey.rs`。crate の公開 API にしない）:
-`e2e-result: operation=… browser=… browser_version=… authenticator=WebDriverVirtual evidence=Virtual counts_as_real_device=false counts_as_safari=false result=succeeded|rejected:<名前>`。
-ブラウザの版は文字種と長さで絞り、URL・ポート・セッション ID・authenticator ID・credential ID は出さない（`SECR-11`・`SECR-23`）。
+`e2e-result: operation=… browser=… authenticator=WebDriverVirtual evidence=Virtual counts_as_real_device=false counts_as_safari=false result=succeeded|rejected:<名前>`。
+ドライバが返す文字列（ブラウザの版を含む）は結果行に転記せず、URL・ポート・セッション ID・authenticator ID・credential ID は出さない（`SECR-11`・`SECR-23`）。
 実行の回数の記録と正式な形は 5/6（#105）。入口のスクリプトは `--show-output` で成功した試験の出力も見せ、`--test-threads=1` でブラウザを同時に複数起動しない。
 
 ## 試験用ページと origin の置き場（人が決める）

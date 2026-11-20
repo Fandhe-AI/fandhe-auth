@@ -68,40 +68,17 @@ pub enum Verdict {
     Rejected(WebAuthnErrorName),
 }
 
-/// 暫定の結果行を標準出力へ出す。ブラウザの版はドライバが返した文字列を文字種と長さで絞る。
+/// 暫定の結果行を標準出力へ出す。ドライバが返す文字列（版を含む）は転記しない（SECR-23。IPv4 様の値が通る経路を残さない）。
 pub fn print_result(
-    handle: &DriverHandle,
+    _handle: &DriverHandle,
     operation: PasskeyOperation,
     browser: Browser,
     verdict: &Verdict,
 ) {
-    println!(
-        "{}",
-        result_line(
-            operation,
-            browser,
-            &handle.browser_version().unwrap_or_default(),
-            verdict
-        )
-    );
+    println!("{}", result_line(operation, browser, verdict));
 }
 
-pub fn result_line(
-    operation: PasskeyOperation,
-    browser: Browser,
-    version: &str,
-    verdict: &Verdict,
-) -> String {
-    // 版番号の形式（数字と `.` だけで、先頭は数字で `.` を含む）に絞る。UUID 形式のセッション ID 等は通さない（SECR-23）。
-    let version = if version.len() <= 32
-        && version.bytes().next().is_some_and(|b| b.is_ascii_digit())
-        && version.contains('.')
-        && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
-    {
-        version
-    } else {
-        "unknown"
-    };
+pub fn result_line(operation: PasskeyOperation, browser: Browser, verdict: &Verdict) -> String {
     let result = match verdict {
         Verdict::Succeeded => "succeeded".to_owned(),
         Verdict::Rejected(n) => format!("rejected:{n:?}"),
@@ -109,6 +86,6 @@ pub fn result_line(
     let device = "authenticator=WebDriverVirtual evidence=Virtual";
     let flags = "counts_as_real_device=false counts_as_safari=false";
     format!(
-        "e2e-result: operation={operation:?} browser={browser:?} browser_version={version} {device} {flags} result={result}"
+        "e2e-result: operation={operation:?} browser={browser:?} {device} {flags} result={result}"
     )
 }

@@ -57,7 +57,7 @@ fn authentication_fails_when_user_verification_fails_with_firefox() {
 
     let (aid, cred) = register(&handle, &origin, Browser::Firefox);
     // 対照: 同じセッション・credential・UV 成功の状態で認証が通ることを先に確かめる。
-    // NotAllowedError は期限切れ等でも返るため、UV の状態だけを変えて結果が変わることで UV による拒否を判別する。
+    // NotAllowedError は期限切れ等でも返るため、これは UV の状態の変更後に NotAllowedError を観測する試験で、原因が UV であることまでは断定しない。
     let control =
         authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("control");
     assert!(control.succeeded(), "error_name={:?}", control.error_name());
@@ -66,7 +66,7 @@ fn authentication_fails_when_user_verification_fails_with_firefox() {
     let outcome =
         authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("authenticate");
     assert!(!outcome.succeeded());
-    // HarnessTimeout とは別の名前で、対照が成功した同一条件から UV だけを変えた結果としてだけ読む。
+    // HarnessTimeout とは別の名前で、対照が成功した同一条件から UV だけを変えた後の結果としてだけ読み、原因の判別とは読まない。
     assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
     assert_one_localhost_credential(&handle, &aid);
     print_result(

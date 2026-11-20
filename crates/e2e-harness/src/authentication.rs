@@ -34,8 +34,7 @@ const credB64u = arguments[2];
     const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, 10000);
     try {
         if (location.origin !== expectedOrigin) {
-            clearTimeout(timer);
-            done({ ok: false, errorName: 'OriginMismatch' });
+            finish({ ok: false, errorName: 'OriginMismatch' });
             return;
         }
         const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
@@ -52,6 +51,7 @@ const credB64u = arguments[2];
             userVerification: 'required',
             timeout: 15000
         }});
+        if (finished) { return; }
         clearTimeout(timer);
         const cd = JSON.parse(new TextDecoder().decode(cred.response.clientDataJSON));
         const ad = new Uint8Array(cred.response.authenticatorData);
@@ -59,7 +59,7 @@ const credB64u = arguments[2];
         const rpHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rpId)));
         let hashOk = ad.length >= 37;
         for (let i = 0; hashOk && i < 32; i++) { if (ad[i] !== rpHash[i]) { hashOk = false; } }
-        done({
+        finish({
             ok: true,
             typeOk: cred.type === 'public-key',
             idOk: b64u(new Uint8Array(cred.rawId)) === credB64u,
@@ -73,8 +73,7 @@ const credB64u = arguments[2];
             signatureLen: sig.length
         });
     } catch (e) {
-        clearTimeout(timer);
-        done({ ok: false, errorName: timedOut ? 'HarnessTimeout' : String((e && e.name) || 'Error') });
+        finish({ ok: false, errorName: timedOut ? 'HarnessTimeout' : String((e && e.name) || 'Error') });
     }
 })();
 "#;
