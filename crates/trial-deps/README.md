@@ -47,11 +47,18 @@ CI に載せるかは `TASK-117` で決める。
 その場合は、依存の差分を監査してから lock を更新する（`./.claude/rules/dependency-policy.md` の手順）。更新後に `Cargo.lock` の差分が無いことを確かめて流す。
 
 ```bash
-cd crates/trial-deps/fuzz
-cargo +nightly metadata --locked --format-version 1 > /dev/null
-cargo +nightly fuzz build && cargo +nightly fuzz run secret_debug -- -max_total_time=10
-git diff --exit-code Cargo.lock
+(
+  set -euo pipefail
+  cd crates/trial-deps/fuzz
+  cargo +nightly metadata --locked --format-version 1 > /dev/null
+  cargo +nightly fuzz build
+  cargo +nightly fuzz run secret_debug -- -max_total_time=10
+  git diff --exit-code Cargo.lock
+)
 ```
+
+サブシェルで `set -euo pipefail` を掛けるので、どの段階の失敗もブロックの終了コードに伝わる（対話シェルに素の `set -e` を貼るとシェルごと落ちるため、サブシェルにしてある）。
+`metadata --locked` が失敗したら、fuzz の build と run は始まらない。
 
 `-max_total_time` の値は秒数で、`10` は例である。変えてよい。
 
@@ -70,19 +77,36 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
 
 1. 厳格版を repo の外へ写す（`docs/spec` は submodule なので書き換えない）。
 2. 写しの許可リストに `"NCSA"` を足す（`libfuzzer-sys` 向け。`D-2026-11-20-9`）。他は変えない。
-3. 一時の設定のパスを変数に入れる（`DENY_CONFIG`）。取得と照合で同じ設定を使う。
-4. 先にその設定で `cargo deny fetch` を 1 回流し、取得の直後に次の 2 つを控える（`DPOL-33`）。commit の日付は取得日ではないので、取得日時は別に取る。
+3. 変数を決める。advisory DB の保存先は、空の専用ディレクトリにする。取得・照合・後片付けで同じ変数を使うので、同じシェルで最後の手順まで使う。
 
     ```bash
-    DENY_CONFIG=/path/to/deny.toml  # 手順 1・2 で作った写しのパスに替える
-    cargo deny fetch --config "$DENY_CONFIG" db
-    date -u +%Y-%m-%dT%H:%M:%SZ
-    ADVISORY_DB_DIR="$(ls -d ~/.cargo/advisory-dbs/advisory-db-* | head -1)"
-    git -C "$ADVISORY_DB_DIR" rev-parse HEAD
+    SRC_CONFIG=/path/to/deny.toml  # 手順 1・2 で作った写しのパスに替える
+    DENY_DB_DIR="$(mktemp -d)"
+    DENY_CONFIG="$(mktemp -d)/deny.toml"
     ```
 
-    - 取得日時: 上の `date` の出力。
-    - 監査に使った DB の commit SHA: 上の `rev-parse` の出力。`ls` が複数の DB を返すときは、その設定で使う DB のディレクトリを選ぶ。
+4. 一時の設定を作り、その設定で `cargo deny fetch` を 1 回流す。取得の直後に取得日時と、`db-path` の下にある全 DB の URL と commit SHA を控える（`DPOL-33`）。
+    設定には `[advisories]` の `db-path` と `db-urls` を足す（cargo-deny 0.19.4 で、指定した `db-path` の下に DB が取得されることを確かめた）。
+    写しにこの 2 つのキーが既にあるときは、重複させずに値を替える。commit の日付は取得日ではないので、取得日時は別に取る。DB のディレクトリを当て推量で選ばず、全部を列挙する。
+    サブシェルで `set -euo pipefail` を掛けるので、どの段階の失敗もブロックの終了コードに伝わる。
+
+    ```bash
+    (
+      set -euo pipefail
+      awk -v d="$DENY_DB_DIR" '{ print } /^\[advisories\]/ { print "db-path = \"" d "\""; print "db-urls = [\"https://github.com/rustsec/advisory-db\"]" }' "$SRC_CONFIG" > "$DENY_CONFIG"
+      grep -q '^db-path' "$DENY_CONFIG"
+      cargo deny fetch --config "$DENY_CONFIG" db
+      date -u +%Y-%m-%dT%H:%M:%SZ
+      for db in "$DENY_DB_DIR"/*/; do
+        [ -d "$db/.git" ]
+        echo "url=$(git -C "$db" remote get-url origin) sha=$(git -C "$db" rev-parse HEAD)"
+      done
+    )
+    ```
+
+    - 取得日時: `date` の出力。
+    - 監査に使った DB の URL と commit SHA: ループの出力。`url` の表記は、git の設定（`url.<base>.insteadOf`）の書き換えを受けることがある。
+
 5. ルートに対して流す。取得は済んでいるので `--disable-fetch` を付ける。
 
     ```bash
@@ -93,6 +117,12 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
 
     ```bash
     cargo deny --locked --manifest-path crates/trial-deps/fuzz/Cargo.toml check --config "$DENY_CONFIG" --disable-fetch
+    ```
+
+7. 照合が済んだら、一時のディレクトリを消す。この DB は手順 5・6 の `--disable-fetch` で使うので、照合より先には消さない。
+
+    ```bash
+    rm -rf "${DENY_DB_DIR:?}" "$(dirname "${DENY_CONFIG:?}")"
     ```
 
 合否は PR の head で、`cargo deny` の 4 検査（advisories・bans・licenses・sources）の全部が成功することで決める（`DPOL-34`）。
@@ -129,82 +159,15 @@ fuzz 側は別 workspace なので、ルートの `Cargo.lock` の監査では�
 合否は PR の head で、ルートと fuzz の両方の lockfile への `cargo audit` が成功することで決める（`DPOL-34`）。基線との差は切り分けにだけ使う。
 結果の判定と例外の追加は人が決める（`DPOL-35`）。
 
-## K11 と feature の測定手順
+## K11 と feature の選び
 
-K11 の閾値は spec に無く未定である。値の記入と判定は人が行う（`ACPT-7`）。ここは手順と空欄の表だけを置く。
+- K11 の測り方・ターゲット・閾値は未定で、人が決める（`D-2026-11-20-7`）。この README には測定の手順も、値を入れる表も置かない。
+- 測定手順の下書きは PR 本文で渡す。
+- 口の feature の選び（`tracing`・`metrics`・dev の道具）は未定で、K11 を人が決めた後に確定する。いまの feature はすべて default のままの暫定である（上の「位置づけ」）。
 
-測定は、repo の外の一時ディレクトリに作る単独の package で行う。ルートの `Cargo.toml` は触らない。
-次のブロックは、新しい bash にそのまま貼って最後まで流れる。先頭の変数だけを組ごとに替える。
+## 確かめた事実
 
-- `CRATE`・`VERSION`・`DEFAULT_FEATURES`・`FEATURES`: 測る crate、版（`=VERSION` で固定する）、既定の feature を使うか、足す feature（引用符付きのカンマ区切り。例: `'"std","attributes"'`）。
-- `KIND`: 実際の利用が `normal` か `dev` か。dev の道具（`tracing-subscriber`・`proptest`・`syn`）も、測定用の manifest では `[dependencies]` に置く。
-  こうすると、全組を同じ `normal,build` の値で測れる。dev であること（本番の木に入らない）は K7 として別に扱い、数には含めない。`KIND` は記録の表示にだけ使う。
-- `TARGET`: 全組で同じにする。例は `x86_64-unknown-linux-gnu`。`all` も選べる。どちらを使ったかを記録する。
-  `all` のとき、MSRV は `--filter-platform` を省いて全ターゲットの依存から引く（`all` は `--filter-platform` の値として全ターゲットを意味しない）。
-- edition と resolver はルートの `Cargo.toml` に合わせる（edition は `[workspace.package]` の `2024`、resolver は `[workspace]` の `"3"`。どちらも暫定で、ルートが変われば合わせ直す）。
-  測定用の manifest は単独の package なので、`resolver` は `[package]` に書く。
-- 比べる組は、同じ日に同じ環境（同じ toolchain・同じ `TARGET`・同じ registry の状態）でまとめて測る。
-  各組の `Cargo.lock` を保存し、共通する推移依存の解決版が組の間でそろっているかを照合する。そろっていなければ測り直す。
-
-```bash
-set -euo pipefail
-PROBE_NAME=probe-k11
-CRATE=tracing
-VERSION=0.1.44
-DEFAULT_FEATURES=true
-FEATURES=''
-KIND=normal
-TARGET=x86_64-unknown-linux-gnu
-
-WORK="$(mktemp -d)"
-mkdir -p "$WORK/src" "$WORK/record"
-cd "$WORK"
-cat > Cargo.toml <<EOF
-[package]
-name = "$PROBE_NAME"
-version = "0.0.0"
-edition = "2024"
-resolver = "3"
-
-[dependencies]
-$CRATE = { version = "=$VERSION", default-features = $DEFAULT_FEATURES, features = [$FEATURES] }
-EOF
-: > src/lib.rs
-cargo generate-lockfile
-
-# 推移依存の数。cargo tree が失敗したら、ここで止まる。
-cargo tree -e normal,build --target "$TARGET" --prefix none --format '{p}' > tree.txt
-sed 's/ (\*)$//' tree.txt | sort -u > uniq.txt
-DEPS="$({ grep -v -e "^$PROBE_NAME " -e "^$CRATE " uniq.txt || true; } | wc -l | tr -d ' ')"
-
-# MSRV。TARGET が all のときは --filter-platform を省く。
-if [ "$TARGET" = all ]; then
-  cargo metadata --locked --format-version 1 > meta.json
-else
-  cargo metadata --locked --format-version 1 --filter-platform "$TARGET" > meta.json
-fi
-jq -r '[.resolve.nodes[].id] as $ids | .packages[] | select(.id as $i | $ids | index($i)) | "\(.name) \(.version) \(.rust_version // "未宣言")"' meta.json > msrv.txt
-
-# 記録。保存先は未定なので、控えを record/ に集めて場所を表示する。
-cp Cargo.lock tree.txt msrv.txt record/
-{ date -u +%Y-%m-%dT%H:%M:%SZ; rustc -V; } > record/env.txt
-echo "crate=$CRATE version=$VERSION kind=$KIND target=$TARGET deps=$DEPS"
-echo "record: $WORK/record"
-```
-
-`cargo tree` は 2 回目以降に出る依存の行に ` (*)` を付ける。`sort -u` は行全体で比べるので、印を `sed` で除いてから重複を除く。
-除かないと、複数の経路で届く依存を 2 回数える。`tracing` と `tracing-subscriber` を両方 normal に置いた一時の crate で流したところ、
-印を除かない場合は 21、除いた場合は 18 で、`--no-dedupe` で数えた 18 と一致した。
-`grep -v` は全行が除かれると終了コード 1 を返すので、`|| true` で数 0 を許す。`cargo tree` や `cargo metadata` が失敗すると、`set -e` でその行で止まる。
-
-- 推移依存の数は、測定用のルートのパッケージと測る crate 自身を除いた件数である。
-- 組ごとに、測った crate の版と feature の組・`TARGET`・測った日・`rustc -V` の出力・`Cargo.lock`（または `tree.txt`）を記録する。保存先は未定で、人が決める。
-- MSRV は、`msrv.txt` の `未宣言` の依存を MSRV の toolchain（1.100）でビルドして確かめる。構成の MSRV は、各依存の宣言の最大値を人が読み取る。
-  `packages` 単独には他のターゲットだけの依存も入る。この workspace で `cargo metadata` の `packages` が 101 件のところ、`x86_64-unknown-linux-gnu` で絞ると 85 件になる。
-  表の「MSRV」の列には、対象の `TARGET` を添えて記入する。
-- ライセンスは `cargo deny list` の結果を使う。
-
-組の候補（各 crate の `[features]` を読んだ事実による）:
+各 crate の `[features]` を読んだ事実:
 
 - `tracing`: default は `std`・`attributes`。`attributes` は proc-macro の `tracing-attributes` を引く。`#[instrument]` を本体が使うかが論点になる。
   ほかに `max_level_*`・`release_max_level_*` がある。
@@ -219,23 +182,18 @@ echo "record: $WORK/record"
 - `proptest`: default は `std`・`fork`・`timeout`・`bit-set`。
 - `syn`: default は `derive`・`parsing`・`printing`・`clone-impls`・`proc-macro`。`full`・`visit` は別の feature。いまの試し実装は `default-features = false` + `full`・`parsing`。
 
-| crate | 版 | ターゲット | 測った日 | feature の組 | 推移依存の数（`normal,build`） | MSRV（対象の `--target` の依存グラフ） | ライセンス | 人の判定 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `tracing` | | | | default | | | | |
-| `tracing` | | | | `default-features = false` | | | | |
-| `tracing` | | | | `default-features = false` + `std` | | | | |
-| `tracing` | | | | 上記 + `max_level_*` | | | | |
-| `metrics` | | | | default | | | | |
-| `tracing-subscriber`（dev） | | | | default | | | | |
-| `tracing-subscriber`（dev） | | | | `default-features = false` + `fmt`・`std` | | | | |
-| `proptest`（dev） | | | | default | | | | |
-| `proptest`（dev） | | | | `default-features = false` + `std` | | | | |
-| `syn`（dev） | | | | default | | | | |
-| `syn`（dev） | | | | `default-features = false` + `full`・`parsing`（現状） | | | | |
-| `syn`（dev） | | | | 上記 + `visit` | | | | |
-
 ## 観測した事実
 
 - `syn` は、マクロ呼び出しの中に書いた構造体を見ない（`src/scan.rs` の `observation_struct_inside_macro_call_is_not_seen`）。合否ではなく観測の固定である。
   見落としの扱いは `TASK-514` で決める（main の読み）。
+- `src/scan.rs` の走査が拾わない形（`TASK-514` への引き継ぎ事項。いずれも合否ではなく観測で、扱いは `TASK-514` で決める。`SECR-21`）:
+  - マクロ呼び出しの中に書いた構造体（上の観測）。
+  - 標準の `String` の別名（`type S = String;`、`use std::string::String as S;`）で参照する欄。逆に、独自型の `custom::String` は末尾が `String` なので拾う（誤検出。`observation_custom_string_is_found_and_alias_is_not`）。
+  - tuple struct（例: `struct ApiToken(String);`）。名前付きの欄だけを見る。
+  - enum の variant の欄。`struct` の項目だけを辿る。
+  - `Option<String>` などで包んだ形。型の経路の末尾の識別子だけを見る。
+  - `Vec<u8>` と `[u8; N]`。
+  - 型名の側が秘密値らしいもの（例: 欄名が `value` で型が `SecretToken`）。見るのは欄名だけである。
+  - 上の tuple struct・enum・`Option<String>`・`Vec<u8>`・`[u8; N]`・型名の 5 つは、scratch の写しで試験を足し、拾われないことを確かめた（拾われた件数 0）。この試験は repo に入れていない。
+  - 試しで通ったことを、走査の検出力の根拠にしない。検出力は `TASK-500`（`AAUD-30`・`AAUD-31`）の陽性対照で確かめる。
 - `syn` の置き場（xtask・専用 crate・別 workspace など）は spec に無く未定である。この crate の dev 依存は一時的な置き方で、置き場の決定ではない。

@@ -58,7 +58,11 @@ fn capture(f: impl FnOnce()) -> String {
         .finish();
     tracing::subscriber::with_default(subscriber, f);
     let bytes = cap.0.lock().unwrap().clone();
-    String::from_utf8(bytes).expect("captured output is UTF-8")
+    // SECR-23・SECR-26: `FromUtf8Error` の `Debug` は捕獲したバイト列を含むため、誤りの中身を捨てて固定のメッセージで落とす。
+    // UTF-8 でない出力は試験の失敗として扱う（`from_utf8_lossy` には替えない）。
+    String::from_utf8(bytes)
+        .map_err(|_| ())
+        .expect("captured output is not UTF-8")
 }
 
 /// SECR-23・SECR-11: `?` 形式の欄に `SecretString` を出しても値が無い。

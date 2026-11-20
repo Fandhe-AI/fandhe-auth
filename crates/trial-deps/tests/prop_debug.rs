@@ -61,6 +61,8 @@ proptest! {
     #[test]
     fn expose_roundtrips(input in input_strategy()) {
         let secret = SecretString::new(input.0.clone());
+        // 注記: この expose() は試験専用の取り出しで、比較だけに使い外へ出さない。
+        // SECR-16 の呼び出し箇所の一覧（TASK-515）の対象。
         let same = secret.expose() == input.0;
         prop_assert!(same, "expose() did not round-trip");
     }

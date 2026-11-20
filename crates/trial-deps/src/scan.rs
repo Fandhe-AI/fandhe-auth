@@ -62,6 +62,14 @@ fn is_secret_like(name: &str) -> bool {
     SECRET_LIKE.iter().any(|k| lower.contains(k))
 }
 
+/// 型が生の `String` かを、型の経路の末尾の識別子だけで判定する。
+///
+/// 型を解決しない、構文の上だけの判定である。このため次の 2 つの制約がある。
+/// - 誤検出: 独自型の `custom::String` も末尾が `String` なので拾う。
+/// - 見逃し: 標準の `String` を別名（`type S = String;`、`use std::string::String as S;`）
+///   で参照する欄は拾わない。
+///
+/// この結果の解釈と扱いは TASK-514 で決める（SECR-21）。
 fn is_raw_string(ty: &Type) -> bool {
     matches!(ty, Type::Path(p) if p.qself.is_none()
         && p.path.segments.last().is_some_and(|s| s.ident == "String"))
@@ -128,5 +136,19 @@ mod tests {
     fn observation_struct_inside_macro_call_is_not_seen() {
         let src = "make_types! { pub struct Hidden { pub password: String } }";
         assert_eq!(found(src), Vec::<(String, String)>::new());
+    }
+
+    /// 観察用（TASK-514 で扱いを決める）: 型を解決しない判定のため、独自型の `custom::String` は
+    /// 拾われ（誤検出）、`String` の別名の欄は拾われない（見逃し）。合否の判定ではない（SECR-21）。
+    #[test]
+    fn observation_custom_string_is_found_and_alias_is_not() {
+        let src = concat!(
+            "type S = String;\n",
+            "use std::string::String as Alias;\n",
+            "pub struct A { pub password: custom::String }\n",
+            "pub struct B { pub password: S }\n",
+            "pub struct C { pub api_token: Alias }",
+        );
+        assert_eq!(found(src), vec![pair("A", "password")]);
     }
 }
