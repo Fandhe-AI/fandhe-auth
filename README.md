@@ -142,7 +142,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make fmt` | `cargo fmt --all` | rustfmt で整形を適用する（ソースを書き換える） |
 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査 + vendored の検査（CI の `lint` ジョブと同じ契約） |
 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
-| `make no-vendored` | `scripts/check-openssl-vendored.sh` | `openssl-sys` の `vendored` feature が 0 件かを `cargo tree -e features` で検査する。合否は試験専用メンバーを除いた本番対象メンバーの normal・build 依存に限る。feature は既定 + 環境変数 `PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り。無ければ空）で、全 feature と試験専用メンバーを含む走査は参考の警告、dev 依存は対象外。メンバーが本番・試験専用のどちらの表にも無ければ検査不能（2）（陰性対照つき。DPOL-13・TASK-667。名前は暫定） |
+| `make no-vendored` | `scripts/check-openssl-vendored.sh` | `openssl-sys` の `vendored` feature が 0 件かを `cargo tree -e features` で検査する。合否は試験専用メンバーを除いた本番対象メンバーの normal・build 依存に限る。feature は既定 + 環境変数 `PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り。無ければ空）で、全 feature と試験専用メンバーを含む走査は参考の警告、dev 依存は対象外。メンバーが本番・試験専用のどちらの表にも無ければ検査不能（2）。違反（1）と検査不能（2）を終了コードで分けられるのはスクリプトを直接実行したときだけで、`make` 経由では GNU Make が中のコマンドの 1 も 2 に変える（陰性対照つき。DPOL-13・TASK-667。名前は暫定） |
 | `make it-db` | `scripts/it-db.sh` | ハーネスの DB 結合試験（Docker 必須・`#[ignore]` の試験を流す。CI では流さない。名前は暫定） |
 | `make it-db-ci` | `scripts/it-db-ci.sh` | CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験 `db_job_frame` だけを流す。0 件は失敗。名前は暫定） |
 | `make e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネスの Chrome の E2E（chromedriver 必須・`#[ignore]` の試験を流す。結果は〔仮想〕。CI では流さない。名前は暫定） |

@@ -37,20 +37,25 @@ for c in cargo mktemp mkdir rm grep dirname basename; do
   require_cmd "${c}" || exit 2
 done
 
-cd "${ROOT_DIR}"
+# 生の診断（絶対パス・ホームのパスを含み得る mkdir・mktemp・cd・cargo・redirect の標準エラー）は出さない。
+# 失敗した箇所は固定の英語の文で報告して終了コード 2 にする。出力の抑制は合否を変えず、終了コードで判定する。
+if ! cd "${ROOT_DIR}" 2>/dev/null; then
+  log "error: cannot enter repository root; cannot inspect"
+  exit 2
+fi
 
 # 偽 crate は repo の target/ の下に作る。誰でも書ける /tmp の下だと、親の .cargo/config.toml
 # （build.rustc-wrapper 等）を別の利用者に置かれて任意のコードが実行され得るため。
 # 準備の失敗は検査不能（2）。set -e の 1 では「違反」と区別できないため明示する。
-if ! mkdir -p "${ROOT_DIR}/target"; then
+if ! mkdir -p "${ROOT_DIR}/target" 2>/dev/null; then
   log "error: cannot create target/; cannot inspect"
   exit 2
 fi
-if ! WORK="$(mktemp -d "${ROOT_DIR}/target/openssl-vendored.XXXXXX")"; then
+if ! WORK="$(mktemp -d "${ROOT_DIR}/target/openssl-vendored.XXXXXX" 2>/dev/null)"; then
   log "error: cannot create work dir; cannot inspect"
   exit 2
 fi
-cleanup() { rm -rf "${WORK}"; }
+cleanup() { rm -rf "${WORK}" 2>/dev/null || true; }
 trap cleanup EXIT
 
 # 本番対象から外す試験専用メンバー（Cargo.toml の注記・check-crate-deps.sh の試験専用の表と同じ。TASK-667）。
@@ -82,7 +87,10 @@ build_feature_args() {
   FA=()
   [ -z "$1" ] && return 0
   # 文字列全体を bash の正規表現で照合する（grep は行ごとのため、改行入りの値の 1 行目だけが通り得る）。
-  local re='^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+(,[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)*$'
+  # 区切り（カンマ）・空要素・`/` の有無・空白と制御文字（改行・CR・タブ等）は拒否する。名前の文字の妥当性（`+` 等）と
+  # 未知の feature は Cargo に任せる（未知の feature は cargo tree の失敗として run_tree が 2 にする）。
+  local c='[^[:space:][:cntrl:],/]'
+  local re="^${c}+/${c}+(,${c}+/${c}+)*\$"
   if ! [[ "$1" =~ $re ]]; then
     log "error: PROD_FEATURES must be comma-separated <crate>/<feature>; cannot inspect"
     exit 2
@@ -129,7 +137,7 @@ run_tree() {
   local dir="$1" mode="$2" out flag="--offline" err="${WORK}/tree.err" kind="other"
   shift 2
   [ "${mode}" = "locked" ] && flag="--locked"
-  if ! out="$(cd "${dir}" && cargo tree "${flag}" -e features,normal,build --target all --prefix none "$@" 2>"${err}")"; then
+  if ! out="$({ { cd "${dir}" && cargo tree "${flag}" -e features,normal,build --target all --prefix none "$@"; } 2>"${err}"; } 2>/dev/null)"; then
     if grep -qi 'lock file' "${err}" 2>/dev/null; then
       kind="lockfile"
     elif grep -qiE 'failed to (download|get|fetch)|network|registry|index' "${err}" 2>/dev/null; then
@@ -159,9 +167,9 @@ count_rule() {
 # mkpkg <dir> <name> <Cargo.toml の追加本文>: path 依存の偽 crate を作る。[workspace] は repo の workspace に取り込まれないため。
 # 書き込みの失敗（ENOSPC 等）は検査不能（2）。set -e の 1 では「違反」と区別できないため明示する。
 mkpkg() {
-  if ! mkdir -p "$1/src" ||
-    ! printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n[workspace]\nresolver = "3"\n' "$2" "$3" >"$1/Cargo.toml" ||
-    ! : >"$1/src/lib.rs"; then
+  if ! mkdir -p "$1/src" 2>/dev/null ||
+    ! printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n[workspace]\nresolver = "3"\n' "$2" "$3" 2>/dev/null >"$1/Cargo.toml" ||
+    ! : 2>/dev/null >"$1/src/lib.rs"; then
     log "error: cannot write fixture ($2); cannot inspect"
     exit 2
   fi
@@ -183,7 +191,7 @@ expect_count() {
 
 selftest() {
   local f="${WORK}/fx" t a b r
-  if ! mkdir -p "${f}"; then
+  if ! mkdir -p "${f}" 2>/dev/null; then
     log "error: cannot create selftest dir; cannot inspect"
     exit 2
   fi
@@ -226,11 +234,11 @@ selftest() {
 
   # F6: 本番メンバーと試験専用メンバーを含む workspace → 走査 A（--exclude）で 0 件、全メンバーの走査 C で検出
   local w="${f}/f6" tp="${TEST_ONLY_PKGS[0]}"
-  if ! mkdir -p "${w}/prod/src" "${w}/${tp}/src" ||
-    ! printf '[workspace]\nresolver = "3"\nmembers = ["prod", "%s"]\n' "${tp}" >"${w}/Cargo.toml" ||
-    ! printf '[package]\nname = "prod"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys" }\n' >"${w}/prod/Cargo.toml" ||
-    ! printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys", features = ["vendored"] }\n' "${tp}" >"${w}/${tp}/Cargo.toml" ||
-    ! : >"${w}/prod/src/lib.rs" || ! : >"${w}/${tp}/src/lib.rs"; then
+  if ! mkdir -p "${w}/prod/src" "${w}/${tp}/src" 2>/dev/null ||
+    ! printf '[workspace]\nresolver = "3"\nmembers = ["prod", "%s"]\n' "${tp}" 2>/dev/null >"${w}/Cargo.toml" ||
+    ! printf '[package]\nname = "prod"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys" }\n' 2>/dev/null >"${w}/prod/Cargo.toml" ||
+    ! printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys", features = ["vendored"] }\n' "${tp}" 2>/dev/null >"${w}/${tp}/Cargo.toml" ||
+    ! : 2>/dev/null >"${w}/prod/src/lib.rs" || ! : 2>/dev/null >"${w}/${tp}/src/lib.rs"; then
     log "error: cannot write fixture (f6); cannot inspect"
     exit 2
   fi
@@ -241,10 +249,10 @@ selftest() {
 
   # F8: 本番メンバーの非既定 feature が openssl-sys/vendored を引く → PROD_FEATURES なしは 0 件、PROD_FEATURES ありは走査 A で検出
   local w8="${f}/f8"
-  if ! mkdir -p "${w8}/prod8/src" ||
-    ! printf '[workspace]\nresolver = "3"\nmembers = ["prod8"]\n' >"${w8}/Cargo.toml" ||
-    ! printf '[package]\nname = "prod8"\nversion = "0.1.0"\nedition = "2021"\n[features]\nx = ["openssl-sys/vendored"]\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys" }\n' >"${w8}/prod8/Cargo.toml" ||
-    ! : >"${w8}/prod8/src/lib.rs"; then
+  if ! mkdir -p "${w8}/prod8/src" 2>/dev/null ||
+    ! printf '[workspace]\nresolver = "3"\nmembers = ["prod8"]\n' 2>/dev/null >"${w8}/Cargo.toml" ||
+    ! printf '[package]\nname = "prod8"\nversion = "0.1.0"\nedition = "2021"\n[features]\nx = ["openssl-sys/vendored"]\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys" }\n' 2>/dev/null >"${w8}/prod8/Cargo.toml" ||
+    ! : 2>/dev/null >"${w8}/prod8/src/lib.rs"; then
     log "error: cannot write fixture (f8); cannot inspect"
     exit 2
   fi
@@ -264,7 +272,7 @@ selftest() {
     fi
   done
   rc=0
-  (build_feature_args "prod8/x,prod8/y") 2>/dev/null || rc=$?
+  (build_feature_args "prod8/x,prod8/y,prod8/x+y") 2>/dev/null || rc=$?
   if [ "${rc}" -ne 0 ]; then
     log "FAIL selftest F9: valid PROD_FEATURES rejected"
     exit 1
@@ -295,7 +303,10 @@ scan_info() {
   shift
   if t="$(run_tree "${ROOT_DIR}" locked "$@")"; then
     for r in R1 R2 R3; do
-      n="$(count_rule "${r}" "${t}")" || exit 2
+      if ! n="$(count_rule "${r}" "${t}")"; then
+        log "warn: scan ${label} (info, not gated) could not be counted; result not affected"
+        return 0
+      fi
       log "scan ${label} (info, not gated) ${r}: ${n}"
       [ "${n}" -ne 0 ] && log "warn: vendored path found in scan ${label} (${r}); confirm it is not a production dependency"
     done
