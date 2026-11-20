@@ -12,12 +12,23 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
 
+# 想定外の失敗（set -e 相当）は検出（1）と取り違えないよう、すべて検査不能（2）として止める（fail-closed）。
+set -E
+trap 'echo "secret-scan-ci: internal error; aborting" >&2; exit 2' ERR
+
 # 呼び出し元の環境が git のリポジトリ・index・設定を差し替えないよう、GIT_* をすべて外す
 # （GIT_INDEX_FILE・GIT_DIR・GIT_WORK_TREE 等。対象の確認と本走査を同じ環境で行う）。
-for _v in $(compgen -e | grep '^GIT_' || true); do
-  unset "${_v}"
+# 列挙の失敗を「該当なし」と取り違えないよう、パイプを使わず bash の照合で絞り、失敗は検査不能にする。
+if ! env_names="$(compgen -e 2> /dev/null)"; then
+  echo "secret-scan-ci: failed to list environment variables" >&2
+  exit 2
+fi
+for _v in ${env_names}; do
+  case "${_v}" in
+    GIT_*) unset "${_v}" ;;
+  esac
 done
-unset _v
+unset _v env_names
 
 if [ "$#" -gt 1 ]; then
   echo "usage: secret-scan-ci.sh [<target-repo-path>]" >&2
@@ -28,10 +39,17 @@ if [ ! -d "${target}" ]; then
   echo "secret-scan-ci: target is not a directory" >&2
   exit 2
 fi
-target="$(cd "${target}" && pwd -P)"
+if ! target="$(cd "${target}" 2> /dev/null && pwd -P)" || [ -z "${target}" ]; then
+  echo "secret-scan-ci: cannot resolve the target directory" >&2
+  exit 2
+fi
 # 親のリポジトリを誤って走査しないよう、対象がリポジトリのルートそのものであることを確かめる（fail-closed）。
 top="$(git -C "${target}" rev-parse --show-toplevel 2>/dev/null)" || top=""
-if [ -z "${top}" ] || [ "$(cd "${top}" && pwd -P)" != "${target}" ]; then
+top_real=""
+if [ -n "${top}" ]; then
+  top_real="$(cd "${top}" 2> /dev/null && pwd -P)" || top_real=""
+fi
+if [ -z "${top_real}" ] || [ "${top_real}" != "${target}" ]; then
   echo "secret-scan-ci: target is not the root of a git repository" >&2
   exit 2
 fi
@@ -45,19 +63,40 @@ if [ "${idx_rc}" -ne 0 ]; then
   exit 2
 fi
 
-out="$(mktemp "${TMPDIR:-/tmp}/secret-scan-ci.XXXXXX")" || {
+out="$(mktemp "${TMPDIR:-/tmp}/secret-scan-ci.XXXXXX" 2> /dev/null)" || {
   echo "secret-scan-ci: mktemp failed" >&2
   exit 2
 }
 trap 'rm -f "${out}"' EXIT
 
+# 検出器の終了状態は 0 = 検出なし / 1 = 検出 / 2 = 検査不能。それ以外（起動失敗・シグナル等）も検査不能に畳む。
 rc=0
 (cd "${target}" && "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary) > "${out}" 2>&1 || rc=$?
 # 規則 ID は許可した一覧との完全一致だけを通す（任意の文字列・git の診断を公開ログへ通さない）。
-grep -aE '^secret-scan: (env-file|vendor-token|private-key|jwt|jwk-private|credential-url|assignment): [0-9]+ (line|file)\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) in [0-9]+ file\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) \([0-9]+ tracked file\(s\) checked\)$|^secret-scan: findings in tracked files$' "${out}" || true
-if [ "${rc}" -ne 0 ]; then
-  echo "secret-scan-ci: scan failed (exit ${rc}); details are withheld on the public log. Re-run locally: make secret-scan" >&2
-  exit "${rc}"
+# grep の終了状態は 0 = 一致 / 1 = 該当なし / 2 以上 = エラー。1 だけを「該当なし」として許す。
+grep_rc=0
+grep -aE '^secret-scan: (env-file|vendor-token|private-key|jwt|jwk-private|credential-url|assignment): [0-9]+ (line|file)\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) in [0-9]+ file\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) \([0-9]+ tracked file\(s\) checked\)$|^secret-scan: findings in tracked files$' "${out}" 2> /dev/null || grep_rc=$?
+if [ "${grep_rc}" -gt 1 ]; then
+  echo "secret-scan-ci: failed to filter the scanner output (grep exit ${grep_rc})" >&2
+  exit 2
 fi
+case "${rc}" in
+  0) ;;
+  1)
+    echo "secret-scan-ci: findings reported; details are withheld on the public log. Re-run locally: make secret-scan" >&2
+    exit 1
+    ;;
+  *)
+    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log. Re-run locally: make secret-scan" >&2
+    exit 2
+    ;;
+esac
 
-"${ROOT_DIR}/scripts/secret-scan-canary.sh"
+# 陰性対照の終了状態: 0 = 期待どおり / 1 = 検出能力の異常 / 2 以上 = 検査不能。
+canary_rc=0
+"${ROOT_DIR}/scripts/secret-scan-canary.sh" || canary_rc=$?
+case "${canary_rc}" in
+  0) ;;
+  1) exit 1 ;;
+  *) exit 2 ;;
+esac

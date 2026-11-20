@@ -31,7 +31,8 @@
 # 圧縮・エンコード（base64 等）・複数行に分割された値・規則に無い形の値は検出できない。
 # .agents/skills/・.claude/skills/・*.lock は本文の走査（規則 assignment 等）の対象外（skills-lock.json 管理の外部取得物・ハッシュ列）。
 # ただし env-file の名前の検査は除外より前に全パスへ掛かる（除外は本文の走査にだけ効く。fail-closed）。
-# 範囲外で検出力が無いもの: コミット履歴・submodule の中・バイナリ・規則に無い形（長い 16 進や base64 の塊単体）。
+# 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
+# 本文のバイト列は照合するが、圧縮・エンコードの展開と、複数行に分かれた値の復元はしない。
 # 保守的なヒューリスティックであり網羅的なスキャナの代替ではない。AAUD-30 の実行時の登録簿による走査とも別物。
 #
 # 誤検知時はダミー値・環境変数参照へ書き換える。`--no-verify` によるバイパスは行わない。
@@ -45,6 +46,14 @@ set -euo pipefail
 # bash は LC_ALL への代入時に setlocale し直すため、以降の照合すべてに効く。
 export LC_ALL=C
 
+# fd 4: 元の標準エラー。固定の文言（診断・集計）はすべてここへ出す。--summary では fd 2 を捨てるため、
+# 以降の文言は `>&4` で出す（シェル・外部コマンドの生の診断は fd 2 に残り、--summary では出ない）。
+exec 4>&2
+
+# 想定外の失敗（set -e 相当）は検出（1）と取り違えないよう、すべて検査不能（2）として止める（fail-closed）。
+set -E
+trap 'echo "secret-scan: internal error; aborting" >&4; exit 2' ERR
+
 mode=staged
 summary=0
 case "$#:${1:-}:${2:-}" in
@@ -55,17 +64,16 @@ case "$#:${1:-}:${2:-}" in
     summary=1
     ;;
   *)
-    echo "usage: secret-scan.sh [--tracked [--summary]]" >&2
+    echo "usage: secret-scan.sh [--tracked [--summary]]" >&4
     exit 2
     ;;
 esac
 
-# git の診断（標準エラー）の出力先を fd 5 に固める。通常は受け継いだ標準エラーの複製、--summary（公開ログ用）
-# では /dev/null（診断はパス・値を含み得る。SECR-23）。失敗は終了状態で検知し、固定の文言と終了コードで伝える。
+# --summary（公開ログ用）では、シェル自身と外部コマンド（git・cd・mktemp 等）の診断を含む標準エラー全体を
+# /dev/null へ向ける（診断はパス・値を含み得る。SECR-23）。固定の文言だけを、退避した元の標準エラー（fd 4）へ出す。
+# 失敗は終了状態で検知し、固定の文言と終了コードで伝える。通常モードは受け継いだ標準エラーをそのまま使う。
 if [ "${summary}" -eq 1 ]; then
-  exec 5> /dev/null
-else
-  exec 5>&2
+  exec 2> /dev/null
 fi
 
 # 行に対する規則（bash 3.2 互換のため添字配列を並べる）。nocase_from 以降は大文字小文字を区別しない。
@@ -102,7 +110,7 @@ classify_line() {
       hit="${i}"
       break
     elif [ "${rc}" -gt 1 ]; then
-      echo "secret-scan: regex evaluation failed (rc=${rc}); aborting" >&2
+      echo "secret-scan: regex evaluation failed (rc=${rc}); aborting" >&4
       exit 2
     fi
   done
@@ -115,7 +123,7 @@ classify_line() {
 q='"' at='@' dash='-----' hi=$'\xe9'
 jwk_d="Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij"
 selftest_fail() {
-  echo "secret-scan: self-test failed (regex engine / locale mismatch?); aborting" >&2
+  echo "secret-scan: self-test failed (regex engine / locale mismatch?); aborting" >&4
   exit 2
 }
 # expect_rule <規則 ID> <行>: その規則に分類されること
@@ -146,13 +154,19 @@ expect_none "+password = ${q}short${q}"
 
 # サブディレクトリから直接実行しても走査範囲が狭まらないよう、リポジトリルートで実行する。
 # rev-parse の失敗を `cd "$(...)"` に埋めると cd "" になり失敗が隠れるため、先に代入で受ける。
-if ! repo_root="$(git rev-parse --show-toplevel 2>&5)" || [ -z "${repo_root}" ]; then
-  echo "secret-scan: not inside a git work tree; aborting" >&2
+if ! repo_root="$(git rev-parse --show-toplevel)" || [ -z "${repo_root}" ]; then
+  echo "secret-scan: not inside a git work tree; aborting" >&4
   exit 2
 fi
-cd "${repo_root}"
+if ! cd "${repo_root}"; then
+  echo "secret-scan: cannot enter the repository root; aborting" >&4
+  exit 2
+fi
 
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")"
+if ! tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")" || [ -z "${tmp_dir}" ]; then
+  echo "secret-scan: mktemp failed; aborting" >&4
+  exit 2
+fi
 trap 'rm -rf "${tmp_dir}"' EXIT
 
 # 利用者の git 設定で出力形式が変わると追加行・ファイル名を取りこぼすため固定する。
@@ -168,18 +182,18 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 # 空になりうる配列を使わず mode で分岐し、tracked のときだけ empty_tree を渡す。
 empty_tree=""
 if [ "${mode}" = tracked ]; then
-  if ! empty_tree="$(git hash-object -t tree --stdin < /dev/null 2>&5)" || [ -z "${empty_tree}" ]; then
-    echo "secret-scan: failed to resolve the empty tree; aborting" >&2
+  if ! empty_tree="$(git hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
+    echo "secret-scan: failed to resolve the empty tree; aborting" >&4
     exit 2
   fi
 fi
 scan_diff() {
   if [ "${mode}" = tracked ]; then
     git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@" 2>&5
+      --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@"
   else
     git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "$@" 2>&5
+      --src-prefix=a/ --dst-prefix=b/ "$@"
   fi
 }
 
@@ -204,7 +218,7 @@ add_flagged() {
 # 1. .env 系ファイル。-z で受け、非 ASCII を含むパスが core.quotePath で引用符付き・
 #    8 進エスケープになり末尾一致しなくなるのを防ぐ。
 if ! scan_diff --name-only -z --diff-filter=ACMR > "${tmp_dir}/names"; then
-  echo "secret-scan: failed to list files; aborting" >&2
+  echo "secret-scan: failed to list files; aborting" >&4
   exit 2
 fi
 
@@ -220,12 +234,12 @@ done < "${tmp_dir}/names"
 
 # 取り違えで「対象なし」を合格にしないため、追跡ファイルがあるのに対象が 0 件なら止める。
 if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
-  if ! git ls-files -z > "${tmp_dir}/ls" 2>&5; then
-    echo "secret-scan: failed to list tracked files; aborting" >&2
+  if ! git ls-files -z > "${tmp_dir}/ls"; then
+    echo "secret-scan: failed to list tracked files; aborting" >&4
     exit 2
   fi
   if [ -s "${tmp_dir}/ls" ]; then
-    echo "secret-scan: tracked files exist but none were selected for scanning; aborting" >&2
+    echo "secret-scan: tracked files exist but none were selected for scanning; aborting" >&4
     exit 2
   fi
 fi
@@ -234,7 +248,7 @@ fi
 if ! scan_diff -U0 --diff-filter=ACMR -- . \
   ':(exclude).agents/skills/**' ':(exclude).claude/skills/**' ':(exclude)*.lock' \
   > "${tmp_dir}/diff"; then
-  echo "secret-scan: failed to read diff; aborting" >&2
+  echo "secret-scan: failed to read diff; aborting" >&4
   exit 2
 fi
 
@@ -242,11 +256,11 @@ fi
 # 後ろの秘密値や NUL で分割された語を見落とし得る（fail-open）。走査の前に NUL を取り除いた版と
 # 空白へ置き換えた版を作り、NUL を含む場合は両方を走査する（行番号は同じ。同じ行は二重に数えない）。
 if ! tr -d '\000' < "${tmp_dir}/diff" > "${tmp_dir}/diff.del"; then
-  echo "secret-scan: failed to normalize diff; aborting" >&2
+  echo "secret-scan: failed to normalize diff; aborting" >&4
   exit 2
 fi
 if ! tr '\000' ' ' < "${tmp_dir}/diff" > "${tmp_dir}/diff.sp"; then
-  echo "secret-scan: failed to normalize diff; aborting" >&2
+  echo "secret-scan: failed to normalize diff; aborting" >&4
   exit 2
 fi
 
@@ -302,14 +316,24 @@ scan_pass() {
     esac
   done < "$1"
 }
-if cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del"; then
-  scan_pass "${tmp_dir}/diff.del"
-else
-  record_seen=1
-  scan_pass "${tmp_dir}/diff.del"
-  record_seen=0
-  scan_pass "${tmp_dir}/diff.sp"
-fi
+# cmp の終了状態は 0 = 同じ（NUL なし）/ 1 = 違う（NUL あり）/ 2 以上 = エラー。後者は検査不能として止める。
+cmp_rc=0
+cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del" || cmp_rc=$?
+case "${cmp_rc}" in
+  0)
+    scan_pass "${tmp_dir}/diff.del"
+    ;;
+  1)
+    record_seen=1
+    scan_pass "${tmp_dir}/diff.del"
+    record_seen=0
+    scan_pass "${tmp_dir}/diff.sp"
+    ;;
+  *)
+    echo "secret-scan: failed to compare normalized diff (cmp exit ${cmp_rc}); aborting" >&4
+    exit 2
+    ;;
+esac
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
 total="${env_hits}"
@@ -319,23 +343,23 @@ done
 
 if [ "${total}" -gt 0 ]; then
   if [ "${mode}" = tracked ]; then
-    echo "secret-scan: findings in tracked files" >&2
+    echo "secret-scan: findings in tracked files" >&4
   else
-    echo "commit blocked: staged changes look like they contain a secret" >&2
+    echo "commit blocked: staged changes look like they contain a secret" >&4
   fi
   if [ "${env_hits}" -gt 0 ]; then
-    echo "secret-scan: env-file: ${env_hits} file(s)" >&2
+    echo "secret-scan: env-file: ${env_hits} file(s)" >&4
   fi
   for ((i = 0; i < rule_count; i++)); do
     if [ "${rule_hits[i]}" -gt 0 ]; then
-      echo "secret-scan: ${rule_ids[i]}: ${rule_hits[i]} line(s)" >&2
+      echo "secret-scan: ${rule_ids[i]}: ${rule_hits[i]} line(s)" >&4
     fi
   done
-  echo "secret-scan: total: ${total} finding(s) in ${flagged_count} file(s)" >&2
+  echo "secret-scan: total: ${total} finding(s) in ${flagged_count} file(s)" >&4
   if [ "${summary}" -eq 0 ]; then
-    printf '%s' "${flagged_files}" >&2
+    printf '%s' "${flagged_files}" >&4
   fi
-  echo "replace values with a placeholder / env var reference, or unstage the file (\`git restore --staged <file>\`)." >&2
+  echo "replace values with a placeholder / env var reference, or unstage the file (\`git restore --staged <file>\`)." >&4
   exit 1
 fi
 

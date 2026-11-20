@@ -453,6 +453,61 @@ else
   fail "scan-canary: passes without a grep error" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# ---- 終了状態の丸めの回帰（0 と既知の 1 以外は検査不能 = 2。--summary は固定の文言だけ）
+# secret-scan-ci.sh: 環境変数の列挙（compgen）の失敗を「該当なし」と取り違えない
+new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
+compgen_fail_env="${work_dir}/compgen-fail.sh"
+printf 'compgen() { return 2; }\n' > "${compgen_fail_env}"
+rc=0
+BASH_ENV="${compgen_fail_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "secret-scan-ci: failure listing environment variables exits 2"
+else
+  fail "secret-scan-ci: failure listing environment variables exits 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# secret-scan.sh: cmp のエラー（終了状態 2 以上）は検査不能
+cmp_shim_dir="${work_dir}/cmp-shim"
+mkdir -p "${cmp_shim_dir}"
+printf '#!/bin/sh\nexit 2\n' > "${cmp_shim_dir}/cmp"
+chmod +x "${cmp_shim_dir}/cmp"
+rc=0
+PATH="${cmp_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" --tracked > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "secret-scan: (tracked) cmp error exits 2"
+else
+  fail "secret-scan: (tracked) cmp error exits 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# secret-scan.sh --summary: シェルが出す外部コマンドの診断（mktemp 等）も捨て、固定の文言だけを出す
+mktemp_shim_dir="${work_dir}/mktemp-shim"
+mkdir -p "${mktemp_shim_dir}"
+printf '#!/bin/sh\necho "RAW-DIAGNOSTIC-MARKER /raw/path" >&2\nexit 1\n' > "${mktemp_shim_dir}/mktemp"
+chmod +x "${mktemp_shim_dir}/mktemp"
+rc=0
+PATH="${mktemp_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && ! grep -q "RAW-DIAGNOSTIC-MARKER" "${work_dir}/out" && grep -q "secret-scan: mktemp failed" "${work_dir}/out"; then
+  pass "secret-scan: --summary drops raw diagnostics of external commands (mktemp)"
+else
+  fail "secret-scan: --summary drops raw diagnostics of external commands (mktemp)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rc=0
+PATH="${mktemp_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" --tracked > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -q "RAW-DIAGNOSTIC-MARKER" "${work_dir}/out"; then
+  pass "secret-scan: normal mode keeps raw diagnostics of external commands (mktemp)"
+else
+  fail "secret-scan: normal mode keeps raw diagnostics of external commands (mktemp)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# secret-scan-canary.sh: 検出器が検査不能（2）を返したら、陰性対照も 2 で終わる（1 は検出能力の異常だけ）
+rc=0
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=--name-only LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "scan-canary: scanner exit 2 makes the canary exit 2"
+else
+  fail "scan-canary: scanner exit 2 makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 new_repo; stage .gitattributes "* -diff"; stage app.txt "x = ${token}"; git commit -q -m "chore: attr"
 check_scan "(tracked) -diff attribute does not hide content" 1 app.txt
 
