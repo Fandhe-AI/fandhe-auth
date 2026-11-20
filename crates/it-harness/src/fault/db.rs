@@ -24,6 +24,21 @@
 //! - 刻みの値（accept 5 ms・待ちの刻み 10 ms・上流への接続の上限 5 秒・遅延の上限）は開発の値で要件の値ではない
 //!   （THRT-29）。
 //!
+//! 順序と境界の契約（#5983。詳細は `docs/harness/fault-injection.md`。ORST-17）:
+//! - `block`: ロック → `Applied` を記録 → 状態を入れて切断 → ロックを外す。記録が拒否されたら状態を変えない（fail-closed）。
+//!   `Applied` の時刻は実際の遮断の開始の下限で、`block` が戻った後は新しい塊を書かず、以後の accept は上流へ届けず切る。
+//! - 上流への接続の開始の保証は「事前確認の時点」までで、確認の後（ポートの取得・`connect_timeout`）に `block` が
+//!   完了しても上流への TCP の試行は起こり得る。ただし client のバイトは上流へ送らず切る。
+//! - `release_block`: ロック → 待ち受けの待ち行列を上限まで排出して切る → `Released` を記録 → 解く。
+//!   排出の後も、解除処理がロックを解放するまで accept のスレッドは進まない（ロックの解放の後に始まった接続は、使える上流があれば上流へ届く。
+//!   `Ok(())` は遮断の解除で転送の保証ではなく、上流が無い・上流への接続に失敗したときは解除の後でも閉じる）。
+//!   排出は `accept()` が `WouldBlock` を返した時点で終わるので、その後の解除までに待ち行列へ入った接続（解除と重なった接続）は解除の後に転送され得る（未定）。
+//!   `Ok(())` で戻った場合に限り、解除の前に待ち行列にあった接続は上流へ届かない（排出の上限を超えた分は保証外。
+//!   `docs/harness/fault-injection.md`）。`Err`（`DrainFailed`・記録の拒否）では遮断のままで、新規接続も切る。
+//!   待ち行列の空を確かめられない accept の失敗（`WouldBlock` 以外。fd 枯渇等）では `Released` を記録せず遮断のまま
+//!   `DrainFailed` で戻る（fail-closed）。呼び出しと重なった往復は未定で、試験の合否に使わない。
+//! - 遅延は順序の契約の対象外（記録してから値を入れる。重なった塊は未定）。
+//!
 //! 名前・形・遮断の形（直ちに閉じる。受けて黙る形は入れていない）は仮置きで、人が確認する。
 
 use std::fmt;
@@ -43,6 +58,11 @@ const ACCEPT_TICK: Duration = Duration::from_millis(5);
 const WAIT_TICK: Duration = Duration::from_millis(10);
 /// 上流への接続の上限（開発の値）。
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// 解除のときに待ち受けの待ち行列から排出する接続の上限（開発の値。THRT-29）。Linux の `somaxconn` の
+/// 既定値以上にして通常の待ち行列は空にし、再接続が続く状況でも解除が期限の中で戻るように件数で打ち切る。
+const MAX_DRAIN_ON_RELEASE: usize = 4096;
+/// 排出中の `Interrupted` で再試行する回数の上限（開発の値。THRT-29）。切断件数とは別に数え、割り込みが続いても打ち切る。
+const MAX_DRAIN_INTERRUPTS: usize = 64;
 /// 遅延の上限（開発の値。試験が固まるほどの遅延を拒否する）。
 const MAX_DELAY_MS: u64 = 600_000;
 
@@ -59,6 +79,8 @@ pub enum DbFaultError {
     InvalidParam,
     /// 記録が拒否した（基準線である等）。状態は変えていない。
     Record(FaultRecordError),
+    /// 解除のときに待ち行列の排出が accept の失敗（`WouldBlock` 以外）で終えられなかった。遮断のまま戻る。
+    DrainFailed,
 }
 
 impl fmt::Display for DbFaultError {
@@ -69,6 +91,7 @@ impl fmt::Display for DbFaultError {
             Self::NotActive => f.write_str("db fault error: not active"),
             Self::InvalidParam => f.write_str("db fault error: invalid parameter"),
             Self::Record(e) => write!(f, "db fault error: {e}"),
+            Self::DrainFailed => f.write_str("db fault error: drain failed"),
         }
     }
 }
@@ -173,6 +196,9 @@ pub struct DbFaultProxy {
     upstream: Upstream,
     listen_port: u16,
     accept: Option<JoinHandle<()>>,
+    /// 待ち受け。accept のスレッドと共有し、解除のときの待ち行列の排出に使う。
+    /// 停止時に `take` して取り外す（accept のスレッドの複製と合わせて、中継の回収を待たずに待ち受けを閉じる）。
+    listener: Option<Arc<TcpListener>>,
     block_active: bool,
     /// 遮断を記録するときの種類。`DbBlock` か `ExternalStoreBlock` だけ（4/8 が後者で包む）。
     block_kind: FaultKind,
@@ -232,9 +258,11 @@ impl DbFaultProxy {
             .map_err(|_| DbFaultError::StartFailed)?
             .port();
         let shared = Arc::new(Shared::new());
+        let listener = Arc::new(listener);
         let accept = {
             let shared = Arc::clone(&shared);
             let upstream = upstream.clone();
+            let listener = Arc::clone(&listener);
             thread::Builder::new()
                 .name("it-db-fault-accept".into())
                 .spawn(move || accept_loop(&listener, &shared, &upstream))
@@ -245,6 +273,7 @@ impl DbFaultProxy {
             upstream,
             listen_port,
             accept: Some(accept),
+            listener: Some(listener),
             block_active: false,
             block_kind,
             delay_active: None,
@@ -275,7 +304,8 @@ impl DbFaultProxy {
     }
 
     /// 転送器が accept した後に直ちに閉じた接続の数（遮断中に accept して切ったもの・上流なし・上流への接続の失敗・
-    /// 確立中の遮断）。カーネルの待ち行列にあってまだ accept していない接続は、遮断中でも数えない。
+    /// 確立中の遮断・解除のときに待ち行列から排出して切ったもの）。遮断中でカーネルの待ち行列にあってまだ
+    /// accept していない接続は、解除の排出までは数えない。
     pub fn refused_count(&self) -> u64 {
         self.shared.refused.load(Ordering::SeqCst)
     }
@@ -302,8 +332,32 @@ impl DbFaultProxy {
     }
 
     /// 遮断を解除する。切れた接続は戻らないので、client はつなぎ直す。
-    /// ロックを取り、`Released` を記録してから遮断を解く。記録が拒否されたら状態を変えない。
+    /// ロックを取り、待ち受けの待ち行列に残る接続を切ってから `Released` を記録して遮断を解く。
+    /// 記録が拒否されたら遮断のまま戻る（排出は遮断中の accept と同じ扱いで、状態の変化ではない。ORST-17）。
     pub fn release_block(&mut self, timeline: &mut FaultTimeline) -> Result<(), DbFaultError> {
+        self.release_block_with(timeline, drain_backlog)
+    }
+
+    /// `release_block` の本体。排出を差し替えられる（排出の失敗が解除を止めることを試験で確かめる。ORST-17）。
+    fn release_block_with(
+        &mut self,
+        timeline: &mut FaultTimeline,
+        drain: impl FnOnce(&TcpListener, &Shared) -> Drain,
+    ) -> Result<(), DbFaultError> {
+        let kind = self.block_kind;
+        self.release_block_inner(timeline, drain, move |tl, _| {
+            tl.record_now(kind, FaultPhase::Released)
+        })
+    }
+
+    /// 本体。`record` は `Released` を積む処理で、まだ遮断中の時点で呼ぶ。記録そのものを差し替えられるので、
+    /// 記録を呼ぶ時点の遮断の状態を試験で観測できる（ORST-17）。
+    fn release_block_inner(
+        &mut self,
+        timeline: &mut FaultTimeline,
+        drain: impl FnOnce(&TcpListener, &Shared) -> Drain,
+        record: impl FnOnce(&mut FaultTimeline, &Shared) -> Result<(), FaultRecordError>,
+    ) -> Result<(), DbFaultError> {
         if !self.block_active {
             return Err(DbFaultError::NotActive);
         }
@@ -312,9 +366,20 @@ impl DbFaultProxy {
             .conns
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        timeline
-            .record_now(self.block_kind, FaultPhase::Released)
-            .map_err(DbFaultError::Record)?;
+        // ロックを持つ間は accept のスレッドが進めない。排出の後も、解除処理がロックを解放するまで進まない。
+        // `WouldBlock` 以外の失敗は待ち行列の空を確かめられていない。`Released` を記録せず遮断を保つ（fail-closed）。
+        // 割り込みの再試行を使い切った場合も空を確かめられていないので同じ扱い（件数の上限到達とは分ける）。
+        // 停止後は待ち受けが無い。空を確かめられないので失敗として扱う（fail-closed）。
+        let Some(listener) = self.listener.as_deref() else {
+            return Err(DbFaultError::DrainFailed);
+        };
+        if matches!(
+            drain(listener, &self.shared),
+            Drain::Failed(_) | Drain::InterruptsExhausted(_)
+        ) {
+            return Err(DbFaultError::DrainFailed);
+        }
+        record(timeline, &self.shared).map_err(DbFaultError::Record)?;
         self.shared.blocked.store(false, Ordering::SeqCst);
         drop(conns);
         self.block_active = false;
@@ -372,6 +437,9 @@ impl DbFaultProxy {
         if let Some(h) = self.accept.take() {
             let _ = h.join();
         }
+        // accept のスレッドが終わった時点で、共有していた待ち受けを取り外す。中継の回収（join）を待たずに
+        // 新規接続を受け付けなくなる（#5983）。
+        self.listener.take();
         self.shared.sever_all();
         let workers: Vec<_> = {
             let mut g = self
@@ -437,39 +505,126 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, upstream: &Upstream
     }
 }
 
+/// 待ち受けの待ち行列に残る接続を上限まで accept して直ちに切る。`conns` のロックを持つ側が呼ぶ（ORST-17）。
+/// 遮断中に connect が終わったがまだ accept していない接続が、解除の後に上流へ届くのを防ぐ。
+/// 切った件数は `refused_count` にも数える。
+fn drain_backlog(listener: &TcpListener, shared: &Shared) -> Drain {
+    drain_with(shared, MAX_DRAIN_ON_RELEASE, MAX_DRAIN_INTERRUPTS, || {
+        listener.accept().map(|(c, _)| c)
+    })
+}
+
+/// 排出の結果。値は切った件数。
+#[derive(Debug, PartialEq, Eq)]
+enum Drain {
+    /// `WouldBlock` で待ち行列の空を確かめた。
+    Done(usize),
+    /// 件数の上限で打ち切った（上限を超えた分は保証外）。
+    Truncated(usize),
+    /// `Interrupted` の再試行を使い切った。空を確かめられておらず、失敗として扱う。
+    InterruptsExhausted(usize),
+    /// `WouldBlock`・`Interrupted` 以外の失敗で、空を確かめられなかった。
+    Failed(usize),
+}
+
+fn drain_with(
+    shared: &Shared,
+    max: usize,
+    max_interrupts: usize,
+    mut next: impl FnMut() -> std::io::Result<TcpStream>,
+) -> Drain {
+    let (mut n, mut interrupts) = (0, 0);
+    while n < max {
+        match next() {
+            Ok(client) => {
+                refuse(&client, shared);
+                n += 1;
+            }
+            Err(e) => match e.kind() {
+                ErrorKind::WouldBlock => return Drain::Done(n),
+                ErrorKind::Interrupted => {
+                    interrupts += 1;
+                    if interrupts > max_interrupts {
+                        return Drain::InterruptsExhausted(n);
+                    }
+                }
+                _ => return Drain::Failed(n),
+            },
+        }
+    }
+    Drain::Truncated(n)
+}
+
 fn refuse(client: &TcpStream, shared: &Shared) {
     shared.refused.fetch_add(1, Ordering::SeqCst);
     let _ = client.shutdown(Shutdown::Both);
 }
 
+/// 上流への接続を確立した段階の接続。中継はまだ始めていない。
+struct Connected {
+    accepted: Accepted,
+    up: TcpStream,
+    u_write: TcpStream,
+    u_kill: TcpStream,
+}
+
 /// 登録済みの接続を、上流へつないで中継する。確立中に遮断が入った場合は、世代の差で見つけて切る。
 fn handle_conn(accepted: Accepted, shared: &Arc<Shared>, upstream: &Upstream) {
-    let Accepted {
-        client,
-        c_read,
-        id,
-        block_gen,
-    } = accepted;
-    // 上流への接続を始める前に、遮断の状態と世代を確かめる。遮断済みなら上流へつながずに終える（ORST-17）。
-    // 上流への接続を始めた後に遮断と重なった場合は、つながった直後の世代の確認で切る（上流への接続自体は
-    // 試みられ得る。この窓は文書の「残る限界」に書いた。#5983 で追う）。
-    if shared.halted() || shared.block_gen.load(Ordering::SeqCst) != block_gen {
+    if let Some(connected) = connect_upstream(accepted, shared, upstream) {
+        start_relay(connected, shared);
+    }
+}
+
+/// 上流への接続の段。遮断済みなら上流へつながずに終える（ORST-17）。
+/// 上流への接続を始めた後に遮断と重なった場合、TCP の接続の試行は起こり得るが、次の段の世代の確認で
+/// client のバイトを送らずに切る（`docs/harness/fault-injection.md` の契約。ロックを持ったままつなぐと
+/// `block` が最大 5 秒待たされるので、試行そのものは防がない）。
+fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) -> Option<Connected> {
+    let id = accepted.id;
+    if shared.halted() || shared.block_gen.load(Ordering::SeqCst) != accepted.block_gen {
         shared.sever_conn(id);
-        return refuse(&client, shared);
+        refuse(&accepted.client, shared);
+        return None;
     }
     let Some(port) = upstream.port() else {
         shared.sever_conn(id);
-        return refuse(&client, shared);
+        refuse(&accepted.client, shared);
+        return None;
     };
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let Ok(up) = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT) else {
         shared.sever_conn(id);
-        return refuse(&client, shared);
+        refuse(&accepted.client, shared);
+        return None;
     };
     let (Ok(u_write), Ok(u_kill)) = (up.try_clone(), up.try_clone()) else {
         shared.sever_conn(id);
-        return refuse(&client, shared);
+        refuse(&accepted.client, shared);
+        return None;
     };
+    Some(Connected {
+        accepted,
+        up,
+        u_write,
+        u_kill,
+    })
+}
+
+/// 中継を始める段。上流側の複製を登録し、世代を確かめてから転送のスレッドを起こす。
+/// 遮断が入っていれば client のバイトを 1 つも上流へ送らずに切る（ORST-17）。
+fn start_relay(connected: Connected, shared: &Arc<Shared>) {
+    let Connected {
+        accepted:
+            Accepted {
+                client,
+                c_read,
+                id,
+                block_gen,
+            },
+        up,
+        u_write,
+        u_kill,
+    } = connected;
     shared
         .conns
         .lock()
@@ -604,6 +759,37 @@ mod tests {
         port
     }
 
+    /// 待ち受けの accept 待ち行列の長さが `want` 以上になるまで、期限付きで待つ（Linux の `/proc/net/tcp` の rx_queue）。
+    /// 待ち行列の外から見える手段が他に無いため。アドレスの表記（エンディアン）に依らないよう、
+    /// 状態が LISTEN（`0A`）でポートが一致する行だけを見る。`/proc/net/tcp` が読めなければ観測できないので panic する
+    /// （合格に数えない。Linux 以外ではこの試験を `ignore` にしている）。
+    fn wait_backlog(port: u16, want: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let suffix = format!(":{port:04X}");
+        loop {
+            let text = std::fs::read_to_string("/proc/net/tcp")
+                .expect("cannot observe the accept queue: /proc/net/tcp is unreadable");
+            let queued = text
+                .lines()
+                .skip(1)
+                .filter_map(|l| {
+                    let f: Vec<&str> = l.split_whitespace().collect();
+                    if f.get(1)?.ends_with(&suffix) && *f.get(3)? == "0A" {
+                        usize::from_str_radix(f.get(4)?.split(':').nth(1)?, 16).ok()
+                    } else {
+                        None
+                    }
+                })
+                .max()
+                .unwrap_or(0);
+            if queued >= want {
+                return;
+            }
+            assert!(Instant::now() < deadline, "backlog never reached {want}");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn connect(port: u16) -> TcpStream {
         let s = TcpStream::connect_timeout(
             &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
@@ -729,6 +915,282 @@ mod tests {
         assert_eq!(echo_or_cut(&mut client, b"y"), None);
     }
 
+    fn nb_listener() -> (TcpListener, u16) {
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        l.set_nonblocking(true).unwrap();
+        let port = l.local_addr().unwrap().port();
+        (l, port)
+    }
+
+    fn accept_blocking(l: &TcpListener, shared: &Shared) -> Accepted {
+        for _ in 0..500 {
+            if let Some(a) = accept_one(l, shared) {
+                return a;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("not accepted");
+    }
+
+    /// 非ブロッキングの待ち受けから受理する。`wait` なら握手の完了まで期限（5 秒）付きで待つ。
+    /// 期限は合否を決める時間ではなく、握手遅延で flaky にしないための上限。
+    fn accept_within(l: &TcpListener, wait: bool) -> std::io::Result<TcpStream> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match l.accept() {
+                Ok((c, _)) => return Ok(c),
+                Err(e)
+                    if wait && e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// 解除の排出が待ち行列の接続を切る（ORST-17）。遮断中に connect が済み、まだ accept していない接続は、
+    /// 排出しなければ解除の後に accept されて上流へ届く。ここでは排出の後に accept できる接続が無く、切断になる。
+    /// 待ちはカーネルが握手を終えるためだけで、合否を時間で決めない。
+    #[test]
+    fn release_drains_backlog_queued_while_blocked() {
+        let shared = Shared::new();
+        let (l, port) = nb_listener();
+        {
+            let mut conns = shared.conns.lock().unwrap();
+            shared.engage_block(&mut conns);
+        }
+        let mut client = connect(port);
+        {
+            let _conns = shared.conns.lock().unwrap();
+            // 握手の完了は期限付きで待つ（固定の待ちに頼らない）。最初の 1 件だけ待ち、以後は即 WouldBlock。
+            let mut waited = false;
+            let drained = drain_with(&shared, MAX_DRAIN_ON_RELEASE, MAX_DRAIN_INTERRUPTS, || {
+                let r = accept_within(&l, !waited);
+                waited = true;
+                r
+            });
+            assert_eq!(drained, Drain::Done(1));
+            shared.blocked.store(false, Ordering::SeqCst);
+        }
+        assert!(accept_one(&l, &shared).is_none(), "nothing left to accept");
+        assert_eq!(echo_or_cut(&mut client, b"q"), None);
+        assert_eq!(shared.refused.load(Ordering::SeqCst), 1);
+        assert_eq!(shared.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    /// 排出は件数で打ち切る（開発の値。THRT-29）。空なら `Done`、上限で `Truncated`。
+    #[test]
+    fn drain_backlog_is_bounded() {
+        let shared = Shared::new();
+        let (l, port) = nb_listener();
+        assert_eq!(drain_backlog(&l, &shared), Drain::Done(0));
+        let _c1 = connect(port);
+        let _c2 = connect(port);
+        // 受理は期限付きで待つ。件数で打ち切るので、待つのは受理が必要な間だけ。
+        let acc = || accept_within(&l, true);
+        assert_eq!(drain_with(&shared, 1, 8, acc), Drain::Truncated(1));
+        let acc = || accept_within(&l, true);
+        assert_eq!(drain_with(&shared, 1, 8, acc), Drain::Truncated(1));
+        assert_eq!(drain_backlog(&l, &shared), Drain::Done(0));
+        assert_eq!(shared.refused.load(Ordering::SeqCst), 2);
+    }
+
+    /// Interrupted が続いても件数とは別の回数で打ち切る。`WouldBlock` 以外の失敗は `Failed`（ORST-17）。
+    #[test]
+    fn drain_distinguishes_interrupt_and_failure() {
+        let shared = Shared::new();
+        let err = |k: ErrorKind| move || Err::<TcpStream, _>(std::io::Error::from(k));
+        assert_eq!(
+            drain_with(&shared, 4096, 3, err(ErrorKind::Interrupted)),
+            Drain::InterruptsExhausted(0)
+        );
+        assert_eq!(
+            drain_with(&shared, 4096, 3, err(ErrorKind::WouldBlock)),
+            Drain::Done(0)
+        );
+        assert_eq!(
+            drain_with(&shared, 4096, 3, err(ErrorKind::Other)),
+            Drain::Failed(0)
+        );
+    }
+
+    /// 公開の `release_block` が排出を呼ぶ（ORST-17）。accept のスレッドを止めて待ち行列に接続を残し、
+    /// 解除を通して切断数と拒否件数を確かめる。`drain_backlog` が呼ばれなければ `refused` は 0 のまま。
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "accept queue is observable only via /proc/net/tcp"
+    )]
+    fn release_block_drains_queued_conns() {
+        let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let up_port = up.local_addr().unwrap().port();
+        let mut p = DbFaultProxy::start_to_port(up_port).unwrap();
+        let mut tl = FaultTimeline::start(
+            Instant::now(),
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        )
+        .unwrap();
+        p.block(&mut tl).unwrap();
+        // accept のスレッドを止める。以後の接続はカーネルの待ち行列に残る。
+        p.shared.stop.store(true, Ordering::SeqCst);
+        if let Some(h) = p.accept.take() {
+            h.join().unwrap();
+        }
+        let mut c1 = connect(p.listen_port());
+        let mut c2 = connect(p.listen_port());
+        assert_eq!(p.refused_count(), 0);
+        // 公開の `release_block` を直接呼ぶ。排出の呼び出しが抜ければ、待ち行列の 2 本は切られず拒否件数は 0 のまま。
+        // connect の戻りは待ち行列への到達を保証しないので、2 本が届いたことを期限付きで確かめてから排出する。
+        wait_backlog(p.listen_port(), 2);
+        p.release_block(&mut tl).unwrap();
+        assert_eq!(p.refused_count(), 2);
+        assert_eq!(p.accepted_count(), 0);
+        assert_eq!(echo_or_cut(&mut c1, b"a"), None);
+        assert_eq!(echo_or_cut(&mut c2, b"b"), None);
+        let _ = tl.finish(UtcTimestamp::from_unix_seconds(1_700_000_060));
+    }
+
+    /// 排出は成功しても `Released` の記録が拒否されたら、`Record` で戻り遮断を保つ。正しいタイムラインで解除を再試行できる（ORST-17）。
+    #[test]
+    fn release_block_record_rejected_keeps_block_and_allows_retry() {
+        let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut p = DbFaultProxy::start_to_port(up.local_addr().unwrap().port()).unwrap();
+        let mut tl = timeline();
+        p.block(&mut tl).unwrap();
+        let mut baseline = FaultTimeline::baseline(
+            Instant::now(),
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        )
+        .unwrap();
+        let r = p.release_block(&mut baseline);
+        assert!(matches!(r, Err(DbFaultError::Record(_))), "{r:?}");
+        assert!(p.shared.blocked.load(Ordering::SeqCst), "still blocked");
+        assert!(p.block_active);
+        p.release_block(&mut tl).unwrap();
+        assert!(!p.shared.blocked.load(Ordering::SeqCst));
+        assert!(!p.block_active);
+        let text = tl
+            .finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
+            .unwrap()
+            .to_string();
+        assert!(text.contains(" released db_block"), "{text}");
+    }
+
+    /// 排出が失敗（割り込みの使い切り・`Failed`）なら `Released` を記録せず遮断のまま `DrainFailed` で戻る。
+    /// 件数の上限到達（`Truncated`）は解除できる（ORST-17）。
+    #[test]
+    fn release_block_fails_closed_on_drain_failure() {
+        for (drain, ok) in [
+            (Drain::InterruptsExhausted(0), false),
+            (Drain::Failed(0), false),
+            (Drain::Truncated(4096), true),
+        ] {
+            let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let mut p = DbFaultProxy::start_to_port(up.local_addr().unwrap().port()).unwrap();
+            let mut tl = FaultTimeline::start(
+                Instant::now(),
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .unwrap();
+            p.block(&mut tl).unwrap();
+            let r = p.release_block_with(&mut tl, |_, _| drain);
+            if ok {
+                assert!(r.is_ok());
+                assert!(!p.shared.blocked.load(Ordering::SeqCst));
+            } else {
+                assert_eq!(r, Err(DbFaultError::DrainFailed));
+                assert!(p.shared.blocked.load(Ordering::SeqCst), "still blocked");
+                assert!(p.block_active);
+            }
+            let text = tl
+                .finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
+                .unwrap()
+                .to_string();
+            assert_eq!(text.contains(" released db_block"), ok, "{text}");
+        }
+    }
+
+    /// 上流への接続の後・中継の開始の前に遮断が入っても、client のバイトは上流へ届かない（ORST-17）。
+    /// 上流への TCP の接続の試行は起こり得る（契約）。上流の側は 0 バイトで EOF か切断になる。
+    #[test]
+    fn upstream_gets_no_client_bytes_when_block_overlaps_connect() {
+        let shared = Arc::new(Shared::new());
+        let (l, port) = nb_listener();
+        let mut client = connect(port);
+        client.write_all(b"payload").unwrap();
+        let accepted = accept_blocking(&l, &shared);
+        let up_l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let up_port = up_l.local_addr().unwrap().port();
+        let connected = connect_upstream(accepted, &shared, &Upstream::Port(up_port))
+            .expect("upstream connected before block");
+        {
+            let mut conns = shared.conns.lock().unwrap();
+            shared.engage_block(&mut conns);
+        }
+        start_relay(connected, &shared);
+        let (mut up_side, _) = up_l.accept().unwrap();
+        up_side
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 16];
+        match up_side.read(&mut buf) {
+            Ok(n) => assert_eq!(n, 0, "no client bytes reach upstream"),
+            Err(e) => assert!(
+                matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                ),
+                "unexpected: {:?}",
+                e.kind()
+            ),
+        }
+        assert_eq!(echo_or_cut(&mut client, b"x"), None);
+        assert_eq!(shared.refused.load(Ordering::SeqCst), 1);
+        assert_eq!(shared.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    /// 上流への接続の後に遮断と解除の両方が済んでも（`blocked` は偽に戻る）、世代の差だけで中継を始めず切る（ORST-17）。
+    /// 世代の比較を消すと `halted()` は偽なので中継が始まり、この試験は落ちる。
+    #[test]
+    fn stale_generation_is_refused_after_block_and_release() {
+        let shared = Arc::new(Shared::new());
+        let (l, port) = nb_listener();
+        let mut client = connect(port);
+        client.write_all(b"payload").unwrap();
+        let accepted = accept_blocking(&l, &shared);
+        let up_l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let up_port = up_l.local_addr().unwrap().port();
+        let connected = connect_upstream(accepted, &shared, &Upstream::Port(up_port))
+            .expect("upstream connected before block");
+        {
+            let mut conns = shared.conns.lock().unwrap();
+            shared.engage_block(&mut conns);
+        }
+        shared.blocked.store(false, Ordering::SeqCst);
+        assert!(!shared.halted(), "released: only the generation differs");
+        start_relay(connected, &shared);
+        let (mut up_side, _) = up_l.accept().unwrap();
+        up_side
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 16];
+        match up_side.read(&mut buf) {
+            Ok(n) => assert_eq!(n, 0, "no client bytes reach upstream"),
+            Err(e) => assert!(
+                matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                ),
+                "unexpected: {:?}",
+                e.kind()
+            ),
+        }
+        assert_eq!(echo_or_cut(&mut client, b"x"), None);
+        assert_eq!(shared.refused.load(Ordering::SeqCst), 1);
+        assert_eq!(shared.accepted.load(Ordering::SeqCst), 0);
+    }
+
     /// `block()` は `Applied` を、`conns` のロックを取った後に記録する。ロックが他で持たれている間は
     /// 記録しない（記録の時刻と実際の遮断の間に待ちを挟まない）。
     #[test]
@@ -761,5 +1223,28 @@ mod tests {
             offset >= 250,
             "Applied recorded before taking the lock: {offset} ms"
         );
+    }
+
+    /// `Released` の記録の時点では、まだ遮断中である。記録が拒否されたら遮断のまま戻る（ORST-17）。
+    /// 状態変更と記録の順序が逆転すると、記録の直前に `blocked` が false になる。
+    #[test]
+    fn released_is_recorded_while_still_blocked() {
+        let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+        let mut tl = timeline();
+        p.block(&mut tl).unwrap();
+        let kind = p.block_kind;
+        let mut observed = None;
+        let r = p.release_block_inner(
+            &mut tl,
+            |_, _| Drain::Done(0),
+            |tl, sh| {
+                // 記録を呼ぶ時点の遮断の状態を見て、そのまま本物の記録を積む。
+                observed = Some(sh.blocked.load(Ordering::SeqCst));
+                tl.record_now(kind, FaultPhase::Released)
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(observed, Some(true), "must still be blocked at record time");
+        assert!(!p.shared.blocked.load(Ordering::SeqCst));
     }
 }
