@@ -42,7 +42,7 @@ fn spec() -> TargetSpec {
 }
 
 fn limits() -> StageLimits {
-    StageLimits::new(64, 1024, 1_000_000).unwrap()
+    StageLimits::new(64, 1024, 1_000_000, u64::MAX).unwrap()
 }
 
 fn vocab() -> Vec<IntervalName> {
@@ -56,31 +56,41 @@ fn sc(c: u64, n: u64, w: u64, reps: u64) -> StageConfig {
 #[test]
 fn plan_validation() {
     let one = sc(1, 1, 0, 1);
-    let lim = StageLimits::new(3, 5, 12).unwrap();
+    let lim = StageLimits::new(3, 5, 12, u64::MAX).unwrap();
     let new = |v: Vec<StageConfig>, l: StageLimits| StagePlan::new(v, MetricKey::P99Ns, l, vocab());
     assert_eq!(new(vec![], lim), Err(StageError::InvalidPlan));
     assert_eq!(new(vec![one; 4], lim), Err(StageError::InvalidPlan));
     assert!(new(vec![one; 3], lim).is_ok());
     // 上限は呼び出し元の設定で決まる。
-    assert!(new(vec![one; 4], StageLimits::new(4, 5, 12).unwrap()).is_ok());
+    assert!(new(vec![one; 4], StageLimits::new(4, 5, 12, u64::MAX).unwrap()).is_ok());
     let load = LoadConfig::new(1, 1, 0).unwrap();
     assert_eq!(StageConfig::new(load, 0), Err(StageError::InvalidPlan));
     assert_eq!(new(vec![sc(1, 1, 0, 6)], lim), Err(StageError::InvalidPlan));
     assert!(new(vec![sc(1, 1, 0, 5)], lim).is_ok());
-    assert_eq!(StageLimits::new(0, 1, 1), Err(StageError::InvalidPlan));
-    assert_eq!(StageLimits::new(1, 0, 1), Err(StageError::InvalidPlan));
-    assert_eq!(StageLimits::new(1, 1, 0), Err(StageError::InvalidPlan));
+    assert_eq!(StageLimits::new(0, 1, 1, 1), Err(StageError::InvalidPlan));
+    assert_eq!(StageLimits::new(1, 0, 1, 1), Err(StageError::InvalidPlan));
+    assert_eq!(StageLimits::new(1, 1, 0, 1), Err(StageError::InvalidPlan));
     // 全体の試行数の溢れ。
     let big = StageConfig::new(LoadConfig::new(1, u64::MAX / 2, 0).unwrap(), 3).unwrap();
     assert_eq!(
-        new(vec![big], StageLimits::new(1, 3, u64::MAX).unwrap()),
+        new(
+            vec![big],
+            StageLimits::new(1, 3, u64::MAX, u64::MAX).unwrap()
+        ),
         Err(StageError::InvalidPlan)
     );
     // 回ごとの試行数の予算（ウォームアップ + 計測）。ちょうどは通り、1 超過は拒否する。
     let cfg = vec![sc(1, 10, 2, 1)];
-    assert!(new(cfg.clone(), StageLimits::new(1, 1, 12).unwrap()).is_ok());
+    assert!(new(cfg.clone(), StageLimits::new(1, 1, 12, u64::MAX).unwrap()).is_ok());
     assert_eq!(
-        new(cfg, StageLimits::new(1, 1, 11).unwrap()),
+        new(cfg, StageLimits::new(1, 1, 11, u64::MAX).unwrap()),
+        Err(StageError::InvalidPlan)
+    );
+    // 計画全体の試行数の上限（段階 2 × 繰り返し 3 × 回 12 = 72）。ちょうどは通り、1 超過は拒否する。
+    let two = vec![sc(1, 10, 2, 3), sc(1, 10, 2, 3)];
+    assert!(new(two.clone(), StageLimits::new(2, 3, 12, 72).unwrap()).is_ok());
+    assert_eq!(
+        new(two, StageLimits::new(2, 3, 12, 71).unwrap()),
         Err(StageError::InvalidPlan)
     );
     // 語彙が空なら計画を作れない。

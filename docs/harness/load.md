@@ -339,7 +339,7 @@ judgment:
 名前・語・値はすべて仮置きで、人が確認する。合否は付けない（`ACPT-7`）。
 
 - API: `StageConfig`（`LoadConfig` と繰り返しの数）、`StagePlan`（段階の並びと、最悪の回を比べる指標。指標は明示で既定なし）、
-  `StageLimits`（段階数・1 段階の繰り返し・1 回の試行数の上限。呼び出し元が明示し、既定値なし）、
+  `StageLimits`（段階数・1 段階の繰り返し・1 回の試行数・計画全体の試行数の上限。呼び出し元が明示し、既定値なし）、
   `run_stages`（回ごとに時計を作る関数・`TargetSpec`・計画・呼び出しを受ける）、`StageResult`・`StagedRun`（結果。段階ごとに分けて持つ）、`StageError`。
 - 段階と回は計画の順に 1 つずつ回し、重ならない。各回は `run_target` で回す。段階の全回が終わったら `worst_run` で段階の最悪の回を求める。
 - 誤り（fail-closed・仮置き）: 最初の誤りで以後の回・段階を始めず、終わった段階の結果も返さない（部分の結果を正しい結果に見せないため）。
@@ -347,7 +347,7 @@ judgment:
 - 結果は非公開フィールド+読み取りだけのアクセサーで持ち、回ごとに残すのは集計のみ（生標本は回の終了時に捨てる）。回の削除・並べ替えで `Display` の番号と `worst_run` がずれない。
 - 記録の行: `StagedRun` の `Display` が、段階ごとに `stage`・（回ごとに）`run`・`failure_kind`・`metric`・`failure_metric`、最後に `worst_run` を出す（形式の 3・4）。
   `n=0` のときは百分位・最大・`max_trial` を `none` で出す。出るのは検査済みの名前・固定の語・整数だけ（形式の 6）。
-- 利用ガイド: `StagePlan::new(stages, by, limits, allowed_intervals)`。`limits`（`StageLimits::new(max_stages, max_repetitions, max_trials_per_run)`）は
+- 利用ガイド: `StagePlan::new(stages, by, limits, allowed_intervals)`。`limits`（`StageLimits::new(max_stages, max_repetitions, max_trials_per_run, max_total_trials)`）は
   呼び出し元が実行環境に合わせて明示する（固定の上限は置かない。`DPOL-32`）。暖機と本計測の合計が `max_trials_per_run` を超える段階を持つ計画は拒否する
   （回の終了まで生標本を保持するため）。段階数・繰り返しの超過、全体の試行数の溢れ、0 の上限も計画の誤りにする。
 - 区間名の語彙: `allowed_intervals` に記録へ出してよい区間名（承認済みの語彙。既定なし・空は誤り）を渡す。`run_stages` は `TargetSpec` の区間名が語彙に無ければ、

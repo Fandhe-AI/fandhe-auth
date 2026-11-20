@@ -32,11 +32,13 @@ pub struct StageLimits {
     max_stages: u64,
     max_repetitions: u64,
     max_trials_per_run: u64,
+    max_total_trials: u64,
 }
 
 impl StageLimits {
     /// `max_stages`: 段階の数、`max_repetitions`: 1 段階の繰り返し、
-    /// `max_trials_per_run`: 1 回の試行数（ウォームアップ + 計測。回の終了まで生標本を保持するため）。
+    /// `max_trials_per_run`: 1 回の試行数（ウォームアップ + 計測。回の終了まで生標本を保持するため）、
+    /// `max_total_trials`: 計画全体の試行数（繰り返しを含む合計。回ごとの集計を全回ぶん保持するため）。
     ///
     /// # Errors
     /// どれかが 0 のとき [`StageError::InvalidPlan`]。
@@ -44,14 +46,20 @@ impl StageLimits {
         max_stages: u64,
         max_repetitions: u64,
         max_trials_per_run: u64,
+        max_total_trials: u64,
     ) -> Result<Self, StageError> {
-        if max_stages == 0 || max_repetitions == 0 || max_trials_per_run == 0 {
+        if max_stages == 0
+            || max_repetitions == 0
+            || max_trials_per_run == 0
+            || max_total_trials == 0
+        {
             return Err(StageError::InvalidPlan);
         }
         Ok(Self {
             max_stages,
             max_repetitions,
             max_trials_per_run,
+            max_total_trials,
         })
     }
 }
@@ -131,6 +139,7 @@ impl StagePlan {
     /// # Errors
     /// 段階が 0 件または `limits` の段階数超、繰り返しが `limits` 超、全体の試行数の計算が溢れる、
     /// 1 回の試行数（ウォームアップ + 計測）が `limits` の予算超の段階があるとき、
+    /// 全体の試行数の合計が `limits` の上限超のとき、
     /// または語彙が空のとき [`StageError::InvalidPlan`]。
     pub fn new(
         stages: Vec<StageConfig>,
@@ -160,6 +169,10 @@ impl StagePlan {
                 .checked_mul(per_run)
                 .ok_or(StageError::InvalidPlan)?;
             total = total.checked_add(t).ok_or(StageError::InvalidPlan)?;
+            // 対象を呼ぶ前に計画全体の合計を検査する（全回の集計を保持するため）。
+            if total > limits.max_total_trials {
+                return Err(StageError::InvalidPlan);
+            }
         }
         Ok(Self {
             stages,

@@ -200,7 +200,7 @@ fn run_stages_calls_hub_stub_jwks_on_harness() {
             StageConfig::new(LoadConfig::new(4, 20, 2).unwrap(), 2).unwrap(),
         ],
         MetricKey::P99Ns,
-        StageLimits::new(64, 1024, 1_000_000).unwrap(),
+        StageLimits::new(64, 1024, 1_000_000, u64::MAX).unwrap(),
         vec![IntervalName::new("stub_jwks").unwrap()],
     )
     .unwrap();
