@@ -345,10 +345,9 @@ SCAN_BIN="${det_ok}" check_scan "dummy under a non-excluded path is detected" 1 
 
 # 検出器の skills-lock.json が壊れていれば検査不能（fail-closed）。診断に名前・パスを出さない
 bad_n=0
-check_bad_lock() {
-  local desc="$1" content="$2" rc=0
-  bad_n=$((bad_n + 1))
-  make_detector "bad${bad_n}" "${content}"
+# run_bad_lock <説明>: 準備済みの検出器（det_bin）が、固定の文言・終了コード 2 で止まること
+run_bad_lock() {
+  local desc="$1" rc=0
   new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
   LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_bin}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
   if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting" "${work_dir}/out" \
@@ -357,6 +356,11 @@ check_bad_lock() {
   else
     fail "secret-scan: ${desc}" "expected exit 2 with a fixed message, got ${rc}" "output: $(cat "${work_dir}/out")"
   fi
+}
+check_bad_lock() {
+  bad_n=$((bad_n + 1))
+  make_detector "bad${bad_n}" "$2"
+  run_bad_lock "$1"
 }
 check_bad_lock "skills-lock.json with version 3 is rejected" '{
   "version": 3,
@@ -548,6 +552,79 @@ check_bad_lock "skills-lock.json with a duplicate version is rejected" '{
 }'
 check_bad_lock "skills-lock.json that is empty is rejected" ''
 
+# 一覧の source 欄だけを差し替えた最小の一覧
+lock_with_source() {
+  printf '{\n  "version": 2,\n  "skills": {\n    "vendored-a": {\n      "source": "%s"\n    }\n  }\n}' "$1"
+}
+bs=$'\x5c'
+check_bad_lock "skills-lock.json with an invalid UTF-8 byte is rejected" "$(lock_with_source "a"$'\xff'"b")"
+check_bad_lock "skills-lock.json with an overlong UTF-8 sequence is rejected" "$(lock_with_source "a"$'\xc0\x80'"b")"
+check_bad_lock "skills-lock.json with a UTF-8 surrogate is rejected" "$(lock_with_source "a"$'\xed\xa0\x80'"b")"
+check_bad_lock "skills-lock.json with a truncated UTF-8 sequence is rejected" "$(lock_with_source "a"$'\xe3\x81'"b")"
+# 不正なバイトの両側が、正しい列の除去で接して新しい列にならない（c2 + 正しい 3 バイト列 + 80）
+check_bad_lock "skills-lock.json with a stray UTF-8 lead around a valid sequence is rejected" "$(lock_with_source "a"$'\xc2\xe2\x82\xac\x80'"b")"
+check_bad_lock "skills-lock.json with a raw tab in a string is rejected" "$(lock_with_source "a"$'\t'"b")"
+check_bad_lock "skills-lock.json with a raw newline in a string is rejected" "$(lock_with_source "a"$'\n'"b")"
+check_bad_lock "skills-lock.json without a version is rejected" '{
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a duplicate skills key is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  },
+  "skills": {
+    "vendored-b": {
+      "source": "y"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a unicode-escaped skill name is rejected" "{
+  \"version\": 2,
+  \"skills\": {
+    \"vendored${bs}u0061\": {
+      \"source\": \"x\"
+    }
+  }
+}"
+deep_open="$(printf '[%.0s' {1..40})"
+deep_close="$(printf ']%.0s' {1..40})"
+check_bad_lock "skills-lock.json nested deeper than the limit is rejected" "{
+  \"version\": 2,
+  \"skills\": {
+    \"vendored-a\": {
+      \"deep\": ${deep_open}${deep_close}
+    }
+  }
+}"
+# NUL を含む一覧（読み取りが NUL で止まり、後ろが未検証になる経路）
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+printf '{\n  "version": 2,\n  "skills": {\n    "vendored-a": {\n      "source": "x"\n    }\n  }\n}\n\0trailing' > "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json containing a NUL byte is rejected"
+# 一覧が普通のファイルでない（行き先の無いシンボリックリンク・ディレクトリ・FIFO）
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+rm -f "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+ln -s "no-such-target" "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json as a dangling symlink is rejected"
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+rm -f "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+mkdir "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json as a directory is rejected"
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+rm -f "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+mkfifo "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json as a FIFO is rejected"
+
 # 構造の記号を含む文字列値・1 行に詰めた JSON は正しく読める（行単位の深さの数え方では誤判定した形）
 check_good_lock() {
   local desc="$1" content="$2"
@@ -566,6 +643,25 @@ check_good_lock "skills-lock.json with braces inside strings is accepted" '{
   }
 }'
 check_good_lock "skills-lock.json packed on one line is accepted" '{"version":2,"skills":{"vendored-a":{"source":"x","n":[1,-2.5e3,true,null,{"k":[]}]}}}'
+
+check_good_lock "skills-lock.json with valid multibyte UTF-8 is accepted" "$(lock_with_source "$(printf 'caf\xc3\xa9 \xe6\x97\xa5\xe6\x9c\xac \xf0\x9f\x98\x80')")"
+check_good_lock "skills-lock.json with a 70-digit number is accepted" "{
+  \"version\": 2,
+  \"skills\": {
+    \"vendored-a\": {
+      \"big\": $(printf '1%.0s' {1..70}),
+      \"neg\": -$(printf '2%.0s' {1..70}).5e10
+    }
+  }
+}"
+check_good_lock "skills-lock.json nested within the depth limit is accepted" "{
+  \"version\": 2,
+  \"skills\": {
+    \"vendored-a\": {
+      \"deep\": $(printf '[%.0s' {1..20})$(printf ']%.0s' {1..20})
+    }
+  }
+}"
 
 # 検出器のあるディレクトリ名が改行で終わっていても、除外の一覧を読める（dirname のコマンド置換は末尾の改行を落とす）
 nl_root="${work_dir}/det-nl"
@@ -636,13 +732,31 @@ printf '%s\n' "${lock_ok}" > skills-lock.json
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a list absent from HEAD excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
 
-# CDPATH で相対パスの cd が別のディレクトリへ向かっても、除外の一覧の読み元を取り違えない
+# CDPATH で相対パスの cd が別のディレクトリ（一覧の無いおとり）へ向かっても、検出器の場所を取り違えない。
+# repo 側にコミットした正しい一覧が使われれば除外され（0）、CDPATH を効かせると一覧を失って検出になる（1）。
 decoy="${work_dir}/decoy"
 mkdir -p "${decoy}/scripts/hooks"
-printf '%s\n' "${lock_ok}" > "${decoy}/skills-lock.json"
-same_checkout_repo
+same_checkout_repo "${lock_ok}"
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
-CDPATH="${decoy}" SCAN_BIN="${same_bin}" check_scan "a CDPATH decoy does not supply the exclusion list" 1 .agents/skills/vendored-a/SKILL.md
+CDPATH="${decoy}" SCAN_BIN="${same_bin}" check_scan "a CDPATH decoy does not displace the detector location" 0
+
+# 登録名の下でも、env-file の名前の検査は全パスに掛かる
+new_repo; stage .agents/skills/vendored-a/.env "KEY=value"
+SCAN_BIN="${det_ok}" check_scan "an env file under a registered skill is still reported" 1 .agents/skills/vendored-a/.env
+
+# 同じ checkout で HEAD の一覧が壊れている・読めないときは検査不能（2）。固定の文言だけを出す
+same_checkout_repo '{ "version": 2, "skills": {'
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken committed list is rejected" 2
+expect_out "same checkout: a broken committed list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+same_checkout_repo "${lock_ok}"
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=ls-tree SCAN_BIN="${same_bin}" check_scan "same checkout: a failure to look up the committed list exits 2" 2
+expect_out "same checkout: a failed lookup reports a fixed message" "secret-scan: cannot read the committed skills-lock.json; aborting"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=cat-file SCAN_BIN="${same_bin}" check_scan "same checkout: a failure to read the committed list exits 2" 2
+expect_out "same checkout: a failed read reports a fixed message" "secret-scan: cannot read the committed skills-lock.json; aborting"
 
 new_repo; stage leaked.txt "$(printf '%s\n%s' "keep" "x = ${token}")"; git commit -q -m "chore: leak"
 printf '%s\n' "keep" > leaked.txt; git add leaked.txt

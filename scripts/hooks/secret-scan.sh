@@ -37,7 +37,7 @@
 #   PR が自分の変更で一覧に名前を足して検査を免れる経路を作らないため（CI は保護された main の検出器を使う。
 #   #51・#6000）。パスの形（*.lock・.claude/skills/・未登録の .agents/skills/ の下）では除外しない。
 #   名前は `[a-z0-9-]` の規則に合うものだけを通し、literal の pathspec にする（glob・`..`・`/` を持ち込ませない）。
-#   skills-lock.json が無ければ除外なしで全部走査する。ファイル全体を JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
+#   skills-lock.json が無ければ除外なしで全部走査する。ファイル全体を（正しい UTF-8 かを確かめてから）JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
 #   検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のときは、作業ツリー・index の一覧ではなく
 #   コミット済み（HEAD）の一覧にある名前だけを使う（未コミットの編集で除外を足せない）。HEAD にまだ無い名前は、
 #   コミットされるまで走査される（PR では CI が保護された main の検出器で改めて走査する）。
@@ -327,7 +327,7 @@ json_value() {
       ;;
     '"') json_string ;;
     *)
-      rest="${js:jp:64}"
+      rest="${js:jp}"
       if [[ "${rest}" =~ ^(-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?) ]] && [ -n "${BASH_REMATCH[1]}" ]; then
         jp=$((jp + ${#BASH_REMATCH[1]}))
       elif [ "${rest:0:4}" = true ] || [ "${rest:0:4}" = null ]; then
@@ -381,7 +381,7 @@ parse_skills() {
 # parse_lock <ファイル>: 全体を解析し、検証した名前を parsed_names に入れる。不正は lock_fail（終了コード 2）。
 parsed_names=()
 parse_lock() {
-  local size key c seen_version=0 seen_skills=0
+  local size key c utf8_t seen_version=0 seen_skills=0
   parsed_names=()
   js=""
   IFS= read -r -d '' js < "$1" || true
@@ -389,6 +389,17 @@ parse_lock() {
   size="$(wc -c < "$1")"
   size="${size//[[:space:]]/}"
   [ "${#js}" -eq "${size}" ] || lock_fail
+  # 構文解析の前に、入力全体が正しい UTF-8 であることを確かめる（C ロケールのバイト単位の照合。iconv 等に依存しない）。
+  # 正しい多バイト列（最短形・サロゲート不可・U+10FFFF 以下）を ASCII の 1 文字へ置き換え、80 以上のバイトが残れば不正。
+  # 空へ置き換えると、不正なバイトの両側が接して新しい列になり得るため、必ず ASCII の文字へ置き換える。
+  utf8_t="${js//[$'\xf0'][$'\x90'-$'\xbf'][$'\x80'-$'\xbf'][$'\x80'-$'\xbf']/A}"
+  utf8_t="${utf8_t//[$'\xf1'-$'\xf3'][$'\x80'-$'\xbf'][$'\x80'-$'\xbf'][$'\x80'-$'\xbf']/A}"
+  utf8_t="${utf8_t//[$'\xf4'][$'\x80'-$'\x8f'][$'\x80'-$'\xbf'][$'\x80'-$'\xbf']/A}"
+  utf8_t="${utf8_t//[$'\xe0'][$'\xa0'-$'\xbf'][$'\x80'-$'\xbf']/A}"
+  utf8_t="${utf8_t//[$'\xe1'-$'\xec'$'\xee'$'\xef'][$'\x80'-$'\xbf'][$'\x80'-$'\xbf']/A}"
+  utf8_t="${utf8_t//[$'\xed'][$'\x80'-$'\x9f'][$'\x80'-$'\xbf']/A}"
+  utf8_t="${utf8_t//[$'\xc2'-$'\xdf'][$'\x80'-$'\xbf']/A}"
+  [[ "${utf8_t}" != *[$'\x80'-$'\xff']* ]] || lock_fail
   jn="${#js}"
   jp=0
   json_ws
@@ -445,7 +456,7 @@ load_skill_names() {
   work_names=("${parsed_names[@]}")
   # 検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のとき、作業ツリーの
   # skills-lock.json は走査対象の側にもあり、未コミットの編集で除外を足せてしまう（走査対象から読まない規則の
-  # ローカル版。.claude/rules/git-hooks.md の (g)）。コミット済み（HEAD）の一覧にある名前だけを使う
+  # ローカル版。.claude/rules/git-hooks.md の (f)）。コミット済み（HEAD）の一覧にある名前だけを使う
   # （作業ツリーの名前との共通部分。常に作業ツリーの一覧の部分集合で、除外を広げない）。
   # HEAD が無い・HEAD に一覧が無いときは除外なし。git の失敗は検査不能（2）。
   if ! repo_real="$(pwd -P && printf x)"; then
@@ -466,11 +477,18 @@ load_skill_names() {
     echo "secret-scan: cannot read HEAD; aborting" >&4
     exit 2
   fi
-  g ls-tree -z HEAD -- skills-lock.json > "${tmp_dir}/head-entry" || exit 2
+  # HEAD の一覧が読めない・壊れているときは検査不能（2）で止める（除外なしで続行する等の方式は人が決める）。
+  if ! g ls-tree -z HEAD -- skills-lock.json > "${tmp_dir}/head-entry"; then
+    echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
+    exit 2
+  fi
   if [ ! -s "${tmp_dir}/head-entry" ]; then
     return 0
   fi
-  g cat-file blob "HEAD:skills-lock.json" > "${tmp_dir}/head-lock" || exit 2
+  if ! g cat-file blob "HEAD:skills-lock.json" > "${tmp_dir}/head-lock"; then
+    echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
+    exit 2
+  fi
   parse_lock "${tmp_dir}/head-lock"
   for n in "${parsed_names[@]}"; do
     head_names="${head_names}${n} "
