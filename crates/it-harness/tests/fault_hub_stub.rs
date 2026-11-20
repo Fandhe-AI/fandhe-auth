@@ -197,19 +197,20 @@ fn jwks_status_refusal_then_release() {
     let v = jwks.current_version();
     let n = jwks.records().len();
     assert_eq!(
-        inj.serve_jwks(&tl, &mut jwks, NOW).unwrap_err(),
+        inj.serve_jwks(&tl, &mut jwks, NOW + 1).unwrap_err(),
         InjectedRefusal::Status(503)
     );
     assert_eq!(jwks.current_version(), v);
     assert_eq!(jwks.records().len(), n);
     inj.release(&mut tl, k).unwrap();
     assert_eq!(inj.active_count(), 0);
-    let ok = inj.serve_jwks(&tl, &mut jwks, NOW + 1).unwrap();
+    let ok = inj.serve_jwks(&tl, &mut jwks, NOW + 2).unwrap();
     assert_eq!(ok.status, 200);
     assert_eq!(ok.version, v);
-    // 解除後はキャッシュが保たれ、age は拒否の間も進まず時刻の差だけ増える。
+    // 解除後はキャッシュが保たれ、age は最初の格納（NOW）からの経過 2 秒。拒否（NOW + 1）が保存時刻を
+    // 更新していれば 1 秒になり落ちる（OCL-36）。
     assert!(ok.from_cache);
-    assert_eq!(ok.age, warm.age + 1);
+    assert_eq!(ok.age, warm.age + 2);
     let body: Value = serde_json::from_str(&ok.body).unwrap();
     let kids: Vec<&str> = body["keys"]
         .as_array()
@@ -663,19 +664,17 @@ fn dropping_unused_injector_unbinds_the_run() {
     );
 }
 
-/// 結ぶ前に直接積んだ Hub stub 事象があると注入器を結べない。
+/// 結ぶ前でも直接記録は Hub stub 事象を拒否し、注入器は結べる（直接の事象は積まれない）。
 #[test]
-fn injector_cannot_bind_after_direct_hub_stub_event() {
+fn direct_hub_stub_event_before_bind_is_rejected_and_injector_binds() {
     let mut tl = timeline();
     let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503));
-    tl.record_now(k, fandhe_auth_it_harness::fault::FaultPhase::Applied)
-        .unwrap();
-    assert!(matches!(
-        HubStubFaultInjector::new(|_d: Duration| {}, &tl),
-        Err(HubStubFaultError::Record(
-            FaultRecordError::HubStubEventsBeforeBind
-        ))
-    ));
+    assert_eq!(
+        tl.record_now(k, fandhe_auth_it_harness::fault::FaultPhase::Applied)
+            .unwrap_err(),
+        FaultRecordError::HubStubEventOutsideInjector
+    );
+    assert!(HubStubFaultInjector::new(|_d: Duration| {}, &tl).is_ok());
 }
 
 /// 結合済みの注入器がある実行へ 2 つ目を結ぶと、事象の有無にかかわらず `AlreadyBound`。

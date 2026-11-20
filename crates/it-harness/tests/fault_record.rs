@@ -48,8 +48,6 @@ fn all_categories_in_one_record() {
         FaultKind::InstanceSigterm,
         FaultKind::InstanceSigkill,
         FaultKind::ExternalStoreBlock,
-        FaultKind::hub_stub_delay(HubStubPort::Jwks, ms(30)).unwrap(),
-        FaultKind::hub_stub_refusal(HubStubPort::Logout, HubStubRefusalKind::Status(503)).unwrap(),
         FaultKind::clock_skew(-2000).unwrap(),
     ];
     let mut tl = fault();
@@ -59,23 +57,45 @@ fn all_categories_in_one_record() {
     }
     let r = tl.finish(ts(1_700_000_060)).unwrap();
     // SIGTERM・SIGKILL は解除が無いので数えない。
-    assert_eq!(r.unreleased_count(), 6);
+    assert_eq!(r.unreleased_count(), 4);
     let at = "at=2023-11-14T22:13:21Z";
     let expect = HEAD.replace("{MODE}", "fault")
-        + "injection_count: 8\nunreleased_count: 6\n"
+        + "injection_count: 6\nunreleased_count: 4\n"
         + &format!(
             "injection: 1 applied db_block target=database {at} offset_ms=0\n\
 injection: 2 applied db_delay target=database {at} offset_ms=1 delay_ms=250\n\
 injection: 3 applied instance_sigterm target=instance {at} offset_ms=2\n\
 injection: 4 applied instance_sigkill target=instance {at} offset_ms=3\n\
 injection: 5 applied external_store_block target=external_store {at} offset_ms=4\n\
-injection: 6 applied hub_stub_delay target=hub_stub {at} offset_ms=5 port=jwks delay_ms=30\n\
-injection: 7 applied hub_stub_refusal target=hub_stub {at} offset_ms=6 port=logout refusal=status_503\n\
-injection: 8 applied clock_skew target=instance {at} offset_ms=7 skew_ms=-2000\n"
+injection: 6 applied clock_skew target=instance {at} offset_ms=5 skew_ms=-2000\n"
         )
-        + NOTE
-        + "note: stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）\n";
+        + NOTE;
     assert_eq!(r.to_string(), expect);
+}
+
+/// 公開の直接記録は Hub の stub の事象を常に拒否する（注入器を通さずに記録を確定させない）。
+#[test]
+fn direct_entries_reject_hub_stub_events_even_unbound() {
+    let kinds = [
+        FaultKind::hub_stub_delay(HubStubPort::Jwks, Duration::from_millis(30)).unwrap(),
+        FaultKind::hub_stub_refusal(HubStubPort::Logout, HubStubRefusalKind::Status(503)).unwrap(),
+    ];
+    for k in kinds {
+        let mut f = fault();
+        assert_eq!(
+            f.record_at(k, FaultPhase::Applied, ts(1), 0),
+            Err(FaultRecordError::HubStubEventOutsideInjector)
+        );
+        assert_eq!(
+            f.record_now(k, FaultPhase::Applied),
+            Err(FaultRecordError::HubStubEventOutsideInjector)
+        );
+        // 事象が 0 件のままなので、直接の確定も失敗する。
+        assert_eq!(
+            f.finish(ts(2)).unwrap_err().error,
+            FaultRecordError::NoInjectionInFaultRun
+        );
+    }
 }
 
 #[test]

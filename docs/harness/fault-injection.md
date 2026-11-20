@@ -101,7 +101,7 @@ hub-stub の実装をそのまま使い、作り直さない。
 - 同じ口の遅れと拒否（各最大 1 件）は 1 つの規則に合成する。hub-stub は最初に当たった 1 件だけを使うため、分けると片方が落ちる。
 - 記録（`Applied`・`Released`）が先、設定の差し替えが後。基準線・記録の拒否では状態を変えない（fail-closed）。
 - 事象に呼び出しの記録の件数（`log_pos`）を添える。呼び出し `i` は `log_pos <= i` の事象より後・次の事象より前に起きたと読み、同じ障害を二度適用・解除しても期間と呼び出しを順序で照合できる。
-- 1 つの実行に結べる注入器は 1 つ（2 つ目の `new` は `AlreadyBound`）。`FaultTimeline` は `Clone` しない。注入器を結んだ実行では、Hub の stub の事象の直接記録（`record_now`・`record_at`）と `FaultTimeline::finish` を拒否し（`HubStubEventOutsideInjector`・`InjectorBound`）、確定は `HubStubFaultInjector::finish` だけが行う。結ぶ前に直接積んだ Hub の stub の事象があると結べない（`HubStubEventsBeforeBind`）。`log_pos` を付ける入口は注入器の内部だけ（`pub(crate)`）で、Hub の stub の事象だけが受け、位置の逆行は拒否する。
+- 1 つの実行に結べる注入器は 1 つ（2 つ目の `new` は `AlreadyBound`）。`FaultTimeline` は `Clone` しない。公開の直接記録（`record_now`・`record_at`）は、結合の有無によらず Hub の stub の事象を常に拒否する（`HubStubEventOutsideInjector`）。注入器を結んだ実行の `FaultTimeline::finish` も拒否し（`InjectorBound`）、確定は `HubStubFaultInjector::finish` だけが行う。`log_pos` を付ける入口は注入器の内部だけ（`pub(crate)`）で、Hub の stub の事象は `log_pos` を必須にし（無ければ `LogPosRequired`）、Hub の stub 以外は受けず、位置の逆行は拒否する。形式の試験が要る人工の事象は、crate 内の単体試験（`#[cfg(test)]`）で組む。
 - 注入器は実行をまたいで使わない。基準線・次の実行には新しい注入器を作る（有効な規則と呼び出しの記録を持ち越さない。fail-closed）。
 - 解除は開始と同じ種類・値でだけ受ける。二重の開始は `AlreadyActive`、無い解除は `NotActive`。
 - `MalformedBody` は JWKS の口だけ。`FaultKind::validate` が他の口を拒否する（1/8 の挙動を狭めた）。
