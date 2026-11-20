@@ -129,7 +129,7 @@ UTF-8・LF の 1 行 1 項目 `key: value`。キーは ASCII 固定。
 
 ### 試験の置き場
 
-結合試験は `crates/it-harness/tests/*.rs` に置く。ハーネスは試験専用で、どの crate もこの crate に依存しない（`LIB-2`・`LIB-4`）。
+結合試験は `crates/it-harness/tests/*.rs` に置く。ハーネスは試験専用で、本体・Plugin からは依存しない（`LIB-2`・`LIB-4`）。試験専用の `load-harness` だけが試験（dev）で依存する（`TASK-12` 5/10。許可表の行は人の確認待ち）。
 他の crate からの辺を足すときは、許可表（`scripts/check-crate-deps.sh`）の人の確認が要る。
 
 ### 組み立ての手順（見本の「手順 N」と対応）

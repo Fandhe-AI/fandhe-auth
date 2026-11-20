@@ -10,5 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# 試験専用・仮称（人が確定する）。どの crate からも依存しない。workspace 内の依存も外部の依存も 0（std だけ）。
+# 試験専用・仮称（人が確定する）。どの crate からも依存しない。通常の依存は 0（std だけ）。
 [dependencies]
+
+# 試験（dev）だけ it-harness の上で構成要素へ負荷をかける（TASK-12 5/10）。hub-stub は試験が設定・鍵の型を直接使うため。
+# 外部の crate は足さない。許可表の行は人の確認待ち。
+[dev-dependencies]
+fandhe-auth-it-harness = { path = "../it-harness" }
+fandhe-auth-hub-stub = { path = "../hub-stub" }
