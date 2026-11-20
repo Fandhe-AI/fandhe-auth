@@ -390,17 +390,21 @@ mod tests {
         let s = Shared::new();
         let reached = AtomicBool::new(false);
         let release = AtomicBool::new(false);
-        let (claimed, was_reached) = thread::scope(|scope| {
+        let (claimed, was_released, was_reached) = thread::scope(|scope| {
             let h = thread::Builder::new()
                 .spawn_scoped(scope, || {
-                    s.claim_after(u64::MAX, || {
+                    let mut released = false;
+                    let claimed = s.claim_after(u64::MAX, || {
                         reached.store(true, Ordering::SeqCst);
                         let mut spins = 0;
                         while !release.load(Ordering::SeqCst) && spins < MAX_SPINS {
                             thread::yield_now();
                             spins += 1;
                         }
-                    })
+                        // 待ちの打ち切りは同期の失敗。明示の再開の通知を受けたかを残す。
+                        released = release.load(Ordering::SeqCst);
+                    });
+                    (claimed, released)
                 })
                 .expect("claimer thread must start");
             let mut spins = 0;
@@ -409,12 +413,16 @@ mod tests {
                 spins += 1;
             }
             let was_reached = reached.load(Ordering::SeqCst);
-            // 実際の fail の経路で記録してから、止めていた取得を再開する。
+            // 取得者が同期点に着いていないなら記録も再開もせず失敗させる（取得者は有限回で待ちを打ち切る）。
+            assert!(was_reached, "claimer did not reach the sync point");
+            // 実際の fail の経路で記録してから、明示の通知で止めていた取得を再開する。
             s.fail(LoadError::InvalidOutcome);
             release.store(true, Ordering::SeqCst);
-            (h.join().expect("claimer must not panic"), was_reached)
+            let (claimed, released) = h.join().expect("claimer must not panic");
+            (claimed, released, was_reached)
         });
         assert!(was_reached, "claimer did not reach the sync point");
+        assert!(was_released, "claimer was not released by the recorder");
         assert!(!claimed, "a claim succeeded after fail was recorded");
         assert_eq!(next_of(&s), 0);
     }
@@ -431,7 +439,7 @@ mod tests {
         const MAX_CLAIMS: u32 = 5_000_000;
         for _ in 0..ROUNDS {
             let s = Shared::new();
-            let (snapshot, spawn_failed) = thread::scope(|scope| {
+            let (snapshot, spawn_failed, progressed) = thread::scope(|scope| {
                 let mut hs = Vec::new();
                 let mut spawn_failed = false;
                 for _ in 0..CLAIMERS {
@@ -446,12 +454,13 @@ mod tests {
                         }
                     }
                 }
-                // 取得が進み始めるのを有限回だけ待つ。進まなくても記録へ進む。
+                // 取得が進み始めるのを有限回だけ待つ。進まなくても取得者を止めるため記録へ進むが、進まなかった回は後で失敗にする。
                 let mut spins = 0;
                 while !spawn_failed && next_of(&s) == 0 && spins < MAX_SPINS {
                     thread::yield_now();
                     spins += 1;
                 }
+                let progressed = next_of(&s) > 0;
                 let snapshot = s.fail_observing(LoadError::InvalidOutcome);
                 let all_stopped = hs
                     .into_iter()
@@ -460,9 +469,10 @@ mod tests {
                     all_stopped,
                     "a claimer did not stop after fail was recorded"
                 );
-                (snapshot, spawn_failed)
+                (snapshot, spawn_failed, progressed)
             });
             assert!(!spawn_failed, "claimer thread failed to start");
+            assert!(progressed, "no claim was observed before the record");
             assert_eq!(
                 next_of(&s),
                 snapshot,
