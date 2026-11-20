@@ -105,9 +105,9 @@ pub struct CredentialSummary {
     pub is_resident: bool,
 }
 
-/// 接続の確立後・送信の前に、宛先のポートを持つドライバの子がまだ生きているかを確かめる関数。
-/// ポートの再利用で別のプロセスへ命令を送らないための確認（A10）。接続の後に確かめるので、
-/// 確かめた時点で子が生きていれば、いま繋がった待ち受けは子のものである。
+/// 接続の確立後・送信の前に、宛先のポートの待ち受けが起動したドライバの子のものだと確かめる関数。
+/// ポートの再利用や別プロセスの待ち受けへ命令を送らないための確認（A10）。確かめられなければ送信を中止する。
+/// 確認は子の生存だけでなく、そのポートの待ち受け socket を子が持つことまで見る。
 #[derive(Clone)]
 pub(crate) struct AliveGuard(Arc<dyn Fn() -> bool + Send + Sync>);
 
@@ -176,9 +176,10 @@ impl WebDriverClient {
         body: Option<&Value>,
     ) -> Result<Value, E2eError> {
         let deadline = deadline_after(self.timeout)?;
-        let (status, mut raw) = self.exchange_with(method, path, body, deadline)?;
-        let r = finish_value(status, &raw);
-        raw.fill(0);
+        let raw = self.exchange_with(method, path, body, deadline)?;
+        let r = finish_value(raw.status, raw.body(), deadline);
+        // 受信バッファは `raw` の破棄で上書きされる（誤りの経路も同じ）。
+        drop(raw);
         // 解析に時間がかかった場合も、成功を返す直前に絶対期限を確かめる。
         remaining(deadline)?;
         r
@@ -187,13 +188,14 @@ impl WebDriverClient {
     /// credential の取得。応答を値の木へ展開せず、`rpId`・`isResidentCredential` だけを読む（SECR-10・SECR-29）。
     fn request_credentials(&self, path: &str) -> Result<Vec<CredentialSummary>, E2eError> {
         let deadline = deadline_after(self.timeout)?;
-        let (status, mut raw) = self.exchange_with(Method::Get, path, None, deadline)?;
-        let parsed = if (200..300).contains(&status) {
-            Parser::credentials(&raw).map_err(|_| failed())
+        let raw = self.exchange_with(Method::Get, path, None, deadline)?;
+        let parsed = if (200..300).contains(&raw.status) {
+            Parser::credentials(raw.body(), Some(deadline)).map_err(|_| failed())
         } else {
             Err(failed())
         };
-        raw.fill(0);
+        // 本文（`privateKey` を含み得る）は複製せず受信バッファのまま読み、破棄時に上書きする。
+        drop(raw);
         remaining(deadline)?;
         Ok(parsed?
             .into_iter()
@@ -204,14 +206,14 @@ impl WebDriverClient {
             .collect())
     }
 
-    /// 1 命令を送り、ステータスと本文のバイト列を返す。本文は呼び出し元が用途に応じて解析し、上書きして捨てる。
+    /// 1 命令を送り、応答（ステータスと受信バッファ）を返す。本文は呼び出し元が用途に応じて解析する。バッファは破棄時に上書きされる。
     fn exchange_with(
         &self,
         method: Method,
         path: &str,
         body: Option<&Value>,
         deadline: Instant,
-    ) -> Result<(u16, Vec<u8>), E2eError> {
+    ) -> Result<Response, E2eError> {
         let path = validated_path(path)?;
         let payload = match body {
             Some(v) => v.to_json_string().into_bytes(),
@@ -360,15 +362,16 @@ fn parse_head(head: &[u8]) -> Result<Head, E2eError> {
 }
 
 /// 応答を読んでステータスと本文を返す。Content-Length が分かればその分で止め、無ければ EOF まで読む。
-fn read_response(stream: &mut TcpStream, deadline: Instant) -> Result<(u16, Vec<u8>), E2eError> {
-    let mut buf: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 4096];
+fn read_response(stream: &mut TcpStream, deadline: Instant) -> Result<Response, E2eError> {
+    // 再確保で古い領域に本文が残らないよう、上限ぶんを先に確保する。誤りの経路でも `buf` の破棄で上書きされる。
+    let mut buf = ZeroBuf(Vec::with_capacity(MAX_RESPONSE_BYTES + CHUNK_SIZE));
+    let mut chunk = ZeroArray([0u8; CHUNK_SIZE]);
     let mut head: Option<(usize, Head)> = None;
     let mut eof = false;
     loop {
         if let Some((end, h)) = &head
             && let Some(cl) = h.content_length
-            && buf.len() >= end + cl
+            && buf.0.len() >= end + cl
         {
             break;
         }
@@ -376,21 +379,21 @@ fn read_response(stream: &mut TcpStream, deadline: Instant) -> Result<(u16, Vec<
         stream
             .set_read_timeout(Some(remaining(deadline)?))
             .map_err(|_| failed())?;
-        let n = stream.read(&mut chunk).map_err(|_| failed())?;
+        let n = stream.read(&mut chunk.0).map_err(|_| failed())?;
         // 最後の読み取りの後にも絶対期限を確かめる（期限を過ぎて届いた応答を受理しない）。
         remaining(deadline)?;
         if n == 0 {
             eof = true;
             break;
         }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.len() > MAX_RESPONSE_BYTES {
+        buf.0.extend_from_slice(&chunk.0[..n]);
+        if buf.0.len() > MAX_RESPONSE_BYTES {
             return Err(failed());
         }
         if head.is_none()
-            && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+            && let Some(pos) = buf.0.windows(4).position(|w| w == b"\r\n\r\n")
         {
-            let parsed = parse_head(&buf[..pos])?;
+            let parsed = parse_head(&buf.0[..pos])?;
             // 上限を超える Content-Length は読む前に拒否する（end + cl の overflow も防ぐ）。
             if parsed
                 .content_length
@@ -414,30 +417,63 @@ fn read_response(stream: &mut TcpStream, deadline: Instant) -> Result<(u16, Vec<
             stream
                 .set_read_timeout(Some(EXTRA_BYTES_GRACE.min(left)))
                 .map_err(|_| failed())?;
-            if matches!(stream.read(&mut chunk), Ok(n) if n > 0) {
+            if matches!(stream.read(&mut chunk.0), Ok(n) if n > 0) {
                 return Err(failed());
             }
         }
     }
     // 結果を受理する時点でも絶対期限を確かめる。期限を過ぎた応答は成功にしない。
     remaining(deadline)?;
-    let body = &buf[end..];
-    let body = match head.content_length {
-        // 宣言より多い・少ない本文は曖昧なフレーミングとして拒否する。
-        Some(cl) if body.len() == cl => body,
-        Some(_) => return Err(failed()),
-        None => body,
-    };
-    let status = head.status;
-    let body = body.to_vec();
-    // ヘッダーを含む受信バッファは、本文（`privateKey` を含み得る）を複製した後に上書きして捨てる。
-    buf.fill(0);
-    Ok((status, body))
+    let body_len = buf.0.len() - end;
+    // 宣言より多い・少ない本文は曖昧なフレーミングとして拒否する。
+    if head.content_length.is_some_and(|cl| body_len != cl) {
+        return Err(failed());
+    }
+    Ok(Response {
+        status: head.status,
+        buf,
+        start: end,
+    })
+}
+
+const CHUNK_SIZE: usize = 4096;
+
+/// 破棄時に中身を 0 で上書きするバッファ（本文に `privateKey` を含み得るため。SECR-10・SECR-29）。
+struct ZeroBuf(Vec<u8>);
+
+impl Drop for ZeroBuf {
+    fn drop(&mut self) {
+        self.0.fill(0);
+        std::hint::black_box(&mut self.0);
+    }
+}
+
+/// 読み取り用の一時バッファ。破棄時に上書きする。
+struct ZeroArray([u8; CHUNK_SIZE]);
+
+impl Drop for ZeroArray {
+    fn drop(&mut self) {
+        self.0.fill(0);
+        std::hint::black_box(&mut self.0);
+    }
+}
+
+/// 受信した応答。本文は複製せずバッファの一部として読む。
+struct Response {
+    status: u16,
+    buf: ZeroBuf,
+    start: usize,
+}
+
+impl Response {
+    fn body(&self) -> &[u8] {
+        &self.buf.0[self.start..]
+    }
 }
 
 /// 本文を汎用の値として解析し、`value` を返す。WebDriver の誤り応答・非 2xx・形の不一致は `CommandFailed`。
-fn finish_value(status: u16, body: &[u8]) -> Result<Value, E2eError> {
-    let json = Value::parse(body).map_err(|_| failed())?;
+fn finish_value(status: u16, body: &[u8], deadline: Instant) -> Result<Value, E2eError> {
+    let json = Value::parse_until(body, Some(deadline)).map_err(|_| failed())?;
     let value = json.get("value").cloned().ok_or_else(failed)?;
     if !(200..300).contains(&status) || value.get("error").is_some_and(Value::is_string) {
         return Err(failed());

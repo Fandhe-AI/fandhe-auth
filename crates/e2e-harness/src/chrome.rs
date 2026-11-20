@@ -383,10 +383,20 @@ impl ChromeDriverComponent {
         result
     }
 
-    /// 接続の後・送信の前にドライバの子の生存を確かめる関数（A10）。
-    fn alive_guard(&self) -> AliveGuard {
+    /// 接続の後・送信の前に、`port` の待ち受けが所有するドライバの子のものだと確かめる関数（A10）。
+    /// 子が生きていて、かつそのポートの待ち受け socket を子が持つときだけ真（確かめられなければ偽で、送信しない）。
+    fn alive_guard(&self, port: u16) -> AliveGuard {
         let driver = Arc::clone(&self.driver);
-        AliveGuard::new(move || driver_is_alive(&driver))
+        AliveGuard::new(move || {
+            if !driver_is_alive(&driver) {
+                return false;
+            }
+            let pid = match lock_driver(&driver).as_ref() {
+                Some(d) => d.child.id(),
+                None => return false,
+            };
+            port_is_listened_only_by(pid, port)
+        })
     }
 
     fn try_start(&mut self) -> Result<(), E2eError> {
@@ -425,7 +435,7 @@ impl ChromeDriverComponent {
                 .ok_or_else(fail)?;
             // 各 probe は残り時間を超えない。
             let client = WebDriverClient::new(port, self.config.command_timeout.min(left))
-                .with_alive_guard(self.alive_guard());
+                .with_alive_guard(self.alive_guard(port));
             if client.is_ready() && Instant::now() < deadline {
                 break;
             }
@@ -441,7 +451,7 @@ impl ChromeDriverComponent {
             sleep(Duration::from_millis(100).min(left));
         }
         let client = WebDriverClient::new(port, self.config.command_timeout)
-            .with_alive_guard(self.alive_guard());
+            .with_alive_guard(self.alive_guard(port));
         let (session, browser_version) = client
             .new_session(&new_session_request_with_profile(
                 &self.config.allowed_origins,
@@ -646,7 +656,86 @@ fn kill_group_and_reap(d: &mut Driver) -> std::io::Result<()> {
     }
     let _ = d.child.kill();
     sent?;
+    // SIGKILL は送っただけで、Chrome が終了処理中かもしれない。グループに生きた構成員が居なくなったことを
+    // 期限付きで確かめてから子を回収する。確かめられなければ子を回収せず誤りを返す（`docs/harness/e2e.md` の停止契約）。
+    wait_group_gone(d.child.id(), GROUP_EXIT_TIMEOUT)?;
     d.child.wait().map(|_| ())
+}
+
+/// SIGKILL 後にグループの消滅を待つ期限。ハーネスの安全上の値で、要件の値ではない。
+const GROUP_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// グループに生きた構成員が居なくなるまで `timeout` を上限に確かめる。居なくならない・確かめられないときは誤り。
+fn wait_group_gone(pgid: u32, timeout: Duration) -> std::io::Result<()> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| std::io::Error::other("deadline overflow"))?;
+    loop {
+        if !group_has_live_member(pgid)? {
+            return Ok(());
+        }
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| std::io::Error::other("group still alive"))?;
+        sleep(Duration::from_millis(20).min(left));
+    }
+}
+
+/// `port` の LISTEN 状態の socket が 1 つ以上あり、そのすべてを `pid` が持つか。確かめられないときは偽（fail-closed）。
+/// Linux は `/proc/net/tcp{,6}` と `/proc/<pid>/fd` で照合する。それ以外の OS は照合手段が無く、常に偽にする
+/// （確かめずに送らない。A10）。
+fn port_is_listened_only_by(pid: u32, port: u16) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux_port_is_listened_only_by(pid, port)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, port);
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_port_is_listened_only_by(pid: u32, port: u16) -> bool {
+    let mut inodes: Vec<u64> = Vec::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(text) = std::fs::read_to_string(table) else {
+            return false;
+        };
+        for line in text.lines().skip(1) {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            // sl local_address rem_address st ... inode（9 番目）。st 0A は LISTEN。
+            if f.len() < 10 || f[3] != "0A" {
+                continue;
+            }
+            let Some((_, p)) = f[1].rsplit_once(':') else {
+                return false;
+            };
+            if u16::from_str_radix(p, 16) != Ok(port) {
+                continue;
+            }
+            match f[9].parse::<u64>() {
+                Ok(i) if i != 0 => inodes.push(i),
+                _ => return false,
+            }
+        }
+    }
+    if inodes.is_empty() {
+        return false;
+    }
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    let owned: Vec<String> = fds
+        .flatten()
+        .filter_map(|e| std::fs::read_link(e.path()).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    inodes
+        .iter()
+        .all(|i| owned.iter().any(|l| *l == format!("socket:[{i}]")))
 }
 
 impl E2eComponent for ChromeDriverComponent {
@@ -795,5 +884,34 @@ mod tests {
         );
         // 未回収の子がグループに残るので、signal は成功し、wait で回収できる。
         assert!(kill_group_and_reap(&mut d).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn listener_is_bound_to_its_owner_only() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        assert!(port_is_listened_only_by(std::process::id(), port));
+        // 別のプロセスはその待ち受けを持たない。
+        let mut other = Command::new("sleep").arg("30").spawn().unwrap();
+        assert!(!port_is_listened_only_by(other.id(), port));
+        let _ = other.kill();
+        let _ = other.wait();
+        drop(l);
+        // 待ち受けが無いポートは偽。
+        assert!(!port_is_listened_only_by(std::process::id(), port));
+    }
+
+    #[test]
+    fn group_wait_times_out_while_a_member_lives() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let r = wait_group_gone(child.id(), Duration::from_millis(100));
+        assert!(r.is_err());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

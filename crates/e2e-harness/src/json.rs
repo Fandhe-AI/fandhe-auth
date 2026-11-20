@@ -4,7 +4,9 @@
 //! 対でないサロゲートは誤りにする（fail-closed）。誤りに入力の断片を載せない（SECR-11・SECR-23）。
 //! 資格情報の応答は [`Parser::credentials`] が必要な欄だけを読み、他の欄は値を保持せずに捨てる（SECR-10・SECR-29）。
 
+use std::collections::HashSet;
 use std::ops::Index;
+use std::time::Instant;
 
 /// 入れ子の深さの上限。ハーネスの安全上の値で、要件の値ではない。
 const MAX_DEPTH: usize = 32;
@@ -132,7 +134,12 @@ impl Value {
 
     /// 構文を厳格に検証して解析する。
     pub fn parse(body: &[u8]) -> Result<Value, JsonError> {
-        let mut p = Parser::new(body)?;
+        Self::parse_until(body, None)
+    }
+
+    /// `parse` に絶対期限を付ける。解析の途中で期限を過ぎたら誤りにする（呼び出し側のロックを長く握らせない）。
+    pub fn parse_until(body: &[u8], deadline: Option<Instant>) -> Result<Value, JsonError> {
+        let mut p = Parser::new(body, deadline)?;
         let v = p.value()?;
         p.finish()?;
         Ok(v)
@@ -210,31 +217,46 @@ pub struct Parser<'a> {
     b: &'a [u8],
     i: usize,
     depth: usize,
+    /// 解析の絶対期限。過ぎたら誤りにする。
+    deadline: Option<Instant>,
 }
 
 impl<'a> Parser<'a> {
-    fn new(body: &'a [u8]) -> Result<Self, JsonError> {
+    fn new(body: &'a [u8], deadline: Option<Instant>) -> Result<Self, JsonError> {
         std::str::from_utf8(body).map_err(|_| JsonError)?;
         Ok(Self {
             b: body,
             i: 0,
             depth: 0,
+            deadline,
         })
+    }
+
+    /// 期限を過ぎていたら誤り。値・キーごとに呼ぶ。
+    fn tick(&self) -> Result<(), JsonError> {
+        match self.deadline {
+            Some(d) if Instant::now() >= d => Err(JsonError),
+            _ => Ok(()),
+        }
     }
 
     /// 資格情報の応答 `{"value":[{...},...]}` から、各要素の `rpId`・`isResidentCredential` だけを読む。
     /// それ以外の欄（`privateKey`・`userHandle` 等）は構文だけを確かめて値を保持せずに捨てる（SECR-10・SECR-29）。
     /// キー名は JSON のエスケープを解いてから照合する（`\u0072pId` も `rpId` と読む）。
-    pub fn credentials(body: &[u8]) -> Result<Vec<CredentialFields>, JsonError> {
-        let mut p = Parser::new(body)?;
+    pub fn credentials(
+        body: &[u8],
+        deadline: Option<Instant>,
+    ) -> Result<Vec<CredentialFields>, JsonError> {
+        let mut p = Parser::new(body, deadline)?;
         p.ws();
         p.expect(b'{')?;
         p.enter()?;
         let mut out: Option<Vec<CredentialFields>> = None;
-        let mut seen: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         p.ws();
         if p.peek() != Some(b'}') {
             loop {
+                p.tick()?;
                 p.ws();
                 let key = p.string()?;
                 dedup(&mut seen, &key)?;
@@ -272,6 +294,7 @@ impl<'a> Parser<'a> {
             return Ok(list);
         }
         loop {
+            self.tick()?;
             self.ws();
             list.push(self.credential_object()?);
             self.ws();
@@ -290,12 +313,13 @@ impl<'a> Parser<'a> {
         self.enter()?;
         let mut rp_id: Option<String> = None;
         let mut resident: Option<bool> = None;
-        let mut seen: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         self.ws();
         if self.peek() == Some(b'}') {
             return Err(JsonError);
         }
         loop {
+            self.tick()?;
             self.ws();
             let key = self.string()?;
             dedup(&mut seen, &key)?;
@@ -385,6 +409,7 @@ impl<'a> Parser<'a> {
     }
 
     fn value(&mut self) -> Result<Value, JsonError> {
+        self.tick()?;
         self.ws();
         match self.peek().ok_or(JsonError)? {
             b'n' => self.literal(b"null").map(|()| Value::Null),
@@ -415,6 +440,7 @@ impl<'a> Parser<'a> {
                 self.i += 1;
                 self.enter()?;
                 let mut m: Vec<(String, Value)> = Vec::new();
+                let mut seen: HashSet<String> = HashSet::new();
                 self.ws();
                 if self.peek() == Some(b'}') {
                     self.i += 1;
@@ -422,9 +448,7 @@ impl<'a> Parser<'a> {
                     loop {
                         self.ws();
                         let k = self.string()?;
-                        if m.iter().any(|(e, _)| *e == k) {
-                            return Err(JsonError);
-                        }
+                        dedup(&mut seen, &k)?;
                         self.ws();
                         self.expect(b':')?;
                         let v = self.value()?;
@@ -447,6 +471,7 @@ impl<'a> Parser<'a> {
 
     /// 値を読み捨てる。構文は `value` と同じに確かめ、文字列・数は保持しない。
     fn skip_value(&mut self) -> Result<(), JsonError> {
+        self.tick()?;
         self.ws();
         match self.peek().ok_or(JsonError)? {
             b'n' => self.literal(b"null"),
@@ -475,7 +500,7 @@ impl<'a> Parser<'a> {
             b'{' => {
                 self.i += 1;
                 self.enter()?;
-                let mut seen: Vec<String> = Vec::new();
+                let mut seen: HashSet<String> = HashSet::new();
                 self.ws();
                 if self.peek() == Some(b'}') {
                     self.i += 1;
@@ -629,11 +654,12 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn dedup(seen: &mut Vec<String>, key: &str) -> Result<(), JsonError> {
-    if seen.iter().any(|k| k == key) {
+/// 重複キーの検出。集合で行い、キー数に対して線形の時間で済ませる。
+fn dedup(seen: &mut HashSet<String>, key: &str) -> Result<(), JsonError> {
+    if seen.contains(key) {
         return Err(JsonError);
     }
-    seen.push(key.to_owned());
+    seen.insert(key.to_owned());
     Ok(())
 }
 
@@ -691,7 +717,7 @@ mod tests {
     #[test]
     fn credentials_reads_only_two_fields_even_with_escaped_keys() {
         let body = br#"{"value":[{"rpId":"localhost","isResidentCredential":true,"\u0070rivateKey":"SECRET","userHandle":null,"nested":{"x":[1,2]}}],"extra":1}"#;
-        let c = Parser::credentials(body).unwrap();
+        let c = Parser::credentials(body, None).unwrap();
         assert_eq!(
             c,
             vec![CredentialFields {
@@ -708,8 +734,36 @@ mod tests {
             r#"{"value":[{"rpId":"a","isResidentCredential":true,"k":"\q"}]}"#,
             r#"{"other":[]}"#,
         ] {
-            assert!(Parser::credentials(bad.as_bytes()).is_err(), "{bad}");
+            assert!(Parser::credentials(bad.as_bytes(), None).is_err(), "{bad}");
         }
-        assert_eq!(Parser::credentials(br#"{"value":[]}"#).unwrap(), vec![]);
+        assert_eq!(
+            Parser::credentials(br#"{"value":[]}"#, None).unwrap(),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn many_distinct_keys_parse_quickly_and_duplicates_are_rejected() {
+        let mut body = String::from("{");
+        for n in 0..50_000 {
+            if n > 0 {
+                body.push(',');
+            }
+            body.push_str(&format!("\"k{n}\":0"));
+        }
+        let mut dup = body.clone();
+        dup.push_str(",\"k7\":1}");
+        body.push('}');
+        let start = Instant::now();
+        assert!(Value::parse(body.as_bytes()).is_ok());
+        assert!(Value::parse(dup.as_bytes()).is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn parsing_stops_after_the_deadline() {
+        let past = Instant::now();
+        assert!(Value::parse_until(br#"{"a":1}"#, Some(past)).is_err());
+        assert!(Parser::credentials(br#"{"value":[]}"#, Some(past)).is_err());
     }
 }
