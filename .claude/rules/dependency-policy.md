@@ -44,7 +44,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 | 対象 | 規則 | 根拠 |
 | --- | --- | --- |
 | `rsa`（RUSTSEC-2023-0071） | 本番の依存（RP 向けの `fandhe-auth-client` を含む）に 0 件 | DPOL-18・DPOL-21 |
-| `openssl` | 直接の宣言 0 件。逆依存の根は `webauthn-rs` 系だけ。`vendored` 不可。配備物は配備先の OpenSSL に動的にリンクする（版の記録 DPOL-12 は → Hub `AOPS-2`） | DPOL-10・DPOL-11・DPOL-13（`vendored` は `scripts/check-openssl-vendored.sh`〔`make lint`・`make no-vendored`〕で機械的に検査する。合否の対象は既定 feature の normal・build 依存だけで、非既定 feature の後ろの経路は警告だけの参考走査） |
+| `openssl` | 直接の宣言 0 件。逆依存の根は `webauthn-rs` 系だけ。`vendored` 不可。配備物は配備先の OpenSSL に動的にリンクする（版の記録 DPOL-12 は → Hub `AOPS-2`） | DPOL-10・DPOL-11・DPOL-13（`vendored` は `scripts/check-openssl-vendored.sh`〔`make lint`・`make no-vendored`〕で機械的に検査する。合否の対象は試験専用メンバーを除いた本番メンバーの normal・build 依存で、既定 feature と `PROD_FEATURES` で明示した feature だけ。全 feature を有効にする走査は警告だけの参考） |
 | `native-tls` | 使わない。外向き通信の TLS は OS の信頼ストアに頼らない（DPOL-46。実クライアントの選定は Hub の `ARUN-14`） | DPOL-46 |
 | `web-sys` | サーバー側のビルドに 0 件。引いてよいのは `fandhe-auth-webauthn-wasm`（段階 2）だけ。サーバーのビルドの確認は Hub のビルドにも課される（→ Hub `ARUN-16`） | DPOL-40・`D-2026-10-17-35` の (2) |
 
@@ -113,6 +113,8 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
   監査は `-e dev` を足して別に見る。
 - `--all-features` は DPOL-31 の変異スイッチなど試験用の feature も有効にし、本番のビルドの木と変わるので使わない。
   feature を明示しないと既定の feature だけを見る。
+- 本番のビルドで有効にする非既定 feature を足す変更では、同じ変更で `PROD_FEATURES` も更新する。更新しないと、その feature が引く経路（例: `openssl-sys/vendored`）が合否の検査（`make no-vendored`・DPOL-13）から外れる。
+  `scripts/check-openssl-vendored.sh` は環境変数 `PROD_FEATURES` を同じ形式で受け、合否の走査に含める。
 - `web-sys` の確認は、`fandhe-auth-webauthn-wasm` を `--exclude` で除いた workspace 全体に `--target all` を付けて行う（crate ごとの `-p` は使わない）。`--exclude` の crate が workspace に無い間（段階 2 の前）は `--exclude` を外して流す。Hub の本番のバイナリでの確認は Hub が持つ（`ARUN-16`）。
 - TASK-4 の選定基準は K1〜K12（`D-2026-11-20-7`）。K7: 試験の道具は dev 依存か別の workspace に置き、本番の依存の木に入れない。K11（推移依存の少なさ・保守）は、数の閾値を置かず、次の 4 つで見る（利用者の決定。`D-2026-11-20-14` の (4)(d)）:
   最新の安定版・既知の advisory 0 件・feature は必要最小・依存の `rust-version` が MSRV 以下（MSRV は `D-2026-11-20-12`）。新しい crate を足すときも同じ 4 つで確かめる。

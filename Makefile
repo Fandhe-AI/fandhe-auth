@@ -59,7 +59,7 @@ crate-deps: ## crate 間の依存の向きの検査（許可表との照合）�
 	@scripts/check-crate-deps.sh
 
 # no-vendored は暫定の名前（人が確定する）。DPOL-13・TASK-667。lint からも呼ばれる。
-no-vendored: ## openssl-sys の vendored の検査（合否は本番メンバーの既定 feature の normal・build 依存。他は参考。検査のみ）。直接: scripts/check-openssl-vendored.sh
+no-vendored: ## openssl-sys の vendored の検査（合否は本番メンバーの normal・build 依存で、既定 feature と PROD_FEATURES で明示した feature だけ。全 feature の走査は参考（警告）。検査のみ）。直接: scripts/check-openssl-vendored.sh
 	@scripts/check-openssl-vendored.sh
 
 # pg-check は暫定の名前（人が確定する）。起動・停止の make ターゲットは置かない

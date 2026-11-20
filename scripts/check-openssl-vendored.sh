@@ -19,7 +19,7 @@
 # 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。
 # B は依存の列挙にだけ使い、ビルド・clippy には使わない（DPOL-31。check-crate-deps.sh と同じ扱い）。
 # 本番の範囲は normal・build（dev は見ない）。`cargo tree -i` は一致が無いと非 0 のため使わない。
-# 実行のたびに自己試験（陰性対照 F1〜F8）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陰性対照 F1〜F9）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は件数と規則名だけ。cargo tree の生の出力には絶対パスが入るため出さない。
 # 限界: dev の依存・別 workspace の crates/trial-deps/fuzz・Hub の最終バイナリは対象外。
 # TODO(TASK-667): 動的リンクと版の記録の対応（#318 の 2/4）を足す
@@ -81,7 +81,9 @@ FA=()
 build_feature_args() {
   FA=()
   [ -z "$1" ] && return 0
-  if ! printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+(,[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)*$'; then
+  # 文字列全体を bash の正規表現で照合する（grep は行ごとのため、改行入りの値の 1 行目だけが通り得る）。
+  local re='^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+(,[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)*$'
+  if ! [[ "$1" =~ $re ]]; then
     log "error: PROD_FEATURES must be comma-separated <crate>/<feature>; cannot inspect"
     exit 2
   fi
@@ -251,7 +253,24 @@ selftest() {
   a="$(prod_tree "${w8}" offline "prod8/x")" || exit 2
   expect_count F8B R3 "${a}" ge1
 
-  log "selftest ok (F1-F8)"
+  # F9: PROD_FEATURES の形式検査。改行・CR・タブ・空白・末尾のカンマ入りの値は検査不能（2）で止まる（1 行目だけが通る穴を塞ぐ）
+  local bad rc
+  for bad in $'prod8/x\nevil' $'prod8/x\r' $'prod8/x\t' $'prod8/x\n' 'prod8/x,' 'prod8 /x' 'prod8'; do
+    rc=0
+    (build_feature_args "${bad}") 2>/dev/null || rc=$?
+    if [ "${rc}" -ne 2 ]; then
+      log "FAIL selftest F9: malformed PROD_FEATURES accepted"
+      exit 1
+    fi
+  done
+  rc=0
+  (build_feature_args "prod8/x,prod8/y") 2>/dev/null || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    log "FAIL selftest F9: valid PROD_FEATURES rejected"
+    exit 1
+  fi
+
+  log "selftest ok (F1-F9)"
 }
 
 selftest
