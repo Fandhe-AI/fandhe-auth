@@ -18,17 +18,16 @@ const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
 #[derive(Debug, PartialEq, Eq)]
 enum Probe {
     Answer(u8),
-    /// 接続の拒否（ECONNREFUSED）か、明示の切断（EOF・リセット）。
+    /// 明示の切断（EOF・リセット等）。
     Cut,
 }
 
-/// SSLRequest を送って 1 バイトの応答を読む。拒否・明示の切断は `Cut`。タイムアウト・別のエラーは失敗。
+/// SSLRequest を送って 1 バイトの応答を読む。明示の切断は `Cut`。タイムアウト・別のエラーは失敗。
 fn ssl_probe(port: u16) -> Probe {
     let cut = |k: ErrorKind| {
         matches!(
             k,
-            ErrorKind::ConnectionRefused
-                | ErrorKind::UnexpectedEof
+            ErrorKind::UnexpectedEof
                 | ErrorKind::ConnectionReset
                 | ErrorKind::ConnectionAborted
                 | ErrorKind::BrokenPipe

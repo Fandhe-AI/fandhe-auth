@@ -12,30 +12,6 @@ use fandhe_auth_it_harness::fault::{DbFaultError, DbFaultProxy, FaultRecordError
 use fandhe_auth_it_harness::record::UtcTimestamp;
 use fandhe_auth_it_harness::{EndpointHandle, FaultRecord, FaultTimeline};
 
-/// 遮断の間は待ち受けのポートを手放すので、同じ試験プロセスの他の試験が `bind(0)` で同じポートを取ると
-/// 解除が失敗する（方式の限界。`docs/harness/fault-injection.md`）。このため試験どうしを直列にする。
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// 解除する。他のプロセスが遮断中にポートを取っていると `RebindFailed`（遮断のまま・記録なし）になる。
-/// これは方式の限界（`docs/harness/fault-injection.md`）で、取られていなくなるまで再試行する。
-/// それ以外の誤りは失敗にする。
-fn release_retry(p: &mut DbFaultProxy, tl: &mut FaultTimeline) {
-    for _ in 0..500 {
-        match p.release_block(tl) {
-            Ok(()) => return,
-            Err(DbFaultError::RebindFailed) => thread::sleep(Duration::from_millis(10)),
-            Err(e) => panic!("release failed: {e:?}"),
-        }
-    }
-    panic!("port stayed taken");
-}
-
 fn t0() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_700_000_000)
 }
@@ -119,25 +95,21 @@ fn roundtrip(s: &mut TcpStream, msg: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// 遮断中の新しい接続。待ち受けが閉じているので ECONNREFUSED になる。つながった場合は往復が明示の切断になる。
-/// それ以外（タイムアウト・別のエラー）は失敗にする。
-fn assert_refused_or_cut(port: u16) {
-    match TcpStream::connect_timeout(
+/// 遮断中の新しい接続。待ち受けは閉じないので connect は成功し、転送器が accept した直後に切る。
+/// 往復は明示の切断になる。タイムアウト・別のエラーは失敗にする。
+fn assert_cut_while_blocked(port: u16) {
+    let mut s = TcpStream::connect_timeout(
         &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
         Duration::from_secs(5),
-    ) {
-        Err(e) => assert_eq!(e.kind(), ErrorKind::ConnectionRefused),
-        Ok(mut s) => {
-            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            assert_eq!(outcome(&mut s, b"c"), Outcome::Disconnected);
-        }
-    }
+    )
+    .expect("connect succeeds while blocked");
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(outcome(&mut s, b"c"), Outcome::Disconnected);
 }
 
 /// 応答を返さずに黙る接続は `TimedOut` と分類する（`roundtrip` が切断として通さないことの確認）。
 #[test]
 fn silent_peer_is_timed_out_not_disconnected() {
-    let _serial = serial();
     let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = l.local_addr().unwrap().port();
     let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
@@ -149,7 +121,6 @@ fn silent_peer_is_timed_out_not_disconnected() {
 
 #[test]
 fn forwards_bytes_unchanged() {
-    let _serial = serial();
     let p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut c = connect(p.listen_port());
     assert_eq!(roundtrip(&mut c, b"hello").as_deref(), Some(&b"hello"[..]));
@@ -159,7 +130,6 @@ fn forwards_bytes_unchanged() {
 
 #[test]
 fn block_cuts_open_and_refuses_new_then_release_recovers() {
-    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     let mut open = connect(p.listen_port());
@@ -167,9 +137,9 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
 
     p.block(&mut tl).unwrap();
     assert!(roundtrip(&mut open, b"b").is_none(), "open conn is cut");
-    assert_refused_or_cut(p.listen_port());
+    assert_cut_while_blocked(p.listen_port());
 
-    release_retry(&mut p, &mut tl);
+    p.release_block(&mut tl).unwrap();
     let mut again = connect(p.listen_port());
     assert_eq!(roundtrip(&mut again, b"d").as_deref(), Some(&b"d"[..]));
 
@@ -182,7 +152,6 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
 
 #[test]
 fn delay_adds_lower_bound_and_release_removes_it() {
-    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     let mut c = connect(p.listen_port());
@@ -202,7 +171,6 @@ fn delay_adds_lower_bound_and_release_removes_it() {
 
 #[test]
 fn baseline_timeline_rejects_injection_and_does_not_inject() {
-    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = FaultTimeline::baseline(Instant::now(), t0()).unwrap();
     assert_eq!(
@@ -222,7 +190,6 @@ fn baseline_timeline_rejects_injection_and_does_not_inject() {
 
 #[test]
 fn double_and_missing_operations_are_rejected_without_recording() {
-    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     assert_eq!(p.release_block(&mut tl), Err(DbFaultError::NotActive));
@@ -244,7 +211,6 @@ fn double_and_missing_operations_are_rejected_without_recording() {
 
 #[test]
 fn unreleased_injections_are_counted() {
-    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     p.block(&mut tl).unwrap();
@@ -255,7 +221,6 @@ fn unreleased_injections_are_counted() {
 
 #[test]
 fn empty_endpoint_handle_fails_closed() {
-    let _serial = serial();
     let p = DbFaultProxy::start_for(EndpointHandle::default()).unwrap();
     assert!(p.proxied_endpoint().is_none());
     let mut c = connect(p.listen_port());
@@ -265,7 +230,6 @@ fn empty_endpoint_handle_fails_closed() {
 
 #[test]
 fn stop_and_drop_finish_in_any_state() {
-    let _serial = serial();
     for state in 0..4 {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -293,7 +257,6 @@ fn stop_and_drop_finish_in_any_state() {
 
 #[test]
 fn outputs_do_not_leak_ports_or_addresses() {
-    let _serial = serial();
     let up = echo_upstream();
     let mut p = DbFaultProxy::start_to_port(up).unwrap();
     let listen = p.listen_port();
@@ -319,7 +282,6 @@ fn outputs_do_not_leak_ports_or_addresses() {
 
 #[test]
 fn release_delay_ends_in_flight_wait() {
-    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     p.delay(&mut tl, Duration::from_secs(30)).unwrap();
@@ -337,7 +299,6 @@ fn release_delay_ends_in_flight_wait() {
 
 #[test]
 fn delay_applies_to_open_connection_with_traffic_in_flight() {
-    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     let mut c = connect(p.listen_port());
