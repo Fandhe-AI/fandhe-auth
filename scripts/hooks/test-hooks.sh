@@ -111,7 +111,7 @@ fail() {
   echo "not ok - $1"
   shift
   local detail
-  for detail in "$@"; do
+  for detail in ${@+"$@"}; do
     echo "    ${detail}"
   done
 }
@@ -788,7 +788,7 @@ run_without_cmd() {
   bin="${work_dir}/nobin-${skip}"
   rm -rf "${bin}"
   mkdir -p "${bin}"
-  for c in "$@"; do
+  for c in ${@+"$@"}; do
     if [ "${c}" != "${skip}" ]; then
       ln -s "$(command -v "${c}")" "${bin}/${c}"
     fi
@@ -1092,11 +1092,14 @@ fi
 INSTALL_MSRV_SH="${HOOKS_DIR}/../install-msrv.sh"
 if [ "${msrv_prereq}" = "ok" ]; then
   # install_msrv_case <名前> <期待の終了状態> <偽 rustc の版の上書き（空なら RUSTUP_TOOLCHAIN をそのまま名乗る）>
-  #   <GITHUB_ENV に期待する行（空なら書かれないこと）> <rustup が呼ばれるか（yes|no）> [環境変数 NAME=VALUE...]
+  #   <GITHUB_ENV に期待する行（空なら書かれないこと）> <rustup の呼び出しの記録の期待（空なら一度も呼ばれないこと）>
+  #   [環境変数 NAME=VALUE...]
   # 偽の rustc は RUSTUP_TOOLCHAIN の値を版として返す（export が消えれば unset を返し、一致確認で落ちる）。
-  # 偽の rustup は呼び出しを記録する（配布元の拒否が rustup の呼び出しより前であることを確かめる）。
+  # 偽の rustup は引数を 1 呼び出し 1 行で記録する（配布元の拒否が rustup の呼び出しより前であること、
+  # 入れる版・既定にする版がパッチ版であることを確かめる）。偽のコマンドの中身は固定で、パスは環境変数で渡す
+  # （TMPDIR 由来の値をシェルのコードへ埋め込まない）。
   install_msrv_case() {
-    local name="$1" want_rc="$2" override_ver="$3" want_env="$4" want_rustup="$5" rc=0 bin gh_env calls
+    local name="$1" want_rc="$2" override_ver="$3" want_env="$4" want_calls="$5" rc=0 bin gh_env calls got_calls
     shift 5
     install_seq=$((${install_seq:-0} + 1))
     bin="${work_dir}/install-msrv-bin-${install_seq}"
@@ -1105,29 +1108,35 @@ if [ "${msrv_prereq}" = "ok" ]; then
     mkdir -p "${bin}"
     : > "${gh_env}"
     : > "${calls}"
-    printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "${calls}" > "${bin}/rustup"
-    # shellcheck disable=SC2016  # 偽 rustc の中で展開させるため単引用符のままにする
-    printf '#!/bin/sh\necho "rustc ${FAKE_RUSTC_VER:-${RUSTUP_TOOLCHAIN:-unset}} (abcdef 2026-01-01)"\n' > "${bin}/rustc"
+    cat > "${bin}/rustup" <<'EOF'
+#!/bin/sh
+echo "$*" >> "${FAKE_RUSTUP_CALLS}"
+exit 0
+EOF
+    cat > "${bin}/rustc" <<'EOF'
+#!/bin/sh
+echo "rustc ${FAKE_RUSTC_VER:-${RUSTUP_TOOLCHAIN:-unset}} (abcdef 2026-01-01)"
+EOF
     chmod +x "${bin}/rustup" "${bin}/rustc"
-    env -u RUSTUP_DIST_SERVER -u RUSTUP_UPDATE_ROOT -u RUSTUP_TOOLCHAIN "$@" \
-      FAKE_RUSTC_VER="${override_ver}" PATH="${bin}:${PATH}" HOME="${real_home}" GITHUB_ENV="${gh_env}" \
+    env -u RUSTUP_DIST_SERVER -u RUSTUP_UPDATE_ROOT -u RUSTUP_TOOLCHAIN ${@+"$@"} \
+      FAKE_RUSTUP_CALLS="${calls}" FAKE_RUSTC_VER="${override_ver}" PATH="${bin}:${PATH}" HOME="${real_home}" GITHUB_ENV="${gh_env}" \
       "${HOOK_BASH}" "${INSTALL_MSRV_SH}" > /dev/null 2> "${work_dir}/out" || rc=$?
-    local called="no"
-    [ -s "${calls}" ] && called="yes"
-    if [ "${rc}" -eq "${want_rc}" ] && [ "$(cat "${gh_env}")" = "${want_env}" ] && [ "${called}" = "${want_rustup}" ]; then
+    got_calls="$(cat "${calls}")"
+    if [ "${rc}" -eq "${want_rc}" ] && [ "$(cat "${gh_env}")" = "${want_env}" ] && [ "${got_calls}" = "${want_calls}" ]; then
       pass "install-msrv: ${name}"
     else
-      fail "install-msrv: ${name}" "exit ${rc} (expected ${want_rc}), GITHUB_ENV: $(cat "${gh_env}"), rustup called: ${called} (expected ${want_rustup})" "stderr: $(cat "${work_dir}/out")"
+      fail "install-msrv: ${name}" "exit ${rc} (expected ${want_rc}), GITHUB_ENV: $(cat "${gh_env}"), rustup calls: ${got_calls} (expected: ${want_calls})" "stderr: $(cat "${work_dir}/out")"
     fi
   }
   want_ver="$(HOME="${real_home}" "${HOOK_BASH}" "${MSRV_SH}")"
   case "${want_ver}" in *.*.*) ;; *) want_ver="${want_ver}.0" ;; esac
-  install_msrv_case "RUSTUP_TOOLCHAIN is exported with the patch version and written to GITHUB_ENV" 0 "" "RUSTUP_TOOLCHAIN=${want_ver}" yes
-  install_msrv_case "a rustc of another version exits 2" 2 "1.99.0" "" yes
-  install_msrv_case "RUSTUP_DIST_SERVER set exits 2 without calling rustup" 2 "" "" no RUSTUP_DIST_SERVER=https://example.invalid
-  install_msrv_case "RUSTUP_UPDATE_ROOT set exits 2 without calling rustup" 2 "" "" no RUSTUP_UPDATE_ROOT=https://example.invalid
-  install_msrv_case "empty RUSTUP_DIST_SERVER exits 2 without calling rustup" 2 "" "" no RUSTUP_DIST_SERVER=
-  install_msrv_case "empty RUSTUP_UPDATE_ROOT exits 2 without calling rustup" 2 "" "" no RUSTUP_UPDATE_ROOT=
+  want_calls="toolchain install ${want_ver} --profile minimal"$'\n'"default ${want_ver}"
+  install_msrv_case "the patch version is installed, made default, exported and written to GITHUB_ENV" 0 "" "RUSTUP_TOOLCHAIN=${want_ver}" "${want_calls}"
+  install_msrv_case "a rustc of another version exits 2" 2 "1.99.0" "" "${want_calls}"
+  install_msrv_case "RUSTUP_DIST_SERVER set exits 2 without calling rustup" 2 "" "" "" RUSTUP_DIST_SERVER=https://example.invalid
+  install_msrv_case "RUSTUP_UPDATE_ROOT set exits 2 without calling rustup" 2 "" "" "" RUSTUP_UPDATE_ROOT=https://example.invalid
+  install_msrv_case "empty RUSTUP_DIST_SERVER exits 2 without calling rustup" 2 "" "" "" RUSTUP_DIST_SERVER=
+  install_msrv_case "empty RUSTUP_UPDATE_ROOT exits 2 without calling rustup" 2 "" "" "" RUSTUP_UPDATE_ROOT=
 else
   echo "ok - install-msrv: skipped (cargo, jq or python3 with tomllib not found)"
 fi
