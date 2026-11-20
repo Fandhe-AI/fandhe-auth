@@ -1,6 +1,8 @@
 //! 並行数を段階的に変える実行の単体試験（TASK-12 8/10）。時間は偽の時計で、実際の経過・sleep・時間の値では判定しない。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 use fandhe_auth_load_harness::{
     CallResult, IntervalName, LoadConfig, MeterError, MetricKey, MonotonicClock, StageConfig,
@@ -389,4 +391,105 @@ fn multi_stage_display_numbers_runs_per_stage_and_worst_run_stays_in_stage() {
     // 第 2 段階の metric 行は第 2 段階の番号で出る。
     assert!(text.contains("metric: 2.1 interval=op class=measured n=3 "));
     assert!(text.contains("metric: 2.2 interval=op class=measured n=3 "));
+}
+
+/// 同時に実行中の呼び出し数の最大値を記録する（共有ロックを持たない対象。重なりの観測だけに使う）。
+struct Overlap {
+    in_flight: AtomicU64,
+    max: AtomicU64,
+}
+
+impl Overlap {
+    fn enter(&self) {
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max.fetch_max(now, Ordering::SeqCst);
+    }
+
+    fn leave(&self) {
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn concurrency_one_stage_never_overlaps() {
+    // 並行数 1 の段階では呼び出しが重ならない（記録した同時実行数の最大が 1）。
+    let plan = StagePlan::new(vec![sc(1, 20, 2, 2)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let ov = Overlap {
+        in_flight: AtomicU64::new(0),
+        max: AtomicU64::new(0),
+    };
+    let r = run_stages(
+        || step_clock(10),
+        &spec(),
+        &plan,
+        || {
+            ov.enter();
+            ov.leave();
+            CallResult::Ok
+        },
+    )
+    .unwrap();
+    assert_eq!(ov.max.load(Ordering::SeqCst), 1);
+    assert!(r.stages()[0].runs().iter().all(|x| x.max_in_flight == 1));
+}
+
+#[test]
+fn multi_worker_stages_really_overlap() {
+    // 並行数 4・3 の段階では、各回の最初の「並行数」件の呼び出しが待ち合わせて全員そろうまで抜けない。
+    // 全員が実際に同時に実行中になった場合だけ待ち合わせが成立する（sleep に頼らず重なりを確定させる）。
+    // 直列の回帰では待ち合わせが成立せず、上限の時間（失敗の検出だけに使う。成功の経路は時間に依らない）で打ち切る。
+    let parties = [4_u64, 3];
+    let plan = StagePlan::new(
+        vec![sc(4, 8, 0, 1), sc(3, 6, 0, 1)],
+        MetricKey::P99Ns,
+        limits(),
+        vocab(),
+    )
+    .unwrap();
+    // (到着数, 今の回の待ち合わせ人数)
+    let gate = (Mutex::new((0_u64, 0_u64)), Condvar::new());
+    let timed_out = AtomicBool::new(false);
+    let ov = Overlap {
+        in_flight: AtomicU64::new(0),
+        max: AtomicU64::new(0),
+    };
+    let runs_started = AtomicU64::new(0);
+    let r = run_stages(
+        || {
+            let k = usize::try_from(runs_started.fetch_add(1, Ordering::SeqCst)).unwrap();
+            *gate.0.lock().unwrap() = (0, parties[k]);
+            step_clock(10)
+        },
+        &spec(),
+        &plan,
+        || {
+            ov.enter();
+            let mut g = gate.0.lock().unwrap();
+            if g.0 < g.1 {
+                g.0 += 1;
+                if g.0 >= g.1 {
+                    gate.1.notify_all();
+                } else {
+                    let (_g, res) = gate
+                        .1
+                        .wait_timeout_while(g, Duration::from_secs(60), |s| s.0 < s.1)
+                        .unwrap();
+                    if res.timed_out() {
+                        timed_out.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+            ov.leave();
+            CallResult::Ok
+        },
+    )
+    .unwrap();
+    assert!(!timed_out.load(Ordering::SeqCst));
+    assert_eq!(ov.max.load(Ordering::SeqCst), 4);
+    let observed: Vec<u64> = r
+        .stages()
+        .iter()
+        .map(|s| s.runs()[0].max_in_flight)
+        .collect();
+    assert_eq!(observed, [4, 3]);
 }
