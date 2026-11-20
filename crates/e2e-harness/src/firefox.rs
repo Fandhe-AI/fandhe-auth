@@ -68,6 +68,7 @@ impl GeckoDriverComponent {
             DriverSpec {
                 port_args,
                 session_request: new_session_request,
+                browser_name: "firefox",
             },
         ))
     }

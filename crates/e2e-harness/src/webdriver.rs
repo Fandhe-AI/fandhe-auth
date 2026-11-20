@@ -120,6 +120,40 @@ impl AuthenticatorId {
     }
 }
 
+/// 登録で得た credential ID（base64url）。認証の `allowCredentials` に渡すための不透明な値。
+///
+/// WebAuthn では秘密値でなく外に出る識別子だが、ログ・結果に出さない方針（SECR-11・SECR-23）で `Debug` は固定の文字列。
+/// `Display` は実装せず、値は crate 内の `as_str` だけで借りる。`[A-Za-z0-9_-]` の 1〜1366 文字だけを受ける（A03）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct CredentialRef(String);
+
+impl fmt::Debug for CredentialRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("CredentialRef").field(&REDACTED).finish()
+    }
+}
+
+impl CredentialRef {
+    /// 検証して作る。外れた値は `CommandFailed`。
+    pub fn new(raw: &str) -> Result<Self, E2eError> {
+        let ok = !raw.is_empty()
+            && raw.len() <= 1366
+            && raw
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if ok {
+            Ok(Self(raw.to_owned()))
+        } else {
+            Err(failed())
+        }
+    }
+
+    /// 認証スクリプトの引数にだけ使う。戻り値をログ・誤りに渡さない。
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// 仮想 authenticator が保持する credential の要約。判定に要る欄だけを持ち、秘密鍵・user handle は保持しない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSummary {
@@ -214,9 +248,13 @@ impl WebDriverClient {
     }
 
     /// 新しいセッションを作る。成功したらセッションとブラウザの版を返す。
+    ///
+    /// 応答の `capabilities.browserName` が `expected_browser_name` と完全一致しなければ、確立したセッションを
+    /// 最善で閉じてから `CommandFailed` を返す（別のブラウザのドライバに繋がった記録を作らない。fail-closed）。
     pub fn new_session(
         &self,
         capabilities: &Value,
+        expected_browser_name: &str,
     ) -> Result<(WebDriverSession, String), E2eError> {
         let v = self.request(HttpMethod::Post, "/session", Some(capabilities))?;
         let id = v
@@ -228,13 +266,19 @@ impl WebDriverClient {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        Ok((
-            WebDriverSession {
-                client: *self,
-                id: SessionId::new(id)?,
-            },
-            version,
-        ))
+        let session = WebDriverSession {
+            client: *self,
+            id: SessionId::new(id)?,
+        };
+        let name_ok = v
+            .pointer("/capabilities/browserName")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n == expected_browser_name);
+        if !name_ok {
+            let _ = session.delete();
+            return Err(failed());
+        }
+        Ok((session, version))
     }
 }
 
@@ -471,6 +515,17 @@ impl WebDriverSession {
                 .and_then(|u| AuthenticatorId::new(&u.to_string())),
             _ => Err(failed()),
         }
+    }
+
+    /// 仮想 authenticator の User Verified の状態を切り替える（`false` にすると UV 必須の認証が拒否される）。
+    pub fn set_user_verified(&self, id: &AuthenticatorId, verified: bool) -> Result<(), E2eError> {
+        self.client
+            .request(
+                HttpMethod::Post,
+                &self.path(&format!("/webauthn/authenticator/{}/uv", id.0)),
+                Some(&json!({ "isUserVerified": verified })),
+            )
+            .map(|_| ())
     }
 
     /// 仮想 authenticator の credential の要約を返す。秘密鍵の欄は読み捨てる。

@@ -5,7 +5,8 @@
 //! PKEY の振る舞いを満たしたとは主張しない。結果は〔仮想〕（ACPT-7・ACPT-8）。
 //!
 //! 安全: 実行するスクリプトは定数で、外部入力を連結しない（A03）。challenge・user.id はブラウザの
-//! `crypto.getRandomValues` で作る。credential の生の値・公開鍵・attestation の中身は返さない（SECR-11）。
+//! `crypto.getRandomValues` で作る。返すのは credential ID（認証の `allowCredentials` に要る識別子。不透明な
+//! [`CredentialRef`] で持ち、`Debug` に出さない）だけで、公開鍵・attestation の中身・署名は返さない（SECR-11）。
 
 use serde_json::{Value, json};
 
@@ -13,6 +14,8 @@ use crate::browser::{AuthenticatorKind, Evidence};
 use crate::component::E2eComponentKind;
 use crate::driver_process::DriverHandle;
 use crate::harness::{E2eError, E2eErrorKind};
+use crate::webauthn_error::WebAuthnErrorName;
+use crate::webdriver::CredentialRef;
 
 /// 登録のスクリプト。options は PKEY-4 の実測の形（UV required・attestation none・ES256/RS256）に合わせるが、
 /// PKEY-4 を満たした主張はしない。`arguments[0]` が RP ID、`arguments[1]` が期待する origin。
@@ -42,6 +45,8 @@ const expectedOrigin = arguments[1];
         const cd = JSON.parse(new TextDecoder().decode(cred.response.clientDataJSON));
         done({
             ok: true,
+            credentialId: b64u(new Uint8Array(cred.rawId)),
+            idOk: cred.id === b64u(new Uint8Array(cred.rawId)),
             typeOk: cred.type === 'public-key',
             attestationLen: cred.response.attestationObject.byteLength,
             clientDataTypeOk: cd.type === 'webauthn.create',
@@ -54,55 +59,15 @@ const expectedOrigin = arguments[1];
 })();
 "#;
 
-/// `create()` の失敗の `DOMException.name` のうち、既知のものだけの列挙。
-///
-/// ブラウザが返す文字列をそのまま持たず、未知の値は固定の `Other` に畳む（SECR-23。出力・失敗メッセージに生の文字列を出さない）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RegistrationErrorName {
-    NotAllowed,
-    InvalidState,
-    Security,
-    NotSupported,
-    Abort,
-    Constraint,
-    Data,
-    Encoding,
-    Network,
-    Timeout,
-    Unknown,
-    Type,
-    /// 登録の前の確認で、ページの origin が試験用の origin と違った（ハーネス自身の固定の名前）。
-    OriginMismatch,
-    /// 既知の名前に当たらない値。
-    Other,
-}
-
-impl RegistrationErrorName {
-    fn from_dom_name(name: &str) -> Self {
-        match name {
-            "NotAllowedError" => Self::NotAllowed,
-            "InvalidStateError" => Self::InvalidState,
-            "SecurityError" => Self::Security,
-            "NotSupportedError" => Self::NotSupported,
-            "AbortError" => Self::Abort,
-            "ConstraintError" => Self::Constraint,
-            "DataError" => Self::Data,
-            "EncodingError" => Self::Encoding,
-            "NetworkError" => Self::Network,
-            "TimeoutError" => Self::Timeout,
-            "UnknownError" => Self::Unknown,
-            "TypeError" => Self::Type,
-            "OriginMismatch" => Self::OriginMismatch,
-            _ => Self::Other,
-        }
-    }
-}
+/// 登録の失敗の名前（認証と共通の列挙の別名。既存の公開名を保つ）。
+pub type RegistrationErrorName = WebAuthnErrorName;
 
 /// 登録 1 件の結果。真偽と長さだけで、credential の値を持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationOutcome {
     created: bool,
+    credential: Option<CredentialRef>,
+    id_ok: bool,
     type_ok: bool,
     attestation_len: u64,
     client_data_type_ok: bool,
@@ -115,11 +80,18 @@ impl RegistrationOutcome {
     /// ページ内の比較がすべて成り立ち、attestation が空でないか。
     pub fn succeeded(&self) -> bool {
         self.created
+            && self.credential.is_some()
+            && self.id_ok
             && self.type_ok
             && self.attestation_len > 0
             && self.client_data_type_ok
             && self.origin_ok
             && self.challenge_ok
+    }
+
+    /// 成功したときの credential ID（認証に渡す。失敗したときは `None`）。
+    pub fn credential(&self) -> Option<&CredentialRef> {
+        self.credential.as_ref()
     }
 
     /// `create()` が失敗したときの `DOMException.name`（既知の名前の列挙。未知は `Other`）。
@@ -132,11 +104,13 @@ impl RegistrationOutcome {
         AuthenticatorKind::WebDriverVirtual.evidence()
     }
 
-    fn from_value(v: &Value) -> Option<Self> {
+    pub(crate) fn from_value(v: &Value) -> Option<Self> {
         let b = |k: &str| v.get(k).and_then(Value::as_bool);
         if b("ok")? {
             Some(Self {
                 created: true,
+                credential: Some(CredentialRef::new(v.get("credentialId")?.as_str()?).ok()?),
+                id_ok: b("idOk")?,
                 type_ok: b("typeOk")?,
                 attestation_len: v.get("attestationLen")?.as_u64()?,
                 client_data_type_ok: b("clientDataTypeOk")?,
@@ -147,12 +121,14 @@ impl RegistrationOutcome {
         } else {
             Some(Self {
                 created: false,
+                credential: None,
+                id_ok: false,
                 type_ok: false,
                 attestation_len: 0,
                 client_data_type_ok: false,
                 origin_ok: false,
                 challenge_ok: false,
-                error_name: Some(RegistrationErrorName::from_dom_name(
+                error_name: Some(WebAuthnErrorName::from_dom_name(
                     v.get("errorName")?.as_str()?,
                 )),
             })
@@ -200,6 +176,22 @@ mod tests {
             let o =
                 RegistrationOutcome::from_value(&json!({ "ok": false, "errorName": raw })).unwrap();
             assert_eq!(o.error_name(), Some(want), "{raw}");
+        }
+    }
+
+    #[test]
+    fn invalid_credential_id_in_success_is_none() {
+        let ok = |id: Value| {
+            json!({
+                "ok": true, "credentialId": id, "idOk": true, "typeOk": true,
+                "attestationLen": 10, "clientDataTypeOk": true, "originOk": true, "challengeOk": true
+            })
+        };
+        let o = RegistrationOutcome::from_value(&ok(json!("Ab-_9"))).unwrap();
+        assert!(o.succeeded());
+        assert!(!format!("{o:?}").contains("Ab-_9"));
+        for bad in [json!("a b"), json!(""), json!(5)] {
+            assert!(RegistrationOutcome::from_value(&ok(bad)).is_none());
         }
     }
 }

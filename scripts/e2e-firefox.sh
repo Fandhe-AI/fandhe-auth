@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ハーネス（crates/e2e-harness）の Firefox の仮想 authenticator の E2E（#[ignore]）を流す（TASK-11 (3/6)）。手で呼ぶ。
+# ハーネス（crates/e2e-harness）の Firefox の仮想 authenticator の E2E（#[ignore]）を流す（TASK-11 (3/6)・(4/6)。登録と、登録の後の認証と失敗の場合）。手で呼ぶ。
 # 呼び出し元: `make e2e-firefox`。CI では流さない（runner のブラウザは前提にしない。TASK-6）。
 # geckodriver と Firefox が無ければ失敗する（黙って飛ばさない。DPOL-30〜32）。結果は〔仮想〕で実機・Safari に数えない（ACPT-7）。
 # 前提: 仮想 authenticator の WebDriver エンドポイントを使える Firefox と geckodriver の組み合わせ（両バイナリの存在だけでは足りない）。
@@ -16,4 +16,4 @@ source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 log "requires a Firefox + geckodriver pair with WebDriver virtual authenticator support (recorded as working: Firefox 156-158 + geckodriver 0.37.1); see the header of this script"
-run_e2e_registration "e2e-firefox" geckodriver firefox_registration
+run_e2e "e2e-firefox" geckodriver firefox_registration firefox_authentication

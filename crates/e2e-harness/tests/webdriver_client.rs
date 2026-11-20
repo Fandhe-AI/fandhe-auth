@@ -159,7 +159,7 @@ fn session_commands_send_the_five_keys_and_parse_credentials() {
     let (port, h, rx) = fake_driver_seq(vec![
         http(
             "200 OK",
-            r#"{"value":{"sessionId":"sid-1","capabilities":{"browserVersion":"1.2.3"}}}"#,
+            r#"{"value":{"sessionId":"sid-1","capabilities":{"browserName":"chrome","browserVersion":"1.2.3"}}}"#,
         ),
         http("200 OK", r#"{"value":"abc-123"}"#),
         http(
@@ -167,7 +167,7 @@ fn session_commands_send_the_five_keys_and_parse_credentials() {
             r#"{"value":[{"credentialId":"x","isResidentCredential":false,"rpId":"localhost","privateKey":"p","signCount":0}]}"#,
         ),
     ]);
-    let (sess, ver) = client(port).new_session(&caps()).unwrap();
+    let (sess, ver) = client(port).new_session(&caps(), "chrome").unwrap();
     assert_eq!(ver, "1.2.3");
     let aid = sess.add_virtual_authenticator(&opts()).unwrap();
     let creds = sess.credentials(&aid).unwrap();
@@ -196,7 +196,7 @@ fn session_commands_send_the_five_keys_and_parse_credentials() {
 #[test]
 fn session_id_with_path_characters_is_rejected() {
     let (port, h, _) = fake_driver(http("200 OK", r#"{"value":{"sessionId":"a/../b"}}"#));
-    assert!(client(port).new_session(&caps()).is_err());
+    assert!(client(port).new_session(&caps(), "chrome").is_err());
     h.join().unwrap();
 }
 
@@ -262,12 +262,12 @@ fn debug_output_has_no_session_id_authenticator_id_or_port() {
     let (port, h, _) = fake_driver_seq(vec![
         http(
             "200 OK",
-            r#"{"value":{"sessionId":"sid-visible-1","capabilities":{"browserVersion":"1"}}}"#,
+            r#"{"value":{"sessionId":"sid-visible-1","capabilities":{"browserName":"chrome","browserVersion":"1"}}}"#,
         ),
         http("200 OK", r#"{"value":"aid-visible-2"}"#),
     ]);
     let c = client(port);
-    let (sess, _) = c.new_session(&caps()).unwrap();
+    let (sess, _) = c.new_session(&caps(), "chrome").unwrap();
     let aid = sess.add_virtual_authenticator(&opts()).unwrap();
     for shown in [
         format!("{sess:?}"),
@@ -395,11 +395,14 @@ fn malformed_header_lines_are_rejected() {
 #[test]
 fn numeric_authenticator_id_is_used_in_the_credentials_path() {
     let (port, h, rx) = fake_driver_seq(vec![
-        http("200 OK", r#"{"value":{"sessionId":"sid-1"}}"#),
+        http(
+            "200 OK",
+            r#"{"value":{"sessionId":"sid-1","capabilities":{"browserName":"chrome"}}}"#,
+        ),
         http("200 OK", r#"{"value":42}"#),
         http("200 OK", r#"{"value":[]}"#),
     ]);
-    let (sess, _) = client(port).new_session(&caps()).unwrap();
+    let (sess, _) = client(port).new_session(&caps(), "chrome").unwrap();
     let aid = sess.add_virtual_authenticator(&opts()).unwrap();
     assert!(sess.credentials(&aid).unwrap().is_empty());
     let reqs: Vec<String> = rx.iter().take(3).collect();
@@ -413,11 +416,56 @@ fn numeric_authenticator_id_is_used_in_the_credentials_path() {
 fn negative_or_fractional_authenticator_id_is_rejected() {
     for body in [r#"{"value":-1}"#, r#"{"value":1.5}"#] {
         let (port, h, _) = fake_driver_seq(vec![
-            http("200 OK", r#"{"value":{"sessionId":"sid-1"}}"#),
+            http(
+                "200 OK",
+                r#"{"value":{"sessionId":"sid-1","capabilities":{"browserName":"chrome"}}}"#,
+            ),
             http("200 OK", body),
         ]);
-        let (sess, _) = client(port).new_session(&caps()).unwrap();
+        let (sess, _) = client(port).new_session(&caps(), "chrome").unwrap();
         assert!(sess.add_virtual_authenticator(&opts()).is_err(), "{body}");
         h.join().unwrap();
     }
+}
+
+#[test]
+fn browser_name_mismatch_or_absence_closes_the_session_and_fails() {
+    // P2-a: 応答の browserName が要求と違う・欠けるときは、セッションを閉じて CommandFailed にする。
+    for body in [
+        r#"{"value":{"sessionId":"sid-1","capabilities":{"browserName":"firefox"}}}"#,
+        r#"{"value":{"sessionId":"sid-1","capabilities":{}}}"#,
+        r#"{"value":{"sessionId":"sid-1","capabilities":{"browserName":7}}}"#,
+    ] {
+        let (port, h, rx) = fake_driver_seq(vec![
+            http("200 OK", body),
+            http("200 OK", r#"{"value":null}"#),
+        ]);
+        let e = client(port).new_session(&caps(), "chrome").unwrap_err();
+        assert_eq!(e.kind(), E2eErrorKind::CommandFailed, "{body}");
+        let reqs: Vec<String> = rx.iter().take(2).collect();
+        assert!(
+            reqs[1].starts_with("DELETE /session/sid-1 HTTP/1.1"),
+            "{body}"
+        );
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn set_user_verified_sends_the_uv_command() {
+    let (port, h, rx) = fake_driver_seq(vec![
+        http(
+            "200 OK",
+            r#"{"value":{"sessionId":"sid-1","capabilities":{"browserName":"chrome"}}}"#,
+        ),
+        http("200 OK", r#"{"value":"abc-123"}"#),
+        http("200 OK", r#"{"value":null}"#),
+    ]);
+    let (sess, _) = client(port).new_session(&caps(), "chrome").unwrap();
+    let aid = sess.add_virtual_authenticator(&opts()).unwrap();
+    sess.set_user_verified(&aid, false).unwrap();
+    let reqs: Vec<String> = rx.iter().take(3).collect();
+    assert!(reqs[2].starts_with("POST /session/sid-1/webauthn/authenticator/abc-123/uv HTTP/1.1"));
+    assert!(reqs[2].contains("\"isUserVerified\":false"));
+    h.join().unwrap();
 }

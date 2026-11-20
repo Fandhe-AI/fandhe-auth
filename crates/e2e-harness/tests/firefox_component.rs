@@ -3,6 +3,10 @@
 //! unix 限定（構成要素が `cfg(unix)`）。結果は起動・停止の形の確認で、E2E の合格に数えない（ACPT-7）。
 #![cfg(unix)]
 
+use std::fs;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::time::Duration;
+
 use fandhe_auth_e2e_harness::firefox::new_session_request;
 use fandhe_auth_e2e_harness::{
     E2eComponent, E2eErrorKind, GeckoDriverComponent, GeckoDriverConfig, Protocol, Transport,
@@ -78,4 +82,43 @@ fn handle_is_not_running_before_start() {
         h.add_virtual_authenticator(&opts()).unwrap_err().kind(),
         E2eErrorKind::NotRunning
     );
+}
+
+#[test]
+fn geckodriver_receives_port_as_two_separate_arguments() {
+    // P2-c: geckodriver には `--port` と番号が別々の引数で渡る（`--port=N` の形ではない）。
+    // 偽のドライバは受けた引数を記録して終了する。本文は固定で、試験用のパスを埋め込まない（A03）。
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("e2e-gecko-args-{}-{nanos}", std::process::id()));
+    fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+    let script = dir.join("fake-driver");
+    let args = dir.join("args");
+    fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$@\" > \"$(dirname \"$0\")/args\"\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut c = GeckoDriverComponent::new(
+        GeckoDriverConfig::new(&script).with_ready_timeout(Duration::from_secs(3)),
+    );
+    // 書いた直後の実行ファイルは ETXTBSY で spawn に失敗し得るため、記録ができるまでやり直す。
+    for _ in 0..5 {
+        assert_eq!(c.start().unwrap_err().kind(), E2eErrorKind::StartFailed);
+        if args.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let text = fs::read_to_string(&args).expect("偽のドライバが実行されなかった");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[0], "2");
+    assert_eq!(lines[1], "--port");
+    let port: u32 = lines[2].parse().expect("ポート番号");
+    assert!((1..=65535).contains(&port));
+    let _ = fs::remove_dir_all(&dir);
 }
