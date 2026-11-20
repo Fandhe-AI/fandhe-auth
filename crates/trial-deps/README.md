@@ -17,7 +17,7 @@
 - feature は、利用者の方針（2026-11-20。安全な最新の安定版・必要最小の feature）で必要最小に絞った暫定。K11 の記入後に人が確定する（`D-2026-11-20-7`）。
   - `tracing`: `default-features = false` + `std`
   - `metrics`: 既定（`[features]` が無い）
-  - `tracing-subscriber`: `default-features = false` + `fmt`・`registry`・`std`
+  - `tracing-subscriber`: `default-features = false` + `fmt`（明示）。`fmt` が `registry`・`std` を暗黙に有効にする
   - `proptest`: `default-features = false` + `std`
   - `syn`: `default-features = false` + `full`・`parsing`
 - 採用 crate の根拠は `D-2026-11-20-8`〜`10`。
@@ -85,7 +85,7 @@ nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly �
   - workspace 全体の normal・build では（3 本目）、`syn` 3.0.10 は `serde_derive` を経由して `hub-stub` と `console-stub` に入っている（どちらも `serde_json` 経由）。この crate の変更によるものではない。
   - 並ぶかどうかの判断はここでは書かない。本体の木に何を引くかは、feature の組の選びと併せて人が決める。
 - `metrics`: `[features]` が無い。既定の feature が無いので、`default-features = false` を指定しても差は出ない。
-- `tracing-subscriber`: default は `smallvec`・`fmt`・`ansi`・`tracing-log`・`std`。いまの試し実装は `default-features = false` + `fmt`・`registry`・`std`。
+- `tracing-subscriber`: default は `smallvec`・`fmt`・`ansi`・`tracing-log`・`std`。いまの試し実装は `default-features = false` + `fmt` だけを明示する。`fmt` が `registry`・`std` を暗黙に有効にする（crate の `[features]` の `fmt = ["registry", "std"]`）。
 - `proptest`: default は `std`・`fork`・`timeout`・`bit-set`。いまの試し実装は `default-features = false` + `std`。
 - `syn`: default は `derive`・`parsing`・`printing`・`clone-impls`・`proc-macro`。`full`・`visit` は別の feature。いまの試し実装は `default-features = false` + `full`・`parsing`。
 

@@ -20,7 +20,7 @@ tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 metrics = "0.24.6"
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "registry", "std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # syn は parse_file（full）と Type/Item の読み取り（parsing）だけ使う。visit・printing は不要。暫定。
 syn = { version = "3.0.10", default-features = false, features = ["full", "parsing"] }
