@@ -95,7 +95,14 @@ fn capture(f: impl FnOnce()) -> (String, Vec<CapturedEvent>) {
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(cap.clone())
-                .with_ansi(false),
+                .with_ansi(false)
+                .without_time()
+                .with_level(true)
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_thread_names(false)
+                .with_file(false)
+                .with_line_number(false),
         )
         .with(sink.clone());
     tracing::subscriber::with_default(subscriber, f);
@@ -119,15 +126,11 @@ fn fields_match(ev: &CapturedEvent, expected: &[(&str, &str)]) -> bool {
             .all(|((n, v), (en, ev_))| n == en && v == ev_)
 }
 
-/// 整形済みの出力に、固定メッセージを含む行がちょうど 1 行あり、その行の「メッセージが最初に現れる位置から行末まで」が
-/// `expected` と完全一致するか。時刻・レベル・target などの可変な接頭辞だけを切り落とし、
-/// メッセージと欄の間に余分な出力が入る変異を検知する（SECR-23）。末尾の空白は落とさない。
-fn formatted_tail_matches(out: &str, message: &str, expected: &str) -> bool {
-    let mut lines = out.lines().filter(|l| l.contains(message));
-    match (lines.next(), lines.next()) {
-        (Some(line), None) => line.find(message).is_some_and(|i| &line[i..] == expected),
-        _ => false,
-    }
+/// 整形済みの出力全体（改行を含む）が `expected` と完全一致するか。
+/// 試験用の fmt layer は時刻・ANSI・スレッド・file/line を出さない確定的な形にしてあるため、
+/// 接頭辞や別の行に値・長さが足される変異も検知する（SECR-23）。
+fn formatted_exact(out: &str, expected: &str) -> bool {
+    out == expected
 }
 
 /// 整形済みの出力・メッセージ・全欄の値のどこにも probe が無いか（`true` なら漏れている）。
@@ -159,15 +162,14 @@ fn secr23_secret_debug_field_has_no_value() {
         events.len(),
         ev.fields.len()
     );
-    // 整形済みの出力でも、対象の行がちょうど 1 行で、メッセージから行末までが完全一致すること（fmt の層が出さない変異を検知する）。
-    let formatted_ok = formatted_tail_matches(
+    // 整形済みの出力でも、出力全体（接頭辞・改行を含む）が完全一致すること（fmt の層が出さない変異を検知する）。
+    let formatted_ok = formatted_exact(
         &out,
-        "secret field emitted",
-        "secret field emitted token=SecretString(<redacted>)",
+        " INFO fandhe_auth_trial_deps::logging: secret field emitted token=SecretString(<redacted>)\n",
     );
     assert!(
         formatted_ok,
-        "formatted line exactly one and tail exact: {formatted_ok} (output len={})",
+        "formatted output exact: {formatted_ok} (output len={})",
         out.len()
     );
     let is_leaked = leaked(&probe, &out, &events);
@@ -207,17 +209,17 @@ fn secr23_derived_debug_holder_has_no_value() {
         events.len(),
         ev.fields.len()
     );
-    // 整形済みの出力でも、対象の行がちょうど 1 行で、メッセージから 3 つの欄の列の末尾までが完全一致すること。
+    // 整形済みの出力でも、出力全体（接頭辞・改行を含む）が完全一致すること。
     let expected_line = concat!(
-        "container fields emitted",
+        " INFO fandhe_auth_trial_deps::logging: container fields emitted",
         " pair=(\"label\", SecretString(<redacted>))",
         " maybe=Some(SecretString(<redacted>))",
-        " list=[SecretString(<redacted>), SecretString(<redacted>)]",
+        " list=[SecretString(<redacted>), SecretString(<redacted>)]\n",
     );
-    let formatted_ok = formatted_tail_matches(&out, "container fields emitted", expected_line);
+    let formatted_ok = formatted_exact(&out, expected_line);
     assert!(
         formatted_ok,
-        "formatted line exactly one and tail exact: {formatted_ok} (output len={})",
+        "formatted output exact: {formatted_ok} (output len={})",
         out.len()
     );
     let is_leaked = leaked(&probe, &out, &events);
