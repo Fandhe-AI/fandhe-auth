@@ -23,7 +23,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
 
-reject_args "$(basename "$0")" "$@"
+reject_args "${0##*/}" "$@"
 
 # 単独で起動されても、呼び出し元の GIT_*（GIT_DIR・GIT_WORK_TREE・GIT_CONFIG_* 等）に左右されないよう外し、
 # 置換参照（refs/replace/）も無効にする（このあと本スクリプトが自前の一時 index・object dir を設定する）。

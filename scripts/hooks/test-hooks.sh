@@ -674,6 +674,47 @@ rc=0
 (cd "${rel_cwd}" && TMPDIR=reltmp LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh") > "${work_dir}/out" 2>&1 || rc=$?
 expect_rc "scan-canary: a relative TMPDIR is resolved to an absolute path" 0 "${rc}"
 
+# CI の secret-scan ジョブと同じ形の target（作業ツリーを展開せず、浅く取得したオブジェクトに HEAD を張っただけ）を走査する。
+# 検出器は作業ツリーではなく HEAD の tree を読むこと（件数が追跡ファイル数と一致し、仕込んだ値を検出する）を確かめる。
+# make_ci_target <ソース repo> <作る target のパス>: 別の空の repo から git init・fetch --depth=1・update-ref HEAD で作る。
+make_ci_target() {
+  local src="$1" dst="$2" sha
+  sha="$(git -C "${src}" rev-parse HEAD)"
+  rm -rf "${dst}"
+  git -c init.defaultBranch=main init -q "${dst}"
+  git -C "${dst}" fetch --quiet --no-tags --depth=1 "file://${src}" "${sha}" > /dev/null 2>&1
+  git -C "${dst}" update-ref HEAD "${sha}"
+}
+new_repo; stage app.txt "hello"; stage sub/b.txt "world"; stage c.txt "plain"
+git config uploadpack.allowAnySHA1InWant true
+git commit -q -m "chore: files"
+ci_src="${repo}"
+tracked_count="$(git -C "${ci_src}" ls-files | wc -l | tr -d ' ')"
+ci_target="${work_dir}/ci-target"
+make_ci_target "${ci_src}" "${ci_target}"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+want_line="secret-scan: total: 0 finding(s) (${tracked_count} tracked file(s) checked)"
+if [ "${rc}" -eq 0 ] && [ -z "$(find "${ci_target}" -mindepth 1 -maxdepth 1 ! -name .git)" ] \
+  && [ "$(grep -cxF -- "${want_line}" "${work_dir}/out" || true)" -eq 1 ] \
+  && [ "$(grep -c '^secret-scan: total:' "${work_dir}/out" || true)" -eq 1 ]; then
+  pass "secret-scan-ci: a target without a working tree is scanned from HEAD (clean, ${tracked_count} files checked)"
+else
+  fail "secret-scan-ci: a target without a working tree is scanned from HEAD (clean, ${tracked_count} files checked)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# 秘密値の形のダミーを仕込んだコミットは検出（1）。作業ツリーが空でも HEAD の内容を走査する
+stage leaked.txt "x = ${token}"
+git commit -q -m "chore: leak"
+make_ci_target "${ci_src}" "${ci_target}"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qxF -- "secret-scan: total: 1 finding(s) in 1 file(s)" "${work_dir}/out" \
+  && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
+  pass "secret-scan-ci: a target without a working tree reports a planted dummy (exit 1, no value or path)"
+else
+  fail "secret-scan-ci: a target without a working tree reports a planted dummy (exit 1, no value or path)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 # 絶対パスへの解決（cd）が失敗しても、mktemp が作った一時領域を残さない（EXIT トラップが消せること）
 cd_tmp_fail_env="${work_dir}/cd-tmp-fail.sh"
 cat > "${cd_tmp_fail_env}" <<'EOF'
@@ -689,7 +730,7 @@ rm -rf "${leak_tmp}"
 mkdir -p "${leak_tmp}"
 rc=0
 TMPDIR="${leak_tmp}" BASH_ENV="${cd_tmp_fail_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 2 ] && [ -z "$(ls -A "${leak_tmp}")" ]; then
+if [ "${rc}" -eq 2 ] && [ -z "$(ls -A "${leak_tmp}")" ] && grep -qF "secret-scan-ci: cannot resolve the temporary directory" "${work_dir}/out"; then
   pass "secret-scan-ci: a failure to resolve the temporary directory leaves no directory behind"
 else
   fail "secret-scan-ci: a failure to resolve the temporary directory leaves no directory behind" "exit ${rc}" "left: $(ls -A "${leak_tmp}")" "output: $(cat "${work_dir}/out")"
@@ -698,7 +739,7 @@ rm -rf "${leak_tmp}"
 mkdir -p "${leak_tmp}"
 rc=0
 TMPDIR="${leak_tmp}" BASH_ENV="${cd_tmp_fail_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 2 ] && [ -z "$(ls -A "${leak_tmp}")" ]; then
+if [ "${rc}" -eq 2 ] && [ -z "$(ls -A "${leak_tmp}")" ] && grep -qF "scan-canary: cannot resolve the temporary directory" "${work_dir}/out"; then
   pass "scan-canary: a failure to resolve the temporary directory leaves no directory behind"
 else
   fail "scan-canary: a failure to resolve the temporary directory leaves no directory behind" "exit ${rc}" "left: $(ls -A "${leak_tmp}")" "output: $(cat "${work_dir}/out")"
@@ -767,7 +808,9 @@ done
 unset run_arg
 for missing in git mktemp mkdir rm sort cmp grep; do
   run_without_cmd "${missing}" "${HOOKS_DIR}/../secret-scan-canary.sh" git mktemp mkdir rm sort cmp grep
-  if [ "${rc}" -eq 2 ] && grep -q "required command not found on PATH: ${missing}" "${work_dir}/out"; then
+  # 依存の確認より前に、確認していない外部コマンド（basename 等）を呼ばない（command not found が出ないこと）
+  if [ "${rc}" -eq 2 ] && grep -q "required command not found on PATH: ${missing}" "${work_dir}/out" \
+    && ! grep -q "command not found$" "${work_dir}/out"; then
     pass "scan-canary: missing ${missing} exits 2 before starting"
   else
     fail "scan-canary: missing ${missing} exits 2 before starting" "exit ${rc}" "output: $(cat "${work_dir}/out")"
@@ -787,7 +830,7 @@ EOF
 rc=0
 # shellcheck disable=SC2016 # 子の bash に渡す固定のコード（展開させない）
 BASH_ENV="${cd_up_fail_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" -c 'source "$1"; echo reached' _ "${HOOKS_DIR}/../lib.sh" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 2 ] && ! grep -q '^reached$' "${work_dir}/out"; then
+if [ "${rc}" -eq 2 ] && ! grep -q '^reached$' "${work_dir}/out" && grep -qF "error: cannot resolve the repository root" "${work_dir}/out"; then
   pass "lib.sh: failure to resolve the repository root stops with exit 2"
 else
   fail "lib.sh: failure to resolve the repository root stops with exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
