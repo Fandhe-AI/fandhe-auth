@@ -150,6 +150,16 @@ fn probe_values_outside_vocab_are_errors_without_leaking() {
             assert!(!format!("{e} {e:?}").contains("canary"));
         }
     }
+    // std を使える x86_64-unknown-hermit の OS 名は許可語彙に含める。
+    for os in ["hermit", "teeos", "uefi"] {
+        assert!(
+            MachineCondition::detect_with(&FakeProbe {
+                arch: Some("x86_64".to_owned()),
+                os: Some(os.to_owned()),
+            })
+            .is_ok()
+        );
+    }
     let ok = MachineCondition::detect_with(&FakeProbe {
         arch: Some("x86_64".to_owned()),
         os: Some("linux".to_owned()),

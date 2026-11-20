@@ -241,6 +241,18 @@ const OS_VOCAB: &[&str] = &[
     "l4re",
     "nuttx",
     "emscripten",
+    "hermit",
+    "teeos",
+    "trusty",
+    "rtems",
+    "managarm",
+    "motor",
+    "vexos",
+    "xous",
+    "uefi",
+    "solid_asp3",
+    "psp",
+    "3ds",
 ];
 
 /// 許可語彙の中の値だけを通す。外れは値を載せずに誤りにする（取れない `None` とは区別する）。
