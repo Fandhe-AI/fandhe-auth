@@ -98,7 +98,7 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 
 ## 測定の条件
 
-機材・構成・並行数は記録の別の欄にする。具体の欄は下の「結果の記録の形式」の 5 で定め、自動での取得は 7/10 で扱う。
+機材・構成・並行数は記録の別の欄にする。具体の欄は下の「結果の記録の形式」の 5 で定め、自動での取得は 7/10 で扱う（下の「機材と構成の記録（7/10）」）。
 機材の名前・ホスト名・内部のアドレス・ホームのパスは書かない。機材は種類・CPU の数・メモリ量などの抽象的な属性で表す（`SECR-11`・`SECR-23`、04-behavior/README.md の (d)）。
 
 ## 結果の記録の形式
@@ -279,7 +279,7 @@ judgment:
 - 暖機の段（`warmup > 0` のときだけ）を回してから本計測の段を回す。2 つの段は重ならない。暖機の試行は結果にかかわらず `Excluded` で締める。
   暖機の試行も通し番号を消費するため、本計測の標本の番号は `warmup + 1` から始まる。
 - 本計測で対象が `Excluded` を返したら `InvalidOutcome`（除外は生成器だけが付ける）。
-- 停止の規則: 誤りが出たら停止の印を立てて新しい試行を止め、立てたワーカーを join してから最初の誤りを返す。panic の中身・`io::Error` の文言は載せない。
+- 停止の規則: 誤りの記録と停止は枠の取得と同じロックで 1 つの代入として確定する（#5984）。記録の後に新しく取得できる枠は 0 件（保証は枠の取得だけ）。記録より前に取得済みの枠の試行は止めない。記録時点で未完了の試行は各ワーカー最大 1 件（設定の並行数が上限）。対象の閉包の panic はワーカー内の `catch_unwind` が捕捉してその場で記録する。join で初めて記録されるのは、ワーカー内で捕捉されずにスレッドを終了させた panic（対象の閉包の外）だけで、検出・記録までに他のワーカーが新しく取得して進める件数の累計は上限を保証しない。立てたワーカーを join してから最初の誤りを返す。panic の中身・`io::Error` の文言は載せない。
 - 不変条件: 実測の最大同時実行数 <= 設定の並行数（2/10 の 4 の候補を閉ループで採る）、`executed == trials_planned`、`excluded == warmup`（違えば `CountMismatch`）。
 - ハーネスの上で動くこと: 試験（dev）だけ `it-harness`・`hub-stub` に依存する（`tests/on_it_harness.rs`。Docker・ネットワークなし）。許可表の行は人の確認待ち。
 - 記録の出力（`fandhe-auth-load-record/1`）を担当する段は未決のまま持ち越す。
@@ -304,11 +304,34 @@ judgment:
   - 試行の始めに誤りの記録を見た試行は、対象を呼ばずに `Excluded` を返す。記録より前にこの確認を通った試行（並行数が 2 以上のとき）は、記録の後に対象を呼び得る。
   - 停止は生成器の fail-closed に依る。暖機の段は結果を問わず除外で締めるため止まらず、残りの暖機は対象を呼ばずに回って本計測の段へ進む。
     本計測の段では `Excluded` が生成器の `InvalidOutcome` で拒否されて新しい試行が止まる。拒否された試行は締められず `unfinished` に数えられ、ワーカーごとに 1 件起こり得る。
-  - 生成器の誤りの記録と停止の確定の順序（5/10 の範囲）は #5984 で追跡する。
+  - 生成器は誤りの記録と停止を枠の取得と同じロックで確定する（#5984。順序は `run_closed_loop` の doc）。
 - 結果の記録: `TargetRun` に残すところまで。試行番号と時間の標本が残るのは成功と失敗（種類を問わない）だけで、失敗の種類の内訳・時間切れ・暖機の除外は件数だけが残り、個々の試行には対応付けられない。`fandhe-auth-load-record/1` のファイルへの出力は未提供で、担当の段は未決。
 - 対象は stub だけ（`TODO(TASK-716)`。実物の経路は最小の組込み先の完成後）。stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）。
   `tests/on_it_harness.rs` で it-harness の上の Hub の stub の JWKS の配信を呼ぶ。stub は Mutex でワーカーを直列化するため、測った時間に意味は無く、試験は件数だけを見る。
 - 依存の辺は変えない（通常の依存は 0。試験の依存は 5/10 のまま）。
+
+## 機材と構成の記録（7/10）
+
+`TASK-12` の 7/10（#118）。`crates/load-harness` の `condition` に、測定の条件を記録の行に出す部品を置いた。
+名前・語・値はすべて仮置きで、人が確認する。合否は付けない（`ACPT-7`）。
+
+- 自動で取得するのは機材の属性（6 属性）だけ。構成と負荷の型は取得せず、呼び出し元が渡す入力である。
+  - 構成: 起動した構成要素の（種類, stub の印）の組を `ComponentConditions::new` に渡す。組は呼び出し元が it-harness の起動済みの構成
+    （`RunningHarness::composition_record()` の各 entry の種類と stub の印）から写して作る。写しは自動ではない。
+    渡さなかった種類は `not_started` で出る（起動していないのか渡し忘れかは出力から区別できない）。
+  - 負荷の型: 呼び出し元が `LoopModel` を渡す（`MeasurementConditions::detect(components, loop_model)`）。
+
+- API: `MeasurementConditions`（機材・構成・負荷の型。`detect` が機材を自動で取得）、`MachineCondition`（`detect_with`・`detect`・`new`）、
+  `MachineProbe`・`StdMachineProbe`、`ComponentConditions`（`new` が重複と stub の印の食い違いを誤りにする）、`ConditionComponent`、`ConditionError`。
+  `Display` は形式の 5 の行（`condition_machine` 6 行・`condition_component` 4 行・stub があるときだけ `note:`・`condition_loop`）を出す。
+- 取得元: `cpu_count` は `available_parallelism`（使える並列数。物理 CPU 数ではない）、`memory_mib` は Linux の `/proc/meminfo` の `MemTotal`
+  （固定パス・64 KiB の上限・整数だけ。上限で途切れたときは改行まで読めた行だけを解析する。コンテナではホストの総量）、`arch`・`os_family` は `std::env::consts`（std が特定できない `unknown` は取得不能の `None` にして `unknown` と出す。`arch` の許可語彙は `arm64ec`〔Windows ARM64EC〕を含む）、`build_profile` は確かめる手段が無いため常に `unknown`（`debug_assertions` はプロファイルで上書きされ誤記録になる。確かな値は `new` で明示）。
+  `virtualization` は判別の方法が未決のため常に `unknown`。
+- 取れない（`None`）値は `unknown`。`arch`・`os_family` は固定の許可語彙だけを受け、語彙の外の値は `detect_with`・`detect`・`new` のどれでも `InvalidMachineValue` の誤りで返す（`unknown` に置き換えない）。ホスト名・機材の名前・パスは取得も記録もしない。
+- 条件は記録の単位で 1 つ持ち、`TargetRun`・`LoadRun` には入れない（8/10 の段階を変える実行で重複しないため）。構成は呼び出し元が起動したものを明示で渡し、渡さない種類は `not_started`。
+- 7 の見本との差: `condition_loop` は 5/10 の閉ループの仮置きで `closed` を出す（見本は `undecided`）。
+- 範囲外: `fandhe-auth-load-record/1` のファイル全体の出力、`stage` 行（並行数は 8/10 とファイル出力の段）、仮想化の判別。
+  Host の実体は `TODO(TASK-716)` まで起動しない。依存の辺は変えない（通常の依存は 0）。
 
 ## 未決・人の確認待ち
 
@@ -318,7 +341,7 @@ judgment:
 - 失敗・時間切れを時間の分布から分ける扱い
 - 区分の追加分（試験の条件・測定値・未決・他所有者の値）
 - 閉ループか開ループか（5/10）: 閉ループ（固定数のワーカー）を仮置きで採った。開ループは作っていない。人が確認する
-- 5/10 の仮置き: 並行数の上限 1024、暖機の段と本計測の段を分けること、本計測での `Excluded` の拒否、API の名前（`generate`・`run_closed_loop`・`LoadConfig`・`LoadRun`・`LoadError`）
+- 5/10 の仮置き: 並行数の上限 1024、暖機の段と本計測の段を分けること、本計測での `Excluded` の拒否、停止の順序（記録より前に枠を取り終えた試行は走り切る。#5984）、API の名前（`generate`・`run_closed_loop`・`LoadConfig`・`LoadRun`・`LoadError`）
 - 許可表の行: `fandhe-auth-load-harness` → `fandhe-auth-it-harness`・`fandhe-auth-hub-stub` の試験（dev）の辺（5/10）
 - 記録への偽の行の差し込みへの対策（下の「結果の記録の形式」の 6 で扱った。内容は人が確認する）
 - 結果の記録の形式の型と出力の実装の置き場。3/10（#114）で別の crate `crates/load-harness`（仮称）に計測の部品を置いた。
@@ -330,4 +353,7 @@ judgment:
 - 閉ループのときの並行数の不変条件（5/10 の決定に依る）
 - 版の情報を実行の記録側に寄せ、`run_record_file` で結ぶこと
 - 6/10 の仮置き: `CallResult` の 4 種、失敗の種類名 `rejected`・`unavailable`、`TargetName` の規則、API の名前（`target`・`run_target`・`TargetSpec`・`TargetRun`・`TargetError`）
+- 7/10 の仮置き: `os_family` に `consts::OS` を採ること、`cpu_count` を使える並列数とすること、`memory_mib` を `/proc/meminfo` の総量とすること、
+  `virtualization` を常に `unknown` とし判別の方法を未決とすること、`build_profile` を標準の取得元では常に `unknown` とし、確かな値は呼び出し元が明示すること、
+  自動取得した値の区分を `test_condition`・`refs=harness_config` とすること、「記録」の読み（ファイル出力を含まない）、API の名前（`condition` 以下）
 - 「結果が記録される」の読み: `TargetRun` の構造体まで。ファイルへの出力を担当する段は未決（人が決める。受け入れ条件を満たしたかの判定も人）

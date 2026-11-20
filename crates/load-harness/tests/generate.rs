@@ -1,7 +1,8 @@
 //! 負荷の生成の単体試験（TASK-12 5/10）。時間は偽の時計を手で進め、実際の経過・sleep・時間の値では判定しない。
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use fandhe_auth_load_harness::{
     FailureKind, IntervalName, LoadConfig, LoadError, LoopModel, MAX_CONCURRENCY, MeterError,
@@ -23,6 +24,51 @@ impl FakeClock {
 impl MonotonicClock for FakeClock {
     fn now_ns(&self) -> Result<u64, MeterError> {
         Ok(self.0.load(Ordering::SeqCst))
+    }
+}
+
+/// 期限付きの待ち合わせ。ワーカーの起動に失敗して参加者が揃わなくても試験が止まらないよう、中断（`abort`）か
+/// 期限で全員を放す。ただし放されたことは `completed` が false になって残るので、試験は必ず `completed` を断定し、
+/// 全員の到着を確かめてから判定する（判定は件数・最大同時実行数の断定で、期限の長さでは行わない）。
+struct Rendezvous {
+    arrived: AtomicU64,
+    parties: u64,
+    aborted: AtomicBool,
+}
+
+impl Rendezvous {
+    fn new(parties: u64) -> Self {
+        Self {
+            arrived: AtomicU64::new(0),
+            parties,
+            aborted: AtomicBool::new(false),
+        }
+    }
+    /// 待ち合わせを明示的に中断する。待っている参加者は放される。
+    fn abort(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+    }
+    /// 全員が到着したら true。中断・期限切れなら false で、中断の印を残す。
+    fn wait(&self) -> bool {
+        self.arrived.fetch_add(1, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if self.aborted.load(Ordering::SeqCst) {
+                return false;
+            }
+            if self.arrived.load(Ordering::SeqCst) >= self.parties {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                self.abort();
+                return false;
+            }
+            std::thread::yield_now();
+        }
+    }
+    /// 全員が揃い、中断も期限切れも起きなかったか。
+    fn completed(&self) -> bool {
+        !self.aborted.load(Ordering::SeqCst) && self.arrived.load(Ordering::SeqCst) >= self.parties
     }
 }
 
@@ -82,7 +128,7 @@ fn serial_run_counts_and_summarizes() {
 fn reaches_configured_concurrency() {
     let clock = FakeClock::new();
     let name = iv();
-    let barrier = Barrier::new(4);
+    let barrier = Rendezvous::new(4);
     let run = run_closed_loop(meter(&clock), &cfg(4, 4, 0), |t| {
         t.measure(&name, || {
             barrier.wait();
@@ -91,6 +137,7 @@ fn reaches_configured_concurrency() {
         Outcome::Success
     })
     .unwrap();
+    assert!(barrier.completed(), "rendezvous aborted or timed out");
     assert_eq!(run.samples.max_in_flight, 4);
 }
 
@@ -174,6 +221,27 @@ fn excluded_in_measured_phase_is_rejected() {
     assert_eq!(r.unwrap_err(), LoadError::InvalidOutcome);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+/// #5984（仮置き。ACPT-7）: 並行数ぶんの試行が同時に走っている間の誤りでは、走り切る試行は並行数ぶんだけで、
+/// 新しい試行は始まらない。全ワーカーが誤りで抜けるので件数は決まる。
+#[test]
+fn all_in_flight_failures_stop_without_new_trials() {
+    const C: u64 = 4;
+    let clock = FakeClock::new();
+    let calls = AtomicU64::new(0);
+    let barrier = Rendezvous::new(C);
+    let r = run_closed_loop(meter(&clock), &cfg(C, 100, 0), |_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        barrier.wait();
+        Outcome::Excluded
+    });
+    assert!(barrier.completed(), "rendezvous aborted or timed out");
+    assert_eq!(r.unwrap_err(), LoadError::InvalidOutcome);
+    assert_eq!(calls.load(Ordering::SeqCst), C);
+}
+
+// 誤りの記録の後に取得が枠を進めない順序は、外から記録の完了を観測できないため、この統合試験では扱わない。
+// 同期点を制御した決定的な単体試験（src/generate.rs の `claim_resumed_after_fail_does_not_advance` ほか）で確かめる（#5984）。
 
 #[test]
 fn unmeasured_success_is_rejected() {

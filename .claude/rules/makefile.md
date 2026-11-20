@@ -57,8 +57,8 @@ description: >
 | `setup` | `scripts/setup.sh` | 冪等（再実行しても安全）。`lefthook install` と `.env` 雛形の配置のみで、既存の `.env` は上書きしない。ツール本体は導入しない |
 | `check` | `scripts/check.sh` | ソースを変更しない（自動修正しない）。editorconfig-checker + shellcheck。CI の `check` ジョブと同一 |
 | `test-hooks` | `scripts/hooks/test-hooks.sh` | 一時 git リポジトリで検証し作業ツリーを変更しない。依存は bash + git のみ。CI の `test-hooks` ジョブと同一 |
-| `secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 検査のみ。追跡ファイル全体の秘密情報の混入を規則表で検査し、規則 ID ごとの件数・合計・ファイル名だけを出す（値は出さない）。0 件で 0・検出で 1・検査不能で 2。CI への組み込みは 2 段目で行う予定（#51。TASK-6）。名前は暫定 |
-| `scan-canary` | `scripts/secret-scan-canary.sh` | 検査のみ。元の index・作業ツリー・object store を変えない。実行時に組み立てたダミーを足した一時 index で、検出器が 1 を返し、`--summary` の出力が許可した集計行の集合と完全に一致し（余計な行があれば失敗）、ダミーの値が出力に無ければ 0。検出能力の異常は 1、検出器が検査不能（2 等）・準備や読み取りの失敗は 2。元のリポジトリの hooks は起動しない。CI への組み込みは 2 段目で行う予定（#51。TASK-6）。名前は暫定 |
+| `secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 検査のみ。追跡ファイル全体の秘密情報の混入を規則表で検査し、規則 ID ごとの件数・合計・ファイル名だけを出す（値は出さない）。0 件で 0・検出で 1・検査不能で 2。CI の `secret scan (tracked files)` ジョブは `scripts/secret-scan-ci.sh` 経由で本検出器を呼ぶ（#51。TASK-6）。名前は暫定 |
+| `scan-canary` | `scripts/secret-scan-canary.sh` | 検査のみ。元の index・作業ツリー・object store を変えない。実行時に組み立てたダミーを足した一時 index で、検出器が 1 を返し、`--summary` の出力が許可した集計行の集合と完全に一致し（余計な行があれば失敗）、ダミーの値が出力に無ければ 0。検出能力の異常は 1、検出器が検査不能（2 等）・準備や読み取りの失敗は 2。元のリポジトリの hooks は起動しない。CI の `secret scan (tracked files)` ジョブは `scripts/secret-scan-ci.sh` 経由で本検出器を呼ぶ（#51。TASK-6）。名前は暫定 |
 | `build` | `cargo build --workspace --locked`（直書き） | ソースを変更しない。`--locked` で `Cargo.lock` の外を解決しない。`--all-features` は付けない（DPOL-31）。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
 | `test` | `cargo test --workspace --locked`（直書き） | ソースを変更しない。`--locked`・`--all-features` なし。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
 | `fmt` | `cargo fmt --all`（直書き） | rustfmt を適用する（ソースを書き換える唯一の make ターゲット） |
@@ -66,6 +66,7 @@ description: >
 | `crate-deps` | `scripts/check-crate-deps.sh` | 検査のみ。crate 間の依存の向きを許可表と照合する。表に無い member・辺は失敗（fail-closed） |
 | `pg-check` | `scripts/dev-pg-check.sh` | 起動中の開発・検証用 PostgreSQL の起動の確かめ。起動・停止はしない。CI へは載せない（TASK-6）。名前は暫定。手順の正は `dev/postgres/README.md` |
 | `it-db` | `scripts/it-db.sh` | ハーネス（`crates/it-harness`）の Docker を使う結合試験（`#[ignore]`）の明示の入口。Docker 必須・CI 外（TASK-6）。パスワードは試験プロセスの中で生成する。名前は暫定 |
+| `it-db-ci` | `scripts/it-db-ci.sh` | CI の DB ジョブの入口。Docker・openssl 必須。枠の試験（`db_job_frame`）だけを `--ignored` で流し、一致 0 件は失敗（AUDB-6 の向き）。CI の `it-db-ci` ジョブと同一（TASK-6 5/10）。パスワードは試験プロセスの中で生成する。名前は暫定 |
 | `e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネス（`crates/e2e-harness`）の Chrome の仮想 authenticator の E2E（`#[ignore]`）の明示の入口。chromedriver 必須・CI 外（TASK-6）。結果は〔仮想〕で実機・Safari に数えない。名前は暫定 |
 
 派生リポジトリでターゲットを足す場合の契約:

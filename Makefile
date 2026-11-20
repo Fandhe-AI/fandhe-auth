@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps pg-check it-db e2e-chrome
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps pg-check it-db it-db-ci e2e-chrome
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -33,7 +33,7 @@ check: ## editorconfig-checker + shellcheck（ソースは変更しない）。�
 test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git のみ）。直接: scripts/hooks/test-hooks.sh
 	@scripts/hooks/test-hooks.sh
 
-# secret-scan は暫定の名前（人が確定する）。scripts/secret-scan-ci.sh（--tracked --summary と scan-canary 相当）の CI への組み込みは 2 段目の PR で行う予定（#51。TASK-6）。
+# secret-scan は暫定の名前（人が確定する）。scripts/secret-scan-ci.sh（--tracked --summary と scan-canary 相当）は CI の secret scan ジョブが呼ぶ（#51。TASK-6）。
 secret-scan: ## 追跡ファイル全体の秘密情報の混入検査（検査のみ・値は出さず件数で判定）。直接: scripts/hooks/secret-scan.sh --tracked
 	@scripts/hooks/secret-scan.sh --tracked
 
@@ -66,6 +66,11 @@ pg-check: ## 開発・検証用 PostgreSQL の起動の確かめ（起動中が�
 # it-db は暫定の名前（人が確定する）。Docker を使う結合試験（#[ignore]）の明示の入口。CI には載せない（TASK-6）。
 it-db: ## ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）。直接: scripts/it-db.sh
 	@scripts/it-db.sh
+
+# it-db-ci は暫定の名前（人が確定する）。CI の DB ジョブ（it-db-ci）が呼ぶ入口で、枠の試験（db_job_frame）だけを流す（TASK-6。#52）。
+# パスワードは試験プロセスの中で生成する（SECR-6）。ここでも CI でも起動・停止の手順は持たない。
+it-db-ci: ## CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験だけを流す。0 件は失敗）。直接: scripts/it-db-ci.sh
+	@scripts/it-db-ci.sh
 
 # e2e-chrome は暫定の名前（人が確定する）。chromedriver を使う E2E（#[ignore]）の明示の入口。CI には載せない（TASK-6）。
 e2e-chrome: ## ハーネスの Chrome の E2E（chromedriver 必須・#[ignore] の試験を流す。CI 外）。直接: scripts/e2e-chrome.sh

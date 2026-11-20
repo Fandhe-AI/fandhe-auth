@@ -128,5 +128,5 @@ DB の主体の分離・初期設定は Hub `ASTORE-5` 以降の担当で、こ�
 ## 持ち越し
 
 - `AUDB-80` の確かめの本体（カタログの点検・100 回の試行・変異）: `TASK-797`。`AUDB-82` の `40P01` の吸収の試験: `TASK-799`
-- CI への搭載: `TASK-6`
+- CI への搭載: DB ジョブの枠（`it-db-ci`。`#52`）は harness 経由で compose を起動する。`pg-check` は CI 外のまま。他の Docker の試験の搭載は人が決める（`TASK-6`）
 - TLS 証明書の検証（`verify-full`。`AUDP-10`・`AUDP-11`）・`ssl_min_protocol_version` の引き上げ: 人が決める
