@@ -1,7 +1,6 @@
 //! 並行数を段階的に変える実行の単体試験（TASK-12 8/10）。時間は偽の時計で、実際の経過・sleep・時間の値では判定しない。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use fandhe_auth_load_harness::{
     CallResult, IntervalName, LoadConfig, MAX_REPETITIONS, MAX_STAGES, MeterError, MetricKey,
@@ -103,36 +102,40 @@ fn results_are_kept_per_stage() {
 
 #[test]
 fn stages_and_runs_do_not_overlap() {
-    let cfgs = vec![sc(3, 6, 1, 2), sc(2, 4, 0, 3)];
-    let plan = StagePlan::new(cfgs, MetricKey::P99Ns).unwrap();
-    let generation = Arc::new(AtomicU64::new(0));
+    // 回ごとの時計を作る時点で、前の回の全試行（暖機を含む）が終了済みで、実行中の試行が 0 件であることを確かめる。
+    // 回ごとの試行数（warmup + trials_planned）。段階 1 は 2 回、段階 2 は 3 回。
+    let per_run: Vec<u64> = vec![7, 7, 4, 4, 4];
+    let plan = StagePlan::new(vec![sc(3, 6, 1, 2), sc(2, 4, 0, 3)], MetricKey::P99Ns).unwrap();
+    let in_flight = AtomicU64::new(0);
+    let finished = AtomicU64::new(0);
     let clock_calls = AtomicU64::new(0);
-    let seen: Mutex<Vec<u64>> = Mutex::new(Vec::new());
-    let g = Arc::clone(&generation);
+    let violations = AtomicU64::new(0);
     let r = run_stages(
         || {
-            clock_calls.fetch_add(1, Ordering::SeqCst);
-            g.fetch_add(1, Ordering::SeqCst);
+            let k = usize::try_from(clock_calls.fetch_add(1, Ordering::SeqCst)).unwrap();
+            let expected_done: u64 = per_run[..k].iter().sum();
+            if in_flight.load(Ordering::SeqCst) != 0
+                || finished.load(Ordering::SeqCst) != expected_done
+            {
+                violations.fetch_add(1, Ordering::SeqCst);
+            }
             step_clock(10)
         },
         &spec(),
         &plan,
         || {
-            seen.lock().unwrap().push(generation.load(Ordering::SeqCst));
+            in_flight.fetch_add(1, Ordering::SeqCst);
+            finished.fetch_add(1, Ordering::SeqCst);
+            in_flight.fetch_sub(1, Ordering::SeqCst);
             CallResult::Ok
         },
     );
     assert!(r.is_ok());
-    assert_eq!(clock_calls.load(Ordering::SeqCst), 2 + 3);
-    let seen = seen.into_inner().unwrap();
-    assert!(seen.windows(2).all(|w| w[0] <= w[1]));
-    // 暖機の試行は閉包を呼ぶ。1 回あたり warmup + trials_planned 回。
-    let count = |g: u64| u64::try_from(seen.iter().filter(|&&x| x == g).count()).unwrap();
-    assert_eq!(count(1), 7);
-    assert_eq!(count(2), 7);
-    assert_eq!(count(3), 4);
-    assert_eq!(count(4), 4);
-    assert_eq!(count(5), 4);
+    assert_eq!(clock_calls.load(Ordering::SeqCst), 5);
+    assert_eq!(violations.load(Ordering::SeqCst), 0);
+    // 最後の回の終了後も、全試行が終了済みで実行中は 0 件。
+    assert_eq!(finished.load(Ordering::SeqCst), per_run.iter().sum::<u64>());
+    assert_eq!(in_flight.load(Ordering::SeqCst), 0);
 }
 
 #[test]
