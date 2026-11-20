@@ -28,7 +28,8 @@ description: >
   （SECR-29 の 2026-11-20 追記・`D-2026-11-20-14` の (4)(e)）。対象の型の範囲は (4)(e) を超えず、他の crate の型には広げない。どれも秘密値の型を包まない間に限る。
   - `crates/trial-deps/tests/prop_debug.rs` の `Input`: `Debug` が固定の文字列を返す間（手書きの実装）
   - `crates/trial-deps/tests/secr23_tracing.rs` の `Capture`・`CaptureWriter`・`CapturedEvent`・`FieldVisitor`・`EventSink`（`SECR-23` の試験の捕獲の型 5 つ）: `Debug` を実装しない間
-  外すのは型の一覧だけである。SECR-21 の構文木の走査でのこれらの型の扱いは、spec に記録が無く未定。
+  外すのは型の一覧だけである。SECR-21 の走査が例外の型を見つけたときの判定は、未定（TASK-514 で人に確かめる。`D-2026-11-20-14` の (4)(e)）。
+  扱いが決まるまで、走査と失敗の条件（上の SECR-21・SECR-32 の箇条）を緩めない。例外の型を走査から外さない。
 
 ## 出力（Debug・Display・Serialize）
 

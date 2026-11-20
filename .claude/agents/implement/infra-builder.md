@@ -53,7 +53,8 @@ tools:
   `deny.toml` の中身（TASK-668）・CI の時間予算（`ci.yml` の 2 分は目安。`../../rules/github-actions.md`）・依存の版の固定の手順も未定。
   決まっていない値は置かずに報告する（仮に置く場合は「未定（TASK-n で決める）」とコメントする）
 - **依存の feature と K11**（`D-2026-11-20-14` (4)）: 版は安全な最新の安定版（pre-release を除く）、feature は `default-features = false` から要るものだけを足す。
-  口は `tracing` が `std` だけ・`metrics` が既定。試験の道具は `tracing-subscriber` が `fmt` だけ・`proptest` が `std` だけ・`syn` が `full`・`parsing` だけ・`libfuzzer-sys` が既定。
+  口は `tracing` が `std` だけ・`metrics` が既定。試験の道具は、試し実装（`crates/trial-deps`）で選んだ組として `tracing-subscriber` が `fmt` だけ・`proptest` が `std` だけ・`syn` が `full`・`parsing` だけ・`libfuzzer-sys` が既定。
+  `TASK-518` で `log` を捕まえるために要る feature は、K11 の 4 つで確かめて足してよい（`../../rules/dependency-policy.md` の「版と feature の選び方」）。
   K11 は数の閾値ではなく「最新の安定版・既知の advisory 0 件・feature は必要最小・依存の `rust-version` が MSRV 以下」の 4 つで見る。ここに無い crate の選びは決まっていないため、利用者に確かめる
 - **unsafe**: 各 crate の `#![forbid(unsafe_code)]` を既定とする。workspace 側で lint として足す場合も例外は利用者の承認
 - **依存監査**: CI で advisories・bans・licenses・sources の 4 検査と `cargo-audit` を、例外を含まない厳格版の設定で実行し、全成功しない変更をマージさせない（DPOL-33〜35）。
@@ -102,7 +103,7 @@ CI は push しないと動かないため、workflow の変更は「未実行�
 - [ ] Makefile・hooks・CI で処理を二重定義していない
 - [ ] 追加した CI ジョブを `ci-complete` の `needs` に足した（該当時）
 - [ ] 未定の値（toolchain の固定・lint 設定・CI の周期・`deny.toml` の中身・依存の版の固定の手順）を断定していない
-- [ ] 依存の feature を足すとき、`D-2026-11-20-14` の選びと食い違っていない（`default-features = false`・必要最小）
+- [ ] 依存の feature を足すとき、`D-2026-11-20-14` と `dependency-policy.md` の扱い（`TASK-518` の例外を含む）に合っている（`default-features = false`・必要最小）
 - [ ] `deny.toml` に人の承認の無い例外を入れていない
 - [ ] `make check`・`make test-hooks` の結果を書いた
 - [ ] 呼び出し元の指示が無い限り commit・push・PR を行っていない
