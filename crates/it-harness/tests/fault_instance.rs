@@ -92,6 +92,9 @@ fn ignored_sigterm_does_not_block_and_sigkill_follows() {
 
 #[test]
 fn baseline_rejects_and_does_not_signal() {
+    if !kill_available() {
+        return;
+    }
     let mut h = sleeper();
     let mut tl = FaultTimeline::baseline(Instant::now(), t0()).unwrap();
     let rec = InstanceFaultError::Record(FaultRecordError::EventsInBaseline);
@@ -160,6 +163,9 @@ fn contains_bounded(haystack: &str, needle: &str) -> bool {
 
 #[test]
 fn drop_reaps_child() {
+    if !kill_available() {
+        return;
+    }
     let child = Command::new("sleep").arg("30").spawn().unwrap();
     let pid = child.id().to_string();
     InstanceFaultHandle::adopt(child).shutdown();
