@@ -77,7 +77,7 @@ fn secr23_secret_debug_field_has_no_value() {
     let matched = out
         .lines()
         .find(|l| l.contains("secret field emitted"))
-        .is_some_and(|l| l.trim_end().ends_with(expected));
+        .is_some_and(|l| l.ends_with(expected));
     assert!(
         matched,
         "masked field `token` matches exactly: {matched} (output len={})",
@@ -109,7 +109,7 @@ fn secr23_derived_debug_holder_has_no_value() {
     let matched = out
         .lines()
         .find(|l| l.contains("container fields emitted"))
-        .is_some_and(|l| l.trim_end().ends_with(expected));
+        .is_some_and(|l| l.ends_with(expected));
     assert!(
         matched,
         "masked fields `pair`/`maybe`/`list` match exactly: {matched} (output len={})",
