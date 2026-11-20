@@ -3,6 +3,7 @@ name = "fandhe-auth-e2e-harness"
 description = "passkey の E2E ハーネスの枠（試験専用。仮想 authenticator の結果は実機の結果ではない）"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

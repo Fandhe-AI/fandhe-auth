@@ -34,6 +34,7 @@ cat <<'EOF'
 
 CI 向けに直接実行するコマンド:
 
+  scripts/install-msrv.sh [COMPONENT...]  CI 向け。Cargo.toml の MSRV（scripts/msrv.sh が読む。終了コード 2 = 読めない）の toolchain を rustup で入れて既定にする（component は引数で渡す）
   scripts/secret-scan-ci.sh [PATH]      CI 向けの入口（PATH は走査対象のリポジトリのルート）。HEAD の tree から作った一時 index を --summary（件数のみ公開）で走査し、続けて陰性対照を実行。作業中の index は読まない。終了コード 0 = 検出なし / 1 = 検出、または陰性対照の失敗（検出器の異常）/ 2 = 検査不能
 
 Git hooks（lefthook.yml から呼ばれる。直接実行も可）:

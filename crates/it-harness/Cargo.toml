@@ -3,6 +3,7 @@ name = "fandhe-auth-it-harness"
 description = "結合試験のハーネスの枠（試験専用。実物ではない）"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
