@@ -77,13 +77,17 @@ fn temp_dir(tag: &str) -> PathBuf {
     d
 }
 
+/// `pid` が zombie 以外の状態で居るか。zombie は止まっている（回収待ちなだけ）とみなす。
+/// 引き取り先が回収しない実行環境でも判定が変わらないよう、`ps` の状態で見分ける。
 fn alive(pid: &str) -> bool {
-    Command::new("kill")
-        .args(["-0", pid])
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
         .stderr(Stdio::null())
-        .status()
-        .unwrap()
-        .success()
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    let stat = stat.trim();
+    !stat.is_empty() && !stat.starts_with('Z')
 }
 
 #[test]
@@ -119,7 +123,7 @@ fn failed_start_kills_the_whole_process_group() {
 
     let grandchild = fs::read_to_string(&pid_file).unwrap();
     let grandchild = grandchild.trim();
-    // 孫は init に引き取られて回収されるまで zombie で残り得るので、少しだけ待つ。
+    // SIGKILL の配送を少しだけ待つ。
     let deadline = Instant::now() + Duration::from_secs(3);
     while alive(grandchild) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));

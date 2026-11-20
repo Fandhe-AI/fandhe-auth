@@ -218,9 +218,15 @@ impl ChromeDriverComponent {
             if probe.is_ready() && Instant::now() < deadline {
                 break;
             }
-            let running = matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(None)));
-            if !running {
-                return Err(fail());
+            match self.child.as_mut().map(Child::try_wait) {
+                Some(Ok(None)) => {}
+                Some(Ok(Some(_))) => {
+                    // try_wait が回収済み。PID が再利用され得るので、teardown がグループへ送らないよう手放す
+                    // （`POST /session` の前で、配下の Chrome は居ない）。
+                    self.child = None;
+                    return Err(fail());
+                }
+                _ => return Err(fail()),
             }
             sleep(Duration::from_millis(100).min(left));
         }
