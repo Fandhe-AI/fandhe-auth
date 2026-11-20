@@ -200,6 +200,20 @@ impl<'a> Shared<'a> {
         self.stop.store(true, Ordering::SeqCst);
     }
 
+    /// 起動側がワーカーを立てる前に、停止の印を確認して観測の事実を残す。立っていれば `true`。
+    /// `claim` と同じ Mutex の中で行い、観測済みの停止は印が戻っても残る。
+    fn observe_cancel(&self) -> bool {
+        let _slots = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.cancelled.load(Ordering::SeqCst) {
+            return true;
+        }
+        if self.cancel.load(Ordering::SeqCst) {
+            self.cancelled.store(true, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
+
     /// 試行の枠を 1 つ取る。上限に達した・停止中・溢れたときは `false`。
     ///
     /// 停止の確認（内部の `stop`・呼び出し元の `cancel`）と枠の加算は同じ Mutex の中で行う。
@@ -276,6 +290,10 @@ where
     thread::scope(|s| {
         let mut handles = Vec::with_capacity(n);
         for _ in 0..n {
+            // 立てる前に停止を確認する。停止中は残りのワーカーを立てず、`Cancelled` を返させる。
+            if shared.observe_cancel() {
+                break;
+            }
             match thread::Builder::new()
                 .name("load-worker".to_owned())
                 .spawn_scoped(s, worker)
@@ -389,5 +407,19 @@ mod tests {
         cancel.store(false, Ordering::SeqCst);
         assert!(!shared.claim(10));
         assert!(shared.cancelled.load(Ordering::SeqCst));
+    }
+
+    /// 起動側の確認: 立っている印を観測し、印が戻っても観測済みとして残る。
+    /// 立っていれば `run_phase` はワーカーを 1 本も立てない（スレッド生成の失敗より `Cancelled` が先）。
+    #[test]
+    fn observe_cancel_sees_preset_and_persists() {
+        let cancel = AtomicBool::new(false);
+        let shared = Shared::new(&cancel);
+        assert!(!shared.observe_cancel());
+        cancel.store(true, Ordering::SeqCst);
+        assert!(shared.observe_cancel());
+        cancel.store(false, Ordering::SeqCst);
+        assert!(shared.observe_cancel());
+        assert!(!shared.claim(10));
     }
 }
