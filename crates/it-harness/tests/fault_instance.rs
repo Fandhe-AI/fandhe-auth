@@ -21,6 +21,7 @@ fn timeline() -> FaultTimeline {
 
 fn finish(tl: FaultTimeline) -> Result<FaultRecord, FaultRecordError> {
     tl.finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
+        .map_err(|f| f.error)
 }
 
 /// SIGTERM は固定パスの /bin/kill で送る。無い環境（最小コンテナ等）ではその試験を飛ばす。

@@ -35,6 +35,8 @@ pub enum ExternalStoreFaultError {
     NotActive,
     /// 記録が拒否した（基準線である等）。状態は変えていない。
     Record(FaultRecordError),
+    /// 解除の排出に失敗し、`Released` を記録せず遮断のまま戻った（`DbFaultError::DrainFailed` と同じ。ORST-17）。
+    DrainFailed,
     /// 遮断の経路では起きない想定の内部の誤り。
     Internal,
 }
@@ -46,6 +48,7 @@ impl fmt::Display for ExternalStoreFaultError {
             Self::AlreadyActive => f.write_str("external store fault error: already active"),
             Self::NotActive => f.write_str("external store fault error: not active"),
             Self::Record(e) => write!(f, "external store fault error: {e}"),
+            Self::DrainFailed => f.write_str("external store fault error: drain failed"),
             Self::Internal => f.write_str("external store fault error: internal"),
         }
     }
@@ -59,6 +62,7 @@ fn convert(e: DbFaultError) -> ExternalStoreFaultError {
         DbFaultError::AlreadyActive => ExternalStoreFaultError::AlreadyActive,
         DbFaultError::NotActive => ExternalStoreFaultError::NotActive,
         DbFaultError::Record(r) => ExternalStoreFaultError::Record(r),
+        DbFaultError::DrainFailed => ExternalStoreFaultError::DrainFailed,
         DbFaultError::InvalidParam => ExternalStoreFaultError::Internal,
     }
 }
@@ -108,7 +112,8 @@ impl ExternalStoreFaultProxy {
     }
 
     /// 転送器が accept した後に直ちに閉じた接続の数（遮断中に accept したもの・上流のハンドルが空・
-    /// 上流への接続の失敗・確立中の遮断）。カーネルの待ち行列にあってまだ accept していない接続は数えない。
+    /// 上流への接続の失敗・確立中の遮断・解除のときに待ち行列から排出して切ったもの。2/8 と同じ契約）。
+    /// 遮断中で待ち行列にあってまだ accept していない接続は、解除の排出までは数えない。
     pub fn refused_count(&self) -> u64 {
         self.inner.refused_count()
     }
