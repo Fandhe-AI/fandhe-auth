@@ -44,7 +44,16 @@ if [ "$#" -gt 1 ]; then
   echo "usage: secret-scan-ci.sh [<target-repo-path>]" >&2
   exit 2
 fi
-target="${1:-${ROOT_DIR}}"
+# 既定の対象を使うのは引数を省略したときだけ。空文字が明示されたときは取り違えを避けて検査不能にする。
+if [ "$#" -eq 0 ]; then
+  target="${ROOT_DIR}"
+else
+  target="$1"
+  if [ -z "${target}" ]; then
+    echo "secret-scan-ci: target is empty" >&2
+    exit 2
+  fi
+fi
 # `-` や `-x` のような値を cd がオプション・OLDPWD として解釈しないよう、絶対パスでなければ `./` を前に付ける。
 case "${target}" in
   /*) ;;
@@ -54,15 +63,26 @@ if [ ! -d "${target}" ]; then
   echo "secret-scan-ci: target is not a directory" >&2
   exit 2
 fi
-if ! target="$(cd "${target}" 2> /dev/null && pwd -P)" || [ -z "${target}" ]; then
+# パスの取得は `$(...)` が末尾の改行を落とすため、番兵（x）を付けて受けてから外す（改行で終わるパスも保つ）。
+if ! target="$(cd "${target}" 2> /dev/null && pwd -P && printf x)"; then
+  echo "secret-scan-ci: cannot resolve the target directory" >&2
+  exit 2
+fi
+target="${target%x}"
+target="${target%$'\n'}"
+if [ -z "${target}" ]; then
   echo "secret-scan-ci: cannot resolve the target directory" >&2
   exit 2
 fi
 # 親のリポジトリを誤って走査しないよう、対象がリポジトリのルートそのものであることを確かめる（fail-closed）。
-top="$(g -C "${target}" rev-parse --show-toplevel 2>/dev/null)" || top=""
+top="$(g -C "${target}" rev-parse --show-toplevel 2> /dev/null && printf x)" || top=""
+top="${top%x}"
+top="${top%$'\n'}"
 top_real=""
 if [ -n "${top}" ]; then
-  top_real="$(cd "${top}" 2> /dev/null && pwd -P)" || top_real=""
+  top_real="$(cd "${top}" 2> /dev/null && pwd -P && printf x)" || top_real=""
+  top_real="${top_real%x}"
+  top_real="${top_real%$'\n'}"
 fi
 if [ -z "${top_real}" ] || [ "${top_real}" != "${target}" ]; then
   echo "secret-scan-ci: target is not the root of a git repository" >&2

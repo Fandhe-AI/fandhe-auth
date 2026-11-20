@@ -161,7 +161,14 @@ expect_none "+password = ${q}short${q}"
 
 # サブディレクトリから直接実行しても走査範囲が狭まらないよう、リポジトリルートで実行する。
 # rev-parse の失敗を `cd "$(...)"` に埋めると cd "" になり失敗が隠れるため、先に代入で受ける。
-if ! repo_root="$(g rev-parse --show-toplevel)" || [ -z "${repo_root}" ]; then
+# `$(...)` は末尾の改行を落とすため、番兵（x）を付けて受けてから外す（改行で終わるパスも保つ）。
+if ! repo_root="$(g rev-parse --show-toplevel && printf x)"; then
+  echo "secret-scan: not inside a git work tree; aborting" >&4
+  exit 2
+fi
+repo_root="${repo_root%x}"
+repo_root="${repo_root%$'\n'}"
+if [ -z "${repo_root}" ]; then
   echo "secret-scan: not inside a git work tree; aborting" >&4
   exit 2
 fi

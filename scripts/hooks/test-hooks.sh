@@ -498,6 +498,40 @@ else
   fail "secret-scan-ci: failure to enter the target before scanning exits 2 (not 1)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# 空文字の引数は既定の対象に落とさず、検査不能（2）にする（既定は引数を省略したときだけ）
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "secret-scan-ci: an explicit empty target exits 2"
+else
+  fail "secret-scan-ci: an explicit empty target exits 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# パスが改行で終わるリポジトリも、末尾の改行を失わずに走査する（検出器・CI 入口とも）
+nl_dir="${work_dir}/nl-parent/repo"$'\n'
+mkdir -p "${nl_dir}"
+(
+  cd "${nl_dir}"
+  git -c init.defaultBranch=main init -q
+  printf 'hello\n' > app.txt
+  git add app.txt
+  git commit -q -m "chore: add"
+)
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${nl_dir}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan-ci: a target whose path ends with a newline is scanned"
+else
+  fail "secret-scan-ci: a target whose path ends with a newline is scanned" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rc=0
+(cd "${nl_dir}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" --tracked) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: (tracked) a repository whose path ends with a newline is scanned"
+else
+  fail "secret-scan: (tracked) a repository whose path ends with a newline is scanned" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 # ---- scripts/secret-scan-canary.sh: grep のエラー（終了状態 2）は失敗にする
 grep_shim_dir="${work_dir}/grep-shim"
 mkdir -p "${grep_shim_dir}"
