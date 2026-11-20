@@ -174,13 +174,18 @@ jobs:
       - name: make lint
         run: make lint
 
-  # 秘密情報の混入検査（TASK-6）。PR のマージ結果の追跡ファイル全体を走査し、1 件以上で失敗する（SECR-23）。
+  # 秘密情報の混入検査（TASK-6）。PR のマージ結果の追跡ファイルを走査し、1 件以上で失敗する（SECR-23）。
+  # 走査しない範囲は検出器の定義（scripts/hooks/secret-scan.sh の除外）に固定された次の 3 つだけで、
+  # CI 側で足し引きしない: .agents/skills/**・.claude/skills/**（skills-lock.json 管理の外部取得物）・*.lock（ハッシュ列）。
   # 続けて陰性対照（scan-canary）で、実行時に組み立てた既知のダミーだけの一時 index に検出器が 1 を返すことを
   # 確かめる（検出器が常に合格する状態を見逃さない。リポジトリの内容に依存しない）。ダミーは commit しない。
   # 実処理は scripts/secret-scan-ci.sh に置く（ローカルからも呼べる。出力の絞り込み・終了コードの伝播もそこ）。
   # 判定コードは信頼済みリビジョン（PR の base）から取り、PR のマージ結果は走査対象のデータとしてだけ渡す
   # （PR 自身が検出器・カナリアを書き換えて合格させる経路を作らない）。base にまだ検出器が無いとき（導入 PR 自身）
   # に限り PR 側の版を使う。導入後は base に必ず在るため、PR が削除・改変しても base の版が判定する。
+  # 検出器 3 点のうち一部だけが base に在る状態は fail-closed で失敗させる（検出器の削除を合格にしない）。
+  # 限界: pull_request で動く本ファイル自体は PR の変更を含む。ワークフロー自体の改変の防止は
+  # ruleset（必須ワークフロー・CODEOWNERS による本ファイルの保護）で行う。リポジトリ設定は人が決める。
   # 公開ログには規則 ID・件数だけを出し、検出ファイルのパスは出さない（--summary。パスに値が含まれ得る）。
   # 範囲外: コミット履歴・submodule の中。検出時は .claude/rules/security.md の重大度「高」に従う。
   secret-scan:
@@ -203,11 +208,20 @@ jobs:
 
       - name: secret-scan (scan the PR merge result with the trusted detector)
         run: |
-          if [ -f trusted/scripts/secret-scan-ci.sh ] && [ -f trusted/scripts/secret-scan-canary.sh ] && [ -f trusted/scripts/hooks/secret-scan.sh ]; then
+          set -euo pipefail
+          present=0
+          for f in scripts/secret-scan-ci.sh scripts/secret-scan-canary.sh scripts/hooks/secret-scan.sh; do
+            if [ -f "trusted/${f}" ]; then present=$((present + 1)); fi
+          done
+          if [ "${present}" -eq 3 ]; then
             trusted/scripts/secret-scan-ci.sh "${GITHUB_WORKSPACE}/target"
-          else
+          elif [ "${present}" -eq 0 ]; then
             # base にまだ検出器が無いとき（導入 PR 自身）に限り PR 側の版を使う
+            echo "::warning::trusted base has no secret detector; using the PR version (bootstrap only)"
             target/scripts/secret-scan-ci.sh "${GITHUB_WORKSPACE}/target"
+          else
+            echo "::error::trusted base has an incomplete secret detector set (${present}/3); failing closed"
+            exit 1
           fi
 
   # squash merge では PR タイトルがそのままコミット件名になるため、commit-msg フックと

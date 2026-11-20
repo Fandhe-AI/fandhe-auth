@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 秘密情報の検査（scripts/hooks/secret-scan.sh --tracked）の陰性対照（TASK-6。CI の secret-scan ジョブが
+# 秘密情報の検査（scripts/hooks/secret-scan.sh --tracked --summary。CI と同じ引数）の陰性対照（TASK-6。CI の secret-scan ジョブが
 # `scripts/secret-scan-ci.sh` 経由で呼ぶ）。検出器が壊れて常に合格する状態（fail-open）を CI で見逃さないため、
 # 実行時に組み立てた既知のダミーだけを入れた一時 index（空から開始）を検出器に走査させ、
 # 終了コード 1・合計 2 件になることを確かめる。リポジトリの内容（PR・base の検出対象の有無）に結果が依存しない。「意図的に混入させたダミーで検査が失敗する」ことの証拠をログに残す役割を持つ。
@@ -53,7 +53,7 @@ plant "${canary_dir}/dummy.txt" "${key_line}"
 plant "${canary_dir}/.env" "canary placeholder"
 
 rc=0
-"${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked > "${work_dir}/out" 2>&1 || rc=$?
+"${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
 
 fail() {
   echo "scan-canary: FAILED: $1" >&2

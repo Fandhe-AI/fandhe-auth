@@ -33,7 +33,7 @@ check: ## editorconfig-checker + shellcheck（ソースは変更しない）。�
 test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git のみ）。直接: scripts/hooks/test-hooks.sh
 	@scripts/hooks/test-hooks.sh
 
-# secret-scan は暫定の名前（人が確定する）。CI の secret-scan ジョブがこれと scan-canary を呼ぶ（TASK-6）。
+# secret-scan は暫定の名前（人が確定する）。CI の secret-scan ジョブは scripts/secret-scan-ci.sh（--tracked --summary と scan-canary 相当）を呼ぶ（TASK-6）。
 secret-scan: ## 追跡ファイル全体の秘密情報の混入検査（検査のみ・値は出さず件数で判定）。直接: scripts/hooks/secret-scan.sh --tracked
 	@scripts/hooks/secret-scan.sh --tracked
 
