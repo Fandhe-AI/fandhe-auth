@@ -23,6 +23,11 @@ const rpId = arguments[0];
 const expectedOrigin = arguments[1];
 (async () => {
     try {
+        // credential を作る前に、ページの origin が期待する origin と一致することを確かめる。
+        if (location.origin !== expectedOrigin) {
+            done({ ok: false, errorName: 'SecurityError' });
+            return;
+        }
         const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
         const b64u = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         const challenge = rnd(32);
@@ -153,6 +158,13 @@ pub fn register_once(
     origin: &str,
     rp_id: &str,
 ) -> Result<RegistrationOutcome, E2eError> {
+    // 期待する origin は、起動前に登録した許可リストと照合したものだけを使う（A10）。
+    if !handle.origin_is_registered(origin) {
+        return Err(E2eError::new(
+            E2eErrorKind::CommandFailed,
+            E2eComponentKind::BrowserDriver,
+        ));
+    }
     let v = handle.execute_async(REGISTER_SCRIPT, &[json!(rp_id), json!(origin)])?;
     RegistrationOutcome::from_value(&v).ok_or(E2eError::new(
         E2eErrorKind::CommandFailed,

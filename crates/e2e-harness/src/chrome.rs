@@ -6,9 +6,9 @@
 //!
 //! 安全: 子プロセスは引数の配列で起動しシェルを通さない。stdin・stderr は捨てる。stdout は待ち受けポートを
 //! 子自身から受け取るためだけに読む（`--port=0` で子が確保したポートを使い、空きポートの取り違えを避ける。A10）。
-//! 環境変数・ファイルは読まない（DPOL-32）。Chrome の flag は `--headless=new` と外部名の解決を禁じる 1 つだけで、
-//! 検証を外す flag を足さない（DPOL-30）。`navigate` は起動前に登録した試験用 origin の配下だけを許し、移動後の
-//! URL（リダイレクト先）も同じ許可リストで確かめる。サブリソースは外部名の解決禁止で外へ出さない（A10）。
+//! 環境変数・ファイルは読まない（DPOL-32）。Chrome の flag は `--headless=new` と外部への通信を禁じる 3 つ（名前の解決禁止・
+//! 解決できない proxy・登録 origin だけの bypass list）だけで、検証を外す flag を足さない（DPOL-30）。`navigate` は起動前に登録した試験用 origin の配下だけを許し、移動後の
+//! URL（リダイレクト先）も同じ許可リストで確かめる。サブリソースと許可外のループバックのポートへの通信は、proxy の bypass list が登録 origin だけを直接接続にするため送信前に失敗する（A10）。
 //! unix 限定（プロセスグループで起動する。`it-harness` の `fault::instance` と同じ）。
 //! 誤り・停止・`Drop` のすべてでセッションの削除と、子のプロセスグループ（chromedriver と Chrome）の終了・wait を行う。
 
@@ -44,6 +44,7 @@ pub struct ChromeDriverConfig {
 }
 
 /// 試験用 origin の形。`http://localhost:<port>` か `http://127.0.0.1:<port>` だけ（path・userinfo を含めない）。
+/// ポートは先頭ゼロなしの 1〜65535 で、既定ポート 80 は正規形でないため拒否する。
 fn validated_origin(origin: &str) -> Result<String, E2eError> {
     let rest = origin
         .strip_prefix("http://localhost:")
@@ -52,7 +53,9 @@ fn validated_origin(origin: &str) -> Result<String, E2eError> {
         !p.is_empty()
             && p.len() <= 5
             && p.bytes().all(|b| b.is_ascii_digit())
-            && p.parse::<u16>().is_ok_and(|n| n != 0)
+            // 先頭ゼロ・既定ポート 80 は origin の正規形でないので設定時に拒否する（比較を文字列の完全一致に保つ）。
+            && !p.starts_with('0')
+            && p.parse::<u16>().is_ok_and(|n| n != 0 && n != 80)
     });
     if ok {
         Ok(origin.to_owned())
@@ -110,21 +113,50 @@ impl ChromeDriverConfig {
 pub const HOST_RESOLVER_RULES_ARG: &str =
     "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost";
 
-/// `POST /session` の本文。Chrome の flag は `--headless=new` と、外部名の解決を禁じる 1 つだけ（DPOL-30）。
-pub fn new_session_request() -> Value {
+/// すべての通信を解決できない proxy へ向ける flag。名前の解決は上の規則で必ず失敗するため、proxy 経由の通信は成立しない。
+/// 登録した origin だけを下の bypass list で直接接続にする（許可外のループバックのポートへ送信させない。A10）。
+pub const PROXY_SERVER_ARG: &str = "--proxy-server=http://proxy.invalid:9";
+
+/// `--proxy-bypass-list` の flag。`<-loopback>` で loopback の暗黙の除外を外し、登録した `host:port` だけを直接接続にする。
+fn proxy_bypass_arg(allowed_origins: &[String]) -> String {
+    let mut list = String::from("--proxy-bypass-list=<-loopback>");
+    for o in allowed_origins {
+        if let Some(hostport) = o.strip_prefix("http://") {
+            list.push(';');
+            list.push_str(hostport);
+        }
+    }
+    list
+}
+
+/// `POST /session` の本文。Chrome の flag は `--headless=new` と、外部への通信を禁じる 3 つだけ（DPOL-30）。
+/// `allowed_origins` に登録した origin 以外へは、初回の移動・リダイレクト・サブリソースとも送信前に失敗する（A10）。
+pub fn new_session_request_for(allowed_origins: &[String]) -> Value {
     json!({
         "capabilities": {
             "alwaysMatch": {
                 "browserName": "chrome",
-                "goog:chromeOptions": { "args": ["--headless=new", HOST_RESOLVER_RULES_ARG] }
+                "goog:chromeOptions": { "args": [
+                    "--headless=new",
+                    HOST_RESOLVER_RULES_ARG,
+                    PROXY_SERVER_ARG,
+                    proxy_bypass_arg(allowed_origins)
+                ] }
             }
         }
     })
 }
 
+/// 許可 origin なしの `POST /session` の本文（すべての通信が失敗する）。
+pub fn new_session_request() -> Value {
+    new_session_request_for(&[])
+}
+
 struct Live {
     session: WebDriverSession,
     browser_version: String,
+    /// 移動の結果を確定できなかった。以後の操作は拒否し、停止処理で回収する。
+    unusable: bool,
 }
 
 /// ブラウザの操作の入口。起動前・停止後は `NotRunning`。
@@ -135,32 +167,40 @@ pub struct ChromeHandle {
 }
 
 impl ChromeHandle {
-    fn session(&self) -> Result<WebDriverSession, E2eError> {
-        let guard = self
+    /// セッションの操作を、ロックを握ったまま実行する。停止（`teardown`）は同じロックを取るので、
+    /// 実行中の命令が終わるまで待ち、停止・回収後の古いポートへ命令を送れない。命令は時間切れで必ず終わる。
+    fn with_live<T>(
+        &self,
+        f: impl FnOnce(&mut Live) -> Result<T, E2eError>,
+    ) -> Result<T, E2eError> {
+        let mut guard = self
             .live
             .lock()
             .map_err(|_| err(E2eErrorKind::NotRunning))?;
-        guard
-            .as_ref()
-            .map(|l| l.session.clone())
-            .ok_or_else(|| err(E2eErrorKind::NotRunning))
+        let live = guard
+            .as_mut()
+            .ok_or_else(|| err(E2eErrorKind::NotRunning))?;
+        if live.unusable {
+            return Err(err(E2eErrorKind::CommandFailed));
+        }
+        f(live)
     }
 
-    /// 動いているか。
+    /// `origin` が起動前に登録した試験用 origin のどれかと完全一致するか。
+    pub(crate) fn origin_is_registered(&self, origin: &str) -> bool {
+        self.allowed_origins.iter().any(|o| o == origin)
+    }
+
+    /// 動いているか（使用不可にされたセッションは動いていないものとして扱う）。
     pub fn is_running(&self) -> bool {
-        self.session().is_ok()
+        self.live
+            .lock()
+            .is_ok_and(|g| g.as_ref().is_some_and(|l| !l.unusable))
     }
 
     /// ブラウザの版（実行の記録用。記録の形は 5/6）。
     pub fn browser_version(&self) -> Result<String, E2eError> {
-        let guard = self
-            .live
-            .lock()
-            .map_err(|_| err(E2eErrorKind::NotRunning))?;
-        guard
-            .as_ref()
-            .map(|l| l.browser_version.clone())
-            .ok_or_else(|| err(E2eErrorKind::NotRunning))
+        self.with_live(|l| Ok(l.browser_version.clone()))
     }
 
     /// 仮想 authenticator を足す。
@@ -168,43 +208,51 @@ impl ChromeHandle {
         &self,
         options: &VirtualAuthenticatorOptions,
     ) -> Result<AuthenticatorId, E2eError> {
-        self.session()?.add_virtual_authenticator(options)
+        self.with_live(|l| l.session.add_virtual_authenticator(options))
     }
 
     /// URL へ移動する。起動前に登録した試験用 origin の配下だけを許し、それ以外は `CommandFailed`（A10）。
-    /// 移動後の URL が許可外（リダイレクト）でも `CommandFailed`。
+    /// 移動後の URL が許可外（リダイレクト）でも `CommandFailed`。移動の結果を確定できない（命令の失敗・時間切れ・
+    /// 移動後の URL を取れない・空白ページへ戻せない）ときは、セッションを使用不可にし、停止処理で回収する。
     pub fn navigate(&self, url: &str) -> Result<(), E2eError> {
-        let session = self.session()?;
         if !url_is_allowed(&self.allowed_origins, url) {
-            return Err(err(E2eErrorKind::CommandFailed));
+            // セッションの有無の確認（起動前・停止後は NotRunning）だけ行う。
+            return self.with_live(|_| Err(err(E2eErrorKind::CommandFailed)));
         }
-        session.navigate(url)?;
-        // リダイレクト先も許可リストで確かめる。外れていたら空白ページへ戻して誤りにする。
-        let landed = session.current_url();
-        if landed
-            .as_deref()
-            .is_ok_and(|u| url_is_allowed(&self.allowed_origins, u))
-        {
-            Ok(())
-        } else {
-            let _ = session.navigate("about:blank");
-            Err(err(E2eErrorKind::CommandFailed))
-        }
+        self.with_live(|l| {
+            if l.session.navigate(url).is_err() {
+                l.unusable = true;
+                return Err(err(E2eErrorKind::CommandFailed));
+            }
+            // リダイレクト先も許可リストで確かめる。外れていたら空白ページへ戻して誤りにする。
+            let landed_ok = l
+                .session
+                .current_url()
+                .is_ok_and(|u| url_is_allowed(&self.allowed_origins, &u));
+            if landed_ok {
+                Ok(())
+            } else {
+                if l.session.navigate("about:blank").is_err() {
+                    l.unusable = true;
+                }
+                Err(err(E2eErrorKind::CommandFailed))
+            }
+        })
     }
 
     /// 非同期スクリプトの時間切れを設定する。
     pub fn set_script_timeout(&self, timeout: Duration) -> Result<(), E2eError> {
-        self.session()?.set_script_timeout(timeout)
+        self.with_live(|l| l.session.set_script_timeout(timeout))
     }
 
     /// 非同期スクリプトを実行する。crate 内の定数スクリプトだけが使う（任意のスクリプトを外へ開かない）。
     pub(crate) fn execute_async(&self, script: &str, args: &[Value]) -> Result<Value, E2eError> {
-        self.session()?.execute_async(script, args)
+        self.with_live(|l| l.session.execute_async(script, args))
     }
 
     /// 仮想 authenticator の credential の要約。
     pub fn credentials(&self, id: &AuthenticatorId) -> Result<Vec<CredentialSummary>, E2eError> {
-        self.session()?.credentials(id)
+        self.with_live(|l| l.session.credentials(id))
     }
 }
 
@@ -235,7 +283,11 @@ impl ChromeDriverComponent {
 
     fn teardown(&mut self) -> Result<(), E2eError> {
         let mut result = Ok(());
-        let live = self.handle.live.lock().ok().and_then(|mut g| g.take());
+        // ロックを取るので、実行中の命令が終わってからセッションを取り出す（命令と停止の同期）。
+        let live = match self.handle.live.lock() {
+            Ok(mut g) => g.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
         // セッションの削除は最善を尽くすだけ。失敗してもプロセスグループの終了へ進む。
         if let Some(live) = live
             && live.session.delete().is_err()
@@ -304,12 +356,13 @@ impl ChromeDriverComponent {
         }
         let client = WebDriverClient::new(port, self.config.command_timeout);
         let (session, browser_version) = client
-            .new_session(&new_session_request())
+            .new_session(&new_session_request_for(&self.config.allowed_origins))
             .map_err(|_| fail())?;
         let mut guard = self.handle.live.lock().map_err(|_| fail())?;
         *guard = Some(Live {
             session,
             browser_version,
+            unusable: false,
         });
         Ok(())
     }
@@ -456,6 +509,9 @@ mod tests {
         for bad in [
             "http://localhost",
             "http://localhost:0",
+            "http://localhost:80",
+            "http://localhost:08080",
+            "http://127.0.0.1:080",
             "http://localhost:8080/",
             "http://localhost:99999",
             "http://example.com:80",

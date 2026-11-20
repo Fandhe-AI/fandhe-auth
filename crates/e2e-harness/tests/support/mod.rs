@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 /// 同時に処理する接続数の上限。超えた接続は何も返さず閉じる（A03・A10）。
 pub const MAX_CONNECTIONS: usize = 8;
+/// ヘッダー部（終端の空行を含む）の上限。
+pub const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// 1 接続の処理全体（読み取りと書き込み）の絶対期限。
 pub const CONNECTION_DEADLINE: Duration = Duration::from_secs(2);
 
@@ -90,7 +92,7 @@ fn handle(mut s: TcpStream, port: u16) {
     let deadline = Instant::now() + CONNECTION_DEADLINE;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
-    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 16 * 1024 {
+    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < MAX_HEADER_BYTES {
         // read ごとに残り時間を取り直し、少量ずつ送る相手でも絶対期限で打ち切る。
         let Some(left) = deadline
             .checked_duration_since(Instant::now())
@@ -108,6 +110,10 @@ fn handle(mut s: TcpStream, port: u16) {
     let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
         return;
     };
+    // 終端の 4 バイトを含めて上限内に収まること（読み取りの最後の塊で上限を超えた終端は受理しない）。
+    if end + 4 > MAX_HEADER_BYTES {
+        return;
+    }
     let text = String::from_utf8_lossy(&buf[..end]);
     let mut lines = text.split("\r\n");
     let request_line = lines.next().unwrap_or("");

@@ -71,8 +71,9 @@ WebAuthn の secure context と RP ID は PoC-2 の結果を ID で引き、試�
 ## ドライバの入手と CI（2/6 以降の案）
 
 2/6 の入口は暫定の `make e2e-chrome`（`scripts/e2e-chrome.sh`。`#[ignore]` の `chrome_registration` を流す。CI 外）。
-chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless=new` と、外部名の解決を禁じる `--host-resolver-rules`
-（`localhost` 以外を引けなくする制限。`navigate` の許可リストのリダイレクト先・サブリソース対策）の 2 つだけで、
+chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless=new` と、外部への通信を禁じる `--host-resolver-rules`・
+`--proxy-server`（解決できない proxy）・`--proxy-bypass-list`（`<-loopback>` と登録 origin の `host:port` だけ。許可外の
+ループバックのポートも送信前に失敗させる。A10）の計 4 つだけで、
 `--disable-*`・`--no-sandbox` は足さない。`navigate` は移動後の URL も許可リストで確かめ、外れたら空白ページへ戻して誤りにする。
 chromedriver の起動はプロセスグループを使うため、Chrome 側の実装・公開経路・試験は `cfg(unix)` に限る。
 停止は、子を回収する前にグループへ SIGKILL を送り、そのあと wait する（回収後の PID を宛先にしない）。
@@ -90,10 +91,12 @@ WebDriver の応答は、ヘッダー名の token 検査・値と理由句の制
   先に取って手放す方式は、別のドライバと取り違える恐れがあるため採らない（A10）。
 - 起動待ちの期限は probe・待機を含めた全体の絶対期限で、期限後の ready は受理しない。命令の期限も書き込み・読み取りを
   通した全体の絶対期限で、時間切れの値が大きすぎて期限を作れない場合は誤りにする（panic しない）。
-- 子は新しいプロセスグループで起動し、停止・失敗・`Drop` で、セッションの削除（最善）→ グループへ SIGTERM →
-  グループへ SIGKILL → wait の順に chromedriver と配下の Chrome を後片付けする。セッション ID が無い失敗でも同じ。
+- 子は新しいプロセスグループで起動し、停止・失敗・`Drop` で、セッションの削除（最善）→ グループへ SIGKILL（セッションは削除済みで
+  Chrome の一時領域は片付いているため SIGTERM の猶予は置かない）→ wait の順に chromedriver と配下の Chrome を後片付けする。セッション ID が無い失敗でも同じ。
 - ブラウザの `navigate` は `ChromeDriverConfig::with_allowed_origin` で起動前に登録した試験用 origin
-  （`http://localhost:<port>`・`http://127.0.0.1:<port>`）の配下だけを許し、未登録なら全拒否（A10）。
+  （`http://localhost:<port>`・`http://127.0.0.1:<port>`。ポートは先頭ゼロなしで 80 以外）の配下だけを許し、未登録なら全拒否（A10）。
+  ブラウザ自体の通信（初回の移動・リダイレクト・サブリソース）も proxy の bypass list により登録 origin 以外は送信前に失敗する。
+  移動の結果を確定できないとき（命令の時間切れ等）はセッションを使用不可にし、停止で回収する。命令と停止は同じロックで同期する。
 - WebDriver のクライアントは crate 内に閉じる。メソッドは列挙型、path は許可文字のみ（A03）。応答のステータス行・
   ヘッダーの構文違反、Content-Length の重複・不正・本文との不一致、chunked は拒否する。credential は
   `rpId`・`isResidentCredential` だけを外へ出し、`privateKey` を含む生の応答を公開しない（SECR-10・SECR-11・SECR-23）。
@@ -120,7 +123,8 @@ WebDriver の応答は、ヘッダー名の token 検査・値と理由句の制
 - 試験用ページと origin の置き場（上の (a)〜(c)。2/6 は (b) を暫定採用）
 - 仮想 authenticator の options の値（2/6 の値は PoC の値）
 - make ターゲット名 `e2e-chrome`
-- Chrome の起動 flag は `--headless=new` だけ（`DPOL-30` の走査語に掛かる flag は足していない）
+- Chrome の起動 flag は `--headless=new` と外部への通信を禁じる `--host-resolver-rules`・`--proxy-server`（解決できない proxy）・
+  `--proxy-bypass-list`（登録 origin の `host:port` だけを直接接続にする）。検証を外す flag（`DPOL-30` の走査語）は足していない。採否は人の確認待ち
 - it-harness・最小の組込み先への辺（足す段で許可表を人に確かめる）
 
 ## 依存の判断待ち（人が決める）

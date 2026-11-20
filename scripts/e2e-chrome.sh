@@ -12,4 +12,13 @@ require_cmd cargo
 require_cmd chromedriver
 cd "${ROOT_DIR}"
 
+# chrome_registration.rs は unix 限定。非対応のターゲットでは 0 件のまま成功しないよう、理由を出して失敗する（DPOL-30〜32）。
+case "$(uname -s)" in
+  Linux | Darwin) ;;
+  *)
+    echo "e2e-chrome: unsupported target (unix only; the registration test would run 0 tests)" >&2
+    exit 1
+    ;;
+esac
+
 cargo test -p fandhe-auth-e2e-harness --locked --test chrome_registration -- --ignored
