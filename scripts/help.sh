@@ -19,6 +19,7 @@ cat <<'EOF'
   check       scripts/check.sh               editorconfig-checker + shellcheck（ソースは変更しない）
   test-hooks  scripts/hooks/test-hooks.sh    フックスクリプト自体の回帰テスト（bash + git のみ）
   secret-scan scripts/hooks/secret-scan.sh --tracked   追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定）
+  scan-canary scripts/secret-scan-canary.sh   secret-scan の陰性対照（ダミーで検出器が 1 を返し、集計行が期待と完全に一致し、ダミー値が出ないことを確かめる。何も変更しない）
   build       cargo build --workspace --locked   workspace 全体をビルドする（--locked。--all-features は使わない）
   test        cargo test --workspace --locked    workspace 全体の試験を流す
   fmt         cargo fmt --all                rustfmt で整形を適用する（ソースを書き換える）
@@ -26,6 +27,10 @@ cat <<'EOF'
   crate-deps  scripts/check-crate-deps.sh    crate 間の依存の向きの検査（許可表との照合）
   pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
   it-db       scripts/it-db.sh               ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）
+
+CI 向けに直接実行するコマンド:
+
+  scripts/secret-scan-ci.sh [PATH]      CI 向けの入口（PATH は走査対象のリポジトリのルート）。HEAD の tree から作った一時 index を --summary（件数のみ公開）で走査し、続けて陰性対照を実行。作業中の index は読まない。終了コード 0 = 検出なし / 1 = 検出、または陰性対照の失敗（検出器の異常）/ 2 = 検査不能
 
 Git hooks（lefthook.yml から呼ばれる。直接実行も可）:
 

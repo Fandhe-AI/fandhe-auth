@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan build test fmt lint crate-deps pg-check it-db
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps pg-check it-db
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -33,9 +33,13 @@ check: ## editorconfig-checker + shellcheck（ソースは変更しない）。�
 test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git のみ）。直接: scripts/hooks/test-hooks.sh
 	@scripts/hooks/test-hooks.sh
 
-# secret-scan は暫定の名前（人が確定する）。CI への組み込みは別 Issue（TASK-6）。
+# secret-scan は暫定の名前（人が確定する）。scripts/secret-scan-ci.sh（--tracked --summary と scan-canary 相当）の CI への組み込みは 2 段目の PR で行う予定（#51。TASK-6）。
 secret-scan: ## 追跡ファイル全体の秘密情報の混入検査（検査のみ・値は出さず件数で判定）。直接: scripts/hooks/secret-scan.sh --tracked
 	@scripts/hooks/secret-scan.sh --tracked
+
+# scan-canary は暫定の名前（人が確定する）。検出器が常に合格する状態を CI で見逃さないための陰性対照。
+scan-canary: ## secret-scan の陰性対照（ダミーで検出器が 1 を返し、集計行が期待と完全に一致し、ダミー値が出ないことを確かめる。何も変更しない）。直接: scripts/secret-scan-canary.sh
+	@scripts/secret-scan-canary.sh
 
 # build・test は暫定の名前（人が確定する）。CI の build-test ジョブがこの 2 つを呼ぶ（TASK-6）。--all-features は付けない（DPOL-31）。
 build: ## workspace 全体をビルドする（Cargo.lock の外を解決しない）。直接: cargo build --workspace --locked
