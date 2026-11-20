@@ -27,7 +27,9 @@ pub mod record;
 
 pub use db::{DbFaultError, DbFaultProxy};
 pub use external_store::{ExternalStoreFaultError, ExternalStoreFaultProxy};
-pub use hub_stub::{HubStubFaultError, HubStubFaultInjector};
+pub use hub_stub::{
+    HubStubCallError, HubStubFaultError, HubStubFaultInjector, HubStubFinishFailure,
+};
 #[cfg(unix)]
 pub use instance::{InstanceExit, InstanceFaultError, InstanceFaultHandle};
 pub use record::{

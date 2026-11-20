@@ -18,6 +18,9 @@
 //! - 記録が先、状態の変更が後。記録が拒否されたら状態を変えない。基準線では記録が拒否し、注入もしない（fail-closed）。
 //! - `MalformedBody` は JWKS の口だけが受ける（hub-stub の `Refusal` で表せない）。他の口は `InvalidParam`。
 //! - 遅れは `Wait` へ渡すだけ。眠る実装は出さない（セッションのロックを握ったまま待たないため。未決）。
+//!   `HubStubHandle::with` のクロージャ内で受け口を呼ぶとセッションのロックを握ったまま `Wait` が走る。
+//!   `Wait` は同じハンドルを参照しない（再入しない）ものに限る。
+//! - 受け口は `timeline` を受け、注入器の実行と一致しなければ内側を呼ばず `RunMismatch`（基準線の呼び出しを注入器のログへ入れない）。
 //! - hub-stub の呼び出しの記録（`InjectionLog.at` は試験の論理時刻）は [`FaultRecord`](super::FaultRecord) に入れず、
 //!   [`HubStubFaultInjector::call_log`] で読み取り専用に出す。対応は順序だけで取る。
 //! - 受け口は呼び出しごとに借りる。token は内側へ渡すだけで保持・記録しない（SECR-11・SECR-23〜27）。
@@ -79,6 +82,40 @@ impl fmt::Display for HubStubFaultError {
 }
 
 impl std::error::Error for HubStubFaultError {}
+
+/// `finish` の失敗。注入器とタイムラインを返すので、正しい組で再試行できる（記録を失わない）。
+pub struct HubStubFinishFailure<W: Wait> {
+    /// 失敗の理由。
+    pub error: HubStubFaultError,
+    /// 渡された注入器。
+    pub injector: HubStubFaultInjector<W>,
+    /// 渡されたタイムライン。
+    pub timeline: FaultTimeline,
+}
+
+impl<W: Wait> fmt::Debug for HubStubFinishFailure<W> {
+    /// 理由だけを出す（SECR-23〜27）。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HubStubFinishFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+/// 受け口の呼び出しの誤り。内側へ委ねる前に実行の一致を確かめるので、別の実行の呼び出しは内側のログに入らない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubStubCallError {
+    /// 注入器を作ったときの実行と別の実行のタイムラインを渡された。内側は呼んでいない。
+    RunMismatch,
+    /// 注入された拒否（hub-stub の内側が返した）。
+    Injected(InjectedRefusal),
+}
+
+impl PartialEq<InjectedRefusal> for HubStubCallError {
+    fn eq(&self, other: &InjectedRefusal) -> bool {
+        matches!(self, Self::Injected(r) if r == other)
+    }
+}
 
 /// 口ごとの有効な注入（遅れと拒否を各 1 件まで）。
 #[derive(Debug, Clone, Copy, Default)]
@@ -247,6 +284,11 @@ impl<W: Wait> HubStubFaultInjector<W> {
         Ok(())
     }
 
+    fn guard(&self, timeline: &FaultTimeline) -> Result<(), HubStubCallError> {
+        self.check_run(timeline)
+            .map_err(|_| HubStubCallError::RunMismatch)
+    }
+
     fn check_run(&self, timeline: &FaultTimeline) -> Result<(), HubStubFaultError> {
         if timeline.run_id() == self.run_id {
             Ok(())
@@ -258,16 +300,28 @@ impl<W: Wait> HubStubFaultInjector<W> {
     /// 実行を終える。注入器を消費するので、解除しなかった規則は次の実行へ残らない
     /// （解除しなかった分は記録の `unreleased_count` に出る）。別の実行の記録は `RunMismatch`。
     /// 記録と呼び出しの記録を組で返す。事象の `log_pos` と呼び出しの順序で、終了後にも照合できる。
+    ///
+    /// # Errors
+    /// 失敗のときは注入器とタイムラインを [`HubStubFinishFailure`] に入れて返す（所有権を失わず、正しい組で再試行できる）。
     pub fn finish(
         self,
         timeline: FaultTimeline,
         recorded_at: UtcTimestamp,
-    ) -> Result<(FaultRecord, InjectionLog), HubStubFaultError> {
-        self.check_run(&timeline)?;
-        let record = timeline
-            .finish_bound(recorded_at)
-            .map_err(HubStubFaultError::Record)?;
-        Ok((record, self.inner.log().clone()))
+    ) -> Result<(FaultRecord, InjectionLog), Box<HubStubFinishFailure<W>>> {
+        let checked = self.check_run(&timeline).and_then(|()| {
+            timeline
+                .check_finishable()
+                .map_err(HubStubFaultError::Record)
+        });
+        if let Err(error) = checked {
+            return Err(Box::new(HubStubFinishFailure {
+                error,
+                injector: self,
+                timeline,
+            }));
+        }
+        let log = self.inner.log().clone();
+        Ok((timeline.into_record(recorded_at), log))
     }
 
     /// 有効な注入の数。
@@ -286,39 +340,55 @@ impl<W: Wait> HubStubFaultInjector<W> {
     /// 本人トークンの提示（hub-stub の同名へ委ねる）。
     pub fn present(
         &mut self,
+        timeline: &FaultTimeline,
         inner: &mut IdentityTokenReceiver,
         token: &str,
         now: u64,
-    ) -> Result<Result<ReceivedIdentity, PresentationRejection>, InjectedRefusal> {
-        self.inner.present(inner, token, now)
+    ) -> Result<Result<ReceivedIdentity, PresentationRejection>, HubStubCallError> {
+        self.guard(timeline)?;
+        self.inner
+            .present(inner, token, now)
+            .map_err(HubStubCallError::Injected)
     }
 
     /// 失効の通知（同上）。
     pub fn receive_logout(
         &mut self,
+        timeline: &FaultTimeline,
         inner: &mut LogoutTokenReceiver,
         token: &str,
         now: u64,
-    ) -> Result<Result<LogoutReceipt, LogoutRejection>, InjectedRefusal> {
-        self.inner.receive_logout(inner, token, now)
+    ) -> Result<Result<LogoutReceipt, LogoutRejection>, HubStubCallError> {
+        self.guard(timeline)?;
+        self.inner
+            .receive_logout(inner, token, now)
+            .map_err(HubStubCallError::Injected)
     }
 
     /// 生存確認（同上）。
     pub fn receive_heartbeat(
         &mut self,
+        timeline: &FaultTimeline,
         inner: &mut HeartbeatReceiver,
         heartbeat: &Heartbeat,
         now: u64,
-    ) -> Result<(), InjectedRefusal> {
-        self.inner.receive_heartbeat(inner, heartbeat, now)
+    ) -> Result<(), HubStubCallError> {
+        self.guard(timeline)?;
+        self.inner
+            .receive_heartbeat(inner, heartbeat, now)
+            .map_err(HubStubCallError::Injected)
     }
 
     /// Hub の JWKS の配信（同上）。
     pub fn serve_jwks(
         &mut self,
+        timeline: &FaultTimeline,
         inner: &mut HubJwksEndpoint,
         now: u64,
-    ) -> Result<JwksResponse, InjectedRefusal> {
-        self.inner.serve_jwks(inner, now)
+    ) -> Result<JwksResponse, HubStubCallError> {
+        self.guard(timeline)?;
+        self.inner
+            .serve_jwks(inner, now)
+            .map_err(HubStubCallError::Injected)
     }
 }

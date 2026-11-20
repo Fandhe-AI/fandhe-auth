@@ -154,6 +154,10 @@ impl FaultTimeline {
     /// 注入器をこの実行へ結ぶ。すでに結んでいれば `false`（1 つの実行に注入器は 1 つ。呼び出しの位置の照合のため）。
     /// 結ぶ前に注入器の外で積まれた Hub の stub の事象があれば `HubStubEventsBeforeBind`（`log_pos` の無い事象と注入状態が食い違うため）。
     pub(crate) fn bind_injector(&self) -> Result<bool, FaultRecordError> {
+        // 結合済みの判定を先に行う（二重登録は事象の有無にかかわらず `false`。`AlreadyBound` に当たる）。
+        if self.injector_bound.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
         if self
             .events
             .iter()
@@ -282,21 +286,32 @@ impl FaultTimeline {
         self.finish_bound(recorded_at)
     }
 
+    /// 確定できるか。消費する前に確かめ、失敗しても記録を失わないようにする（注入器の内部だけ）。
+    pub(crate) fn check_finishable(&self) -> Result<(), FaultRecordError> {
+        if self.mode == RunMode::Fault && self.events.is_empty() {
+            return Err(FaultRecordError::NoInjectionInFaultRun);
+        }
+        Ok(())
+    }
+
     /// 注入器と一緒に確定する入口（注入器の内部だけ）。
     pub(crate) fn finish_bound(
         self,
         recorded_at: UtcTimestamp,
     ) -> Result<FaultRecord, FaultRecordError> {
-        if self.mode == RunMode::Fault && self.events.is_empty() {
-            return Err(FaultRecordError::NoInjectionInFaultRun);
-        }
-        Ok(FaultRecord {
+        self.check_finishable()?;
+        Ok(self.into_record(recorded_at))
+    }
+
+    /// 検査（`check_finishable`）を通した後の確定。
+    pub(crate) fn into_record(self, recorded_at: UtcTimestamp) -> FaultRecord {
+        FaultRecord {
             mode: self.mode,
             started_at: self.started_at,
             recorded_at,
             unreleased: self.open.len(),
             events: self.events,
-        })
+        }
     }
 }
 
