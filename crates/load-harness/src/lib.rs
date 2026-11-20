@@ -5,6 +5,7 @@
 //! [`generate`]（5/10）は閉ループで対象を並行に繰り返し呼ぶ。呼び出し元は負荷の対象を呼ぶ
 //! ハーネスの試験（試験ビルド）だけ。指標の定義は `docs/harness/load.md`。
 //! [`condition`]（7/10）は測定の条件（機材・構成・負荷の型）を記録の行に出す。
+//! [`stage`]（8/10）は並行数を段階的に変えて回し、結果を段階ごとに分けて記録の行（`stage`・`run`・`worst_run` 等）に出す。
 //!
 //! 範囲外: 記録のファイル全体の出力（担当の段は未決）、障害注入（`TASK-13`）、負荷の見積もり（`TASK-15`）、
 //! 合格の値の導出（`TASK-21`・`AUDP-29`）、結合試験（`TASK-10`）。合否は付けない（`ACPT-7`）。
@@ -23,6 +24,7 @@ pub mod aggregate;
 pub mod condition;
 pub mod generate;
 pub mod meter;
+pub mod stage;
 pub mod target;
 
 pub use aggregate::{
@@ -40,6 +42,11 @@ pub use generate::{LoadConfig, LoadError, LoadRun, LoopModel, MAX_CONCURRENCY, r
 pub use meter::{
     FailureKind, IntervalName, MeterError, MonotonicClock, Outcome, RunMeter, RunSamples, Sample,
     StdMonotonicClock, Trial,
+};
+
+pub use stage::{
+    MAX_REPETITIONS, MAX_STAGES, StageConfig, StageError, StagePlan, StageResult, StagedRun,
+    run_stages,
 };
 
 pub use target::{CallResult, TargetError, TargetName, TargetRun, TargetSpec, run_target};

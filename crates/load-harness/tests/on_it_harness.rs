@@ -12,8 +12,9 @@ use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
 use fandhe_auth_it_harness::{ComponentKind, Harness, HarnessConfig, HubStubComponent};
 use fandhe_auth_load_harness::{
     CallResult, ComponentConditions, ConditionComponent, FailureKind, IntervalName, LoadConfig,
-    LoopModel, MeasurementConditions, Outcome, RunMeter, StdMonotonicClock, TargetName, TargetSpec,
-    Trial, run_closed_loop, run_target, summarize_run,
+    LoopModel, MeasurementConditions, MetricKey, Outcome, RunMeter, StageConfig, StagePlan,
+    StdMonotonicClock, TargetName, TargetSpec, Trial, run_closed_loop, run_stages, run_target,
+    summarize_run,
 };
 
 const T0: u64 = 1_000;
@@ -178,5 +179,49 @@ fn conditions_from_running_harness_composition() {
     assert!(!out.contains(HOST_MARK) && !out.contains(CLIENT_MARK));
     let dbg = format!("{conditions:?}");
     assert!(!dbg.contains(HOST_MARK) && !dbg.contains(CLIENT_MARK));
+    running.stop().unwrap();
+}
+
+#[test]
+fn run_stages_calls_hub_stub_jwks_on_harness() {
+    let hub = HubStubComponent::new(hub_config());
+    let handle = hub.handle();
+    let running = Harness::start(HarnessConfig::new().with(Box::new(hub))).unwrap();
+    let key = AssertionSigningKey::generate("kid-load-stage.test").unwrap();
+    handle.with(|s| s.jwks.publish(&key)).unwrap();
+
+    let spec = TargetSpec::new(
+        TargetName::new("hub_stub_jwks").unwrap(),
+        IntervalName::new("stub_jwks").unwrap(),
+    );
+    let plan = StagePlan::new(
+        vec![
+            StageConfig::new(LoadConfig::new(1, 10, 1).unwrap(), 2).unwrap(),
+            StageConfig::new(LoadConfig::new(4, 20, 2).unwrap(), 2).unwrap(),
+        ],
+        MetricKey::P99Ns,
+    )
+    .unwrap();
+    let call = || match handle.with(|s| s.jwks.serve(T0)) {
+        Some(r) if r.status == 200 => CallResult::Ok,
+        Some(_) => CallResult::Rejected,
+        None => CallResult::Unavailable,
+    };
+    let r = run_stages(|| Box::new(StdMonotonicClock::new()), &spec, &plan, call).unwrap();
+    assert_eq!(r.stages.len(), 2);
+    for st in &r.stages {
+        for run in &st.runs {
+            assert_eq!(run.summary.executed, st.config.load().trials_planned());
+            assert_eq!(run.summary.success, st.config.load().trials_planned());
+            assert_eq!(run.summary.excluded, st.config.load().warmup());
+        }
+    }
+    // 経路を実際に呼んだ証拠: 暖機を含む全試行数（11 x 2 + 22 x 2）に一致する。
+    assert_eq!(handle.with(|s| s.jwks.records().len()), Some(66));
+    let text = r.to_string();
+    let dbg = format!("{r:?}");
+    for out in [&text, &dbg] {
+        assert!(!out.contains(HOST_MARK) && !out.contains(CLIENT_MARK));
+    }
     running.stop().unwrap();
 }
