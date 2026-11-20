@@ -314,17 +314,23 @@ fn delay_applies_to_open_connection_with_traffic_in_flight() {
     p.release_delay(&mut tl).unwrap();
 }
 
-/// 受けたバイト数を数える上流（返さない）。
-fn counting_upstream() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+/// 受けたバイト数を数える上流（返さない）。接続ごとに、読み取りの終了（EOF・エラー）を channel で知らせる。
+fn counting_upstream() -> (
+    u16,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    mpsc::Receiver<()>,
+) {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = l.local_addr().unwrap().port();
     let n = Arc::new(AtomicUsize::new(0));
     let n2 = Arc::clone(&n);
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for s in l.incoming().flatten() {
             let n = Arc::clone(&n2);
+            let tx = tx.clone();
             thread::spawn(move || {
                 let mut s = s;
                 let mut b = [0u8; 1024];
@@ -334,10 +340,11 @@ fn counting_upstream() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) 
                     }
                     n.fetch_add(k, Ordering::SeqCst);
                 }
+                let _ = tx.send(());
             });
         }
     });
-    (port, n)
+    (port, n, rx)
 }
 
 /// ORST-17・#5983: `block()` が戻った後は、開いていた接続から上流へ新しい塊が届かない。
@@ -345,7 +352,7 @@ fn counting_upstream() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) 
 #[test]
 fn no_client_bytes_reach_upstream_after_block_returns() {
     use std::sync::atomic::Ordering;
-    let (up, count) = counting_upstream();
+    let (up, count, ended) = counting_upstream();
     let mut p = DbFaultProxy::start_to_port(up).unwrap();
     let mut tl = timeline();
     let mut c = connect(p.listen_port());
@@ -356,8 +363,11 @@ fn no_client_bytes_reach_upstream_after_block_returns() {
         thread::sleep(Duration::from_millis(5));
     }
     p.block(&mut tl).unwrap();
-    // 戻った後の転送器は上流へ書かない。カーネルの送信バッファに入っていた分は届き得るので、少し待ってから控える。
-    thread::sleep(Duration::from_millis(100));
+    // 戻った後の転送器は上流へ書かない。カーネルの送信バッファに入っていた分は届き得るので、
+    // 対象の接続の上流側の読み取りが終わる（切断）のを期限付きで待ってから控える。
+    ended
+        .recv_timeout(Duration::from_secs(5))
+        .expect("upstream side of the conn was not closed after block");
     let settled = count.load(Ordering::SeqCst);
     for _ in 0..20 {
         if c.write_all(b"after").is_err() {
@@ -365,7 +375,6 @@ fn no_client_bytes_reach_upstream_after_block_returns() {
         }
         thread::sleep(Duration::from_millis(5));
     }
-    thread::sleep(Duration::from_millis(100));
     assert_eq!(count.load(Ordering::SeqCst), settled, "bytes after block");
     let mut buf = [0u8; 8];
     match c.read(&mut buf) {
@@ -444,14 +453,20 @@ fn recorded_offsets_are_not_after_call_return() {
 #[test]
 fn conn_queued_during_block_never_reaches_upstream_after_release() {
     use std::sync::atomic::Ordering;
-    let (up, count) = counting_upstream();
+    let (up, count, _ended) = counting_upstream();
     let mut p = DbFaultProxy::start_to_port(up).unwrap();
     let mut tl = timeline();
     p.block(&mut tl).unwrap();
     let mut queued = connect(p.listen_port());
     p.release_block(&mut tl).unwrap();
     let _ = queued.write_all(b"late");
-    thread::sleep(Duration::from_millis(200));
+    // 対象の接続が切れるのを期限付きで待つ（転送されていれば切れず、読みはタイムアウトになる）。
+    let mut buf = [0u8; 8];
+    match queued.read(&mut buf) {
+        Ok(0) => {}
+        Ok(_) => panic!("unexpected data"),
+        Err(e) => assert_eq!(classify(&e), Outcome::Disconnected),
+    }
     assert_eq!(
         count.load(Ordering::SeqCst),
         0,
