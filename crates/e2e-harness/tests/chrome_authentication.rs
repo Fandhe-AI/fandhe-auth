@@ -32,16 +32,16 @@ fn authenticates_after_registration_with_chrome_virtual_authenticator() {
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
+
+    let creds = handle.credentials(&aid).expect("credentials");
+    assert_eq!(creds.len(), 1);
+    assert_eq!(creds[0].rp_id, "localhost");
     print_result(
         &handle,
         PasskeyOperation::Authentication,
         Browser::Chrome,
         &Verdict::Succeeded,
     );
-
-    let creds = handle.credentials(&aid).expect("credentials");
-    assert_eq!(creds.len(), 1);
-    assert_eq!(creds[0].rp_id, "localhost");
 
     running.stop().expect("stop");
 }

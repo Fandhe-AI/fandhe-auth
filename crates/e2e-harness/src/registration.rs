@@ -60,7 +60,7 @@ const expectedOrigin = arguments[1];
 "#;
 
 /// 登録の失敗の名前（認証と共通の列挙の別名。既存の公開名を保つ）。
-pub type RegistrationErrorName = WebAuthnErrorName;
+pub use crate::webauthn_error::WebAuthnErrorName as RegistrationErrorName;
 
 /// 登録 1 件の結果。真偽と長さだけで、credential の値を持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +107,7 @@ impl RegistrationOutcome {
     pub(crate) fn from_value(v: &Value) -> Option<Self> {
         let b = |k: &str| v.get(k).and_then(Value::as_bool);
         if b("ok")? {
-            Some(Self {
+            let mut o = Self {
                 created: true,
                 credential: Some(CredentialRef::new(v.get("credentialId")?.as_str()?).ok()?),
                 id_ok: b("idOk")?,
@@ -117,7 +117,12 @@ impl RegistrationOutcome {
                 origin_ok: b("originOk")?,
                 challenge_ok: b("challengeOk")?,
                 error_name: None,
-            })
+            };
+            // 比較が 1 つでも偽なら成功ではない。credential ID を渡さない（失敗時は None）。
+            if !o.succeeded() {
+                o.credential = None;
+            }
+            Some(o)
         } else {
             Some(Self {
                 created: false,
@@ -187,11 +192,39 @@ mod tests {
                 "attestationLen": 10, "clientDataTypeOk": true, "originOk": true, "challengeOk": true
             })
         };
-        let o = RegistrationOutcome::from_value(&ok(json!("Ab-_9"))).unwrap();
+        let o = RegistrationOutcome::from_value(&ok(json!("AbCd-_9w"))).unwrap();
         assert!(o.succeeded());
-        assert!(!format!("{o:?}").contains("Ab-_9"));
-        for bad in [json!("a b"), json!(""), json!(5)] {
+        assert!(!format!("{o:?}").contains("AbCd-_9w"));
+        // 非正規（長さ mod 4 == 1・余りビットが 0 でない）も拒否する。
+        for bad in [
+            json!("a b"),
+            json!(""),
+            json!(5),
+            json!("Ab-_9"),
+            json!("AB"),
+            json!("AAB"),
+        ] {
             assert!(RegistrationOutcome::from_value(&ok(bad)).is_none());
+        }
+    }
+
+    #[test]
+    fn failed_comparison_returns_no_credential() {
+        for key in [
+            "idOk",
+            "typeOk",
+            "clientDataTypeOk",
+            "originOk",
+            "challengeOk",
+        ] {
+            let mut v = json!({
+                "ok": true, "credentialId": "AbCd", "idOk": true, "typeOk": true,
+                "attestationLen": 10, "clientDataTypeOk": true, "originOk": true, "challengeOk": true
+            });
+            v[key] = json!(false);
+            let o = RegistrationOutcome::from_value(&v).unwrap();
+            assert!(!o.succeeded(), "{key}");
+            assert!(o.credential().is_none(), "{key}");
         }
     }
 }

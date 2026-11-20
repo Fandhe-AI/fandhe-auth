@@ -123,7 +123,7 @@ impl AuthenticatorId {
 /// 登録で得た credential ID（base64url）。認証の `allowCredentials` に渡すための不透明な値。
 ///
 /// WebAuthn では秘密値でなく外に出る識別子だが、ログ・結果に出さない方針（SECR-11・SECR-23）で `Debug` は固定の文字列。
-/// `Display` は実装せず、値は crate 内の `as_str` だけで借りる。`[A-Za-z0-9_-]` の 1〜1366 文字だけを受ける（A03）。
+/// `Display` は実装せず、値は crate 内の `as_str` だけで借りる。パディングなしの正規の base64url（`[A-Za-z0-9_-]`、1〜1366 文字）だけを受ける（A03）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct CredentialRef(String);
 
@@ -136,12 +136,7 @@ impl fmt::Debug for CredentialRef {
 impl CredentialRef {
     /// 検証して作る。外れた値は `CommandFailed`。
     pub fn new(raw: &str) -> Result<Self, E2eError> {
-        let ok = !raw.is_empty()
-            && raw.len() <= 1366
-            && raw
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        if ok {
+        if is_canonical_base64url(raw) {
             Ok(Self(raw.to_owned()))
         } else {
             Err(failed())
@@ -151,6 +146,35 @@ impl CredentialRef {
     /// 認証スクリプトの引数にだけ使う。戻り値をログ・誤りに渡さない。
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// パディングなしの正規の base64url か（1〜1366 文字）。長さ mod 4 が 1 の値と、末尾の余りビットが 0 でない値は拒否する
+/// （認証スクリプトの `atob` が拒否する・再エンコードで一致しない表現を構築時に落とす）。
+fn is_canonical_base64url(raw: &str) -> bool {
+    let val = |b: u8| match b {
+        b'A'..=b'Z' => Some(b - b'A'),
+        b'a'..=b'z' => Some(b - b'a' + 26),
+        b'0'..=b'9' => Some(b - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    };
+    let bytes = raw.as_bytes();
+    if bytes.is_empty() || bytes.len() > 1366 || bytes.len() % 4 == 1 {
+        return false;
+    }
+    let mut last = 0;
+    for &b in bytes {
+        match val(b) {
+            Some(v) => last = v,
+            None => return false,
+        }
+    }
+    match bytes.len() % 4 {
+        2 => last & 0x0f == 0,
+        3 => last & 0x03 == 0,
+        _ => true,
     }
 }
 

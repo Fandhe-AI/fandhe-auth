@@ -229,12 +229,21 @@ mod tests {
 
     #[test]
     fn credential_ref_validates_and_redacts() {
-        for bad in ["", "a b", "a/b", "a=b", "日本", &"a".repeat(1367)] {
+        for bad in [
+            "",
+            "a b",
+            "a/b",
+            "a=b",
+            "日本",
+            "Ab-_9",
+            "AB",
+            &"a".repeat(1367),
+        ] {
             assert!(CredentialRef::new(bad).is_err(), "{bad:?}");
         }
-        let c = CredentialRef::new("Ab-_09").unwrap();
+        let c = CredentialRef::new("Ab-_0w").unwrap();
         let shown = format!("{c:?} {c:#?}");
-        assert!(!shown.contains("Ab-_09"), "{shown}");
+        assert!(!shown.contains("Ab-_0w"), "{shown}");
         assert!(shown.contains("<redacted>"));
     }
 }

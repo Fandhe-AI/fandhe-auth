@@ -82,11 +82,10 @@ pub fn result_line(
     version: &str,
     verdict: &Verdict,
 ) -> String {
-    let version = if !version.is_empty()
-        && version.len() <= 64
-        && version
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    // 版番号の形式（数字と `.` だけで、先頭は数字）に絞る。UUID 形式のセッション ID 等は通さない（SECR-23）。
+    let version = if version.len() <= 32
+        && version.bytes().next().is_some_and(|b| b.is_ascii_digit())
+        && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
     {
         version
     } else {

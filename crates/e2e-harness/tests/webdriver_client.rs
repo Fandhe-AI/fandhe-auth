@@ -195,7 +195,10 @@ fn session_commands_send_the_five_keys_and_parse_credentials() {
 
 #[test]
 fn session_id_with_path_characters_is_rejected() {
-    let (port, h, _) = fake_driver(http("200 OK", r#"{"value":{"sessionId":"a/../b"}}"#));
+    let (port, h, _) = fake_driver(http(
+        "200 OK",
+        r#"{"value":{"sessionId":"a/../b","capabilities":{"browserName":"chrome"}}}"#,
+    ));
     assert!(client(port).new_session(&caps(), "chrome").is_err());
     h.join().unwrap();
 }
