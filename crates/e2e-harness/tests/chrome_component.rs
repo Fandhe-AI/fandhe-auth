@@ -1,6 +1,8 @@
 //! chromedriver 構成要素と操作の入口の試験（公開 API だけ）。
 
-use fandhe_auth_e2e_harness::chrome::new_session_request;
+#![cfg(unix)]
+
+use fandhe_auth_e2e_harness::chrome::{self, new_session_request};
 use fandhe_auth_e2e_harness::{
     AuthenticatorId, ChromeDriverComponent, ChromeDriverConfig, E2eComponent, E2eErrorKind,
     Protocol, Transport, VirtualAuthenticatorOptions,
@@ -18,11 +20,14 @@ fn opts() -> VirtualAuthenticatorOptions {
 }
 
 #[test]
-fn new_session_request_has_only_headless_flag() {
-    // DPOL-30: 検証を外す意味の flag を足さない。
+fn new_session_request_has_only_headless_and_name_resolution_restriction() {
+    // DPOL-30: 検証を外す意味の flag を足さない。足してよいのは外部名の解決を禁じる制限だけ（A10）。
     let v = new_session_request();
     let args = &v["capabilities"]["alwaysMatch"]["goog:chromeOptions"]["args"];
-    assert_eq!(args, &serde_json::json!(["--headless=new"]));
+    assert_eq!(
+        args,
+        &serde_json::json!(["--headless=new", chrome::HOST_RESOLVER_RULES_ARG])
+    );
 }
 
 #[test]

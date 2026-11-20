@@ -235,6 +235,11 @@ fn ambiguous_or_malformed_framing_is_rejected() {
     assert_rejected(format!("HTTP/9.9 200 OK\r\nContent-Length: {n}\r\n\r\n{b}").as_bytes());
     assert_rejected(format!("HTTP/1.1 2000 OK\r\nContent-Length: {n}\r\n\r\n{b}").as_bytes());
     assert_rejected(format!("garbage\r\nContent-Length: {n}\r\n\r\n{b}").as_bytes());
+    // ヘッダー名が token でない・値と理由句に制御文字を含む。
+    assert_rejected(&ok(&format!("Content-Length: {n}\r\nBad(Name): x")));
+    assert_rejected(&ok(&format!("Content-Length: {n}\r\nX-A: a\x01b")));
+    assert_rejected(&ok(&format!("Content-Length: {n}\r\nX-A: a\x7fb")));
+    assert_rejected(format!("HTTP/1.1 200 O\x01K\r\nContent-Length: {n}\r\n\r\n{b}").as_bytes());
     // 宣言より長い本文。
     assert_rejected(&ok(&format!("Content-Length: {}", n - 1)));
 }

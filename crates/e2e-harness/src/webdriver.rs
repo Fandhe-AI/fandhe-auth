@@ -7,6 +7,8 @@
 //! path は許可文字だけ、path に埋める id は英数字と `-` だけ（A03）。応答はステータス行・ヘッダーの構文が正しくない・
 //! 長さが曖昧（重複・不正な Content-Length、chunked）・上限超過なら誤りにする（fail-closed）。
 //! 誤りに URL・ポート・path・応答本文を載せない（SECR-11・SECR-23）。
+//! 余分なバイトの拒否は、宣言した長さに届いた後の猶予（50ms）内に届いた分と、同じ受信に含まれた分までが保証の範囲
+//! （接続は 1 命令で捨てる）。
 //! 生の応答（`privateKey` を含み得る）を返す入口は crate 内に閉じ、外へは型付きの値だけを出す（SECR-10・SECR-11）。
 
 use std::io::{Read, Write};
@@ -21,6 +23,9 @@ use crate::virtual_authenticator::VirtualAuthenticatorOptions;
 
 /// 応答の大きさの上限。ハーネスの安全上の上限で、要件の値ではない。
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// 宣言した長さに届いたあと、余分なバイトを待つ猶予。ハーネスの安全上の値で、要件の値ではない。
+const EXTRA_BYTES_GRACE: Duration = Duration::from_millis(50);
 
 /// 現在から `timeout` 後の期限。加算が溢れる大きな値は誤りにする（panic しない）。
 pub(crate) fn deadline_after(timeout: Duration) -> Result<Instant, E2eError> {
@@ -200,6 +205,36 @@ struct Head {
     content_length: Option<usize>,
 }
 
+/// RFC 9110 の token（ヘッダー名に使える文字だけの 1 文字以上の並び）。
+fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+/// HTAB 以外の制御文字（0x00〜0x1f・0x7f）を含むか。
+fn has_control_char(s: &str) -> bool {
+    s.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f)
+}
+
 /// ステータス行とヘッダーを厳格に読む。構文が正しくない・長さが曖昧（Content-Length の重複・不正、
 /// Transfer-Encoding）なものは誤りにする（fail-closed。リクエスト・応答の smuggling 対策）。
 fn parse_head(head: &[u8]) -> Result<Head, E2eError> {
@@ -217,6 +252,10 @@ fn parse_head(head: &[u8]) -> Result<Head, E2eError> {
         return Err(failed());
     }
     let status = code.parse::<u16>().map_err(|_| failed())?;
+    // 理由句は空でもよいが、制御文字（CR・LF・NUL 等）は含めない。
+    if parts.next().is_some_and(has_control_char) {
+        return Err(failed());
+    }
     let mut content_length: Option<usize> = None;
     for line in lines {
         // 折り返し（obs-fold）・裸の CR/LF・`:` 無しは拒否する。
@@ -224,7 +263,8 @@ fn parse_head(head: &[u8]) -> Result<Head, E2eError> {
             return Err(failed());
         }
         let (name, value) = line.split_once(':').ok_or_else(failed)?;
-        if name.is_empty() || name.contains([' ', '\t']) {
+        // 名前は RFC 9110 の token、値は制御文字（HTAB を除く）を含まない。
+        if !is_token(name) || has_control_char(value) {
             return Err(failed());
         }
         if name.eq_ignore_ascii_case("transfer-encoding") {
@@ -249,6 +289,7 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut head: Option<(usize, Head)> = None;
+    let mut eof = false;
     loop {
         if let Some((end, h)) = &head
             && let Some(cl) = h.content_length
@@ -262,6 +303,7 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
             .map_err(|_| failed())?;
         let n = stream.read(&mut chunk).map_err(|_| failed())?;
         if n == 0 {
+            eof = true;
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
@@ -283,6 +325,15 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
         }
     }
     let (end, head) = head.ok_or_else(failed)?;
+    // 宣言した長さに届いた時点で読み終えている場合、続きの余分なバイトを短い猶予で 1 回だけ確かめる。
+    // 接続は 1 命令で捨てる（`Connection: close`）ので、猶予内に届かないバイトは見ない（保証は猶予内の到着まで）。
+    if head.content_length.is_some() && !eof {
+        let grace = remaining(deadline)?.min(EXTRA_BYTES_GRACE);
+        stream.set_read_timeout(Some(grace)).map_err(|_| failed())?;
+        if matches!(stream.read(&mut chunk), Ok(n) if n > 0) {
+            return Err(failed());
+        }
+    }
     let body = &buf[end..];
     let body = match head.content_length {
         // 宣言より多い・少ない本文は曖昧なフレーミングとして拒否する。
@@ -326,6 +377,12 @@ impl WebDriverSession {
                 Some(&json!({ "url": url })),
             )
             .map(|_| ())
+    }
+
+    /// 現在の URL を返す（移動後のリダイレクト先の確認用）。
+    pub(crate) fn current_url(&self) -> Result<String, E2eError> {
+        let v = self.client.request(Method::Get, &self.path("/url"), None)?;
+        v.as_str().map(str::to_owned).ok_or_else(failed)
     }
 
     /// 非同期スクリプトの時間切れを設定する。

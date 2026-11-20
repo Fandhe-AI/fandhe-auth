@@ -1,7 +1,7 @@
 //! 試験コードの中だけの試験用ページの配信（TASK-11、`docs/harness/e2e.md` の候補 (b)。人の確認待ち）。
 //!
 //! 本番の画面ではない。loopback にだけ bind し、`GET /` に最小の HTML（スクリプト・外部資源なし）を返す。
-//! `Host` が `localhost:<port>` 以外は 400（DNS rebinding 対策）。origin は試験用の仮の値（`A-2026-10-28-1`〜`14`）。
+//! ヘッダーの終端が無い要求には応えない。`Host` は `localhost:<port>` の 1 件だけを受け、それ以外は 400（DNS rebinding 対策）。origin は試験用の仮の値（`A-2026-10-28-1`〜`14`）。
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// 同時に処理する接続数の上限。超えた接続は何も返さず閉じる（A03・A10）。
-const MAX_CONNECTIONS: usize = 8;
+pub const MAX_CONNECTIONS: usize = 8;
 /// 1 接続の処理全体（読み取りと書き込み）の絶対期限。
 pub const CONNECTION_DEADLINE: Duration = Duration::from_secs(2);
 
@@ -104,18 +104,31 @@ fn handle(mut s: TcpStream, port: u16) {
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
     }
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines = text.lines();
+    // ヘッダーの終端（空行）が上限内に無い要求には応えない。Host はヘッダー部だけから探す。
+    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&buf[..end]);
+    let mut lines = text.split("\r\n");
     let request_line = lines.next().unwrap_or("");
-    let mut parts = request_line.split_whitespace();
-    let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-    let host = lines
-        .find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case("host").then(|| v.trim())
-        })
-        .unwrap_or("");
-    let (status, body) = if host != format!("localhost:{port}") {
+    let parts: Vec<&str> = request_line.split(' ').collect();
+    let well_formed = parts.len() == 3 && parts[2] == "HTTP/1.1" && !parts[0].is_empty();
+    let (method, path) = (parts[0], parts.get(1).copied().unwrap_or(""));
+    // Host は正しい形式でちょうど 1 件のときだけ受ける。
+    let mut hosts = Vec::new();
+    let mut headers_ok = true;
+    for l in lines {
+        match l.split_once(':') {
+            Some((k, v)) if !k.is_empty() && !k.contains([' ', '\t']) => {
+                if k.eq_ignore_ascii_case("host") {
+                    hosts.push(v.trim_matches([' ', '\t']));
+                }
+            }
+            _ => headers_ok = false,
+        }
+    }
+    let host_ok = hosts.len() == 1 && hosts[0] == format!("localhost:{port}");
+    let (status, body) = if !well_formed || !headers_ok || !host_ok {
         ("400 Bad Request", "")
     } else if method != "GET" {
         ("405 Method Not Allowed", "")

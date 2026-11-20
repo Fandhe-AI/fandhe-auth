@@ -6,12 +6,14 @@
 //!
 //! 安全: 子プロセスは引数の配列で起動しシェルを通さない。stdin・stderr は捨てる。stdout は待ち受けポートを
 //! 子自身から受け取るためだけに読む（`--port=0` で子が確保したポートを使い、空きポートの取り違えを避ける。A10）。
-//! 環境変数・ファイルは読まない（DPOL-32）。Chrome の flag は `--headless=new` だけで、検証を外す flag を足さない
-//! （DPOL-30）。`navigate` は起動前に登録した試験用 origin の配下だけを許す（A10）。
+//! 環境変数・ファイルは読まない（DPOL-32）。Chrome の flag は `--headless=new` と外部名の解決を禁じる 1 つだけで、
+//! 検証を外す flag を足さない（DPOL-30）。`navigate` は起動前に登録した試験用 origin の配下だけを許し、移動後の
+//! URL（リダイレクト先）も同じ許可リストで確かめる。サブリソースは外部名の解決禁止で外へ出さない（A10）。
+//! unix 限定（プロセスグループで起動する。`it-harness` の `fault::instance` と同じ）。
 //! 誤り・停止・`Drop` のすべてでセッションの削除と、子のプロセスグループ（chromedriver と Chrome）の終了・wait を行う。
 
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader};
+use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -103,13 +105,18 @@ impl ChromeDriverConfig {
     }
 }
 
-/// `POST /session` の本文。Chrome の flag は `--headless=new` だけ（DPOL-30）。
+/// 外部名の解決を禁じる flag（`localhost` 以外の名前は引けない）。試験用ページが外部へ出るサブリソース・
+/// リダイレクトを辿れないようにする制限で、検証を外す flag ではない（A10・DPOL-30）。
+pub const HOST_RESOLVER_RULES_ARG: &str =
+    "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost";
+
+/// `POST /session` の本文。Chrome の flag は `--headless=new` と、外部名の解決を禁じる 1 つだけ（DPOL-30）。
 pub fn new_session_request() -> Value {
     json!({
         "capabilities": {
             "alwaysMatch": {
                 "browserName": "chrome",
-                "goog:chromeOptions": { "args": ["--headless=new"] }
+                "goog:chromeOptions": { "args": ["--headless=new", HOST_RESOLVER_RULES_ARG] }
             }
         }
     })
@@ -165,12 +172,24 @@ impl ChromeHandle {
     }
 
     /// URL へ移動する。起動前に登録した試験用 origin の配下だけを許し、それ以外は `CommandFailed`（A10）。
+    /// 移動後の URL が許可外（リダイレクト）でも `CommandFailed`。
     pub fn navigate(&self, url: &str) -> Result<(), E2eError> {
         let session = self.session()?;
         if !url_is_allowed(&self.allowed_origins, url) {
             return Err(err(E2eErrorKind::CommandFailed));
         }
-        session.navigate(url)
+        session.navigate(url)?;
+        // リダイレクト先も許可リストで確かめる。外れていたら空白ページへ戻して誤りにする。
+        let landed = session.current_url();
+        if landed
+            .as_deref()
+            .is_ok_and(|u| url_is_allowed(&self.allowed_origins, u))
+        {
+            Ok(())
+        } else {
+            let _ = session.navigate("about:blank");
+            Err(err(E2eErrorKind::CommandFailed))
+        }
     }
 
     /// 非同期スクリプトの時間切れを設定する。
@@ -224,7 +243,7 @@ impl ChromeDriverComponent {
             result = Err(err(E2eErrorKind::StopFailed));
         }
         if let Some(mut child) = self.child.take()
-            && terminate_group(&mut child).is_err()
+            && kill_group_and_reap(&mut child).is_err()
         {
             result = Err(err(E2eErrorKind::StopFailed));
         }
@@ -249,17 +268,7 @@ impl ChromeDriverComponent {
         let stdout = stdout.ok_or_else(fail)?;
 
         let (tx, rx) = mpsc::channel::<u16>();
-        std::thread::spawn(move || {
-            let mut sent = false;
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if !sent && let Some(port) = parse_started_port(&line) {
-                    sent = true;
-                    let _ = tx.send(port);
-                }
-                // 以降も読み捨てて、子が出力で詰まらないようにする。子の終了で EOF になる。
-            }
-        });
+        std::thread::spawn(move || read_driver_output(stdout, &tx));
         let wait = deadline
             .checked_duration_since(Instant::now())
             .ok_or_else(fail)?;
@@ -275,14 +284,22 @@ impl ChromeDriverComponent {
             if client.is_ready() && Instant::now() < deadline {
                 break;
             }
-            let running = matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(None)));
+            // 子が先に終わっていたら、ここで回収済みになる。セッション前なので Chrome は居らず、
+            // グループへの signal は不要（回収後の PID を signal の宛先にしない）。
+            match self.child.as_mut().map(Child::try_wait) {
+                Some(Ok(None)) => {}
+                // 回収済み。宛先にする PID が無いので子を手放す。
+                Some(Ok(Some(_))) => {
+                    self.child = None;
+                    return Err(fail());
+                }
+                // 状態を取れない。子は残し、呼び出し元の teardown に任せる。
+                _ => return Err(fail()),
+            }
             let left = deadline
                 .checked_duration_since(Instant::now())
                 .filter(|d| !d.is_zero())
                 .ok_or_else(fail)?;
-            if !running {
-                return Err(fail());
-            }
             sleep(Duration::from_millis(100).min(left));
         }
         let client = WebDriverClient::new(port, self.config.command_timeout);
@@ -306,34 +323,71 @@ fn parse_started_port(line: &str) -> Option<u16> {
     digits.parse::<u16>().ok().filter(|p| *p != 0)
 }
 
-/// 子のプロセスグループ（chromedriver と配下の Chrome）を終了して wait する。まず SIGTERM で正常終了を促し
-/// （一時プロファイルの後始末のため）、時間内に終わらなければ SIGKILL。
-fn terminate_group(child: &mut Child) -> std::io::Result<()> {
-    let group = format!("-{}", child.id());
-    let signal = |sig: &str| {
-        let _ = Command::new("kill")
-            .args([sig, "--", &group])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    };
-    signal("-TERM");
-    let until = Instant::now() + Duration::from_secs(3);
-    let mut exited = false;
-    while Instant::now() < until {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            exited = true;
-            break;
+/// 1 行の上限。ポート通知の行は短いので、超える行は読み捨てる（メモリを無制限に使わない）。
+const MAX_LINE_BYTES: usize = 1024;
+
+/// ドライバの標準出力を固定サイズの buffer で読み、`started successfully on port N` の行から N を `tx` へ送る。
+/// 改行の無い出力を読んでも保持するのは `MAX_LINE_BYTES` までで、超えた行は次の改行まで捨てる。EOF まで読み捨てる。
+fn read_driver_output(mut stdout: impl Read, tx: &mpsc::Sender<u16>) {
+    let mut chunk = [0u8; 4096];
+    let mut line: Vec<u8> = Vec::with_capacity(MAX_LINE_BYTES);
+    let mut overflow = false;
+    let mut sent = false;
+    loop {
+        let n = match stdout.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        for &b in &chunk[..n] {
+            if b == b'\n' {
+                if !sent
+                    && !overflow
+                    && let Ok(text) = std::str::from_utf8(&line)
+                    && let Some(port) = parse_started_port(text)
+                {
+                    sent = true;
+                    let _ = tx.send(port);
+                }
+                line.clear();
+                overflow = false;
+            } else if !overflow {
+                if line.len() < MAX_LINE_BYTES {
+                    line.push(b);
+                } else {
+                    overflow = true;
+                    line.clear();
+                }
+            }
         }
-        sleep(Duration::from_millis(50));
     }
-    // 親が先に終わっても孫が残り得るので、グループへ必ず SIGKILL する。
-    signal("-KILL");
-    if !exited {
-        let _ = child.kill();
+}
+
+/// `kill` を 1 回実行する。起動できない・成功以外の終了は誤りにする（結果を捨てない）。
+fn send_signal(sig: &str, group: &str) -> std::io::Result<()> {
+    let status = Command::new("kill")
+        .args([sig, "--", group])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("kill failed"))
     }
-    child.wait().map(|_| ())
+}
+
+/// 子のプロセスグループ（chromedriver と配下の Chrome）へ SIGKILL を送り、そのあとで子を wait する。
+/// 子を回収する前に signal を送るので、グループ ID（= 子の PID）は signal を送り終えるまで再利用されない
+/// （回収済みの PID を宛先にしない）。セッションは削除済みで Chrome の一時領域は片付いているため、SIGTERM の猶予は置かない。
+/// signal の失敗は子を回収したうえで誤りとして返す。
+fn kill_group_and_reap(child: &mut Child) -> std::io::Result<()> {
+    let group = format!("-{}", child.id());
+    let sent = send_signal("-KILL", &group);
+    // グループ全体が送れなくても、子自身は止めて回収する。
+    let _ = child.kill();
+    let waited = child.wait().map(|_| ());
+    sent.and(waited)
 }
 
 impl E2eComponent for ChromeDriverComponent {
@@ -410,6 +464,23 @@ mod tests {
         ] {
             assert!(validated_origin(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn driver_output_without_newline_is_bounded_and_port_line_is_found() {
+        let (tx, rx) = mpsc::channel();
+        // 改行の無い大きな出力のあとに、通知の行が来る。
+        let mut data = vec![b'x'; 5 * 1024 * 1024];
+        data.extend_from_slice(b"\nChromeDriver was started successfully on port 4242.\n");
+        read_driver_output(std::io::Cursor::new(data), &tx);
+        assert_eq!(rx.try_recv().ok(), Some(4242));
+        // 上限を超えた行の中の通知は拾わない。
+        let (tx, rx) = mpsc::channel();
+        let mut long = b"ChromeDriver was started successfully on port 1.".to_vec();
+        long.extend(vec![b'y'; MAX_LINE_BYTES]);
+        long.push(b'\n');
+        read_driver_output(std::io::Cursor::new(long), &tx);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

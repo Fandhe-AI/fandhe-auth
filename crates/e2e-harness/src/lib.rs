@@ -14,25 +14,31 @@
 //! 安全: 検証を外す意味の分岐・feature は作らない（DPOL-30〜32）。誤りの値に秘密値・URL・パスを載せない
 //! （SECR-11・SECR-23）。仮想 authenticator の合格を実機・Safari の合格に数えない（ACPT-7・ACPT-8）。
 //!
-//! 2/6 の実体: Chrome（chromedriver）の [`chrome::ChromeDriverComponent`] と、passkey の登録 1 件の手順
+//! 2/6 の実体（chromedriver をプロセスグループで起動するため unix 限定。`it-harness` の `fault::instance` と同じ）: Chrome（chromedriver）の [`chrome::ChromeDriverComponent`] と、passkey の登録 1 件の手順
 //! [`registration::register_once`]。RP 側の実体は `TASK-716` 待ちで置かない。構成の下書きは `docs/harness/e2e.md`。
 
 #![forbid(unsafe_code)]
 
 pub mod browser;
+#[cfg(unix)]
 pub mod chrome;
 pub mod component;
 pub mod harness;
+#[cfg(unix)]
 pub mod registration;
 pub mod scope;
 pub mod virtual_authenticator;
+#[cfg(unix)]
 pub(crate) mod webdriver;
 
 pub use browser::{AuthenticatorKind, Browser, Evidence};
+#[cfg(unix)]
 pub use chrome::{ChromeDriverComponent, ChromeDriverConfig, ChromeHandle};
 pub use component::{E2eComponent, E2eComponentKind};
 pub use harness::{E2eConfig, E2eError, E2eErrorKind, E2eHarness, RunningE2e};
+#[cfg(unix)]
 pub use registration::{RegistrationErrorKind, RegistrationOutcome, register_once};
 pub use scope::PasskeyOperation;
 pub use virtual_authenticator::{Protocol, Transport, VirtualAuthenticatorOptions};
+#[cfg(unix)]
 pub use webdriver::{AuthenticatorId, CredentialSummary};

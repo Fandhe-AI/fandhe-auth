@@ -45,7 +45,9 @@ E2E のハーネス。2026-11-04 の追随で、画面の E2E は Hub の `ASCR`
 
 ## 登録 1 件の定義（2/6）
 
-`register_once` が次を満たすことを「登録 1 件が通る」とする。サーバー側の登録応答の検証（`webauthn-rs`）は
+`register_once` は次の 1・2 を、ページ内の結果（`ok`・`origin_ok`・`challenge_ok` 等の型付きの値）として返す。
+3 は `register_once` の成功条件に含めず、`chrome_registration`（`#[ignore]`）の側が `credentials` で別に確かめる。
+次を満たすことを「登録 1 件が通る」とする。サーバー側の登録応答の検証（`webauthn-rs`）は
 RelyingParty の実体（`TASK-716`）待ちで含めない。PKEY の振る舞いを満たしたとは主張しない。
 
 1. 試験用 origin で `navigator.credentials.create()` が resolve し、`type` が `public-key`、attestation が空でない
@@ -69,7 +71,13 @@ WebAuthn の secure context と RP ID は PoC-2 の結果を ID で引き、試�
 ## ドライバの入手と CI（2/6 以降の案）
 
 2/6 の入口は暫定の `make e2e-chrome`（`scripts/e2e-chrome.sh`。`#[ignore]` の `chrome_registration` を流す。CI 外）。
-chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless=new` だけで、`--disable-*`・`--no-sandbox` は足さない。
+chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless=new` と、外部名の解決を禁じる `--host-resolver-rules`
+（`localhost` 以外を引けなくする制限。`navigate` の許可リストのリダイレクト先・サブリソース対策）の 2 つだけで、
+`--disable-*`・`--no-sandbox` は足さない。`navigate` は移動後の URL も許可リストで確かめ、外れたら空白ページへ戻して誤りにする。
+chromedriver の起動はプロセスグループを使うため、Chrome 側の実装・公開経路・試験は `cfg(unix)` に限る。
+停止は、子を回収する前にグループへ SIGKILL を送り、そのあと wait する（回収後の PID を宛先にしない）。
+WebDriver の応答は、ヘッダー名の token 検査・値と理由句の制御文字の拒否を行う。宣言した長さを超える余分なバイトの拒否は、
+長さに届いた後の短い猶予（50ms）内に届いた分までを保証の範囲とする（接続は 1 命令で捨てる）。
 
 - chromedriver・geckodriver は外部の実行ファイル。`#[ignore]` と明示の make ターゲット（`it-db` と同じ形）で CI の外に置く案。
 - 環境の有無で自動に飛ばす分岐は作らない（`DPOL-30`〜`32`）。ブラウザの起動 flag（`--disable-*` 等）は `DPOL-30` の走査語に掛かる。
@@ -114,3 +122,8 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 - make ターゲット名 `e2e-chrome`
 - Chrome の起動 flag は `--headless=new` だけ（`DPOL-30` の走査語に掛かる flag は足していない）
 - it-harness・最小の組込み先への辺（足す段で許可表を人に確かめる）
+
+## 依存の判断待ち（人が決める）
+
+`serde_json` を直接の依存にしている（`hub-stub`・`console-stub` と同じ暫定の採用で、`Cargo.lock` に既存）。
+`dependency-policy.md` に従い、採用の可否は人の確認待ち。確認が取れるまで、この依存を前提に進めた段であることを PR に記録する。

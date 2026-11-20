@@ -3,6 +3,8 @@
 //! 前提: chromedriver と Chrome が手元にある。無ければ失敗する（黙って飛ばさない。DPOL-30〜32）。
 //! 結果は〔仮想〕で、実機・Safari に数えない（ACPT-7・ACPT-8）。サーバー側の検証は `TASK-716` 待ちで、PKEY の確定を主張しない。
 
+#![cfg(unix)]
+
 mod support;
 
 use std::time::Duration;
