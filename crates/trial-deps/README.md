@@ -42,8 +42,15 @@ cargo test -p fandhe-auth-trial-deps --locked
 fuzz は別 workspace（`fuzz/`）で、`make build`・`make test`・`make lint`・`make crate-deps`・CI のどれの対象にもならない。手作業の検査は下の手順で行う。nightly は最新を追う（`D-2026-11-20-9`）。
 CI に載せるかは `TASK-117` で決める。
 
+`cargo fuzz` の `build`・`run` は `--locked` を受けない（`cargo +nightly fuzz build --help` で確かめた）。
+先に `cargo metadata --locked` で lock が最新であることを確かめてから流す。lock の更新が要るときは、`--locked` が失敗する。
+その場合は、依存の差分を監査してから lock を更新する（`./.claude/rules/dependency-policy.md` の手順）。更新後に `Cargo.lock` の差分が無いことを確かめて流す。
+
 ```bash
-cd crates/trial-deps/fuzz && cargo +nightly fuzz build && cargo +nightly fuzz run secret_debug -- -max_total_time=10
+cd crates/trial-deps/fuzz
+cargo +nightly metadata --locked --format-version 1 > /dev/null
+cargo +nightly fuzz build && cargo +nightly fuzz run secret_debug -- -max_total_time=10
+git diff --exit-code Cargo.lock
 ```
 
 `-max_total_time` の値は秒数で、`10` は例である。変えてよい。
@@ -127,6 +134,20 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
 
 1. repo の外に一時ディレクトリを作る。ルートの `Cargo.toml` は触らない。
 2. 組ごとに、最小の `Cargo.toml` を 1 つ作る。依存は測る crate 1 つだけにし、版は `=x.y.z` で固定して、feature の組を指定する。
+    edition と resolver はルートの `Cargo.toml` に合わせる（edition は `[workspace.package]` の `2024`、resolver は `[workspace]` の `"3"`。どちらも暫定で、ルートが変われば合わせ直す）。
+    測定用の manifest は単独の package なので、`resolver` は `[package]` の `resolver = "3"` で明記する。
+
+    ```toml
+    [package]
+    name = "probe-k11"
+    version = "0.0.0"
+    edition = "2024"
+    resolver = "3"
+
+    [dependencies]
+    tracing = { version = "=x.y.z", default-features = false, features = ["std"] }
+    ```
+
     dev の道具（`tracing-subscriber`・`proptest`・`syn`）も、測定用の manifest では `[dependencies]` に置く。
     こうすると、その crate を使ったときの推移依存を、全組で同じ `normal,build` の値として測れる。
     実際の利用が dev であること（本番の木に入らない）は、K7 として別に扱い、この数には含めない。
@@ -158,14 +179,17 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
     - `--target` の値
     - 測った日と `rustc -V` の出力
     - 測定用の `Cargo.lock`（または `tree.txt`）の保存先。保存先は未定で、人が決める
-5. MSRV は、解決したパッケージの `rust_version` を `cargo metadata` から引く。宣言の無い依存は `未宣言` と出る。
+5. MSRV は、手順 4 で選んだ `--target` の依存グラフに入るパッケージだけから、`rust_version` を `cargo metadata` で引く。
+    `--filter-platform` で絞り、`resolve.nodes` に出るパッケージの id で `packages` を引く。宣言の無い依存は `未宣言` と出る。
 
     ```bash
-    cargo metadata --format-version 1 | jq -r '.packages[] | "\(.name) \(.version) \(.rust_version // "未宣言")"'
+    cargo metadata --locked --format-version 1 --filter-platform "$TARGET" \
+      | jq -r '[.resolve.nodes[].id] as $ids | .packages[] | select(.id as $i | $ids | index($i)) | "\(.name) \(.version) \(.rust_version // "未宣言")"'
     ```
 
-    `packages` には全プラットフォーム分の依存が入る。`未宣言` の依存は、MSRV の toolchain（1.100）でビルドして確かめる。
-    構成の MSRV は、各依存の宣言の最大値を人が読み取る。
+    `packages` 単独には他のターゲットだけの依存も入る（この workspace で 101 件のところ、`x86_64-unknown-linux-gnu` で絞ると 85 件）。
+    `未宣言` の依存は、MSRV の toolchain（1.100）でビルドして確かめる。構成の MSRV は、各依存の宣言の最大値を人が読み取る。
+    表の「MSRV」の列には、対象の `--target` を添えて記入する。
 6. ライセンスは `cargo deny list` の結果を使う。
 
 組の候補（各 crate の `[features]` を読んだ事実による）:
@@ -183,7 +207,7 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
 - `proptest`: default は `std`・`fork`・`timeout`・`bit-set`。
 - `syn`: default は `derive`・`parsing`・`printing`・`clone-impls`・`proc-macro`。`full`・`visit` は別の feature。いまの試し実装は `default-features = false` + `full`・`parsing`。
 
-| crate | 版 | ターゲット | 測った日 | feature の組 | 推移依存の数（`normal,build`） | MSRV | ライセンス | 人の判定 |
+| crate | 版 | ターゲット | 測った日 | feature の組 | 推移依存の数（`normal,build`） | MSRV（対象の `--target` の依存グラフ） | ライセンス | 人の判定 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `tracing` | | | | default | | | | |
 | `tracing` | | | | `default-features = false` | | | | |

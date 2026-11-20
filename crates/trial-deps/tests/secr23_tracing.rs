@@ -67,9 +67,12 @@ fn secr23_secret_debug_field_has_no_value() {
     let probe = make_probe();
     let s = SecretString::new(&probe);
     let out = capture(|| log_secret_debug_field(&s));
+    // 欄名と値の組み合わせで確かめる（メッセージや別の欄の印で通らないようにする）。
+    let expected = "token=SecretString(<redacted>)";
+    let present = out.contains(expected);
     assert!(
-        out.contains("<redacted>"),
-        "redacted marker present: false (output len={})",
+        present,
+        "masked field `token` present: {present} (output len={})",
         out.len()
     );
     let leaked = out.contains(&probe);
