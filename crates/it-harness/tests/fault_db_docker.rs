@@ -3,7 +3,7 @@
 //! 80877103）に対する 1 バイトの `S` の応答だけで経路を確かめる（秘密値は使わない）。
 //! 記録は事実の出力で合否の判定ではない（ACPT-7）。
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
@@ -14,18 +14,45 @@ use fandhe_auth_it_harness::{Database, DatabaseConfig, FaultTimeline, Harness, H
 
 const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
 
-/// SSLRequest を送って 1 バイトの応答を読む。切れていれば `None`。
-fn ssl_probe(port: u16) -> Option<u8> {
-    let mut s = TcpStream::connect_timeout(
+/// 探りの結果。タイムアウトは切断と区別する（応答を止めるだけの実装を遮断と読まないため。AUDB-6）。
+#[derive(Debug, PartialEq, Eq)]
+enum Probe {
+    Answer(u8),
+    /// 接続の拒否（ECONNREFUSED）か、明示の切断（EOF・リセット）。
+    Cut,
+}
+
+/// SSLRequest を送って 1 バイトの応答を読む。拒否・明示の切断は `Cut`。タイムアウト・別のエラーは失敗。
+fn ssl_probe(port: u16) -> Probe {
+    let cut = |k: ErrorKind| {
+        matches!(
+            k,
+            ErrorKind::ConnectionRefused
+                | ErrorKind::UnexpectedEof
+                | ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::BrokenPipe
+        )
+    };
+    let mut s = match TcpStream::connect_timeout(
         &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
         Duration::from_secs(5),
-    )
-    .ok()?;
-    s.set_read_timeout(Some(Duration::from_secs(10))).ok()?;
-    s.write_all(&SSL_REQUEST).ok()?;
+    ) {
+        Ok(s) => s,
+        Err(e) if cut(e.kind()) => return Probe::Cut,
+        Err(e) => panic!("unexpected connect error: {:?}", e.kind()),
+    };
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    if let Err(e) = s.write_all(&SSL_REQUEST) {
+        assert!(cut(e.kind()), "unexpected write error: {:?}", e.kind());
+        return Probe::Cut;
+    }
     let mut b = [0u8; 1];
-    s.read_exact(&mut b).ok()?;
-    Some(b[0])
+    match s.read_exact(&mut b) {
+        Ok(()) => Probe::Answer(b[0]),
+        Err(e) if cut(e.kind()) => Probe::Cut,
+        Err(e) => panic!("unexpected read error: {:?}", e.kind()),
+    }
 }
 
 #[test]
@@ -42,16 +69,16 @@ fn db_block_and_delay_through_proxy() {
     let port = proxy.listen_port();
 
     let mut tl = FaultTimeline::start(Instant::now(), SystemTime::now()).unwrap();
-    assert_eq!(ssl_probe(port), Some(b'S'));
+    assert_eq!(ssl_probe(port), Probe::Answer(b'S'));
 
     proxy.block(&mut tl).unwrap();
-    assert_eq!(ssl_probe(port), None, "blocked");
+    assert_eq!(ssl_probe(port), Probe::Cut, "blocked");
     proxy.release_block(&mut tl).unwrap();
-    assert_eq!(ssl_probe(port), Some(b'S'), "recovered");
+    assert_eq!(ssl_probe(port), Probe::Answer(b'S'), "recovered");
 
     proxy.delay(&mut tl, Duration::from_millis(300)).unwrap();
     let t = Instant::now();
-    assert_eq!(ssl_probe(port), Some(b'S'));
+    assert_eq!(ssl_probe(port), Probe::Answer(b'S'));
     assert!(t.elapsed() >= Duration::from_millis(300));
     proxy.release_delay(&mut tl).unwrap();
 

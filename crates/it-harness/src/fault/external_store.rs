@@ -33,8 +33,10 @@ pub enum ExternalStoreFaultError {
     AlreadyActive,
     /// 遮断していない。
     NotActive,
-    /// 解除での待ち受けの作り直しに失敗した。遮断のまま、`Released` は記録していない。
+    /// 解除の前の確かめ（試し bind）に失敗した。遮断のまま、`Released` は記録していない。
     RebindFailed,
+    /// `Released` の記録の後に待ち受けの作り直しに失敗した。遮断のままで、その記録は正しい記録として使わない。
+    RebindFailedAfterRecord,
     /// 記録が拒否した（基準線である等）。状態は変えていない。
     Record(FaultRecordError),
     /// 遮断の経路では起きない想定の内部の誤り。
@@ -48,6 +50,9 @@ impl fmt::Display for ExternalStoreFaultError {
             Self::AlreadyActive => f.write_str("external store fault error: already active"),
             Self::NotActive => f.write_str("external store fault error: not active"),
             Self::RebindFailed => f.write_str("external store fault error: rebind failed"),
+            Self::RebindFailedAfterRecord => {
+                f.write_str("external store fault error: rebind failed after record")
+            }
             Self::Record(e) => write!(f, "external store fault error: {e}"),
             Self::Internal => f.write_str("external store fault error: internal"),
         }
@@ -62,6 +67,7 @@ fn convert(e: DbFaultError) -> ExternalStoreFaultError {
         DbFaultError::AlreadyActive => ExternalStoreFaultError::AlreadyActive,
         DbFaultError::NotActive => ExternalStoreFaultError::NotActive,
         DbFaultError::RebindFailed => ExternalStoreFaultError::RebindFailed,
+        DbFaultError::RebindFailedAfterRecord => ExternalStoreFaultError::RebindFailedAfterRecord,
         DbFaultError::Record(r) => ExternalStoreFaultError::Record(r),
         DbFaultError::InvalidParam => ExternalStoreFaultError::Internal,
     }
@@ -111,13 +117,13 @@ impl ExternalStoreFaultProxy {
         self.inner.accepted_count()
     }
 
-    /// 直ちに閉じた接続の数。遮断中に閉じたものに加え、上流のハンドルが空のとき・上流への接続に失敗したときの
-    /// 閉じも含む（遮断以外の拒否を含む）。
+    /// 転送器が accept した後に直ちに閉じた接続の数（上流のハンドルが空・上流への接続の失敗・確立中の遮断）。
+    /// 遮断中の接続は待ち受けが閉じているのでカーネルの中で拒否され、ここでは数えない。
     pub fn refused_count(&self) -> u64 {
         self.inner.refused_count()
     }
 
-    /// 保存先への経路を遮断する。開いている接続を切り、新しい接続を直ちに閉じる。
+    /// 保存先への経路を遮断する。開いている接続を切り、待ち受けを閉じる（新しい接続はカーネルが拒否する）。
     pub fn block(&mut self, timeline: &mut FaultTimeline) -> Result<(), ExternalStoreFaultError> {
         self.inner.block(timeline).map_err(convert)
     }

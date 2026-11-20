@@ -2,7 +2,7 @@
 //! 時間に依る試験は下限だけを確かめる。値は試験の中だけの仮の値（THRT-29・A-2026-10-28-1）。
 //! 記録は事実の出力で合否の判定ではない（ACPT-7）。
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
@@ -11,6 +11,30 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fandhe_auth_it_harness::fault::{DbFaultError, DbFaultProxy, FaultRecordError};
 use fandhe_auth_it_harness::record::UtcTimestamp;
 use fandhe_auth_it_harness::{EndpointHandle, FaultRecord, FaultTimeline};
+
+/// 遮断の間は待ち受けのポートを手放すので、同じ試験プロセスの他の試験が `bind(0)` で同じポートを取ると
+/// 解除が失敗する（方式の限界。`docs/harness/fault-injection.md`）。このため試験どうしを直列にする。
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 解除する。他のプロセスが遮断中にポートを取っていると `RebindFailed`（遮断のまま・記録なし）になる。
+/// これは方式の限界（`docs/harness/fault-injection.md`）で、取られていなくなるまで再試行する。
+/// それ以外の誤りは失敗にする。
+fn release_retry(p: &mut DbFaultProxy, tl: &mut FaultTimeline) {
+    for _ in 0..500 {
+        match p.release_block(tl) {
+            Ok(()) => return,
+            Err(DbFaultError::RebindFailed) => thread::sleep(Duration::from_millis(10)),
+            Err(e) => panic!("release failed: {e:?}"),
+        }
+    }
+    panic!("port stayed taken");
+}
 
 fn t0() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_700_000_000)
@@ -55,17 +79,77 @@ fn connect(port: u16) -> TcpStream {
     s
 }
 
-/// 1 往復。つながっていれば Some(応答)、切れていれば None。
-fn roundtrip(s: &mut TcpStream, msg: &[u8]) -> Option<Vec<u8>> {
-    if s.write_all(msg).is_err() {
-        return None;
+/// 往復の結果。タイムアウトは切断と区別する（応答を止めるだけの実装を「切れた」と読まないため。AUDB-6）。
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Echoed(Vec<u8>),
+    Disconnected,
+    TimedOut,
+}
+
+/// 切断を示す I/O エラーだけを `Disconnected` にする。タイムアウトは `TimedOut`、それ以外は試験の失敗。
+fn classify(e: &std::io::Error) -> Outcome {
+    match e.kind() {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => Outcome::TimedOut,
+        ErrorKind::UnexpectedEof
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe => Outcome::Disconnected,
+        kind => panic!("unexpected io error kind: {kind:?}"),
+    }
+}
+
+fn outcome(s: &mut TcpStream, msg: &[u8]) -> Outcome {
+    if let Err(e) = s.write_all(msg) {
+        return classify(&e);
     }
     let mut buf = vec![0u8; msg.len()];
-    s.read_exact(&mut buf).ok().map(|()| buf)
+    match s.read_exact(&mut buf) {
+        Ok(()) => Outcome::Echoed(buf),
+        Err(e) => classify(&e),
+    }
+}
+
+/// 1 往復。つながっていれば Some(応答)、明示の切断なら None。タイムアウトは失敗にする。
+fn roundtrip(s: &mut TcpStream, msg: &[u8]) -> Option<Vec<u8>> {
+    match outcome(s, msg) {
+        Outcome::Echoed(b) => Some(b),
+        Outcome::Disconnected => None,
+        Outcome::TimedOut => panic!("round trip timed out (not a disconnect)"),
+    }
+}
+
+/// 遮断中の新しい接続。待ち受けが閉じているので ECONNREFUSED になる。つながった場合は往復が明示の切断になる。
+/// それ以外（タイムアウト・別のエラー）は失敗にする。
+fn assert_refused_or_cut(port: u16) {
+    match TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_secs(5),
+    ) {
+        Err(e) => assert_eq!(e.kind(), ErrorKind::ConnectionRefused),
+        Ok(mut s) => {
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            assert_eq!(outcome(&mut s, b"c"), Outcome::Disconnected);
+        }
+    }
+}
+
+/// 応答を返さずに黙る接続は `TimedOut` と分類する（`roundtrip` が切断として通さないことの確認）。
+#[test]
+fn silent_peer_is_timed_out_not_disconnected() {
+    let _serial = serial();
+    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = l.local_addr().unwrap().port();
+    let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let (_held, _) = l.accept().unwrap();
+    assert_eq!(outcome(&mut c, b"x"), Outcome::TimedOut);
 }
 
 #[test]
 fn forwards_bytes_unchanged() {
+    let _serial = serial();
     let p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut c = connect(p.listen_port());
     assert_eq!(roundtrip(&mut c, b"hello").as_deref(), Some(&b"hello"[..]));
@@ -75,6 +159,7 @@ fn forwards_bytes_unchanged() {
 
 #[test]
 fn block_cuts_open_and_refuses_new_then_release_recovers() {
+    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     let mut open = connect(p.listen_port());
@@ -82,18 +167,9 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
 
     p.block(&mut tl).unwrap();
     assert!(roundtrip(&mut open, b"b").is_none(), "open conn is cut");
-    // 待ち受けを閉じるので、新しい接続はカーネルが拒否する（つながっても往復は切断）。
-    if let Ok(mut fresh) = TcpStream::connect_timeout(
-        &SocketAddr::from((Ipv4Addr::LOCALHOST, p.listen_port())),
-        Duration::from_secs(5),
-    ) {
-        fresh
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        assert!(roundtrip(&mut fresh, b"c").is_none(), "new conn is closed");
-    }
+    assert_refused_or_cut(p.listen_port());
 
-    p.release_block(&mut tl).unwrap();
+    release_retry(&mut p, &mut tl);
     let mut again = connect(p.listen_port());
     assert_eq!(roundtrip(&mut again, b"d").as_deref(), Some(&b"d"[..]));
 
@@ -106,6 +182,7 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
 
 #[test]
 fn delay_adds_lower_bound_and_release_removes_it() {
+    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     let mut c = connect(p.listen_port());
@@ -125,6 +202,7 @@ fn delay_adds_lower_bound_and_release_removes_it() {
 
 #[test]
 fn baseline_timeline_rejects_injection_and_does_not_inject() {
+    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = FaultTimeline::baseline(Instant::now(), t0()).unwrap();
     assert_eq!(
@@ -144,6 +222,7 @@ fn baseline_timeline_rejects_injection_and_does_not_inject() {
 
 #[test]
 fn double_and_missing_operations_are_rejected_without_recording() {
+    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     assert_eq!(p.release_block(&mut tl), Err(DbFaultError::NotActive));
@@ -165,6 +244,7 @@ fn double_and_missing_operations_are_rejected_without_recording() {
 
 #[test]
 fn unreleased_injections_are_counted() {
+    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     p.block(&mut tl).unwrap();
@@ -175,6 +255,7 @@ fn unreleased_injections_are_counted() {
 
 #[test]
 fn empty_endpoint_handle_fails_closed() {
+    let _serial = serial();
     let p = DbFaultProxy::start_for(EndpointHandle::default()).unwrap();
     assert!(p.proxied_endpoint().is_none());
     let mut c = connect(p.listen_port());
@@ -184,6 +265,7 @@ fn empty_endpoint_handle_fails_closed() {
 
 #[test]
 fn stop_and_drop_finish_in_any_state() {
+    let _serial = serial();
     for state in 0..4 {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -211,6 +293,7 @@ fn stop_and_drop_finish_in_any_state() {
 
 #[test]
 fn outputs_do_not_leak_ports_or_addresses() {
+    let _serial = serial();
     let up = echo_upstream();
     let mut p = DbFaultProxy::start_to_port(up).unwrap();
     let listen = p.listen_port();
@@ -236,6 +319,7 @@ fn outputs_do_not_leak_ports_or_addresses() {
 
 #[test]
 fn release_delay_ends_in_flight_wait() {
+    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     p.delay(&mut tl, Duration::from_secs(30)).unwrap();
@@ -253,6 +337,7 @@ fn release_delay_ends_in_flight_wait() {
 
 #[test]
 fn delay_applies_to_open_connection_with_traffic_in_flight() {
+    let _serial = serial();
     let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
     let mut tl = timeline();
     let mut c = connect(p.listen_port());
