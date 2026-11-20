@@ -1,0 +1,124 @@
+# fandhe-auth-trial-deps
+
+依存の試し実装（TASK-4 の 6/6、Issue #35）。採用した crate が最小の形で成立するかを確かめる試験専用の crate である。
+
+## 位置づけ
+
+- 試験専用で、名前・置き場は仮称。人が確定する。
+- `publish = false`。どの crate からも依存されない。
+- 段階 1 のリリースのメンバーではない（`LIB-14`）。
+- 本番の依存の木に入らない（`D-2026-11-20-7` の K7）。`tracing`・`metrics` を normal 依存にしているのは、本体が将来持つ出す口の形を測るためである。
+- 引き取り先は次のとおり。
+  - `TASK-518`（`SECR-23`）・`TASK-514`（`SECR-21`）・`TASK-116`・`TASK-117`
+  - `TASK-513`: 派生 `Debug` の入れ物の試験（`SECR-13`）と、乱数の probe の本番版
+  - `TASK-500`: 陽性対照、つまり検出力の確認（`AAUD-30`・`AAUD-31`）
+  - `TASK-511`: `SECR-11` の property test（`prop_debug`）と fuzz
+- 消す条件: 採った道具と試験の形を、本番の TASK（500・511・513・514・518・116・117）が引き取ったら、この crate は消す。
+- feature はすべて default のままの暫定（`syn` だけ `default-features = false` + `full`・`parsing`）。K11 の記入後に人が確定する。
+- 採用 crate の根拠は `D-2026-11-20-8`〜`10`。
+- ここでの合格は〔仮想〕の確認で、spec の「確定」ではない（`ACPT-7`）。
+
+## 試験と fuzz の対象
+
+| 対象 | 場所 | 確かめること | ID |
+| --- | --- | --- | --- |
+| `tracing` + `tracing-subscriber` | `tests/secr23_tracing.rs` | `SecretString` を `?` 形式で出しても、派生 `Debug` の入れ物に入れても、捕獲した出力に値が無い。`tests/secr23_tracing.rs` の中で `expose()` の値を直接出す経路は検出できる（陽性対照。lib には置かない） | `SECR-23`・`SECR-11`・`SECR-13` |
+| `metrics` | `tests/metrics_probe.rs` | 自前の最小 `Recorder` を `with_local_recorder` で当て、counter の key・ラベル・増分を受けられる | `SECR-26`・`SECR-27` |
+| `proptest` | `tests/prop_debug.rs` | 任意の `String` から作った `SecretString` の `Debug` が常に固定文字列で、値を含まない。`expose()` が往復する。K8 の形を試すもので、対象の P-n・F-n ではない | `SECR-11`（K8 の形。`ACPT-37` の対象外） |
+| `syn` | `src/scan.rs` の `#[cfg(test)]` | `syn::parse_file` で、秘密値らしい欄名で型が生の `String` の欄を拾う。edition 2024 の構文を読める | `SECR-21` |
+| `cargo-fuzz` / `libfuzzer-sys` | `fuzz/fuzz_targets/secret_debug.rs` | 任意のバイト列を UTF-8 として読めたら `SecretString` にし、`Debug` が固定で `expose()` が往復する。K8 の形を試すもので、対象の P-n・F-n ではない | `SECR-11`（K8 の形。`ACPT-38` の対象外） |
+
+範囲外: `SECR-23` の本番の試験（`TASK-518`）、`SECR-21` の本番の走査と CI への組み込み（`TASK-514`）、本番の property test と fuzz の継続（`TASK-116`・`TASK-117`）。
+`metrics` のラベルに秘密値を載せない型の制約も範囲外である。
+
+## 実行手順
+
+試験:
+
+```bash
+cargo test -p fandhe-auth-trial-deps --locked
+```
+
+fuzz は別 workspace（`fuzz/`）で、`make build`・`make test`・`make lint`・`make crate-deps`・CI のどれの対象にもならない。手作業の検査は下の手順で行う。nightly は最新を追う（`D-2026-11-20-9`）。
+CI に載せるかは `TASK-117` で決める。
+
+```bash
+cd crates/trial-deps/fuzz && cargo +nightly fuzz build && cargo +nightly fuzz run secret_debug -- -max_total_time=<秒>
+```
+
+実行の記録には `rustc +nightly -V` の出力を控える。記録の保存先は未定（`D-2026-11-20-9`）で、人が決める。
+
+整形（`make lint` の対象外なので手で流す）:
+
+```bash
+cargo fmt --manifest-path crates/trial-deps/fuzz/Cargo.toml --check
+```
+
+## cargo deny の一時の設定
+
+repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例外の形や bans の一覧を先取りしてしまうためである。
+`docs/spec/03-poc/quality-checks/qp2-deps/deny.toml` の厳格版を、repo の外の一時ディレクトリで使う。
+
+1. 厳格版を repo の外へ写す（`docs/spec` は submodule なので書き換えない）。
+2. 写しの許可リストに `"NCSA"` を足す（`libfuzzer-sys` 向け。`D-2026-11-20-9`）。他は変えない。
+3. 先に `cargo deny fetch` を 1 回流し、advisory DB の commit と取得日を控える（`DPOL-33`）。
+4. ルートに対して流す。
+
+    ```bash
+    cargo deny --locked check --config <一時の設定のパス> --disable-fetch
+    ```
+
+5. fuzz 側は `--manifest-path` を付けて流す。`libfuzzer-sys` の NCSA の通過を確かめるのは、こちらである。
+
+    ```bash
+    cargo deny --locked --manifest-path crates/trial-deps/fuzz/Cargo.toml check --config <一時の設定のパス> --disable-fetch
+    ```
+
+判定は基線との差で行う。依存を足す前の HEAD で同じ設定を流した出力と、足した後の出力を比べる。
+通過は判断材料であり、例外の追加は人が決める（`DPOL-35`）。
+
+## K11 と feature の測定手順
+
+K11 の閾値は spec に無く未定である。値の記入と判定は人が行う（`ACPT-7`）。ここは手順と空欄の表だけを置く。
+
+1. repo の外に一時ディレクトリを作る。ルートの `Cargo.toml` は触らない。
+2. 組ごとに、最小の `Cargo.toml` を 1 つ作る。依存は測る crate 1 つだけにし、feature の組を指定する。
+3. 次のコマンドで数える。dev の道具（`tracing-subscriber`・`proptest`・`syn`）は `-e normal,dev` に替えて別に数える。
+
+    ```bash
+    cargo tree -e normal --prefix none --format '{p}' | sort -u | wc -l
+    ```
+
+4. MSRV は `cargo tree` の結果から人が確認する。ライセンスは `cargo deny list` の結果を使う。
+
+組の候補（各 crate の `[features]` を読んだ事実による）:
+
+- `tracing`: default は `std`・`attributes`。`attributes` は proc-macro の `tracing-attributes` を引く。`#[instrument]` を本体が使うかが論点になる。
+  ほかに `max_level_*`・`release_max_level_*` がある。
+- `tracing` の default の `attributes` は、`tracing-attributes`（proc-macro）を経由して `syn` 2.0.119 を normal で引く。
+  本体に default のまま入れると、本番のビルドに `syn` 2 が入り、`syn` 3 と 2 つの major が並ぶ。
+- `metrics`: `[features]` が無い。`default-features = false` の組は成り立たない。
+- `tracing-subscriber`: default は `smallvec`・`fmt`・`ansi`・`tracing-log`・`std`。
+- `proptest`: default は `std`・`fork`・`timeout`・`bit-set`。
+- `syn`: default は `derive`・`parsing`・`printing`・`clone-impls`・`proc-macro`。`full`・`visit` は別の feature。いまの試し実装は `default-features = false` + `full`・`parsing`。
+
+| crate | feature の組 | 推移依存の数 | MSRV | ライセンス | 人の判定 |
+| --- | --- | --- | --- | --- | --- |
+| `tracing` | default | | | | |
+| `tracing` | `default-features = false` | | | | |
+| `tracing` | `default-features = false` + `std` | | | | |
+| `tracing` | 上記 + `max_level_*` | | | | |
+| `metrics` | default | | | | |
+| `tracing-subscriber`（dev） | default | | | | |
+| `tracing-subscriber`（dev） | `default-features = false` + `fmt`・`std` | | | | |
+| `proptest`（dev） | default | | | | |
+| `proptest`（dev） | `default-features = false` + `std` | | | | |
+| `syn`（dev） | default | | | | |
+| `syn`（dev） | `default-features = false` + `full`・`parsing`（現状） | | | | |
+| `syn`（dev） | 上記 + `visit` | | | | |
+
+## 観測した事実
+
+- `syn` は、マクロ呼び出しの中に書いた構造体を見ない（`src/scan.rs` の `observation_struct_inside_macro_call_is_not_seen`）。合否ではなく観測の固定である。
+  見落としの扱いは `TASK-514` で決める（main の読み）。
+- `syn` の置き場（xtask・専用 crate・別 workspace など）は spec に無く未定である。この crate の dev 依存は一時的な置き方で、置き場の決定ではない。

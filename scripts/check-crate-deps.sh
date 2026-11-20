@@ -32,6 +32,7 @@ cd "${ROOT_DIR}"
 # load-harness も試験専用で、通常（normal・build）の依存は workspace 内になし。試験（dev）だけ it-harness・hub-stub に
 # 依存する（dev_only_deps の表。dev の辺に限って許可し、normal・build に現れたら拒否する）
 # （TASK-12 (5/10)。it-harness の上で構成要素へ負荷をかける。どの crate からも依存されない。この行は人の確認待ち）。
+# trial-deps も試験専用で secret のみ（TASK-4 (6/6)・#35。どの crate からも依存されない。D-2026-11-20-8〜10）。
 # backend は差し替え点の枠だけで workspace 内の依存なし（TASK-9。辺を足すのは中身の TASK で、足すときに確かめる）。
 allowed_deps() {
   case "$1" in
@@ -45,6 +46,7 @@ allowed_deps() {
     fandhe-auth-it-harness) echo "fandhe-auth-secret fandhe-auth-hub-stub fandhe-auth-console-stub" ;;
     fandhe-auth-e2e-harness) echo "" ;;
     fandhe-auth-load-harness) echo "" ;;
+    fandhe-auth-trial-deps) echo "fandhe-auth-secret" ;;
     fandhe-auth-backend) echo "" ;;
     *) return 1 ;;
   esac

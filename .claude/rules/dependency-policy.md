@@ -121,7 +121,9 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
     fuzz の nightly は日付で固定せず最新を追う。実行の記録に nightly の版を残すかは **未定**（`D-2026-11-20-9`）
   - `SECR-21` の構文木の走査は `syn` を使う自前の検査（`D-2026-11-20-10`）。置き場は spec に記録が無く **未定**。
     マクロ呼び出しの中の型を見落とすかは `TASK-514` の試し実装で確かめる（main の読み）
-  - 最小の試し実装（TASK-4 の成果物）は未実施。足す前に利用者へ確かめる
+  - 最小の試し実装（TASK-4 の成果物）は `crates/trial-deps`（#35）に実施した。normal は `fandhe-auth-secret`・`tracing`・`metrics`、
+    dev は `tracing-subscriber`・`proptest`・`syn`（`default-features = false`、`full`・`parsing`）。fuzz は別 workspace の `crates/trial-deps/fuzz/`（ルートの `exclude`）で、nightly を使い CI には載せていない。
+    口の feature の選び・K11 の閾値・`deny.toml` の形は **未定**（K11 を記入して人が決める）
   上の対象以外の依存は選定の記録に無いので、足す前に利用者へ確かめる。メール送信と外向き HTTP クライアントは選定の対象から外れた。本体は口と契約テストだけを持ち、具象は組込み先が選ぶ（`D-2026-11-20-4`・`HOST-7`・`AMTH-14`・`AAUD-40`・`DPOL-46`）ので、本体の依存に足さない。
 
 ## 関連 rule
