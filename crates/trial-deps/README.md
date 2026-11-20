@@ -22,10 +22,10 @@
 
 | 対象 | 場所 | 確かめること | ID |
 | --- | --- | --- | --- |
-| `tracing` + `tracing-subscriber` | `tests/secr23_tracing.rs` | `SecretString` を `?` 形式で出しても、派生 `Debug` の入れ物（std の tuple・`Option`。自前の構造体の試験は `TASK-513`）に入れても、捕獲した出力に値が無い。`tests/secr23_tracing.rs` の中で `expose()` の値を直接出す経路は検出できる（陽性対照。lib には置かない） | `SECR-23`・`SECR-11`・`SECR-13` |
-| `metrics` | `tests/metrics_probe.rs` | 自前の最小 `Recorder` を `with_local_recorder` で当て、counter の key・ラベル・増分を受けられる | `SECR-26`・`SECR-27` |
-| `proptest` | `tests/prop_debug.rs` | 任意の `String` から作った `SecretString` の `Debug` が常に固定文字列で、値を含まない。`expose()` が往復する。K8 の形を試すもので、対象の P-n・F-n ではない | `SECR-11`（K8 の形。`ACPT-37` の対象外） |
-| `syn` | `src/scan.rs` の `#[cfg(test)]` | `syn::parse_file` で、秘密値らしい欄名で型が生の `String` の欄を拾う。edition 2024 の構文を読める | `SECR-21` |
+| `tracing` + `tracing-subscriber` | | | | `tests/secr23_tracing.rs` | | | | |
+| `metrics` | | | | `tests/metrics_probe.rs` | | | | |
+| `proptest` | | | | `tests/prop_debug.rs` | | | | |
+| `syn` | | | | `src/scan.rs` の `#[cfg(test)]` | | | | |
 | `cargo-fuzz` / `libfuzzer-sys` | `fuzz/fuzz_targets/secret_debug.rs` | 任意のバイト列を UTF-8 として読めたら `SecretString` にし、`Debug` が固定で `expose()` が往復する。K8 の形を試すもので、対象の P-n・F-n ではない | `SECR-11`（K8 の形。`ACPT-38` の対象外） |
 
 範囲外: `SECR-23` の本番の試験（`TASK-518`）、`SECR-21` の本番の走査と CI への組み込み（`TASK-514`）、本番の property test と fuzz の継続（`TASK-116`・`TASK-117`）。
@@ -48,7 +48,7 @@ cd crates/trial-deps/fuzz && cargo +nightly fuzz build && cargo +nightly fuzz ru
 
 `-max_total_time` の値は秒数で、`10` は例である。変えてよい。
 
-実行の記録には `rustc +nightly -V` の出力を控える。記録の保存先は未定（`D-2026-11-20-9`）で、人が決める。
+この試し実装の手作業の実行では、`rustc +nightly -V` の出力を控えて PR 本文に書く。実行の記録に nightly の版を残すかは未定（`D-2026-11-20-9`）で、記録の保存先も未定である。どちらも人が決める。
 
 整形（`make lint` の対象外なので手で流す）:
 
@@ -113,21 +113,35 @@ fuzz 側は別 workspace なので、ルートの `Cargo.lock` の監査では�
 K11 の閾値は spec に無く未定である。値の記入と判定は人が行う（`ACPT-7`）。ここは手順と空欄の表だけを置く。
 
 1. repo の外に一時ディレクトリを作る。ルートの `Cargo.toml` は触らない。
-2. 組ごとに、最小の `Cargo.toml` を 1 つ作る。依存は測る crate 1 つだけにし、feature の組を指定する。
-3. 次のコマンドで数える。`-e normal,build` を起点にし、測定用のルートのパッケージ（手順 2 で作ったもの。`PROBE_NAME` に入れる名前）を数から除く。
-  測る crate 自身も、推移依存ではないので数から除く。
+2. 組ごとに、最小の `Cargo.toml` を 1 つ作る。依存は測る crate 1 つだけにし、版は `=x.y.z` で固定して、feature の組を指定する。
+    dev の道具（`tracing-subscriber`・`proptest`・`syn`）も、測定用の manifest では `[dependencies]` に置く。
+    こうすると、その crate を使ったときの推移依存を、全組で同じ `normal,build` の値として測れる。
+    実際の利用が dev であること（本番の木に入らない）は、K7 として別に扱い、この数には含めない。
+3. 次の手順で数える。`-e normal,build` を起点にし、`--target` を明示する。測定用のルートのパッケージ（手順 2 で作ったもの。`PROBE_NAME` に入れる名前）と、
+    測る crate 自身（`CRATE` に入れる名前）は推移依存ではないので、数から除く。`cargo tree` が失敗したら集計に進まないよう、2 段に分ける。
 
     ```bash
-    cargo tree -e normal,build --prefix none --format '{p}' | sed 's/ (\*)$//' | sort -u | grep -v "^$PROBE_NAME " | wc -l
+    set -euo pipefail
+    TARGET=x86_64-unknown-linux-gnu
+    cargo tree -e normal,build --target "$TARGET" --prefix none --format '{p}' > tree.txt
+    sed 's/ (\*)$//' tree.txt | sort -u > uniq.txt
+    { grep -v -e "^$PROBE_NAME " -e "^$CRATE " uniq.txt || true; } | wc -l
     ```
 
+    `cargo tree` が失敗すると（存在しない feature の指定など）、`cargo tree` の行で止まり、後の集計は流れない。
+    `grep -v` は全行が除かれると終了コード 1 を返すので、`|| true` で数 0 を許す。
     `cargo tree` は 2 回目以降に出る依存の行に ` (*)` を付ける。`sort -u` は行全体で比べるので、印を `sed` で除いてから重複を除く。
     除かないと、複数の経路で届く依存を 2 回数える。`tracing` と `tracing-subscriber` を両方 normal に置いた一時の crate で流したところ、
     印を除かない場合は 21、除いた場合は 18 で、`--no-dedupe` で数えた 18 と一致した。
 
-    測る crate 自身の 1 行は、出力から引いて「推移依存の数」とする。dev の道具（`tracing-subscriber`・`proptest`・`syn`）は、
-    `-e normal,build,dev` に替え、`sed` を含む同じ形で別に数える。表の「推移依存の数」の列は `normal,build` の値で、`dev` 込みの値は別の測定として分けて記入する。
+    `--target` は `x86_64-unknown-linux-gnu` に固定する（全組で同じにする）。`--target all` にする場合は、全組をそれに替え、どちらを使ったかを記録する。
+    表の「推移依存の数」の列は、全行この `normal,build` の値である。
 
+    組ごとに次を記録する。別の日・別のホストの結果と比べるための記録で、値の判定は人が行う。
+    - 測った crate の版（`=x.y.z`）と feature の組
+    - `--target` の値
+    - 測った日と `rustc -V` の出力
+    - 測定用の `Cargo.lock`（または `tree.txt`）の保存先。保存先は未定で、人が決める
 4. MSRV は、解決したパッケージの `rust_version` を `cargo metadata` から引く。宣言の無い依存は `未宣言` と出る。
 
     ```bash
@@ -149,20 +163,20 @@ K11 の閾値は spec に無く未定である。値の記入と判定は人が�
 - `proptest`: default は `std`・`fork`・`timeout`・`bit-set`。
 - `syn`: default は `derive`・`parsing`・`printing`・`clone-impls`・`proc-macro`。`full`・`visit` は別の feature。いまの試し実装は `default-features = false` + `full`・`parsing`。
 
-| crate | feature の組 | 推移依存の数 | MSRV | ライセンス | 人の判定 |
-| --- | --- | --- | --- | --- | --- |
-| `tracing` | default | | | | |
-| `tracing` | `default-features = false` | | | | |
-| `tracing` | `default-features = false` + `std` | | | | |
-| `tracing` | 上記 + `max_level_*` | | | | |
-| `metrics` | default | | | | |
-| `tracing-subscriber`（dev） | default | | | | |
-| `tracing-subscriber`（dev） | `default-features = false` + `fmt`・`std` | | | | |
-| `proptest`（dev） | default | | | | |
-| `proptest`（dev） | `default-features = false` + `std` | | | | |
-| `syn`（dev） | default | | | | |
-| `syn`（dev） | `default-features = false` + `full`・`parsing`（現状） | | | | |
-| `syn`（dev） | 上記 + `visit` | | | | |
+| crate | 版 | ターゲット | 測った日 | feature の組 | 推移依存の数（`normal,build`） | MSRV | ライセンス | 人の判定 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tracing` | | | | default | | | | |
+| `tracing` | | | | `default-features = false` | | | | |
+| `tracing` | | | | `default-features = false` + `std` | | | | |
+| `tracing` | | | | 上記 + `max_level_*` | | | | |
+| `metrics` | | | | default | | | | |
+| `tracing-subscriber`（dev） | | | | default | | | | |
+| `tracing-subscriber`（dev） | | | | `default-features = false` + `fmt`・`std` | | | | |
+| `proptest`（dev） | | | | default | | | | |
+| `proptest`（dev） | | | | `default-features = false` + `std` | | | | |
+| `syn`（dev） | | | | default | | | | |
+| `syn`（dev） | | | | `default-features = false` + `full`・`parsing`（現状） | | | | |
+| `syn`（dev） | | | | 上記 + `visit` | | | | |
 
 ## 観測した事実
 

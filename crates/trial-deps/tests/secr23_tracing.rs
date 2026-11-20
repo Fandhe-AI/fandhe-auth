@@ -89,11 +89,23 @@ fn secr23_derived_debug_holder_has_no_value() {
     let maybe = Some(SecretString::new(&probe));
     let list = vec![SecretString::new(&probe), SecretString::new(&probe)];
     let out = capture(|| log_container_debug_fields(&("label", &s), &maybe, &list));
-    assert!(
-        out.contains("<redacted>"),
-        "redacted marker present: false (output len={})",
-        out.len()
-    );
+    // 欄ごとにマスク済みの値が出ていることを確かめる（1 つの欄だけで通らないようにする）。
+    let expected_fields = [
+        ("pair", "pair=(\"label\", SecretString(<redacted>))"),
+        ("maybe", "maybe=Some(SecretString(<redacted>))"),
+        (
+            "list",
+            "list=[SecretString(<redacted>), SecretString(<redacted>)]",
+        ),
+    ];
+    for (name, expected) in expected_fields {
+        let present = out.contains(expected);
+        assert!(
+            present,
+            "masked field `{name}` present: {present} (output len={})",
+            out.len()
+        );
+    }
     let leaked = out.contains(&probe);
     assert!(
         !leaked,
