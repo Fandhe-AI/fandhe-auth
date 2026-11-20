@@ -33,6 +33,8 @@ pub enum ExternalStoreFaultError {
     AlreadyActive,
     /// 遮断していない。
     NotActive,
+    /// 解除での待ち受けの作り直しに失敗した。遮断のまま、`Released` は記録していない。
+    RebindFailed,
     /// 記録が拒否した（基準線である等）。状態は変えていない。
     Record(FaultRecordError),
     /// 遮断の経路では起きない想定の内部の誤り。
@@ -45,6 +47,7 @@ impl fmt::Display for ExternalStoreFaultError {
             Self::StartFailed => f.write_str("external store fault error: start failed"),
             Self::AlreadyActive => f.write_str("external store fault error: already active"),
             Self::NotActive => f.write_str("external store fault error: not active"),
+            Self::RebindFailed => f.write_str("external store fault error: rebind failed"),
             Self::Record(e) => write!(f, "external store fault error: {e}"),
             Self::Internal => f.write_str("external store fault error: internal"),
         }
@@ -58,6 +61,7 @@ fn convert(e: DbFaultError) -> ExternalStoreFaultError {
         DbFaultError::StartFailed => ExternalStoreFaultError::StartFailed,
         DbFaultError::AlreadyActive => ExternalStoreFaultError::AlreadyActive,
         DbFaultError::NotActive => ExternalStoreFaultError::NotActive,
+        DbFaultError::RebindFailed => ExternalStoreFaultError::RebindFailed,
         DbFaultError::Record(r) => ExternalStoreFaultError::Record(r),
         DbFaultError::InvalidParam => ExternalStoreFaultError::Internal,
     }

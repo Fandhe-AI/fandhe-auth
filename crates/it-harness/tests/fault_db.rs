@@ -82,9 +82,16 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
 
     p.block(&mut tl).unwrap();
     assert!(roundtrip(&mut open, b"b").is_none(), "open conn is cut");
-    let mut fresh = connect(p.listen_port());
-    assert!(roundtrip(&mut fresh, b"c").is_none(), "new conn is closed");
-    assert!(p.refused_count() >= 1);
+    // 待ち受けを閉じるので、新しい接続はカーネルが拒否する（つながっても往復は切断）。
+    if let Ok(mut fresh) = TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, p.listen_port())),
+        Duration::from_secs(5),
+    ) {
+        fresh
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert!(roundtrip(&mut fresh, b"c").is_none(), "new conn is closed");
+    }
 
     p.release_block(&mut tl).unwrap();
     let mut again = connect(p.listen_port());

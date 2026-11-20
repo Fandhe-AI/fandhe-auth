@@ -164,13 +164,7 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
         Outcome::Disconnected,
         "open conn is cut"
     );
-    let mut fresh = connect(p.listen_port());
-    assert_eq!(
-        roundtrip(&mut fresh, b"c"),
-        Outcome::Disconnected,
-        "new conn is closed"
-    );
-    assert!(wait_until(|| p.refused_count() >= 1));
+    assert_refused_or_cut(p.listen_port(), "new conn is rejected");
 
     p.release_block(&mut tl).unwrap();
     let mut again = connect(p.listen_port());
@@ -185,8 +179,23 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
     assert!(!text.contains("db_block"));
 }
 
-/// ORST-17: 遮断中に始めて accept の待ち行列に残った接続は、`release_block()` が戻る前に切られ、
-/// 解除後の状態で上流へ届かない。拒否を観測せずに connect 完了の直後に解除する。
+/// 遮断中の新しい接続は、待ち受けが閉じているのでカーネルが拒否する（ECONNREFUSED）。
+/// 万一つながっても、往復は切断になる。上流へは届かない。
+fn assert_refused_or_cut(port: u16, what: &str) {
+    match TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_secs(5),
+    ) {
+        Err(e) => assert_eq!(e.kind(), ErrorKind::ConnectionRefused, "{what}"),
+        Ok(mut s) => {
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            assert_eq!(roundtrip(&mut s, b"x"), Outcome::Disconnected, "{what}");
+        }
+    }
+}
+
+/// ORST-17: 遮断中に始めた接続は、解除の後に上流へ届かない。遮断中の connect は拒否され、
+/// 解除後の新しい接続だけが届く。拒否を待たずに続けて解除を繰り返す形で、順序の取りこぼしを探す。
 #[test]
 fn conn_started_during_block_never_reaches_upstream_after_release() {
     let up = echo_upstream();
@@ -194,18 +203,65 @@ fn conn_started_during_block_never_reaches_upstream_after_release() {
     let mut tl = timeline();
     for _ in 0..30 {
         p.block(&mut tl).unwrap();
-        // connect の完了（カーネルの待ち行列への積み込み）を待ってから、すぐ解除する。
-        let mut queued = connect(p.listen_port());
+        assert_refused_or_cut(p.listen_port(), "conn during block");
         p.release_block(&mut tl).unwrap();
-        assert_eq!(
-            roundtrip(&mut queued, b"q"),
-            Outcome::Disconnected,
-            "conn started during block must not reach upstream"
-        );
     }
-    assert_eq!(p.accepted_count(), 0);
+    assert_eq!(p.accepted_count(), 0, "nothing reached upstream");
     let mut after = connect(p.listen_port());
     assert_eq!(roundtrip(&mut after, b"r"), Outcome::Echoed(b"r".to_vec()));
+}
+
+/// 遮断中に再接続を繰り返す相手がいても、解除は期限の中で戻る。
+#[test]
+fn release_returns_in_time_under_reconnect_storm() {
+    let up = echo_upstream();
+    let mut p = ExternalStoreFaultProxy::start_to_port(up.port()).unwrap();
+    let mut tl = timeline();
+    let port = p.listen_port();
+    p.block(&mut tl).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = Arc::clone(&stop);
+    let storm = thread::spawn(move || {
+        while !stop2.load(Ordering::SeqCst) {
+            let _ = TcpStream::connect_timeout(
+                &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                Duration::from_millis(200),
+            );
+        }
+    });
+    thread::sleep(Duration::from_millis(50));
+    let started = Instant::now();
+    let r = p.release_block(&mut tl);
+    let elapsed = started.elapsed();
+    stop.store(true, Ordering::SeqCst);
+    storm.join().unwrap();
+    r.unwrap();
+    assert!(elapsed < Duration::from_secs(5), "release returned late");
+    let mut c = connect(port);
+    assert_eq!(roundtrip(&mut c, b"s"), Outcome::Echoed(b"s".to_vec()));
+}
+
+/// 作り直しに失敗したら誤りを返し、遮断のまま `Released` を記録しない（fail-closed）。
+#[test]
+fn release_fails_closed_when_port_is_taken() {
+    let up = echo_upstream();
+    let mut p = ExternalStoreFaultProxy::start_to_port(up.port()).unwrap();
+    let mut tl = timeline();
+    let port = p.listen_port();
+    p.block(&mut tl).unwrap();
+    let squatter = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+    assert_eq!(
+        p.release_block(&mut tl),
+        Err(ExternalStoreFaultError::RebindFailed)
+    );
+    drop(squatter);
+    assert_refused_or_cut(port, "still blocked after failed release");
+    p.release_block(&mut tl).unwrap();
+    let mut c = connect(port);
+    assert_eq!(roundtrip(&mut c, b"t"), Outcome::Echoed(b"t".to_vec()));
+    let text = finish(tl).to_string();
+    assert!(text.contains("injection_count: 2\n"), "one Released only");
+    assert!(text.contains("unreleased_count: 0\n"));
 }
 
 #[test]
@@ -283,6 +339,7 @@ fn debug_and_display_do_not_leak_port() {
         ExternalStoreFaultError::AlreadyActive,
         ExternalStoreFaultError::NotActive,
         ExternalStoreFaultError::Internal,
+        ExternalStoreFaultError::RebindFailed,
         ExternalStoreFaultError::Record(FaultRecordError::EventsInBaseline),
     ] {
         assert!(!e.to_string().contains(&port));

@@ -16,8 +16,8 @@
 //! - 記録が成功してから状態を変える。「記録したのに注入していない」も「注入したのに記録が無い」も起こさない。
 //!   基準線の `FaultTimeline` への注入は記録が拒否するので、注入もされない（fail-closed）。
 //! - 環境変数・設定ファイル・feature で注入を切り替える経路を作らない（DPOL-30〜32）。
-//! - 遮断は既存の接続を切り、新しい接続を直ちに閉じる。解除しても切れた接続は戻らないので、client は
-//!   解除の後につなぎ直す。遅延は応答（上流から client）の向きの塊ごとに足す。
+//! - 遮断は既存の接続を切り、待ち受けのソケットを閉じる（新しい接続はカーネルが拒否する）。
+//!   解除は同じポートで作り直す。解除しても切れた接続は戻らないので、client は解除の後につなぎ直す。遅延は応答（上流から client）の向きの塊ごとに足す。
 //! - 接続の確立（上流への connect。上限 5 秒）は accept のスレッドで同期に行う。上流は `127.0.0.1` で
 //!   通常は即座に結果が出るが、固まると後続の accept がその間止まる（試験専用の制約として受け入れる）。
 //! - 刻みの値（accept 5 ms・待ちの刻み 10 ms・上流への接続の上限 5 秒・遅延の上限）は開発の値で要件の値ではない
@@ -54,6 +54,8 @@ pub enum DbFaultError {
     AlreadyActive,
     /// 有効でない注入を解除しようとした。
     NotActive,
+    /// 解除での待ち受けの作り直しに失敗した（ポートが取られた等）。遮断のまま、`Released` は記録していない。
+    RebindFailed,
     /// 遅延の値の検査に落ちた（0・ms 未満・過大）。
     InvalidParam,
     /// 記録が拒否した（基準線である等）。状態は変えていない。
@@ -66,6 +68,7 @@ impl fmt::Display for DbFaultError {
             Self::StartFailed => f.write_str("db fault error: start failed"),
             Self::AlreadyActive => f.write_str("db fault error: already active"),
             Self::NotActive => f.write_str("db fault error: not active"),
+            Self::RebindFailed => f.write_str("db fault error: rebind failed"),
             Self::InvalidParam => f.write_str("db fault error: invalid parameter"),
             Self::Record(e) => write!(f, "db fault error: {e}"),
         }
@@ -93,11 +96,9 @@ impl Upstream {
 
 /// 転送のスレッドと注入の入口で共有する状態。
 struct Shared {
-    /// 待ち受け。accept のスレッドと `release_block` の吸い出しが `accept_gate` の下で使う。
-    listener: TcpListener,
-    /// accept 1 回と、その接続の処理（`handle_conn`）を直列にする。`release_block` は遮断を解く前に
-    /// これを取り、待ち行列に残る接続を吸い出して切る（ORST-17）。
-    accept_gate: Mutex<()>,
+    /// 待ち受け。`None` は遮断中（ソケットを閉じている）。accept 1 回とその接続の処理（`handle_conn`）は
+    /// このロックの下で行い、`block`・`release_block` も同じロックの下で差し替える（ORST-17）。
+    listener: Mutex<Option<TcpListener>>,
     stop: AtomicBool,
     blocked: AtomicBool,
     delay_ms: AtomicU64,
@@ -210,8 +211,7 @@ impl DbFaultProxy {
             .map_err(|_| DbFaultError::StartFailed)?
             .port();
         let shared = Arc::new(Shared {
-            listener,
-            accept_gate: Mutex::new(()),
+            listener: Mutex::new(Some(listener)),
             stop: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             delay_ms: AtomicU64::new(0),
@@ -270,7 +270,7 @@ impl DbFaultProxy {
         self.shared.refused.load(Ordering::SeqCst)
     }
 
-    /// DB への経路を遮断する。開いている接続を切り、新しい接続を直ちに閉じる。
+    /// DB への経路を遮断する。開いている接続を切り、待ち受けを閉じる（新しい接続はカーネルが拒否する）。
     pub fn block(&mut self, timeline: &mut FaultTimeline) -> Result<(), DbFaultError> {
         if self.block_active {
             return Err(DbFaultError::AlreadyActive);
@@ -278,9 +278,19 @@ impl DbFaultProxy {
         timeline
             .record_now(self.block_kind, FaultPhase::Applied)
             .map_err(DbFaultError::Record)?;
+        // 待ち受けのソケットを閉じる。以後の connect はカーネルが拒否し、待ち行列に残っていた未 accept の
+        // 接続もリセットされる（ORST-17）。ロックは処理中の `handle_conn` の完了を待つので、その接続の
+        // 登録は `sever_all` より前に終わる。accept のスレッドは `None` の間は何も受けず眠る。
+        let mut slot = self
+            .shared
+            .listener
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *slot = None;
         self.shared.blocked.store(true, Ordering::SeqCst);
         self.shared.block_gen.fetch_add(1, Ordering::SeqCst);
         self.shared.sever_all();
+        drop(slot);
         self.block_active = true;
         Ok(())
     }
@@ -290,25 +300,26 @@ impl DbFaultProxy {
         if !self.block_active {
             return Err(DbFaultError::NotActive);
         }
+        // 同じポートで待ち受けを作り直す。失敗したら遮断のまま誤りを返し、`Released` は記録しない。
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.listen_port))
+            .map_err(|_| DbFaultError::RebindFailed)?;
+        if listener.local_addr().ok().map(|a| a.port()) != Some(self.listen_port)
+            || listener.set_nonblocking(true).is_err()
+        {
+            return Err(DbFaultError::RebindFailed);
+        }
+        // 記録が拒否したら作り直した待ち受けを捨て、遮断のままにする。成功したら直後に再開する。
         timeline
             .record_now(self.block_kind, FaultPhase::Released)
             .map_err(DbFaultError::Record)?;
-        // ORST-17: 遮断中に始めて待ち行列に残った接続を、遮断を解く前にすべて受けて切る。
-        // accept のスレッドの処理中はゲートで待つので、処理中の接続も遮断の状態で決着してから解く。
         {
-            let _gate = self
+            let mut slot = self
                 .shared
-                .accept_gate
+                .listener
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            loop {
-                match self.shared.listener.accept() {
-                    Ok((client, _)) => refuse(&client, &self.shared),
-                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                    Err(_) => break,
-                }
-            }
             self.shared.blocked.store(false, Ordering::SeqCst);
+            *slot = Some(listener);
         }
         self.block_active = false;
         Ok(())
@@ -389,17 +400,17 @@ impl Drop for DbFaultProxy {
 fn accept_loop(shared: &Arc<Shared>, upstream: &Upstream) {
     while !shared.stop.load(Ordering::SeqCst) {
         let accepted = {
-            // accept と処理をゲートの下で行う。眠りはゲートの外（`release_block` が取れるように）。
-            let _gate = shared
-                .accept_gate
+            // accept と処理をロックの下で行う。眠りはロックの外（`block`・`release_block` が取れるように）。
+            let slot = shared
+                .listener
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            match shared.listener.accept() {
-                Ok((client, _)) => {
+            match slot.as_ref().map(TcpListener::accept) {
+                Some(Ok((client, _))) => {
                     handle_conn(client, shared, upstream);
                     true
                 }
-                Err(_) => false,
+                _ => false,
             }
         };
         if !accepted {
