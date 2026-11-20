@@ -127,11 +127,12 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
       - 導入は `scripts/install-msrv.sh` を経る。ワークフローに toolchain の導入・切り替え（`rustup toolchain install`・`rustup default`・`rustup override`・`rustup update` 等）を直接書かない（手順 3 の「処理は `scripts/`」と同じ）。今の toolchain の表示（`rustup show active-toolchain`）は許す
       - 後続のステップにも同じ版を使わせる。`install-msrv.sh` が `$GITHUB_ENV` に `RUSTUP_TOOLCHAIN=<版>` を書き、導入の直後に使われる `rustc` の版が MSRV と一致することを確かめる（違えば終了コード 2）
       - `latest`・`stable`・`beta`・`nightly` など、動く名前の追従にしない
-      - rustup の公式の配布元を使う。`RUSTUP_DIST_SERVER`・`RUSTUP_UPDATE_ROOT` を CI（ワークフロー・`scripts/`）で設定しない。`install-msrv.sh` は空でない値で設定されていれば終了コード 2 で止める。配布元を変えるには利用者の承認が要る
+      - rustup の公式の配布元を使う。`RUSTUP_DIST_SERVER`・`RUSTUP_UPDATE_ROOT` を CI（ワークフロー・`scripts/`）で設定しない。`install-msrv.sh` は設定されていれば（空の値も含む）、rustup を呼ぶ前に終了コード 2 で止める。配布元を変えるには利用者の承認が要る
       - 他の外部ツール（`check` ジョブの検査ツール等）には広げない。それらは従来どおり版 + SHA256 の宣言と検証を要る
       - 例外の範囲を広げる・条件を緩めるのは、利用者の承認を待つ（承認は人が行う。ACPT-7）
       - #47（TASK-6）で追跡していた残りの課題（ルートの宣言との照合・後続のステップでの toolchain の明示・配布元の条件の機械的な強制）は解消した。
-        ルートの照合は `scripts/msrv.sh`、後者 2 つは `scripts/install-msrv.sh` が持ち、`scripts/hooks/test-hooks.sh` で試験する
+        ルートの照合は `scripts/msrv.sh`、後者 2 つは `scripts/install-msrv.sh` が持ち、`scripts/hooks/test-hooks.sh` で試験する。
+        試験は `cargo`・`jq`・`tomllib` を持つ `python3`（3.11 以上）を要し、CI（`CI`・`GITHUB_ACTIONS` が設定）では前提が足りなければ skip せず失敗にする
 10. 信頼できない入力（PR タイトル等）は `${{ }}` で `run` に直接展開せず `env` 経由で渡す（`pr-title` ジョブの方式）
 11. 時間予算: `ci.yml` は PR の wall-clock で 2 分以内を目安とする。超える場合は並列化・キャッシュ・
     変更検知による skip を検討し、PR 本文に変更前後の実測を書く

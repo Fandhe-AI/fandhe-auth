@@ -1014,8 +1014,18 @@ else
 fi
 
 # ---- scripts/msrv.sh: cargo metadata の解決結果から読む（表記の違い・複数行の文字列に左右されない。読めなければ 2）
+# 前提: cargo・jq・tomllib を持つ python3（3.11 以上）。CI（CI または GITHUB_ACTIONS が設定）では前提が足りなければ
+# skip せず失敗にする（検査が黙って素通りしないため）。ローカルでは skip する。
+msrv_prereq="ok"
+if ! command -v cargo > /dev/null 2>&1 || ! command -v jq > /dev/null 2>&1 \
+  || ! command -v python3 > /dev/null 2>&1 || ! python3 -I -c 'import tomllib' > /dev/null 2>&1; then
+  msrv_prereq="missing"
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "msrv: prerequisites (cargo, jq, python3 with tomllib) are required in CI" "missing prerequisite" ""
+  fi
+fi
 MSRV_SH="${HOOKS_DIR}/../msrv.sh"
-if command -v cargo > /dev/null 2>&1 && command -v jq > /dev/null 2>&1 && command -v python3 > /dev/null 2>&1; then
+if [ "${msrv_prereq}" = "ok" ]; then
   # msrv_ws <名前> <期待の終了状態> <期待の標準出力（空なら確かめない）> <ルート Cargo.toml> [メンバー crate の Cargo.toml]
   # 一時の workspace（メンバー m1 = 与えた内容）を作って msrv.sh を流す。
   msrv_ws() {
@@ -1075,42 +1085,51 @@ if command -v cargo > /dev/null 2>&1 && command -v jq > /dev/null 2>&1 && comman
   HOME="${real_home}" "${HOOK_BASH}" "${MSRV_SH}" > "${work_dir}/msrv-root.out" 2> "${work_dir}/out" || rc=$?
   expect_rc "msrv: the root Cargo.toml yields a version" 0 "${rc}"
 else
-  echo "ok - msrv: skipped (cargo, jq or python3 not found)"
+  echo "ok - msrv: skipped (cargo, jq or python3 with tomllib not found)"
 fi
 
 # ---- scripts/install-msrv.sh: 配布元の設定は 2 で止める・版の引き継ぎと一致確認（rustup・rustc は偽物に差し替える）
 INSTALL_MSRV_SH="${HOOKS_DIR}/../install-msrv.sh"
-if command -v cargo > /dev/null 2>&1 && command -v jq > /dev/null 2>&1 && command -v python3 > /dev/null 2>&1; then
-  # install_msrv_case <名前> <期待の終了状態> <偽 rustc が名乗る版> <GITHUB_ENV に期待する行（空なら書かれないこと）> [環境変数 NAME=VALUE...]
+if [ "${msrv_prereq}" = "ok" ]; then
+  # install_msrv_case <名前> <期待の終了状態> <偽 rustc の版の上書き（空なら RUSTUP_TOOLCHAIN をそのまま名乗る）>
+  #   <GITHUB_ENV に期待する行（空なら書かれないこと）> <rustup が呼ばれるか（yes|no）> [環境変数 NAME=VALUE...]
+  # 偽の rustc は RUSTUP_TOOLCHAIN の値を版として返す（export が消えれば unset を返し、一致確認で落ちる）。
+  # 偽の rustup は呼び出しを記録する（配布元の拒否が rustup の呼び出しより前であることを確かめる）。
   install_msrv_case() {
-    local name="$1" want_rc="$2" fake_ver="$3" want_env="$4" rc=0 bin gh_env
-    shift 4
+    local name="$1" want_rc="$2" override_ver="$3" want_env="$4" want_rustup="$5" rc=0 bin gh_env calls
+    shift 5
     install_seq=$((${install_seq:-0} + 1))
     bin="${work_dir}/install-msrv-bin-${install_seq}"
     gh_env="${work_dir}/install-msrv-ghenv-${install_seq}"
+    calls="${bin}/rustup-calls"
     mkdir -p "${bin}"
     : > "${gh_env}"
-    printf '#!/bin/sh\nexit 0\n' > "${bin}/rustup"
-    printf '#!/bin/sh\necho "rustc %s (abcdef 2026-01-01)"\n' "${fake_ver}" > "${bin}/rustc"
+    : > "${calls}"
+    printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "${calls}" > "${bin}/rustup"
+    # shellcheck disable=SC2016  # 偽 rustc の中で展開させるため単引用符のままにする
+    printf '#!/bin/sh\necho "rustc ${FAKE_RUSTC_VER:-${RUSTUP_TOOLCHAIN:-unset}} (abcdef 2026-01-01)"\n' > "${bin}/rustc"
     chmod +x "${bin}/rustup" "${bin}/rustc"
     env -u RUSTUP_DIST_SERVER -u RUSTUP_UPDATE_ROOT -u RUSTUP_TOOLCHAIN "$@" \
-      PATH="${bin}:${PATH}" HOME="${real_home}" GITHUB_ENV="${gh_env}" \
+      FAKE_RUSTC_VER="${override_ver}" PATH="${bin}:${PATH}" HOME="${real_home}" GITHUB_ENV="${gh_env}" \
       "${HOOK_BASH}" "${INSTALL_MSRV_SH}" > /dev/null 2> "${work_dir}/out" || rc=$?
-    if [ "${rc}" -eq "${want_rc}" ] && [ "$(cat "${gh_env}")" = "${want_env}" ]; then
+    local called="no"
+    [ -s "${calls}" ] && called="yes"
+    if [ "${rc}" -eq "${want_rc}" ] && [ "$(cat "${gh_env}")" = "${want_env}" ] && [ "${called}" = "${want_rustup}" ]; then
       pass "install-msrv: ${name}"
     else
-      fail "install-msrv: ${name}" "exit ${rc} (expected ${want_rc}), GITHUB_ENV: $(cat "${gh_env}")" "stderr: $(cat "${work_dir}/out")"
+      fail "install-msrv: ${name}" "exit ${rc} (expected ${want_rc}), GITHUB_ENV: $(cat "${gh_env}"), rustup called: ${called} (expected ${want_rustup})" "stderr: $(cat "${work_dir}/out")"
     fi
   }
   want_ver="$(HOME="${real_home}" "${HOOK_BASH}" "${MSRV_SH}")"
   case "${want_ver}" in *.*.*) ;; *) want_ver="${want_ver}.0" ;; esac
-  install_msrv_case "matching rustc writes RUSTUP_TOOLCHAIN to GITHUB_ENV" 0 "${want_ver}" "RUSTUP_TOOLCHAIN=${want_ver}"
-  install_msrv_case "a rustc of another version exits 2" 2 "1.99.0" ""
-  install_msrv_case "RUSTUP_DIST_SERVER set exits 2" 2 "${want_ver}" "" RUSTUP_DIST_SERVER=https://example.invalid
-  install_msrv_case "RUSTUP_UPDATE_ROOT set exits 2" 2 "${want_ver}" "" RUSTUP_UPDATE_ROOT=https://example.invalid
-  install_msrv_case "empty RUSTUP_DIST_SERVER is allowed" 0 "${want_ver}" "RUSTUP_TOOLCHAIN=${want_ver}" RUSTUP_DIST_SERVER=
+  install_msrv_case "RUSTUP_TOOLCHAIN is exported with the patch version and written to GITHUB_ENV" 0 "" "RUSTUP_TOOLCHAIN=${want_ver}" yes
+  install_msrv_case "a rustc of another version exits 2" 2 "1.99.0" "" yes
+  install_msrv_case "RUSTUP_DIST_SERVER set exits 2 without calling rustup" 2 "" "" no RUSTUP_DIST_SERVER=https://example.invalid
+  install_msrv_case "RUSTUP_UPDATE_ROOT set exits 2 without calling rustup" 2 "" "" no RUSTUP_UPDATE_ROOT=https://example.invalid
+  install_msrv_case "empty RUSTUP_DIST_SERVER exits 2 without calling rustup" 2 "" "" no RUSTUP_DIST_SERVER=
+  install_msrv_case "empty RUSTUP_UPDATE_ROOT exits 2 without calling rustup" 2 "" "" no RUSTUP_UPDATE_ROOT=
 else
-  echo "ok - install-msrv: skipped (cargo, jq or python3 not found)"
+  echo "ok - install-msrv: skipped (cargo, jq or python3 with tomllib not found)"
 fi
 
 echo "# passed: ${passed}, failed: ${failed}"

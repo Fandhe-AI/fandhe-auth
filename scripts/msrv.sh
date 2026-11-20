@@ -26,6 +26,11 @@ fi
 require_cmd cargo || exit 2
 require_cmd jq || exit 2
 require_cmd python3 || exit 2
+# tomllib は Python 3.11 以上の標準ライブラリ。無ければ読めないものとして止める（fail-closed）。
+if ! python3 -I -c 'import tomllib' > /dev/null 2>&1; then
+  echo "error: python3 with tomllib (Python 3.11 or later) is required" >&2
+  exit 2
+fi
 
 # ルートの [workspace.package].rust-version を tomllib で読む。-I は環境変数・カレントのモジュールを読まない。
 # 読めない・文字列でない場合は出力せず非 0 で終わる（stderr は捨て、値を出さない）。

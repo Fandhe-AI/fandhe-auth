@@ -8,7 +8,7 @@
 # 後続のステップへの引き継ぎ: `rustup default` は RUSTUP_TOOLCHAIN や rust-toolchain.toml に負けるため、
 # GitHub Actions では $GITHUB_ENV に RUSTUP_TOOLCHAIN=<版> を書く（環境変数は rust-toolchain.toml より優先される）。
 # あわせて、導入の直後に実際に使われる rustc の版が MSRV と一致することを確かめ、違えば 2 で止める。
-# 配布元: RUSTUP_DIST_SERVER・RUSTUP_UPDATE_ROOT が空でない値で設定されていれば、何も入れずに 2 で止める
+# 配布元: RUSTUP_DIST_SERVER・RUSTUP_UPDATE_ROOT が設定されていれば（空の値も含む）、rustup を呼ばずに 2 で止める
 # （公式の配布元だけを使う条件。.claude/rules/github-actions.md のチェックリスト 9 の例外）。
 # 終了コード: 誤用・環境の誤り（rustup 等が無い・版を読めない・配布元の設定・版の不一致）は 2。rustup の失敗はその終了コード。
 set -euo pipefail
@@ -17,8 +17,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DIR}/lib.sh"
 
 for v in RUSTUP_DIST_SERVER RUSTUP_UPDATE_ROOT; do
-  if [ -n "${!v:-}" ]; then
-    echo "error: ${v} must not be set (only the official rustup distribution is allowed)" >&2
+  if [ -n "${!v+x}" ]; then
+    echo "error: ${v} must not be set, even empty (only the official rustup distribution is allowed)" >&2
     exit 2
   fi
 done
