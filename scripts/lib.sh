@@ -44,3 +44,25 @@ reject_args() {
 log() {
   echo "[$(basename "$0")] $*" >&2
 }
+
+# run_e2e_registration <script-name> <driver-cmd> <test-target>: ドライバ付きの E2E（#[ignore]）の登録試験を流す共通処理。
+# 呼び出し元: scripts/e2e-chrome.sh・scripts/e2e-firefox.sh（コマンド契約の一元化。makefile.md）。
+# 試験の対象は cfg(unix) 限定のため、uname ではなく実行した試験の件数で確かめる。
+# 登録試験が 0 件のまま成功しない（DPOL-30〜32）。
+run_e2e_registration() {
+  local script_name="$1" driver="$2" target="$3" out
+  require_cmd cargo
+  require_cmd "${driver}"
+  require_cmd mktemp
+  require_cmd tee
+  require_cmd grep
+  cd "${ROOT_DIR}"
+  out="$(mktemp)"
+  # shellcheck disable=SC2064 # out は定義済みの値を trap に固定する
+  trap "rm -f '${out}'" EXIT
+  cargo test -p fandhe-auth-e2e-harness --locked --test "${target}" -- --ignored 2>&1 | tee "${out}"
+  if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' "${out}"; then
+    echo "${script_name}: no registration test ran (non-unix target or runner?); failing instead of passing with 0 tests" >&2
+    return 1
+  fi
+}

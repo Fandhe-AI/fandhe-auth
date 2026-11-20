@@ -464,7 +464,11 @@ impl WebDriverSession {
         // chromedriver は文字列、geckodriver は数値で返しうる。両方を受理する。
         match &v {
             Value::String(s) => AuthenticatorId::new(s),
-            Value::Number(n) => AuthenticatorId::new(&n.to_string()),
+            // 負数・小数は authenticator の ID として受理しない（符号なし整数だけ）。
+            Value::Number(n) => n
+                .as_u64()
+                .ok_or_else(failed)
+                .and_then(|u| AuthenticatorId::new(&u.to_string())),
             _ => Err(failed()),
         }
     }

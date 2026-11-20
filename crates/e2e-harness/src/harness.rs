@@ -22,6 +22,8 @@ pub enum E2eErrorKind {
     CommandFailed,
     /// 起動前または停止後のドライバに操作した。
     NotRunning,
+    /// 構成要素が対象とするブラウザが、構成のブラウザと一致しない。起動前に拒否する。
+    BrowserMismatch,
 }
 
 /// ハーネスの誤り。種類と構成要素の種類だけを持ち、秘密値・URL・パス・ポートを載せない（SECR-11・SECR-23）。
@@ -99,6 +101,12 @@ impl E2eHarness {
         for (i, c) in components.iter().enumerate() {
             if components[..i].iter().any(|p| p.kind() == c.kind()) {
                 return Err(E2eError::new(E2eErrorKind::Duplicate, c.kind()));
+            }
+        }
+        // ドライバのブラウザと構成のブラウザが食い違う構成は起動前に拒否する（Chrome の構成に geckodriver 等）。
+        for c in &components {
+            if c.browser().is_some_and(|b| b != browser) {
+                return Err(E2eError::new(E2eErrorKind::BrowserMismatch, c.kind()));
             }
         }
         components.sort_by_key(|c| c.kind().rank());

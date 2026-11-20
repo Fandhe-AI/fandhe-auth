@@ -99,6 +99,32 @@ fn duplicate_kind_is_rejected_before_any_start() {
     assert!(entries(&log).is_empty());
 }
 
+/// 構成のブラウザと食い違うドライバは起動前に拒否され、どれも起動しない。
+#[test]
+fn browser_mismatch_is_rejected_before_any_start() {
+    struct Gecko(Log);
+    impl E2eComponent for Gecko {
+        fn kind(&self) -> E2eComponentKind {
+            E2eComponentKind::BrowserDriver
+        }
+        fn browser(&self) -> Option<Browser> {
+            Some(Browser::Firefox)
+        }
+        fn start(&mut self) -> Result<(), E2eError> {
+            self.0.lock().unwrap().push("start".to_owned());
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), E2eError> {
+            Ok(())
+        }
+    }
+    let log: Log = Log::default();
+    let cfg = config().with(Box::new(Gecko(Arc::clone(&log))));
+    let err = E2eHarness::start(cfg).err().unwrap();
+    assert_eq!(err.kind(), E2eErrorKind::BrowserMismatch);
+    assert!(entries(&log).is_empty());
+}
+
 /// 後ろの起動が失敗すると、起動済みを停止してから誤りが返る。
 #[test]
 fn failed_start_stops_started_components() {

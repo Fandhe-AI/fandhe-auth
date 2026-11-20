@@ -9,6 +9,7 @@
 
 use serde_json::{Value, json};
 
+use crate::browser::Browser;
 use crate::component::{E2eComponent, E2eComponentKind};
 use crate::driver_process::{DriverComponent, DriverConfig, DriverHandle, DriverSpec};
 use crate::harness::E2eError;
@@ -59,6 +60,10 @@ impl ChromeDriverComponent {
 impl E2eComponent for ChromeDriverComponent {
     fn kind(&self) -> E2eComponentKind {
         E2eComponentKind::BrowserDriver
+    }
+
+    fn browser(&self) -> Option<Browser> {
+        Some(Browser::Chrome)
     }
 
     fn start(&mut self) -> Result<(), E2eError> {

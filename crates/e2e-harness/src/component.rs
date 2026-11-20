@@ -2,6 +2,7 @@
 //!
 //! 呼び出し元は [`crate::harness`] だけ。実体は後続の段が [`E2eComponent`] を実装して置く。1/6 では置かない。
 
+use crate::browser::Browser;
 use crate::harness::E2eError;
 
 /// 構成要素の種類。2 種だけ。
@@ -37,6 +38,12 @@ impl E2eComponentKind {
 pub trait E2eComponent {
     /// 種類。
     fn kind(&self) -> E2eComponentKind;
+    /// この構成要素が対象とするブラウザ。ブラウザに結び付く要素（ドライバ）は `Some` を返し、
+    /// [`crate::harness::E2eHarness::start`] が [`crate::harness::E2eConfig`] のブラウザとの一致を起動前に確かめる。
+    /// ブラウザに結び付かない要素（RelyingParty 等）は既定の `None`。
+    fn browser(&self) -> Option<Browser> {
+        None
+    }
     /// 起動する。
     fn start(&mut self) -> Result<(), E2eError>;
     /// 停止する。

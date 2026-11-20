@@ -9,19 +9,4 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
-require_cmd cargo
-require_cmd geckodriver
-require_cmd mktemp
-require_cmd tee
-require_cmd grep
-cd "${ROOT_DIR}"
-
-# firefox_registration.rs は unix 限定（cfg(unix)）。uname はホストの判定で Cargo の対象と一致しないため、実行した試験の件数で確かめる。
-# 登録試験が 0 件のまま成功しない（DPOL-30〜32）。
-out="$(mktemp)"
-trap 'rm -f "${out}"' EXIT
-cargo test -p fandhe-auth-e2e-harness --locked --test firefox_registration -- --ignored 2>&1 | tee "${out}"
-if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' "${out}"; then
-  echo "e2e-firefox: no registration test ran (non-unix target or runner?); failing instead of passing with 0 tests" >&2
-  exit 1
-fi
+run_e2e_registration "e2e-firefox" geckodriver firefox_registration
