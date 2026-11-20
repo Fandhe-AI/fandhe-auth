@@ -28,7 +28,7 @@ cat <<'EOF'
   pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
   it-db       scripts/it-db.sh               ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）
   e2e-chrome  scripts/e2e-chrome.sh          ハーネスの Chrome の E2E（chromedriver 必須・#[ignore] の試験を流す。CI 外）
-  e2e-firefox scripts/e2e-firefox.sh         ハーネスの Firefox の E2E（geckodriver・Firefox 必須・#[ignore] の試験を流す。CI 外）
+  e2e-firefox scripts/e2e-firefox.sh         ハーネスの Firefox の E2E（geckodriver・Firefox 必須（仮想 authenticator のエンドポイントが使える組み合わせ。既定無効の版は失敗する。詳細は scripts/e2e-firefox.sh）・#[ignore] の試験を流す。CI 外）
 
 CI 向けに直接実行するコマンド:
 

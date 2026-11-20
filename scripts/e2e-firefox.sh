@@ -2,6 +2,9 @@
 # ハーネス（crates/e2e-harness）の Firefox の仮想 authenticator の E2E（#[ignore]）を流す（TASK-11 (3/6)）。手で呼ぶ。
 # 呼び出し元: `make e2e-firefox`。CI では流さない（runner のブラウザは前提にしない。TASK-6）。
 # geckodriver と Firefox が無ければ失敗する（黙って飛ばさない。DPOL-30〜32）。結果は〔仮想〕で実機・Safari に数えない（ACPT-7）。
+# 前提: 仮想 authenticator の WebDriver エンドポイントを使える Firefox と geckodriver の組み合わせ（両バイナリの存在だけでは足りない）。
+# 既定でエンドポイントが無効な組み合わせ（例: Firefox 122 と geckodriver 0.34.0）では、softtoken・usbtoken の pref を切り替えても
+# 有効にならず、登録操作の前に失敗する。有効にする設定と対応する版の組み合わせは人が確かめる（PoC-3 の値。要件の値ではない）。
 # 前提: unix（Linux・macOS 等。geckodriver をプロセスグループで起動・停止するため）。
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,4 +12,5 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
+log "requires a Firefox + geckodriver pair whose WebDriver virtual authenticator endpoints are enabled; see the header of this script"
 run_e2e_registration "e2e-firefox" geckodriver firefox_registration
