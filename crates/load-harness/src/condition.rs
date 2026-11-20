@@ -99,8 +99,9 @@ pub trait MachineProbe {
 ///
 /// - `cpu_count`: `available_parallelism`。affinity・cgroup の上限が効く「使える並列数」で、物理 CPU 数ではない。
 /// - `memory_mib`: Linux だけ `/proc/meminfo` の `MemTotal`。コンテナでは cgroup の上限ではなくホストの総量が出る。
-/// - `arch`・`os_family`: `std::env::consts` の `ARCH`・`OS` を検査せずそのまま返す。語彙の外の値は
-///   [`MachineCondition::detect_with`] が誤りにする（`None` は取得できなかったときだけ）。
+/// - `arch`・`os_family`: `std::env::consts` の `ARCH`・`OS` を返す。std が特定できないときの `unknown`
+///   （`wasm32-unknown-unknown` の OS 等）は取得不能の `None` にする。それ以外は検査せず返し、語彙の外の値は
+///   [`MachineCondition::detect_with`] が誤りにする。
 /// - `virtualization`: 判別の方法が未決のため常に `Unknown`。
 /// - `build_profile`: 実行時にプロファイルを確かめる手段が無い（`debug_assertions` はプロファイルの設定で上書きされ誤記録になる）ため
 ///   常に `Unknown`。確かな値は呼び出し元が [`MachineCondition::new`] で明示する。
@@ -119,11 +120,11 @@ impl MachineProbe for StdMachineProbe {
     }
 
     fn arch(&self) -> Option<String> {
-        Some(std::env::consts::ARCH.to_owned())
+        std_value(std::env::consts::ARCH)
     }
 
     fn os_family(&self) -> Option<String> {
-        Some(std::env::consts::OS.to_owned())
+        std_value(std::env::consts::OS)
     }
 
     fn virtualization(&self) -> Virtualization {
@@ -135,6 +136,12 @@ impl MachineProbe for StdMachineProbe {
     }
 }
 
+/// 標準の取得元が返す `unknown`（特定できない）を取得不能の `None` にする。任意の取得元の値には使わない
+/// （そちらは許可語彙の検査を通す）。
+fn std_value(v: &str) -> Option<String> {
+    (v != "unknown").then(|| v.to_owned())
+}
+
 /// `/proc/meminfo` から読む量の上限（仮置き。読みすぎない・中身を抱えない）。
 #[cfg(target_os = "linux")]
 const MEMINFO_READ_LIMIT: u64 = 64 * 1024;
@@ -143,16 +150,27 @@ const MEMINFO_READ_LIMIT: u64 = 64 * 1024;
 fn read_mem_total_mib() -> Option<u64> {
     use std::io::Read;
     let file = std::fs::File::open("/proc/meminfo").ok()?;
-    let mut buf = String::new();
-    file.take(MEMINFO_READ_LIMIT)
-        .read_to_string(&mut buf)
-        .ok()?;
-    parse_mem_total_mib(&buf)
+    let mut buf = Vec::new();
+    file.take(MEMINFO_READ_LIMIT).read_to_end(&mut buf).ok()?;
+    let truncated = u64::try_from(buf.len()).ok()? >= MEMINFO_READ_LIMIT;
+    parse_mem_total_bounded(&buf, truncated)
 }
 
 #[cfg(not(target_os = "linux"))]
 fn read_mem_total_mib() -> Option<u64> {
     None
+}
+
+/// 読み取りの上限で途切れていた（`truncated`）ときは、改行まで読めた行だけを解析する（途切れた末尾の断片は捨てる）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn parse_mem_total_bounded(bytes: &[u8], truncated: bool) -> Option<u64> {
+    let bytes = if truncated {
+        let end = bytes.iter().rposition(|b| *b == b'\n')?;
+        &bytes[..=end]
+    } else {
+        bytes
+    };
+    parse_mem_total_mib(std::str::from_utf8(bytes).ok()?)
 }
 
 /// `MemTotal:` の行の kB を MiB（整数除算）にする。形の外れはすべて `None`。
@@ -505,7 +523,7 @@ impl fmt::Display for MeasurementConditions {
 mod tests {
     use super::{
         ARCH_VOCAB, BuildProfile, ConditionError, MachineCondition, MachineProbe, OS_VOCAB,
-        Virtualization, parse_mem_total_mib,
+        Virtualization, parse_mem_total_bounded, parse_mem_total_mib, std_value,
     };
 
     struct RawProbe(Option<String>, Option<String>);
@@ -591,5 +609,39 @@ mod tests {
         assert_eq!(parse_mem_total_mib("MemTotal: 10 MB\n"), None);
         assert_eq!(parse_mem_total_mib("MemTotal: 10\n"), None);
         assert_eq!(parse_mem_total_mib("MemTotal: 10 kB extra\n"), None);
+    }
+
+    #[test]
+    fn std_unknown_becomes_unobtained_but_other_values_pass() {
+        assert_eq!(std_value("unknown"), None);
+        assert_eq!(std_value("linux"), Some("linux".to_owned()));
+        // 標準の取得元の変換後は、記録が作れる（P1）。
+        let os = std_value("unknown");
+        assert!(MachineCondition::detect_with(&RawProbe(None, os)).is_ok());
+        // 任意の取得元の `unknown` は語彙の外のまま拒否する。
+        assert_eq!(
+            MachineCondition::detect_with(&RawProbe(None, Some("unknown".to_owned()))),
+            Err(ConditionError::InvalidMachineValue)
+        );
+    }
+
+    #[test]
+    fn truncated_read_uses_only_complete_lines() {
+        // 上限で `kB` の直後に途切れた行（続きに余分なトークンがあり得る）は有効にしない。
+        assert_eq!(
+            parse_mem_total_bounded(b"Foo: 1 kB\nMemTotal: 16384 kB", true),
+            None
+        );
+        // 改行まで読めた行は使える。
+        assert_eq!(
+            parse_mem_total_bounded(b"MemTotal: 16384 kB\nBar: 2 k", true),
+            Some(16)
+        );
+        // 途切れていなければ従来どおり、末尾の改行なしも解析する。
+        assert_eq!(
+            parse_mem_total_bounded(b"MemTotal: 16384 kB", false),
+            Some(16)
+        );
+        assert_eq!(parse_mem_total_bounded(&[0xff, 0xfe], false), None);
     }
 }

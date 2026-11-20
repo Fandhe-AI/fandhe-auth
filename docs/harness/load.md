@@ -312,14 +312,20 @@ judgment:
 
 ## 機材と構成の記録（7/10）
 
-`TASK-12` の 7/10（#118）。`crates/load-harness` の `condition` に、測定の条件を人の手入力なしで記録の行に出す部品を置いた。
+`TASK-12` の 7/10（#118）。`crates/load-harness` の `condition` に、測定の条件を記録の行に出す部品を置いた。
 名前・語・値はすべて仮置きで、人が確認する。合否は付けない（`ACPT-7`）。
+
+- 自動で取得するのは機材の属性（6 属性）だけ。構成と負荷の型は取得せず、呼び出し元が渡す入力である。
+  - 構成: 起動した構成要素の（種類, stub の印）の組を `ComponentConditions::new` に渡す。組は呼び出し元が it-harness の起動済みの構成
+    （`RunningHarness::composition_record()` の各 entry の種類と stub の印）から写して作る。写しは自動ではない。
+    渡さなかった種類は `not_started` で出る（起動していないのか渡し忘れかは出力から区別できない）。
+  - 負荷の型: 呼び出し元が `LoopModel` を渡す（`MeasurementConditions::detect(components, loop_model)`）。
 
 - API: `MeasurementConditions`（機材・構成・負荷の型。`detect` が機材を自動で取得）、`MachineCondition`（`detect_with`・`detect`・`new`）、
   `MachineProbe`・`StdMachineProbe`、`ComponentConditions`（`new` が重複と stub の印の食い違いを誤りにする）、`ConditionComponent`、`ConditionError`。
   `Display` は形式の 5 の行（`condition_machine` 6 行・`condition_component` 4 行・stub があるときだけ `note:`・`condition_loop`）を出す。
 - 取得元: `cpu_count` は `available_parallelism`（使える並列数。物理 CPU 数ではない）、`memory_mib` は Linux の `/proc/meminfo` の `MemTotal`
-  （固定パス・64 KiB の上限・整数だけ。コンテナではホストの総量）、`arch`・`os_family` は `std::env::consts`（`arch` の許可語彙は `arm64ec`〔Windows ARM64EC〕を含む）、`build_profile` は確かめる手段が無いため常に `unknown`（`debug_assertions` はプロファイルで上書きされ誤記録になる。確かな値は `new` で明示）。
+  （固定パス・64 KiB の上限・整数だけ。上限で途切れたときは改行まで読めた行だけを解析する。コンテナではホストの総量）、`arch`・`os_family` は `std::env::consts`（std が特定できない `unknown` は取得不能の `None` にして `unknown` と出す。`arch` の許可語彙は `arm64ec`〔Windows ARM64EC〕を含む）、`build_profile` は確かめる手段が無いため常に `unknown`（`debug_assertions` はプロファイルで上書きされ誤記録になる。確かな値は `new` で明示）。
   `virtualization` は判別の方法が未決のため常に `unknown`。
 - 取れない（`None`）値は `unknown`。`arch`・`os_family` は固定の許可語彙だけを受け、語彙の外の値は `detect_with`・`detect`・`new` のどれでも `InvalidMachineValue` の誤りで返す（`unknown` に置き換えない）。ホスト名・機材の名前・パスは取得も記録もしない。
 - 条件は記録の単位で 1 つ持ち、`TargetRun`・`LoadRun` には入れない（8/10 の段階を変える実行で重複しないため）。構成は呼び出し元が起動したものを明示で渡し、渡さない種類は `not_started`。
