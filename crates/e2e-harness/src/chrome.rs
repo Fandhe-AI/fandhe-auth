@@ -177,7 +177,12 @@ impl ChromeDriverComponent {
             // chromedriver が配下の Chrome を残しても、同じグループごと止める。
             // 送信に失敗したら配下の終了を確かめられないので、`StopFailed` にする（グループが既に無い場合は成功）。
             if kill_group(child.id()).is_err() {
-                result = Err(err(E2eErrorKind::StopFailed));
+                // グループへ送れなかった。子（グループの先頭）は回収せず所有を保ち、stop()・Drop で再試行できるようにする
+                // （回収するとグループ ID を失い、残った配下を止められないまま次の stop() が Ok を返してしまう）。
+                // 先頭は止めておく（止めるだけで回収しない）。
+                let _ = child.kill();
+                self.child = Some(child);
+                return Err(err(E2eErrorKind::StopFailed));
             }
             let _ = child.kill();
             if wait_until(&mut child, STOP_TIMEOUT).is_err() {
@@ -393,13 +398,9 @@ mod tests {
     }
 
     #[test]
-    fn kill_group_of_a_vanished_group_is_ok_and_live_group_is_killed() {
-        // 終了・回収済みのグループ（ESRCH）は成功。
-        let mut gone = Command::new("true").process_group(0).spawn().unwrap();
-        let pgid = gone.id();
-        gone.wait().unwrap();
-        assert!(kill_group(pgid).is_ok());
-        // 生きているグループは止まる。
+    fn kill_group_kills_a_live_group_that_this_test_owns() {
+        // 回収済みの PGID へは送らない（PGID の再利用で無関係なグループを止めない）。消失の分岐は
+        // `classify_kill` の試験で確かめ、実シグナルは所有中の子のグループだけに送る。
         let mut live = Command::new("sleep")
             .arg("30")
             .process_group(0)

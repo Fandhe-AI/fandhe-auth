@@ -264,6 +264,7 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
             && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
         {
             header_end = Some(pos + 4);
+            validate_head(&buf[..pos])?;
             content_length = content_length_of(&buf[..pos])?;
             // 上限を超える Content-Length は読む前に拒否する（end + cl の overflow も防ぐ）。
             if content_length.is_some_and(|cl| cl > MAX_RESPONSE_BYTES) {
@@ -302,6 +303,25 @@ fn parse_status_line(head: &[u8]) -> Result<u16, E2eError> {
         return Err(failed());
     }
     code.parse::<u16>().map_err(|_| failed())
+}
+
+/// ヘッダー部の構文を一度だけ検証する。行は CRLF だけで区切り（裸の CR・LF を含む行は誤り）、
+/// 2 行目以降は名前が空でない `名前: 値` の形に限る。解釈できない行を読み飛ばして `Content-Length` を
+/// 見落とすことがないようにする（fail-closed）。
+fn validate_head(head: &[u8]) -> Result<(), E2eError> {
+    let text = std::str::from_utf8(head).map_err(|_| failed())?;
+    for (i, line) in text.split("\r\n").enumerate() {
+        if line.contains(['\r', '\n']) {
+            return Err(failed());
+        }
+        if i > 0 {
+            match line.split_once(':') {
+                Some((name, _)) if !name.trim().is_empty() => {}
+                _ => return Err(failed()),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `Content-Length` を読む。複数あって値が食い違えば誤り。数字以外（`+`・`0x` 等）も誤り。

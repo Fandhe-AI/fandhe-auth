@@ -362,3 +362,23 @@ fn non_digit_content_length_is_rejected() {
         let _ = h.join();
     }
 }
+
+#[test]
+fn malformed_header_lines_are_rejected() {
+    // 前提: 改行形式の混在・コロンの無い行・空の名前のヘッダー行を含む応答（長さ指定は見落とされ得る形）。
+    // 期待: ヘッダーの構文を検証し、EOF まで読んだ JSON を成功にせず CommandFailed。
+    for headers in [
+        "Content-Type: x\nContent-Length: 12",
+        "not-a-header",
+        ": empty-name",
+        "Content-Length: 12\nX: y",
+    ] {
+        let resp =
+            format!("HTTP/1.1 200 OK\r\n{headers}\r\nConnection: close\r\n\r\n{{\"value\":{{}}}}")
+                .into_bytes();
+        let (port, h, _) = fake_driver(resp);
+        let e = client(port).status().unwrap_err();
+        assert_eq!(e.kind(), E2eErrorKind::CommandFailed, "{headers:?}");
+        h.join().unwrap();
+    }
+}
