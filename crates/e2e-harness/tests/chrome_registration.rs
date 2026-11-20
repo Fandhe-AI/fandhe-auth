@@ -8,9 +8,9 @@
 mod support;
 
 use std::io::Write;
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use fandhe_auth_e2e_harness::{
@@ -64,19 +64,54 @@ fn registers_one_passkey_with_chrome_virtual_authenticator() {
 }
 
 /// 接続を 1 件受けるたびに 204 を返して数える待ち受け（対照用。応答しないとページの load が終わらない）。
-fn counting_server(listener: TcpListener) -> Arc<AtomicUsize> {
-    let count = Arc::new(AtomicUsize::new(0));
-    let c = Arc::clone(&count);
-    std::thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { return };
-            c.fetch_add(1, Ordering::SeqCst);
-            let _ = s.write_all(
-                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
+/// スコープの終了（`Drop`）で受け付けのスレッドを止めて join し、ポートを残さない（`TestOrigin` と同じ）。
+struct CountingServer {
+    count: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    port: u16,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CountingServer {
+    fn start(listener: TcpListener) -> Self {
+        let port = listener.local_addr().expect("addr").port();
+        let count = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (c, st) = (Arc::clone(&count), Arc::clone(&stop));
+        let thread = std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                if st.load(Ordering::SeqCst) {
+                    return;
+                }
+                let Ok(mut s) = conn else { return };
+                c.fetch_add(1, Ordering::SeqCst);
+                let _ = s.write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        Self {
+            count,
+            stop,
+            port,
+            thread: Some(thread),
         }
-    });
-    count
+    }
+
+    fn hits(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for CountingServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // accept を起こしてループを抜ける。
+        let _ = TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)));
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 /// 待ち受けを nonblocking にし、`wait` の間に接続が 1 件でも来たか。
@@ -101,7 +136,7 @@ fn chrome_never_connects_to_a_loopback_port_that_is_not_registered() {
     let allowed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
     let fport = forbidden.local_addr().expect("addr").port();
     let aport = allowed.local_addr().expect("addr").port();
-    let allowed_hits = counting_server(allowed);
+    let allowed_server = CountingServer::start(allowed);
 
     let page = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>e2e</title></head><body>\
@@ -123,7 +158,7 @@ fn chrome_never_connects_to_a_loopback_port_that_is_not_registered() {
     handle.navigate(&origin.origin()).expect("navigate");
 
     assert!(
-        allowed_hits.load(Ordering::SeqCst) > 0,
+        allowed_server.hits() > 0,
         "control: the registered port must receive the subresource request"
     );
     assert!(

@@ -31,7 +31,8 @@ use crate::component::{E2eComponent, E2eComponentKind};
 use crate::harness::{E2eError, E2eErrorKind};
 use crate::virtual_authenticator::VirtualAuthenticatorOptions;
 use crate::webdriver::{
-    AuthenticatorId, CredentialSummary, WebDriverClient, WebDriverSession, deadline_after,
+    AliveGuard, AuthenticatorId, CredentialSummary, WebDriverClient, WebDriverSession,
+    deadline_after,
 };
 
 fn err(kind: E2eErrorKind) -> E2eError {
@@ -183,7 +184,7 @@ struct Live {
 pub struct ChromeHandle {
     live: Arc<Mutex<Option<Live>>>,
     /// 起動したドライバの子プロセス。命令の前に生きていることを確かめ、終了後に再利用されたポートへ送らない（A10）。
-    driver: Arc<Mutex<Option<Child>>>,
+    driver: Arc<Mutex<Option<Driver>>>,
     allowed_origins: Arc<Vec<String>>,
 }
 
@@ -219,10 +220,12 @@ impl ChromeHandle {
     }
 
     /// 動いているか（使用不可にされたセッションは動いていないものとして扱う）。
+    /// ドライバが終了していれば動いていない（子の所有は手放さず、回収と後片付けは停止処理が行う）。
     pub fn is_running(&self) -> bool {
         self.live
             .lock()
             .is_ok_and(|g| g.as_ref().is_some_and(|l| !l.unusable))
+            && driver_is_alive(&self.driver)
     }
 
     /// ブラウザの版（実行の記録用。記録の形は 5/6）。
@@ -305,7 +308,7 @@ pub struct ChromeDriverComponent {
     config: ChromeDriverConfig,
     handle: ChromeHandle,
     /// ドライバの子プロセス（ハンドルと共有する。回収を確かめるまで保持する）。
-    driver: Arc<Mutex<Option<Child>>>,
+    driver: Arc<Mutex<Option<Driver>>>,
     /// Chrome の一時領域（ハーネスが作り、プロセスの回収後にセッション ID に依らず消す）。
     profile_dir: Option<PathBuf>,
 }
@@ -351,8 +354,8 @@ impl ChromeDriverComponent {
         let reaped = {
             let mut g = lock_driver(&self.driver);
             match g.as_mut() {
-                Some(child) => {
-                    if kill_group_and_reap(child).is_ok() {
+                Some(d) => {
+                    if kill_group_and_reap(d).is_ok() {
                         *g = None;
                         true
                     } else {
@@ -375,6 +378,12 @@ impl ChromeDriverComponent {
         result
     }
 
+    /// 接続の後・送信の前にドライバの子の生存を確かめる関数（A10）。
+    fn alive_guard(&self) -> AliveGuard {
+        let driver = Arc::clone(&self.driver);
+        AliveGuard::new(move || driver_is_alive(&driver))
+    }
+
     fn try_start(&mut self) -> Result<(), E2eError> {
         let fail = || err(E2eErrorKind::StartFailed);
         let deadline = deadline_after(self.config.ready_timeout).map_err(|_| fail())?;
@@ -389,7 +398,10 @@ impl ChromeDriverComponent {
             .spawn()
             .map_err(|_| fail())?;
         let stdout = child.stdout.take();
-        *lock_driver(&self.driver) = Some(child);
+        *lock_driver(&self.driver) = Some(Driver {
+            child,
+            exited: false,
+        });
         let profile = make_profile_dir().map_err(|_| fail())?;
         self.profile_dir = Some(profile.clone());
         let stdout = stdout.ok_or_else(fail)?;
@@ -407,24 +419,15 @@ impl ChromeDriverComponent {
                 .filter(|d| !d.is_zero())
                 .ok_or_else(fail)?;
             // 各 probe は残り時間を超えない。
-            let client = WebDriverClient::new(port, self.config.command_timeout.min(left));
+            let client = WebDriverClient::new(port, self.config.command_timeout.min(left))
+                .with_alive_guard(self.alive_guard());
             if client.is_ready() && Instant::now() < deadline {
                 break;
             }
-            // 子が先に終わっていたら、ここで回収済みになる。セッション前なので Chrome は居らず、
-            // グループへの signal は不要（回収後の PID を signal の宛先にしない）。
-            {
-                let mut g = lock_driver(&self.driver);
-                match g.as_mut().map(Child::try_wait) {
-                    Some(Ok(None)) => {}
-                    // 回収済み。宛先にする PID が無いので子を手放す。
-                    Some(Ok(Some(_))) => {
-                        *g = None;
-                        return Err(fail());
-                    }
-                    // 状態を取れない。子は残し、呼び出し元の teardown に任せる。
-                    _ => return Err(fail()),
-                }
+            // 子が先に終わっていたら終了済みと記録する。子は手放さず、グループへの終了通知と一時領域の
+            // 削除は呼び出し元の teardown が行う（所有権はグループの kill が済むまで保持する）。
+            if !driver_is_alive(&self.driver) {
+                return Err(fail());
             }
             let left = deadline
                 .checked_duration_since(Instant::now())
@@ -432,7 +435,8 @@ impl ChromeDriverComponent {
                 .ok_or_else(fail)?;
             sleep(Duration::from_millis(100).min(left));
         }
-        let client = WebDriverClient::new(port, self.config.command_timeout);
+        let client = WebDriverClient::new(port, self.config.command_timeout)
+            .with_alive_guard(self.alive_guard());
         let (session, browser_version) = client
             .new_session(&new_session_request_with_profile(
                 &self.config.allowed_origins,
@@ -449,24 +453,35 @@ impl ChromeDriverComponent {
     }
 }
 
+/// ドライバの子と、その終了を観測したか。終了を観測しても子は手放さない（Chrome が残り得るので、
+/// プロセスグループへの終了通知が済むまで所有を保持する）。
+struct Driver {
+    child: Child,
+    exited: bool,
+}
+
 /// ドライバの子の保持先を取る。毒された lock でも中身を使う（後片付けを止めない）。
-fn lock_driver(driver: &Mutex<Option<Child>>) -> std::sync::MutexGuard<'_, Option<Child>> {
+fn lock_driver(driver: &Mutex<Option<Driver>>) -> std::sync::MutexGuard<'_, Option<Driver>> {
     driver
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// 所有するドライバの子がまだ動いているか。終了を観測した・状態を取れない・子が無いときは `false`。
-/// 終了を観測したら回収済みなので子を手放す（回収後の PID を signal の宛先にしない）。
-fn driver_is_alive(driver: &Mutex<Option<Child>>) -> bool {
+/// 終了の検知だけで、子の保持は変えない（所有権・グループへの終了通知は失わせない）。
+fn driver_is_alive(driver: &Mutex<Option<Driver>>) -> bool {
     let mut g = lock_driver(driver);
-    match g.as_mut().map(Child::try_wait) {
-        Some(Ok(None)) => true,
-        Some(Ok(Some(_))) => {
-            *g = None;
+    let Some(d) = g.as_mut() else { return false };
+    if d.exited {
+        return false;
+    }
+    match d.child.try_wait() {
+        Ok(None) => true,
+        Ok(Some(_)) => {
+            d.exited = true;
             false
         }
-        _ => false,
+        Err(_) => false,
     }
 }
 
@@ -555,12 +570,19 @@ fn send_signal(sig: &str, group: &str) -> std::io::Result<()> {
 /// （回収済みの PID を宛先にしない）。Chrome の一時領域は回収後にハーネスが消すため、SIGTERM の猶予は置かない。
 /// グループへの signal が失敗したら、子自身は止めるが回収しない（PID を確保したままにし、呼び出し元が子を保持して再試行できる。
 /// 回収すると、残った Chrome のグループの PID が再利用され得る）。
-fn kill_group_and_reap(child: &mut Child) -> std::io::Result<()> {
-    let group = format!("-{}", child.id());
+///
+/// 子の終了を既に観測している（`exited`）ときは回収済みで、配下の Chrome にだけグループの signal を送る。
+/// グループが空なら signal は失敗するが、その区別を付けられないため成功として扱う（残る Chrome が居れば
+/// グループ ID は再利用されない）。
+fn kill_group_and_reap(d: &mut Driver) -> std::io::Result<()> {
+    let group = format!("-{}", d.child.id());
     let sent = send_signal("-KILL", &group);
-    let _ = child.kill();
+    if d.exited {
+        return Ok(());
+    }
+    let _ = d.child.kill();
     sent?;
-    child.wait().map(|_| ())
+    d.child.wait().map(|_| ())
 }
 
 impl E2eComponent for ChromeDriverComponent {

@@ -13,6 +13,7 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -104,11 +105,71 @@ pub struct CredentialSummary {
     pub is_resident: bool,
 }
 
-/// ドライバ 1 つへの接続先。ポートだけを持つ。crate 内でだけ使う。
-#[derive(Debug, Clone, Copy)]
+/// 接続の確立後・送信の前に、宛先のポートを持つドライバの子がまだ生きているかを確かめる関数。
+/// ポートの再利用で別のプロセスへ命令を送らないための確認（A10）。接続の後に確かめるので、
+/// 確かめた時点で子が生きていれば、いま繋がった待ち受けは子のものである。
+#[derive(Clone)]
+pub(crate) struct AliveGuard(Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl AliveGuard {
+    pub(crate) fn new(f: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+}
+
+impl std::fmt::Debug for AliveGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AliveGuard")
+    }
+}
+
+/// ドライバ 1 つへの接続先。ポートと（あれば）生存の確認を持つ。crate 内でだけ使う。
+#[derive(Debug, Clone)]
 pub(crate) struct WebDriverClient {
     port: u16,
     timeout: Duration,
+    alive: Option<AliveGuard>,
+}
+
+/// `"privateKey":"<値>"` の値の部分を、長さを保ったまま `0` で上書きする（SECR-10・SECR-29）。
+/// 応答を JSON へ展開する前に呼び、秘密鍵の値を値の木・戻り値に入れない。値に `\` を含む・閉じが無い形は
+/// 想定外の形として誤りにする（fail-closed。base64 の値は引用符・`\` を含まない）。
+fn blank_private_keys(buf: &mut [u8]) -> Result<(), E2eError> {
+    const KEY: &[u8] = b"\"privateKey\"";
+    let mut i = 0;
+    while let Some(off) = buf[i..].windows(KEY.len()).position(|w| w == KEY) {
+        let mut j = i + off + KEY.len();
+        let skip_ws = |buf: &[u8], mut k: usize| {
+            while k < buf.len() && matches!(buf[k], b' ' | b'\t' | b'\r' | b'\n') {
+                k += 1;
+            }
+            k
+        };
+        j = skip_ws(buf, j);
+        if buf.get(j) != Some(&b':') {
+            // 文字列の中の語など（キーではない）。次を探す。
+            i = j.max(i + off + 1);
+            continue;
+        }
+        j = skip_ws(buf, j + 1);
+        if buf.get(j) != Some(&b'"') {
+            return Err(failed());
+        }
+        j += 1;
+        let start = j;
+        while j < buf.len() && buf[j] != b'"' {
+            if buf[j] == b'\\' {
+                return Err(failed());
+            }
+            j += 1;
+        }
+        if j >= buf.len() {
+            return Err(failed());
+        }
+        buf[start..j].fill(b'0');
+        i = j;
+    }
+    Ok(())
 }
 
 /// 期限までに `bytes` をすべて書く。部分書き込みのたびに残り時間を取り直す。
@@ -134,7 +195,18 @@ fn write_all_deadline(
 impl WebDriverClient {
     /// loopback の `port` へ向ける。`timeout` は 1 命令（接続・書き込み・応答の読み取りの全体）の期限に使う。
     pub(crate) fn new(port: u16, timeout: Duration) -> Self {
-        Self { port, timeout }
+        Self {
+            port,
+            timeout,
+            alive: None,
+        }
+    }
+
+    /// 接続の後・送信の前に確かめる生存の確認を付ける（A10）。
+    #[must_use]
+    pub(crate) fn with_alive_guard(mut self, guard: AliveGuard) -> Self {
+        self.alive = Some(guard);
+        self
     }
 
     /// 1 命令を送り、応答の `value` を返す。WebDriver の誤り応答・非 2xx・形の不一致は `CommandFailed`。
@@ -143,6 +215,26 @@ impl WebDriverClient {
         method: Method,
         path: &str,
         body: Option<&Value>,
+    ) -> Result<Value, E2eError> {
+        self.request_inner(method, path, body, false)
+    }
+
+    /// `request` と同じ。応答の `privateKey` の値を展開の前に潰す（credential の取得だけが使う）。
+    fn request_redacted(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, E2eError> {
+        self.request_inner(method, path, body, true)
+    }
+
+    fn request_inner(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        redact_private_key: bool,
     ) -> Result<Value, E2eError> {
         let path = validated_path(path)?;
         let payload = match body {
@@ -154,6 +246,12 @@ impl WebDriverClient {
         let deadline = deadline_after(self.timeout)?;
         let mut stream =
             TcpStream::connect_timeout(&addr, remaining(deadline)?).map_err(|_| failed())?;
+        // 接続の後に子の生存を確かめる。生きていれば繋がった先は子の待ち受けで、ポートの再利用先ではない（A10）。
+        if let Some(g) = &self.alive
+            && !(g.0)()
+        {
+            return Err(failed());
+        }
         let mut message = format!(
             "{} {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             method.as_str(),
@@ -163,7 +261,7 @@ impl WebDriverClient {
         .into_bytes();
         message.extend_from_slice(&payload);
         write_all_deadline(&mut stream, &message, deadline)?;
-        parse_response(&mut stream, deadline)
+        parse_response(&mut stream, deadline, redact_private_key)
     }
 
     /// `GET /status` の `ready` が真か。
@@ -191,7 +289,7 @@ impl WebDriverClient {
             .to_owned();
         Ok((
             WebDriverSession {
-                client: *self,
+                client: self.clone(),
                 id: validated_id(id)?,
             },
             version,
@@ -286,7 +384,11 @@ fn parse_head(head: &[u8]) -> Result<Head, E2eError> {
 }
 
 /// 応答を読んで `value` を返す。Content-Length が分かればその分で止め、無ければ EOF まで読む。
-fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2eError> {
+fn parse_response(
+    stream: &mut TcpStream,
+    deadline: Instant,
+    redact_private_key: bool,
+) -> Result<Value, E2eError> {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut head: Option<(usize, Head)> = None;
@@ -347,6 +449,9 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
     }
     // 結果を受理する時点でも絶対期限を確かめる。期限を過ぎた応答は成功にしない。
     remaining(deadline)?;
+    if redact_private_key {
+        blank_private_keys(&mut buf[end..])?;
+    }
     let body = &buf[end..];
     let body = match head.content_length {
         // 宣言より多い・少ない本文は曖昧なフレーミングとして拒否する。
@@ -359,6 +464,8 @@ fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2
     if !(200..300).contains(&head.status) || value.get("error").is_some_and(Value::is_string) {
         return Err(failed());
     }
+    // 復号・展開に時間がかかった場合も、成功を返す直前に絶対期限を確かめる。
+    remaining(deadline)?;
     Ok(value)
 }
 
@@ -437,7 +544,7 @@ impl WebDriverSession {
         &self,
         id: &AuthenticatorId,
     ) -> Result<Vec<CredentialSummary>, E2eError> {
-        let v = self.client.request(
+        let v = self.client.request_redacted(
             Method::Get,
             &self.path(&format!("/webauthn/authenticator/{}/credentials", id.0)),
             None,

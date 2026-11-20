@@ -318,3 +318,19 @@ fn credentials_returns_only_summary_fields() {
     assert!(!format!("{creds:?}").contains("PK"));
     h.join().unwrap();
 }
+
+#[test]
+fn private_key_values_are_blanked_before_parsing() {
+    use super::blank_private_keys;
+    let mut b = br#"[{"rpId":"x","privateKey" : "QUJDRA==","isResidentCredential":true}]"#.to_vec();
+    blank_private_keys(&mut b).unwrap();
+    let t = String::from_utf8(b).unwrap();
+    assert!(!t.contains("QUJDRA"));
+    assert!(t.contains("\"rpId\":\"x\""));
+    assert!(serde_json::from_str::<serde_json::Value>(&t).is_ok());
+    // 想定外の形（エスケープ・閉じ無し）は誤り。
+    let mut bad = br#"{"privateKey":"a\"b"}"#.to_vec();
+    assert!(blank_private_keys(&mut bad).is_err());
+    let mut open = br#"{"privateKey":"abc"#.to_vec();
+    assert!(blank_private_keys(&mut open).is_err());
+}
