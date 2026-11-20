@@ -313,3 +313,159 @@ fn delay_applies_to_open_connection_with_traffic_in_flight() {
     assert!(t.elapsed() >= Duration::from_millis(250));
     p.release_delay(&mut tl).unwrap();
 }
+
+/// 受けたバイト数を数える上流（返さない）。
+fn counting_upstream() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = l.local_addr().unwrap().port();
+    let n = Arc::new(AtomicUsize::new(0));
+    let n2 = Arc::clone(&n);
+    thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let n = Arc::clone(&n2);
+            thread::spawn(move || {
+                let mut s = s;
+                let mut b = [0u8; 1024];
+                while let Ok(k) = s.read(&mut b) {
+                    if k == 0 {
+                        break;
+                    }
+                    n.fetch_add(k, Ordering::SeqCst);
+                }
+            });
+        }
+    });
+    (port, n)
+}
+
+/// ORST-17・#5983: `block()` が戻った後は、開いていた接続から上流へ新しい塊が届かない。
+/// 戻る前に送った分は下限として数え、戻った後の増加だけを見る。
+#[test]
+fn no_client_bytes_reach_upstream_after_block_returns() {
+    use std::sync::atomic::Ordering;
+    let (up, count) = counting_upstream();
+    let mut p = DbFaultProxy::start_to_port(up).unwrap();
+    let mut tl = timeline();
+    let mut c = connect(p.listen_port());
+    c.write_all(b"before").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while count.load(Ordering::SeqCst) < 6 {
+        assert!(Instant::now() < deadline, "first chunk never arrived");
+        thread::sleep(Duration::from_millis(5));
+    }
+    p.block(&mut tl).unwrap();
+    // 戻った後の転送器は上流へ書かない。カーネルの送信バッファに入っていた分は届き得るので、少し待ってから控える。
+    thread::sleep(Duration::from_millis(100));
+    let settled = count.load(Ordering::SeqCst);
+    for _ in 0..20 {
+        if c.write_all(b"after").is_err() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(count.load(Ordering::SeqCst), settled, "bytes after block");
+    let mut buf = [0u8; 8];
+    match c.read(&mut buf) {
+        Ok(0) => {}
+        Ok(_) => panic!("unexpected data"),
+        Err(e) => assert_eq!(classify(&e), Outcome::Disconnected),
+    }
+    p.release_block(&mut tl).unwrap();
+}
+
+/// ORST-17・#5983: 上流が書き続ける接続は、`block()` の後に期限の中で切断に至る（client 向き）。
+/// バッファに既に入っていた分のバイト数は問わない。
+#[test]
+fn streaming_conn_ends_after_block_returns() {
+    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let up = l.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            thread::spawn(move || {
+                let mut s = s;
+                while s.write_all(&[0u8; 512]).is_ok() {
+                    thread::sleep(Duration::from_millis(2));
+                }
+            });
+        }
+    });
+    let mut p = DbFaultProxy::start_to_port(up).unwrap();
+    let mut tl = timeline();
+    let mut c = connect(p.listen_port());
+    let mut buf = [0u8; 512];
+    c.read_exact(&mut buf).unwrap();
+    p.block(&mut tl).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match c.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => assert!(Instant::now() < deadline, "still streaming after block"),
+            Err(e) => {
+                assert_eq!(classify(&e), Outcome::Disconnected);
+                break;
+            }
+        }
+    }
+}
+
+/// #5983: `Applied`・`Released` の `offset_ms` は、呼び出しが戻る時刻より後にならない（下限の契約）。
+#[test]
+fn recorded_offsets_are_not_after_call_return() {
+    let mut p = DbFaultProxy::start_to_port(echo_upstream()).unwrap();
+    let start = Instant::now();
+    let mut tl = FaultTimeline::start(start, t0()).unwrap();
+    p.block(&mut tl).unwrap();
+    let after_block = start.elapsed().as_millis() as u64;
+    p.release_block(&mut tl).unwrap();
+    let after_release = start.elapsed().as_millis() as u64;
+    let text = finish(tl).to_string();
+    let offsets: Vec<u64> = text
+        .lines()
+        .filter(|l| l.starts_with("injection:"))
+        .map(|l| {
+            l.split("offset_ms=")
+                .nth(1)
+                .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|n| n.parse().ok())
+                .expect("offset")
+        })
+        .collect();
+    assert_eq!(offsets.len(), 2);
+    assert!(offsets[0] <= after_block, "{offsets:?} {after_block}");
+    assert!(offsets[1] <= after_release, "{offsets:?} {after_release}");
+    assert!(offsets[0] <= offsets[1]);
+}
+
+/// ORST-17・#5983: 遮断中に connect して読まずに置いた接続は、解除の後に往復しても上流へ届かない。
+/// accept のスレッドが先に切っても、解除の排出で切っても合格（「届かない」だけを固定する）。
+#[test]
+fn conn_queued_during_block_never_reaches_upstream_after_release() {
+    use std::sync::atomic::Ordering;
+    let (up, count) = counting_upstream();
+    let mut p = DbFaultProxy::start_to_port(up).unwrap();
+    let mut tl = timeline();
+    p.block(&mut tl).unwrap();
+    let mut queued = connect(p.listen_port());
+    p.release_block(&mut tl).unwrap();
+    let _ = queued.write_all(b"late");
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        0,
+        "queued conn reached upstream"
+    );
+    assert_eq!(p.accepted_count(), 0);
+    let mut after = connect(p.listen_port());
+    let _ = after.write_all(b"ok");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while count.load(Ordering::SeqCst) < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "later conn never reached upstream"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
