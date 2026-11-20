@@ -4,8 +4,9 @@ paths:
 description: >
   .github/workflows/ を編集する際の方針。runner 選択（public = GitHub ホステッド、ai-review の
   codex 専用 self-hosted runner は例外）、必須チェックと集約ジョブ ci-complete、発火条件・concurrency・
-  paths フィルタの書き方、ジョブ追加時のチェックリスト、キャッシュ方針（容量 10 GB・保存は main の push のみ・
-  キー設計・効果の計測）、所要時間の計測方法と棚卸し結果を規定する。
+  paths フィルタの書き方、ジョブ追加時のチェックリスト（外部ツールの版と SHA256 の規則と、Rust の toolchain の
+  例外を含む）、キャッシュ方針（容量 10 GB・保存は main の push のみ・キー設計・効果の計測）、所要時間の計測方法と
+  棚卸し結果を規定する。
 ---
 
 # GitHub Actions 編集ルール
@@ -23,6 +24,11 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 | `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
+
+`ci.yml` の Rust のジョブ（`build-test`・`lint`・`it-db-ci`）は、toolchain を MSRV の版で入れて流す（利用者の指示、2026-11-20）。
+入れるのは `scripts/install-msrv.sh` で、版は `scripts/msrv.sh` が全 workspace メンバーの `rust-version` から読む。
+MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・edition・整形」を正とし、ここには写さない。
+新しい stable での検査は無く、足すかは未定。入れ方の例外は「ジョブ・ワークフローを追加するときのチェックリスト」の 9 を参照する。
 
 ## runner 方針
 
@@ -114,6 +120,16 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
     - 公式・サードパーティ action は commit SHA で固定し、行末にタグをコメントする（`@<sha> # v7.0.1`）
     - 自組織の reusable workflow（`Fandhe-AI/actions`）は可変タグ `@latest`
     - CLI ツールはバージョン + SHA256 を `ci.yml` の `env` に宣言し、検証してから導入する（既存の `check` ジョブの方式）
+    - **例外: Rust の toolchain だけ**は、`env` の版 + SHA256 の宣言を置かず、`scripts/install-msrv.sh` が rustup で入れる。
+      利用者が 2026-11-20 に認めた（理由: rustup の公式の配布を使う・配布物の検証は rustup が行う・版をパッチまで固定する）。
+      次の条件をすべて満たすときだけ例外にできる
+      - 版をパッチ版まで固定する（`rust-version` が `X.Y` なら `X.Y.0` に補う。`X.Y.Z` はそのまま）。補い方は `install-msrv.sh` が持つ
+      - 導入は `scripts/install-msrv.sh` を経る。ワークフローに rustup の呼び出しを直接書かない（手順 3 の「処理は `scripts/`」と同じ）
+      - `latest`・`stable`・`beta`・`nightly` など、動く名前の追従にしない
+      - 他の外部ツール（`check` ジョブの検査ツール等）には広げない。それらは従来どおり版 + SHA256 の宣言と検証を要る
+      - 例外の範囲を広げる・条件を緩めるのは、利用者の承認を待つ（承認は人が行う。ACPT-7）
+      - 残りの課題は #47（TASK-6）で追跡する: (1) ルートの宣言との照合、
+        (2) 後続のステップで toolchain を明示すること。解消するまで例外は暫定として扱う
 10. 信頼できない入力（PR タイトル等）は `${{ }}` で `run` に直接展開せず `env` 経由で渡す（`pr-title` ジョブの方式）
 11. 時間予算: `ci.yml` は PR の wall-clock で 2 分以内を目安とする。超える場合は並列化・キャッシュ・
     変更検知による skip を検討し、PR 本文に変更前後の実測を書く
@@ -129,6 +145,7 @@ GitHub Actions のキャッシュ（`actions/cache`・`actions/setup-node` の `
 
 - 本リポジトリは GitHub Actions のキャッシュを使っていない（キャッシュ 0 件・0 バイト）。
   `ci.yml` のツールは `env` に宣言した版を SHA256 で検証して毎回導入する方式で、所要時間は数十秒
+  （Rust のジョブの toolchain だけは例外で、rustup で毎回導入する。チェックリストの 9）
 - 言語固有のジョブを足してキャッシュを入れる場合は、本節に従う
 
 ### 前提: 容量と課金
