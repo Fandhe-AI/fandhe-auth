@@ -333,7 +333,13 @@ new_repo; stage .agents/skills/x/SKILL.md "x = ${token}"; git commit -q -m "chor
 check_scan "(tracked) excluded paths" 0
 
 new_repo; printf 'x = %s\n\000' "${token}" > bin.dat; git add bin.dat; git commit -q -m "chore: bin"
-check_scan "(tracked) binary is not scanned" 0
+check_scan "(tracked) NUL-containing file is scanned (fail-closed)" 1 bin.dat
+
+new_repo; stage .gitattributes "* -diff"; stage app.txt "x = ${token}"; git commit -q -m "chore: attr"
+check_scan "(tracked) -diff attribute does not hide content" 1 app.txt
+
+new_repo; stage .gitattributes "* binary"; stage app.txt "x = ${token}"; git commit -q -m "chore: attr"
+check_scan "(tracked) binary attribute does not hide content" 1 app.txt
 
 new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
 PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=hash-object check_scan "(e) (tracked) failure resolving the empty tree" 2

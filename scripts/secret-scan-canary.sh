@@ -57,8 +57,8 @@ rc=0
 
 fail() {
   echo "scan-canary: FAILED: $1" >&2
-  # 検出器の出力は件数とファイル名だけ（値は出さない契約）
-  cat "${work_dir}/out" >&2
+  # 検出器の生出力は転送しない（公開 CI ログへ走査対象の値が再掲され得る。SECR-23）。
+  # 固定の診断文・終了コード・欠けた集計項目だけを出す。
   exit 1
 }
 [ "${rc}" -eq 1 ] || fail "scanner exit code was ${rc}, expected 1"

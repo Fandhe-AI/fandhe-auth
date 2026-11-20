@@ -137,6 +137,8 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 # 利用者の git 設定で出力形式が変わると追加行・ファイル名を取りこぼすため固定する。
 #   --no-color: color.diff / color.ui = always で行頭に色コードが付き `+` 行を検出できなくなる
 #   --no-ext-diff / --no-textconv: diff.external・textconv ドライバが本文を差し替える
+#   --text: .gitattributes の binary・-diff 属性で本文が検査から外れるのを防ぐ（PR 内の属性変更で
+#     検査を回避させない。SECR-23）。NUL を含むファイルも本文を走査する（fail-closed）
 #   --no-renames: リネームを削除 + 追加として扱い、移動先の全行を走査する（除外パスからの移動も含む）
 #   --src-prefix / --dst-prefix: diff.noprefix・diff.mnemonicPrefix でヘッダが `+++ b/` 以外になる
 # --tracked では空の tree と index の差分を取る。追跡ファイルの全行が追加行になるため、
@@ -152,10 +154,10 @@ if [ "${mode}" = tracked ]; then
 fi
 scan_diff() {
   if [ "${mode}" = tracked ]; then
-    git diff --cached --no-color --no-ext-diff --no-textconv --no-renames \
+    git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
       --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@"
   else
-    git diff --cached --no-color --no-ext-diff --no-textconv --no-renames \
+    git diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
       --src-prefix=a/ --dst-prefix=b/ "$@"
   fi
 }
