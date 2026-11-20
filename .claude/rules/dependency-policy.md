@@ -117,7 +117,7 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 - TASK-4 の選定基準は K1〜K12（`D-2026-11-20-7`）。K7: 試験の道具は dev 依存か別の workspace に置き、本番の依存の木に入れない。K11（推移依存の少なさ・保守）は、数の閾値を置かず、次の 4 つで見る（利用者の決定。`D-2026-11-20-14` の (4)(d)）:
   最新の安定版・既知の advisory 0 件・feature は必要最小・依存の `rust-version` が MSRV 以下（MSRV は `D-2026-11-20-12`）。新しい crate を足すときも同じ 4 つで確かめる。
 - 選定の結果（`D-2026-11-20-6`〜`10`・`14`）。版は spec の記録時点のもので、版の固定の手順は spec に記録が無く未定:
-  - 版と feature の選び方（`D-2026-11-20-14` の (4)(a)(b)(c)）: 版は、可能な限り安全な最新の安定版（pre-release を除く）。feature は `default-features = false` から要るものだけを足す。
+  - 版と feature の選び方（`D-2026-11-20-14` の (4)(a)(b)(c)）: 版は、可能な限り安全な最新の安定版（pre-release を除く）。最新の安定版が依存の `rust-version` で MSRV（`D-2026-11-20-12`）を超える、または既知の advisory があるときは、条件を満たす旧版を勝手に選ばず、その crate を上げずに利用者へ確かめる（この場合の扱いは `D-2026-11-20-14` に定めが無く未定。決める人は利用者）。feature は `default-features = false` から要るものだけを足す。
     口は `tracing` が `std` だけ・`metrics` が既定。試験の道具は `tracing-subscriber` が `fmt` だけ・`proptest` が `std` だけ（`fork`・`timeout` を外す）・`syn` が `full`・`parsing` だけ・`libfuzzer-sys` が既定
     試験の道具の feature は試し実装（`crates/trial-deps`）で選んだ組で、`log` の記録は `fmt` だけでは捕獲に届かない。`TASK-518` で `log` を捕まえるために要る feature（例: `tracing-subscriber` の `tracing-log`。または試験専用の別の捕獲の経路）は、(4)(a) の「要るものだけを足す」として足してよい。足すときは K11 の 4 つで確かめる
   - ログの出す口 `tracing`・計測の出す口 `metrics`（本体の依存）。`tracing-subscriber` は dev-dependencies だけ（`D-2026-11-20-8`）

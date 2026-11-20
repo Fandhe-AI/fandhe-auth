@@ -70,7 +70,7 @@ nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly �
 
 各 crate の `[features]` を読んだ事実:
 
-- `tracing`: default は `std`・`attributes`。`attributes` は proc-macro の `tracing-attributes` を引く。`#[instrument]` を本体が使うかが論点になる。
+- `tracing`: default は `std`・`attributes`。`attributes` は proc-macro の `tracing-attributes` を引く。`#[instrument]` を本体が使うかは試し実装の時点の論点で、`D-2026-11-20-14` の (4)(b) で口は `std` だけ（`#[instrument]` は使わない）と決まった。
   ほかに `max_level_*`・`release_max_level_*` がある。
 - `tracing` の default のままなら、`attributes` が `tracing-attributes`（proc-macro）を経由して `syn` 2.x を normal で引く。
   この crate は `default-features = false` + `std` にして `attributes` を外した（マクロだけを使い、`#[instrument]` は使わない）。

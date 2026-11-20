@@ -52,7 +52,9 @@ tools:
 - **未定の値を決めない**: formatter / lint の設定、ビルド手順は TASK-3（原文）で決める。toolchain の固定（`rust-toolchain.toml`）は未定（決める TASK は未定）。
   `deny.toml` の中身（TASK-668）・CI の時間予算（`ci.yml` の 2 分は目安。`../../rules/github-actions.md`）・依存の版の固定の手順も未定。
   決まっていない値は置かずに報告する（仮に置く場合は「未定（TASK-n で決める）」とコメントする）
-- **依存の feature と K11**（`D-2026-11-20-14` (4)）: 版は安全な最新の安定版（pre-release を除く）、feature は `default-features = false` から要るものだけを足す。
+- **依存の feature と K11**（`D-2026-11-20-14` (4)）: 版は安全な最新の安定版（pre-release を除く）、
+  最新の安定版が依存の `rust-version` で MSRV を超える、または既知の advisory があるときは、条件を満たす旧版を勝手に選ばず、上げずに呼び出し元（利用者）へ報告する（扱いは未定。`../../rules/dependency-policy.md` の「版と feature の選び方」）、
+  feature は `default-features = false` から要るものだけを足す。
   口は `tracing` が `std` だけ・`metrics` が既定。試験の道具は、試し実装（`crates/trial-deps`）で選んだ組として `tracing-subscriber` が `fmt` だけ・`proptest` が `std` だけ・`syn` が `full`・`parsing` だけ・`libfuzzer-sys` が既定。
   `TASK-518` で `log` を捕まえるために要る feature は、K11 の 4 つで確かめて足してよい（`../../rules/dependency-policy.md` の「版と feature の選び方」）。
   K11 は数の閾値ではなく「最新の安定版・既知の advisory 0 件・feature は必要最小・依存の `rust-version` が MSRV 以下」の 4 つで見る。ここに無い crate の選びは決まっていないため、利用者に確かめる
