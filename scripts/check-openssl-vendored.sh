@@ -7,7 +7,9 @@
 #   R1: `openssl-sys feature "vendored"`（DPOL-13 の本体）
 #   R2: `openssl feature "vendored"`（openssl-sys/vendored を有効にする上流の経路）
 #   R3: package `openssl-src`（vendored の build 依存が木に入った痕跡）
-# 走査 A は既定の feature（本番の木）、走査 B は --all-features の上位集合（optional の feature の後ろに隠した vendored を拾う）。
+# 走査 A は既定の feature（本番の木）で、合否に入る。走査 B は --all-features の上位集合で、参考の警告だけ出し合否に入れない
+# （optional の feature の後ろに隠した vendored の早期発見用）。dependency-policy.md は本番の依存の監査に --all-features を使わないと
+# 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。本番 feature 構成の明示（PROD_FEATURES）が決まったら、A をそれに置き換える。
 # B は依存の列挙にだけ使い、ビルド・clippy には使わない（DPOL-31。check-crate-deps.sh と同じ扱い）。
 # 本番の範囲は normal・build（dev は見ない）。`cargo tree -i` は一致が無いと非 0 のため使わない。
 # 実行のたびに自己試験（陰性対照 F1〜F5）を先に流し、検出器が常に 0 を返す状態を防ぐ。
@@ -141,8 +143,13 @@ for scan in A B; do
   tree="$(run_tree "${ROOT_DIR}" locked --workspace ${extra[@]+"${extra[@]}"})"
   for r in R1 R2 R3; do
     n="$(count_rule "${r}" "${tree}")"
-    log "scan ${scan} ${r}: ${n}"
-    total=$((total + n))
+    if [ "${scan}" = "A" ]; then
+      log "scan A ${r}: ${n}"
+      total=$((total + n))
+    else
+      log "scan B (info, not gated) ${r}: ${n}"
+      [ "${n}" -ne 0 ] && log "warn: vendored path behind a non-default feature (${r}); confirm it is not a production feature"
+    fi
   done
 done
 

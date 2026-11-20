@@ -140,7 +140,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make setup` | `scripts/setup.sh` | Git hooks 有効化と `.env` 雛形の配置 |
 | `make check` | `scripts/check.sh` | editorconfig-checker + shellcheck（ソースは変更しない） |
 | `make fmt` | `cargo fmt --all` | rustfmt で整形を適用する（ソースを書き換える） |
-| `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査（CI の `lint` ジョブと同じ契約） |
+| `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査 + vendored の検査（CI の `lint` ジョブと同じ契約） |
 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
 | `make no-vendored` | `scripts/check-openssl-vendored.sh` | `openssl-sys` の `vendored` feature が依存解決に 0 件かを `cargo tree -e features` で検査する（陰性対照つき。DPOL-13・TASK-667。名前は暫定） |
 | `make it-db` | `scripts/it-db.sh` | ハーネスの DB 結合試験（Docker 必須・`#[ignore]` の試験を流す。CI では流さない。名前は暫定） |
