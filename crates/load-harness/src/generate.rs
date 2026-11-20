@@ -11,7 +11,7 @@
 use std::cell::Cell;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once, PoisonError};
 use std::thread;
 
@@ -164,7 +164,8 @@ impl Drop for QuietGuard {
 
 /// ワーカー間で共有する試行の枠・停止の印・最初の誤り。
 struct Shared<'a> {
-    next: AtomicU64,
+    /// 次の枠の番号。枠の割り当てと内部の停止の確認は、この Mutex の中で 1 つの区間として行う。
+    next: Mutex<u64>,
     stop: AtomicBool,
     /// 呼び出し元が立てる停止の印。立っている間は新しい枠を取らせない。
     cancel: &'a AtomicBool,
@@ -174,7 +175,7 @@ struct Shared<'a> {
 impl<'a> Shared<'a> {
     fn new(cancel: &'a AtomicBool) -> Self {
         Self {
-            next: AtomicU64::new(0),
+            next: Mutex::new(0),
             stop: AtomicBool::new(false),
             cancel,
             first_error: Mutex::new(None),
@@ -191,19 +192,30 @@ impl<'a> Shared<'a> {
             *g = Some(e);
         }
         drop(g);
+        // 枠の割り当てと同じ Mutex の中で立て、立てた後に枠が取れないことを 1 つの順序で決める。
+        let _slots = self.next.lock().unwrap_or_else(PoisonError::into_inner);
         self.stop.store(true, Ordering::SeqCst);
     }
 
     /// 試行の枠を 1 つ取る。上限に達した・停止中・溢れたときは `false`。
+    ///
+    /// 停止の確認（内部の `stop`・呼び出し元の `cancel`）と枠の加算は同じ Mutex の中で行う。
+    /// 内部の停止（`fail`）は同じ Mutex の中で立つので、立った後に枠が取れることは無い。
+    /// 呼び出し元の `cancel` は外の `AtomicBool` なので、確認の瞬間が停止との先後の境になる
+    /// （確認より後に立った印は、その枠には効かない）。
     fn claim(&self, count: u64) -> bool {
-        if self.stop.load(Ordering::SeqCst) || self.cancel.load(Ordering::SeqCst) {
+        let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.stop.load(Ordering::SeqCst) || self.cancel.load(Ordering::SeqCst) || *next >= count
+        {
             return false;
         }
-        self.next
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                if v < count { v.checked_add(1) } else { None }
-            })
-            .is_ok()
+        match next.checked_add(1) {
+            Some(v) => {
+                *next = v;
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -309,7 +321,7 @@ where
 /// 新しい試行の枠を取らせず、次の段へ進まず、立てたワーカーを join してから最初の誤りを返す。
 /// 誤りが無く印だけが立っていたときは [`LoadError::Cancelled`]。印は対象が結果（`Outcome`）とは別の経路で
 /// 生成器へ伝えるための道で、暖機の段が結果を問わず `Excluded` で締める規則は変えない。
-/// 枠を取り終えて走っている試行は、印が立っても締めるまで続く（途中で止めない）。
+/// 枠を取り終えて走っている試行は、印が立っても締めるまで続く（途中で止めない）。枠の取得は印の確認の瞬間に決まり、確認より後に立った印は、その確認を通った枠には効かない。
 ///
 /// # Errors
 /// [`run_closed_loop`] と同じ。加えて停止の印が立ったとき [`LoadError::Cancelled`]。

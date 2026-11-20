@@ -238,3 +238,18 @@ fn cancel_in_warmup_stops_new_trials_and_skips_measured_phase() {
     assert_eq!(r.unwrap_err(), LoadError::Cancelled);
     assert_eq!(started.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn preset_cancel_claims_no_slot() {
+    use std::sync::atomic::AtomicBool;
+    let clock = FakeClock::new();
+    let cancel = AtomicBool::new(true);
+    let started = AtomicU64::new(0);
+    // 印が先に立っていれば、並行数が多くても枠は 1 つも取れず、対象は 1 度も呼ばれない。
+    let r = run_closed_loop_until(meter(&clock), &cfg(8, 100, 0), &cancel, |_| {
+        started.fetch_add(1, Ordering::SeqCst);
+        Outcome::Success
+    });
+    assert_eq!(r.unwrap_err(), LoadError::Cancelled);
+    assert_eq!(started.load(Ordering::SeqCst), 0);
+}
