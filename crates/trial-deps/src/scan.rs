@@ -21,6 +21,9 @@ pub struct Finding {
 /// `source` を `syn::parse_file` で読み、秘密値らしい欄名で型が生の `String` の欄を返す。
 /// モジュールの中は辿る。マクロ呼び出しの中は辿らない。
 ///
+/// 走査の範囲: 辿るのはファイルの項目とインラインの `mod` の項目だけである。関数の本体など
+/// ブロックの中で宣言した構造体は見ない（見落とし）。この範囲の扱いは TASK-514 で決める（SECR-21）。
+///
 /// # Errors
 /// 構文として読めないとき、`syn` の誤りを返す。
 pub fn find_raw_string_secret_fields(source: &str) -> syn::Result<Vec<Finding>> {
@@ -135,6 +138,14 @@ mod tests {
     #[test]
     fn observation_struct_inside_macro_call_is_not_seen() {
         let src = "make_types! { pub struct Hidden { pub password: String } }";
+        assert_eq!(found(src), Vec::<(String, String)>::new());
+    }
+
+    /// 観察用（TASK-514 で扱いを決める）: 関数の本体などブロックの中で宣言した構造体は
+    /// 走査の対象外で、拾われない（見落とし）。合否の判定ではない（SECR-21）。
+    #[test]
+    fn observation_struct_inside_fn_body_is_not_seen() {
+        let src = "fn f() { struct Inner { password: String } }";
         assert_eq!(found(src), Vec::<(String, String)>::new());
     }
 

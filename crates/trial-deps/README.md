@@ -39,125 +39,15 @@
 cargo test -p fandhe-auth-trial-deps --locked
 ```
 
-fuzz は別 workspace（`fuzz/`）で、`make build`・`make test`・`make lint`・`make crate-deps`・CI のどれの対象にもならない。手作業の検査は下の手順で行う。nightly は最新を追う（`D-2026-11-20-9`）。
-CI に載せるかは `TASK-117` で決める。
+fuzz は別 workspace（`fuzz/`）で、`make build`・`make test`・`make lint`・`make crate-deps`・CI のどれの対象にもならない。CI に載せるかは `TASK-117` で決める。
+手で流すときは、空の専用のコーパスか合成の入力だけを使う。crash のときの stderr と `fuzz/artifacts/` を PR・Issue・記録に貼らない（`SECR-23`・`SECR-26`）。
+nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly の版を残すかは未定（`D-2026-11-20-9`）で、記録の保存先も未定である。どちらも人が決める。
 
-`cargo fuzz` の `build`・`run` は `--locked` を受けない（`cargo +nightly fuzz build --help` で確かめた）。
-先に `cargo metadata --locked` で lock が最新であることを確かめてから流す。lock の更新が要るときは、`--locked` が失敗する。
-その場合は、依存の差分を監査してから lock を更新する（`./.claude/rules/dependency-policy.md` の手順）。更新後に `Cargo.lock` の差分が無いことを確かめて流す。
+## 依存の監査
 
-```bash
-(
-  set -euo pipefail
-  cd crates/trial-deps/fuzz
-  cargo +nightly metadata --locked --format-version 1 > /dev/null
-  cargo +nightly fuzz build
-  cargo +nightly fuzz run secret_debug -- -max_total_time=10
-  git diff --exit-code Cargo.lock
-)
-```
-
-サブシェルで `set -euo pipefail` を掛けるので、どの段階の失敗もブロックの終了コードに伝わる（対話シェルに素の `set -e` を貼るとシェルごと落ちるため、サブシェルにしてある）。
-`metadata --locked` が失敗したら、fuzz の build と run は始まらない。
-
-`-max_total_time` の値は秒数で、`10` は例である。変えてよい。
-
-この試し実装の手作業の実行では、`rustc +nightly -V` の出力を控えて PR 本文に書く。実行の記録に nightly の版を残すかは未定（`D-2026-11-20-9`）で、記録の保存先も未定である。どちらも人が決める。
-
-整形（`make lint` の対象外なので手で流す）:
-
-```bash
-cargo fmt --manifest-path crates/trial-deps/fuzz/Cargo.toml --check
-```
-
-## cargo deny の一時の設定
-
-repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例外の形や bans の一覧を先取りしてしまうためである。
-`docs/spec/03-poc/quality-checks/qp2-deps/deny.toml` の厳格版を、repo の外の一時ディレクトリで使う。
-
-1. 厳格版を repo の外へ写す（`docs/spec` は submodule なので書き換えない）。
-2. 写しの許可リストに `"NCSA"` を足す（`libfuzzer-sys` 向け。`D-2026-11-20-9`）。他は変えない。
-3. 変数を決める。advisory DB の保存先は、空の専用ディレクトリにする。取得・照合・後片付けで同じ変数を使うので、同じシェルで最後の手順まで使う。
-
-    ```bash
-    SRC_CONFIG=/path/to/deny.toml  # 手順 1・2 で作った写しのパスに替える
-    DENY_DB_DIR="$(mktemp -d)"
-    DENY_CONFIG="$(mktemp -d)/deny.toml"
-    ```
-
-4. 一時の設定を作り、その設定で `cargo deny fetch` を 1 回流す。取得の直後に取得日時と、`db-path` の下にある全 DB の URL と commit SHA を控える（`DPOL-33`）。
-    設定には `[advisories]` の `db-path` と `db-urls` を足す（cargo-deny 0.19.4 で、指定した `db-path` の下に DB が取得されることを確かめた）。
-    写しにこの 2 つのキーが既にあるときは、重複させずに値を替える。commit の日付は取得日ではないので、取得日時は別に取る。DB のディレクトリを当て推量で選ばず、全部を列挙する。
-    サブシェルで `set -euo pipefail` を掛けるので、どの段階の失敗もブロックの終了コードに伝わる。
-
-    ```bash
-    (
-      set -euo pipefail
-      awk -v d="$DENY_DB_DIR" '{ print } /^\[advisories\]/ { print "db-path = \"" d "\""; print "db-urls = [\"https://github.com/rustsec/advisory-db\"]" }' "$SRC_CONFIG" > "$DENY_CONFIG"
-      grep -q '^db-path' "$DENY_CONFIG"
-      cargo deny fetch --config "$DENY_CONFIG" db
-      date -u +%Y-%m-%dT%H:%M:%SZ
-      for db in "$DENY_DB_DIR"/*/; do
-        [ -d "$db/.git" ]
-        echo "url=$(git -C "$db" remote get-url origin) sha=$(git -C "$db" rev-parse HEAD)"
-      done
-    )
-    ```
-
-    - 取得日時: `date` の出力。
-    - 監査に使った DB の URL と commit SHA: ループの出力。`url` の表記は、git の設定（`url.<base>.insteadOf`）の書き換えを受けることがある。
-
-5. ルートに対して流す。取得は済んでいるので `--disable-fetch` を付ける。
-
-    ```bash
-    cargo deny --locked check --config "$DENY_CONFIG" --disable-fetch
-    ```
-
-6. fuzz 側は `--manifest-path` を付けて流す。`libfuzzer-sys` の NCSA の通過を確かめるのは、こちらである。
-
-    ```bash
-    cargo deny --locked --manifest-path crates/trial-deps/fuzz/Cargo.toml check --config "$DENY_CONFIG" --disable-fetch
-    ```
-
-7. 照合が済んだら、一時のディレクトリを消す。この DB は手順 5・6 の `--disable-fetch` で使うので、照合より先には消さない。
-
-    ```bash
-    rm -rf "${DENY_DB_DIR:?}" "$(dirname "${DENY_CONFIG:?}")"
-    ```
-
-合否は PR の head で、`cargo deny` の 4 検査（advisories・bans・licenses・sources）の全部が成功することで決める（`DPOL-34`）。
-基線との差で合格にしない。基線と PR の両方で同じ検査が失敗していても合格とは読まない。
-基線との差は、失敗したときの原因の切り分けにだけ使う。依存を足す前の HEAD で同じ設定を流した出力と、足した後の出力を比べる。
-通過は判断材料であり、例外の追加は人が決める（`DPOL-35`）。
-
-## cargo audit
-
-`cargo deny` の手順の後に流す（`DPOL-33`・`DPOL-34`）。
-
-1. advisory DB を 1 回取得する。`cargo audit` には `fetch` のサブコマンドが無いので、`--no-fetch` を付けない 1 回目の実行で取得する。
-
-    ```bash
-    cargo audit --file Cargo.lock
-    ```
-
-2. 取得の直後に、取得日時と DB の commit SHA を控える。`git log` の `%cd` は DB の最新 commit の日付で、取得した日ではないので使わない。
-
-    ```bash
-    date -u +%Y-%m-%dT%H:%M:%SZ
-    CARGO_AUDIT_DB_DIR=~/.cargo/advisory-db
-    git -C "$CARGO_AUDIT_DB_DIR" rev-parse HEAD
-    ```
-
-3. ルートの `Cargo.lock` と fuzz 側の `Cargo.lock` の両方に流す。以降は取得を止めて、同じ DB で照合する。
-
-    ```bash
-    cargo audit --no-fetch --file Cargo.lock
-    cargo audit --no-fetch --file crates/trial-deps/fuzz/Cargo.lock
-    ```
-
-fuzz 側は別 workspace なので、ルートの `Cargo.lock` の監査では拾えない。2 つの lock を別々に流す。
-合否は PR の head で、ルートと fuzz の両方の lockfile への `cargo audit` が成功することで決める（`DPOL-34`）。基線との差は切り分けにだけ使う。
-結果の判定と例外の追加は人が決める（`DPOL-35`）。
+- 正式な手順と `deny.toml` は `TASK-668` が作る。repo に `deny.toml` は置かない。
+- 試しの実行の手順と結果は、PR #5980 の本文に記録した。
+- 合否は PR の head で、全検査が成功することで決める（`DPOL-34`）。結果の判定と例外の追加は人が決める（`DPOL-35`）。
 
 ## K11 と feature の選び
 
@@ -177,7 +67,7 @@ fuzz 側は別 workspace なので、ルートの `Cargo.lock` の監査では�
   - `-e normal,build,dev` に替えると、この crate の木には `syn` 2.0.119 と `syn` 3.0.10 の両方が入る。`syn` 3 は、この crate の dev 依存（構文の走査用）である。
   - workspace 全体の normal・build では、`syn` 3.0.10 は `serde_derive` を経由して `hub-stub` と `console-stub` に入っている。この crate の変更によるものではない。
   - 並ぶかどうかの判断はここでは書かない。本体の木に `syn` が何を引くかは、feature の組の選びと併せて人が決める。
-- `metrics`: `[features]` が無い。`default-features = false` の組は成り立たない。
+- `metrics`: `[features]` が無い。既定の feature が無いので、`default-features = false` を指定しても差は出ない。
 - `tracing-subscriber`: default は `smallvec`・`fmt`・`ansi`・`tracing-log`・`std`。
 - `proptest`: default は `std`・`fork`・`timeout`・`bit-set`。
 - `syn`: default は `derive`・`parsing`・`printing`・`clone-impls`・`proc-macro`。`full`・`visit` は別の feature。いまの試し実装は `default-features = false` + `full`・`parsing`。
@@ -193,6 +83,7 @@ fuzz 側は別 workspace なので、ルートの `Cargo.lock` の監査では�
   - enum の variant の欄。`struct` の項目だけを辿る。
   - `Option<String>` などで包んだ形。型の経路の末尾の識別子だけを見る。
   - `Vec<u8>` と `[u8; N]`。
+  - ファイルとインラインのモジュールの項目だけを辿るので、関数の本体などのブロックの中の `struct` は見ない（`collect` が辿るのは `Item::Struct` と、本文のあるインラインの `mod` だけ）。
   - 型名の側が秘密値らしいもの（例: 欄名が `value` で型が `SecretToken`）。見るのは欄名だけである。
   - 上の tuple struct・enum・`Option<String>`・`Vec<u8>`・`[u8; N]`・型名の 5 つは、scratch の写しで試験を足し、拾われないことを確かめた（拾われた件数 0）。この試験は repo に入れていない。
   - 試しで通ったことを、走査の検出力の根拠にしない。検出力は `TASK-500`（`AAUD-30`・`AAUD-31`）の陽性対照で確かめる。
