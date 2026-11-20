@@ -63,6 +63,10 @@ pub struct HubStubHandle(Arc<Mutex<Option<HubStubSession>>>);
 
 impl HubStubHandle {
     /// 起動中だけ `Some(f の戻り値)`。起動前・停止後・lock の毒化は `None`。
+    ///
+    /// `f` の実行中はセッションの lock を握る。`f` の中で `HubStubFaultInjector` の受け口を呼ぶと、遅れの `Wait` も
+    /// lock を握ったまま走る。`Wait` の中で同じハンドル（`with`・`is_running` 等）を触ると自己待ちで止まるので、触らない。
+    /// 遅れを lock の外で実行する構造にはしていない（遅れの実行は hub-stub の注入器の内側で、`f` の戻りより前に起きる）。
     pub fn with<R>(&self, f: impl FnOnce(&mut HubStubSession) -> R) -> Option<R> {
         self.0.lock().ok()?.as_mut().map(f)
     }

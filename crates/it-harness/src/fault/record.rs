@@ -6,7 +6,8 @@
 //! 設計上の約束:
 //! - 時刻はハーネスのプロセスの基準の時計で押す。試験対象に注入した、ずれた時計や stub の引数の `now` は使わない
 //!   （時計のずれを注入しても記録の時刻はずれない。AVLB-31）。壁時計 `at`（秒）と、実行開始からの単調時計の
-//!   経過 `offset_ms` を持つ。hub-stub の `InjectionLog.at` との対応づけは 5/8。
+//!   経過 `offset_ms` を持つ。hub-stub の `InjectionLog.at`（試験の論理時刻）は
+//!   ここへ入れず、`HubStubFaultInjector::call_log` で別に読む（対応は順序だけ。事象行の `log_pos` は形式の版 `/2` で足した）。
 //! - 基準線でも同じキーを出す。節を省くと「記録しなかった」と見分けられないため（TASK-10 の `not_started` と同じ）。
 //! - 基準線に事象を積むのも、Fault の実行で 0 件のまま記録を作るのも誤り（fail-closed）。
 //! - 記録は enum・数値・静的な名前だけで組む。ホスト名・ポート・パス・接続情報・実行時の文字列を持たない
@@ -17,14 +18,15 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 
 use super::{FaultKind, FaultPhase, FaultTarget};
 use crate::record::UtcTimestamp;
 
-/// 記録の形式の識別子（仮置き）。形式を変えたら末尾の版を上げる。
-pub const FAULT_RECORD_FORMAT: &str = "fandhe-auth-it-fault-record/1";
+/// 記録の形式の識別子（仮置き）。形式を変えたら末尾の版を上げる。/2 で事象行に任意の `log_pos=<n>` を足した（TASK-13 の 5/8）。
+pub const FAULT_RECORD_FORMAT: &str = "fandhe-auth-it-fault-record/2";
 
 /// 実行の種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +54,16 @@ pub enum FaultRecordError {
     ReleaseOfInstantaneous,
     /// `offset_ms` が前の件より小さい。
     OffsetWentBackwards,
+    /// 呼び出しの位置（`log_pos`）を Hub の stub 以外の事象に付けようとした。
+    LogPosNotAllowed,
+    /// 呼び出しの位置（`log_pos`）が前の件より小さい。
+    LogPosWentBackwards,
+    /// 公開の直接記録（`record_now`・`record_at`）で Hub の stub の事象を積もうとした（常に拒否。注入器の入口だけが積む）。
+    HubStubEventOutsideInjector,
+    /// Hub の stub の事象に呼び出しの位置（`log_pos`）が無い。
+    LogPosRequired,
+    /// 注入器を結んだ実行の記録を、注入器を介さず確定しようとした。
+    InjectorBound,
     /// ファイルの書き込みに失敗した。
     WriteFailed,
 }
@@ -66,6 +78,11 @@ impl fmt::Display for FaultRecordError {
             Self::ReleaseWithoutApply => "release without apply",
             Self::ReleaseOfInstantaneous => "release of instantaneous fault",
             Self::OffsetWentBackwards => "offset went backwards",
+            Self::LogPosNotAllowed => "log position not allowed for this target",
+            Self::LogPosWentBackwards => "log position went backwards",
+            Self::HubStubEventOutsideInjector => "hub stub event must go through the injector",
+            Self::LogPosRequired => "hub stub event requires a log position",
+            Self::InjectorBound => "timeline is bound to an injector; finish through it",
             Self::WriteFailed => "write failed",
         };
         write!(f, "fault record error: {s}")
@@ -83,16 +100,33 @@ pub struct FaultEvent {
     pub at: UtcTimestamp,
     /// 実行の開始からの単調時計の経過（ミリ秒）。
     pub offset_ms: u64,
+    /// 事象を積んだ時点の、呼び出しの記録（hub-stub の `InjectionLog`）の件数。`None` は呼び出しの記録を持たない種類。
+    /// 呼び出し `i`（0 始まり）は、`log_pos <= i` の事象より後・次の事象より前に起きた。
+    /// 同じ口へ同じ障害を二度適用・解除しても、どの期間の呼び出しかを照合できる（TASK-13 の 5/8）。
+    pub log_pos: Option<usize>,
 }
 
 /// 事象を積む入口。`Instant` の原点と開始時刻を持つ。
-#[derive(Debug, Clone)]
+///
+/// `Clone` は実装しない。複製すると事象列と開いている注入の記録が分かれ、複製側の解除が元に反映されないため
+/// （1 つの実行の記録は 1 つに集約する）。
+#[derive(Debug)]
 pub struct FaultTimeline {
+    run_id: u64,
+    injector_bound: Arc<AtomicBool>,
     mode: RunMode,
     started_at: UtcTimestamp,
     origin: Instant,
     events: Vec<FaultEvent>,
     open: Vec<FaultKind>,
+}
+
+/// Hub の stub の事象は公開の直接記録で積ませない（注入器を通さない確定を作らない。TASK-13 の 5/8）。
+fn reject_hub_stub(kind: FaultKind) -> Result<(), FaultRecordError> {
+    if kind.target() == FaultTarget::HubStub {
+        return Err(FaultRecordError::HubStubEventOutsideInjector);
+    }
+    Ok(())
 }
 
 impl FaultTimeline {
@@ -109,7 +143,10 @@ impl FaultTimeline {
     fn new(mode: RunMode, origin: Instant, started: SystemTime) -> Result<Self, FaultRecordError> {
         let started_at = UtcTimestamp::from_system_time(started)
             .map_err(|_| FaultRecordError::ClockBeforeEpoch)?;
+        static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
         Ok(Self {
+            run_id: RUN_SEQ.fetch_add(1, Ordering::Relaxed),
+            injector_bound: Arc::new(AtomicBool::new(false)),
             mode,
             started_at,
             origin,
@@ -118,22 +155,52 @@ impl FaultTimeline {
         })
     }
 
+    /// この実行の識別（プロセス内で一意）。注入器を単一の実行へ結ぶために使う。
+    pub(crate) fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
+    /// 注入器をこの実行へ結ぶ。すでに結んでいれば `None`（1 つの実行に注入器は 1 つ。呼び出しの位置の照合のため）。
+    /// 結べたら結合の印を返す。注入器が未使用のまま破棄されたとき、その印を下ろして結び直せるようにする。
+    /// Hub の stub の事象は公開の入口では積めない（`push` が `log_pos` を必須にする）ので、結ぶ前の事象に Hub の stub のものは無い。
+    pub(crate) fn bind_injector(&self) -> Result<Option<Arc<AtomicBool>>, FaultRecordError> {
+        if self.injector_bound.swap(true, Ordering::SeqCst) {
+            return Ok(None);
+        }
+        Ok(Some(Arc::clone(&self.injector_bound)))
+    }
+
     /// ハーネスの時計で現在の時刻を押して積む。
+    ///
+    /// # Errors
+    /// Hub の stub の事象は常に `HubStubEventOutsideInjector`（注入器の内部の入口だけが `log_pos` 付きで積む）。
     pub fn record_now(
         &mut self,
         kind: FaultKind,
         phase: FaultPhase,
     ) -> Result<(), FaultRecordError> {
+        reject_hub_stub(kind)?;
+        self.record_now_with_log_pos(kind, phase, None)
+    }
+
+    /// `record_now` に、呼び出しの記録の件数（`FaultEvent::log_pos`）を添える。注入器の内部だけの入口。
+    /// Hub の stub の事象だけが受け、位置は前の位置以上でなければならない。
+    pub(crate) fn record_now_with_log_pos(
+        &mut self,
+        kind: FaultKind,
+        phase: FaultPhase,
+        log_pos: Option<usize>,
+    ) -> Result<(), FaultRecordError> {
         let at = UtcTimestamp::from_system_time(SystemTime::now())
             .map_err(|_| FaultRecordError::ClockBeforeEpoch)?;
         let ms = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-        self.record_at(kind, phase, at, ms)
+        self.push(kind, phase, at, ms, log_pos)
     }
 
     /// 時刻を引数で渡して積む（試験用の決定的な入口）。
     ///
     /// # Errors
-    /// 基準線への積み込み・パラメータの検査落ち・`offset_ms` の逆行・対応する `Applied` の無い `Released`・
+    /// Hub の stub の事象（常に `HubStubEventOutsideInjector`）・基準線への積み込み・パラメータの検査落ち・`offset_ms` の逆行・対応する `Applied` の無い `Released`・
     /// 一回きりの事象への `Released`。誤りのときは何も積まない。
     pub fn record_at(
         &mut self,
@@ -142,6 +209,18 @@ impl FaultTimeline {
         at: UtcTimestamp,
         offset_ms: u64,
     ) -> Result<(), FaultRecordError> {
+        reject_hub_stub(kind)?;
+        self.push(kind, phase, at, offset_ms, None)
+    }
+
+    fn push(
+        &mut self,
+        kind: FaultKind,
+        phase: FaultPhase,
+        at: UtcTimestamp,
+        offset_ms: u64,
+        log_pos: Option<usize>,
+    ) -> Result<(), FaultRecordError> {
         if self.mode == RunMode::Baseline {
             return Err(FaultRecordError::EventsInBaseline);
         }
@@ -149,6 +228,23 @@ impl FaultTimeline {
             .map_err(|_| FaultRecordError::InvalidParam)?;
         if self.events.last().is_some_and(|e| offset_ms < e.offset_ms) {
             return Err(FaultRecordError::OffsetWentBackwards);
+        }
+        if kind.target() == FaultTarget::HubStub && log_pos.is_none() {
+            return Err(FaultRecordError::LogPosRequired);
+        }
+        if let Some(pos) = log_pos {
+            if kind.target() != FaultTarget::HubStub {
+                return Err(FaultRecordError::LogPosNotAllowed);
+            }
+            if self
+                .events
+                .iter()
+                .rev()
+                .find_map(|e| e.log_pos)
+                .is_some_and(|prev| pos < prev)
+            {
+                return Err(FaultRecordError::LogPosWentBackwards);
+            }
         }
         match phase {
             FaultPhase::Applied => {
@@ -173,23 +269,70 @@ impl FaultTimeline {
             phase,
             at,
             offset_ms,
+            log_pos,
         });
         Ok(())
     }
 
     /// 記録を作る。Fault の実行で 0 件なら誤り（何も注入していない故障の試験を作らない）。
     /// 解除しなかった `Applied` は `unreleased_count` に数える（黙って省かない）。
-    pub fn finish(self, recorded_at: UtcTimestamp) -> Result<FaultRecord, FaultRecordError> {
+    ///
+    /// 注入器を結んだ実行では、注入器を `HubStubFaultInjector::finish` まで保持する。受け口を一度でも呼んだ（`apply` を通さなくても）
+    /// 注入器を先に破棄すると結合の印が残り、この `finish` も新しい注入器の結合も拒否されて、基準線や DB の障害だけの記録も
+    /// 確定できなくなる（呼び出しの記録と `log_pos` の照合を崩さないため）。未使用のまま破棄したときだけ結合が取り消される。
+    ///
+    /// # Errors
+    /// 注入器を結んだ実行は `InjectorBound`（注入器が有効なまま残らないよう、`HubStubFaultInjector::finish` が確定する）。
+    /// 失敗のときは `FaultFinishFailure` にタイムラインを入れて返す（蓄積した事象を失わず、正しい経路で再試行できる）。
+    pub fn finish(self, recorded_at: UtcTimestamp) -> Result<FaultRecord, Box<FaultFinishFailure>> {
+        let checked = if self.injector_bound.load(Ordering::SeqCst) {
+            Err(FaultRecordError::InjectorBound)
+        } else {
+            self.check_finishable()
+        };
+        match checked {
+            Ok(()) => Ok(self.into_record(recorded_at)),
+            Err(error) => Err(Box::new(FaultFinishFailure {
+                error,
+                timeline: self,
+            })),
+        }
+    }
+
+    /// 確定できるか。消費する前に確かめ、失敗しても記録を失わないようにする（注入器の内部だけ）。
+    pub(crate) fn check_finishable(&self) -> Result<(), FaultRecordError> {
         if self.mode == RunMode::Fault && self.events.is_empty() {
             return Err(FaultRecordError::NoInjectionInFaultRun);
         }
-        Ok(FaultRecord {
+        Ok(())
+    }
+
+    /// 検査（`check_finishable`）を通した後の確定。
+    pub(crate) fn into_record(self, recorded_at: UtcTimestamp) -> FaultRecord {
+        FaultRecord {
             mode: self.mode,
             started_at: self.started_at,
             recorded_at,
             unreleased: self.open.len(),
             events: self.events,
-        })
+        }
+    }
+}
+
+/// `FaultTimeline::finish` の失敗。タイムラインを返すので、記録を失わずに再試行できる。
+pub struct FaultFinishFailure {
+    /// 失敗の理由。
+    pub error: FaultRecordError,
+    /// 渡されたタイムライン。
+    pub timeline: FaultTimeline,
+}
+
+impl fmt::Debug for FaultFinishFailure {
+    /// 理由だけを出す（SECR-23〜27）。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FaultFinishFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 
@@ -261,7 +404,7 @@ impl fmt::Display for FaultRecord {
                 FaultPhase::Applied => "applied",
                 FaultPhase::Released => "released",
             };
-            writeln!(
+            write!(
                 f,
                 "injection: {} {phase} {} target={} at={} offset_ms={}{}",
                 i + 1,
@@ -271,6 +414,10 @@ impl fmt::Display for FaultRecord {
                 e.offset_ms,
                 e.kind
             )?;
+            if let Some(n) = e.log_pos {
+                write!(f, " log_pos={n}")?;
+            }
+            writeln!(f)?;
         }
         writeln!(
             f,
@@ -287,5 +434,127 @@ impl fmt::Display for FaultRecord {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fault::HubStubPort;
+    use std::time::Duration;
+
+    fn tl() -> FaultTimeline {
+        FaultTimeline::start(
+            Instant::now(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .unwrap()
+    }
+
+    fn stub_delay() -> FaultKind {
+        FaultKind::hub_stub_delay(HubStubPort::Jwks, Duration::from_millis(5)).unwrap()
+    }
+
+    /// 位置は Hub の stub の事象だけに付く。
+    #[test]
+    fn log_pos_is_only_for_hub_stub_events() {
+        let mut t = tl();
+        let db = FaultKind::db_delay(Duration::from_millis(5)).unwrap();
+        assert_eq!(
+            t.record_now_with_log_pos(db, FaultPhase::Applied, Some(0)),
+            Err(FaultRecordError::LogPosNotAllowed)
+        );
+        assert!(t.events.is_empty());
+    }
+
+    /// 位置の逆行は拒否し、何も積まない。同じ位置は受ける。
+    #[test]
+    fn log_pos_must_not_go_backwards() {
+        let mut t = tl();
+        let k = stub_delay();
+        t.record_now_with_log_pos(k, FaultPhase::Applied, Some(3))
+            .unwrap();
+        assert_eq!(
+            t.record_now_with_log_pos(k, FaultPhase::Released, Some(2)),
+            Err(FaultRecordError::LogPosWentBackwards)
+        );
+        assert_eq!(t.events.len(), 1);
+        t.record_now_with_log_pos(k, FaultPhase::Released, Some(3))
+            .unwrap();
+    }
+
+    /// Hub の stub の事象は公開の直接記録で常に拒否し、何も積まない（結合の有無によらない）。
+    #[test]
+    fn public_entries_always_reject_hub_stub_events() {
+        let mut t = tl();
+        let k = stub_delay();
+        assert_eq!(
+            t.record_now(k, FaultPhase::Applied),
+            Err(FaultRecordError::HubStubEventOutsideInjector)
+        );
+        assert_eq!(
+            t.record_at(
+                k,
+                FaultPhase::Applied,
+                UtcTimestamp::from_unix_seconds(1),
+                0
+            ),
+            Err(FaultRecordError::HubStubEventOutsideInjector)
+        );
+        assert!(t.events.is_empty());
+        assert_eq!(
+            t.check_finishable(),
+            Err(FaultRecordError::NoInjectionInFaultRun)
+        );
+    }
+
+    /// 内部の入口でも Hub の stub の事象は `log_pos` を必須にする。
+    #[test]
+    fn hub_stub_event_requires_log_pos() {
+        let mut t = tl();
+        assert_eq!(
+            t.push(
+                stub_delay(),
+                FaultPhase::Applied,
+                UtcTimestamp::from_unix_seconds(1),
+                0,
+                None
+            ),
+            Err(FaultRecordError::LogPosRequired)
+        );
+        assert!(t.events.is_empty());
+    }
+
+    /// 記録の形式: Hub の stub の事象行（`log_pos` 付き）と注記。時刻は固定の人工の値（決定的）。
+    #[test]
+    fn hub_stub_event_lines_format() {
+        let mut t = tl();
+        let at = UtcTimestamp::from_unix_seconds(1_700_000_001);
+        let d = stub_delay();
+        let r = FaultKind::hub_stub_refusal(
+            HubStubPort::Logout,
+            crate::fault::HubStubRefusalKind::Status(503),
+        )
+        .unwrap();
+        t.push(d, FaultPhase::Applied, at, 0, Some(0)).unwrap();
+        t.push(r, FaultPhase::Applied, at, 1, Some(2)).unwrap();
+        let rec = t.into_record(UtcTimestamp::from_unix_seconds(1_700_000_060));
+        assert_eq!(rec.unreleased_count(), 2);
+        let s = rec.to_string();
+        assert!(s.contains(
+            "injection: 1 applied hub_stub_delay target=hub_stub at=2023-11-14T22:13:21Z offset_ms=0 port=jwks delay_ms=5 log_pos=0\n"
+        ));
+        assert!(s.contains(
+            "injection: 2 applied hub_stub_refusal target=hub_stub at=2023-11-14T22:13:21Z offset_ms=1 port=logout refusal=status_503 log_pos=2\n"
+        ));
+        assert!(s.contains("note: stub の合格を実物の合格に数えない"));
+    }
+
+    /// 注入器を結べるのは 1 回だけ。
+    #[test]
+    fn injector_binds_once() {
+        let t = tl();
+        assert!(t.bind_injector().unwrap().is_some());
+        assert!(t.bind_injector().unwrap().is_none());
     }
 }
