@@ -98,7 +98,8 @@ pub trait MachineProbe {
 ///
 /// - `cpu_count`: `available_parallelism`。affinity・cgroup の上限が効く「使える並列数」で、物理 CPU 数ではない。
 /// - `memory_mib`: Linux だけ `/proc/meminfo` の `MemTotal`。コンテナでは cgroup の上限ではなくホストの総量が出る。
-/// - `arch`・`os_family`: `std::env::consts` の `ARCH`・`OS`。
+/// - `arch`・`os_family`: `std::env::consts` の `ARCH`・`OS`。許可語彙の外（対象外のプラットフォーム）は誤りにせず
+///   `None`（未取得）にして、他の測定条件の記録を妨げない。外から注入された値の拒否は [`in_vocab`] が維持する。
 /// - `virtualization`: 判別の方法が未決のため常に `Unknown`。
 /// - `build_profile`: 実行時にプロファイルを確かめる手段が無い（`debug_assertions` はプロファイルの設定で上書きされ誤記録になる）ため
 ///   常に `Unknown`。確かな値は呼び出し元が [`MachineCondition::new`] で明示する。
@@ -117,11 +118,11 @@ impl MachineProbe for StdMachineProbe {
     }
 
     fn arch(&self) -> Option<String> {
-        Some(std::env::consts::ARCH.to_owned())
+        std_value_in_vocab(std::env::consts::ARCH, ARCH_VOCAB)
     }
 
     fn os_family(&self) -> Option<String> {
-        Some(std::env::consts::OS.to_owned())
+        std_value_in_vocab(std::env::consts::OS, OS_VOCAB)
     }
 
     fn virtualization(&self) -> Virtualization {
@@ -197,6 +198,15 @@ const ARCH_VOCAB: &[&str] = &[
     "hexagon",
     "wasm32",
     "wasm64",
+    "mips32r6",
+    "mips64r6",
+    "powerpc64le",
+    "xtensa",
+    "avr",
+    "msp430",
+    "bpf",
+    "nvptx64",
+    "amdgpu",
 ];
 
 /// `std::env::consts::OS` の語彙（仮置き。人が確認する）。
@@ -216,7 +226,27 @@ const OS_VOCAB: &[&str] = &[
     "redox",
     "haiku",
     "wasi",
+    "tvos",
+    "visionos",
+    "watchos",
+    "cygwin",
+    "aix",
+    "hurd",
+    "nto",
+    "vxworks",
+    "espidf",
+    "horizon",
+    "vita",
+    "l4re",
+    "nuttx",
+    "emscripten",
 ];
+
+/// 標準の取得元の値を許可語彙に照らす。語彙の外は `None`（未取得）。注入値の検査（[`in_vocab`]）とは別で、
+/// 標準の取得元が対象外のプラットフォームで他の測定条件を巻き込まないための入口。
+fn std_value_in_vocab(v: &str, vocab: &'static [&'static str]) -> Option<String> {
+    vocab.iter().find(|w| **w == v).map(|w| (*w).to_owned())
+}
 
 /// 許可語彙の中の値だけを通す。外れは値を載せずに誤りにする（取れない `None` とは区別する）。
 fn in_vocab(
@@ -465,7 +495,42 @@ impl fmt::Display for MeasurementConditions {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_mem_total_mib;
+    use super::{
+        ARCH_VOCAB, BuildProfile, ConditionError, MachineCondition, OS_VOCAB, Virtualization,
+        parse_mem_total_mib, std_value_in_vocab,
+    };
+
+    #[test]
+    fn std_probe_value_outside_vocab_is_unobtained() {
+        assert_eq!(std_value_in_vocab("someos", OS_VOCAB), None);
+        assert_eq!(std_value_in_vocab("somearch", ARCH_VOCAB), None);
+        assert_eq!(
+            std_value_in_vocab("tvos", OS_VOCAB).as_deref(),
+            Some("tvos")
+        );
+        assert_eq!(
+            std_value_in_vocab("mips32r6", ARCH_VOCAB).as_deref(),
+            Some("mips32r6")
+        );
+    }
+
+    #[test]
+    fn injected_value_outside_vocab_stays_rejected() {
+        let r = MachineCondition::new(
+            None,
+            None,
+            Some("somearch".to_owned()),
+            None,
+            Virtualization::Unknown,
+            BuildProfile::Unknown,
+        );
+        assert!(matches!(r, Err(ConditionError::InvalidMachineValue)));
+    }
+
+    #[test]
+    fn detect_succeeds_on_this_target() {
+        assert!(MachineCondition::detect().is_ok());
+    }
 
     #[test]
     fn parses_mem_total() {
