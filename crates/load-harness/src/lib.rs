@@ -1,4 +1,4 @@
-//! 計測・集計・負荷の生成の部品を置く crate（TASK-12 3/10・4/10・5/10）。試験専用で、本番のビルドには入らない。
+//! 計測・集計・負荷の生成の部品を置く crate（TASK-12 3/10〜6/10）。試験専用で、本番のビルドには入らない。
 //!
 //! 役割: 1 回の「回」の中で、試行ごとに区間の時間を単調な時計で測り、標本・件数・実測の最大同時実行数を
 //! 集める。集めた結果（[`RunSamples`]）は [`aggregate`]（4/10）が百分位・最大・最悪の回に集計する。
@@ -20,6 +20,7 @@
 pub mod aggregate;
 pub mod generate;
 pub mod meter;
+pub mod target;
 
 pub use aggregate::{
     AggregateError, IntervalStats, MetricKey, RunSummary, summarize_interval, summarize_run,
@@ -32,3 +33,5 @@ pub use meter::{
     FailureKind, IntervalName, MeterError, MonotonicClock, Outcome, RunMeter, RunSamples, Sample,
     StdMonotonicClock, Trial,
 };
+
+pub use target::{CallResult, TargetError, TargetName, TargetRun, TargetSpec, run_target};
