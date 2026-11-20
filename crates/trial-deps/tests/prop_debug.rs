@@ -26,8 +26,13 @@ impl std::fmt::Debug for Input {
     }
 }
 
+/// 任意の `char` の列から文字列を作る戦略。
+///
+/// `any::<String>()` の既定（`\PC*`）は改行・タブ・NUL などの制御文字を生成しない。
+/// SECR-11 の「任意の文字列」にそれらを含めるため、`any::<char>()` の列から組み立てる。
+/// 長さの上限 64 は「最小形」の段の目安で、要件の値ではない。
 fn input_strategy() -> impl Strategy<Value = Input> {
-    any::<String>().prop_map(Input)
+    proptest::collection::vec(any::<char>(), 0..64).prop_map(|v| Input(v.into_iter().collect()))
 }
 
 proptest! {

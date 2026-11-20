@@ -87,12 +87,6 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（合否と、例外を足したならその理由）を PR 本文に書く。
 
 ```bash
-# DENY_CONFIG: deny.toml（TASK-668）が無い間の cargo deny の設定。QP-2 の厳格版（docs/spec/03-poc/quality-checks/qp2-deps/deny.toml）の写しに
-#   NCSA を許可リストへ足したもの。写しは repo の外（mktemp -d）に置き、ルートと fuzz の両方に --config で渡す。正式な設定は TASK-668 が作り、その後はこの 3 行を外す
-DENY_CONFIG="$(mktemp -d)/deny.toml"
-awk '{print} /^    "Zlib",$/ {print "    \"NCSA\","}' docs/spec/03-poc/quality-checks/qp2-deps/deny.toml > "$DENY_CONFIG"
-grep -c '"NCSA"' "$DENY_CONFIG"      # 合格: 1
-
 # advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。使った DB の commit と取得日を記録する
 cargo deny fetch
 cargo audit --file Cargo.lock        # cargo-audit の DB の取得を兼ねる（QP-2 の手順）
@@ -100,14 +94,9 @@ git -C ~/.cargo/advisory-db log -1 --format='%H %cI'                  # cargo-au
 git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'  # cargo-deny の DB の commit と日時
 
 # 取得なしで流す（DPOL-33・DPOL-34）
-cargo deny --locked check --config "$DENY_CONFIG" --disable-fetch   # advisories・bans・licenses・sources
+cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
 cargo audit --no-fetch --file Cargo.lock    # cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
 git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換えが無いこと（依存を足した変更では差分を目視で確かめる）
-
-# fuzz の別 workspace（ルートの exclude。独自の Cargo.lock を持つ）。ルートの上の 2 行は libfuzzer-sys とその推移依存を見ないので別に流す（DPOL-33・DPOL-34）
-cargo deny --locked --manifest-path crates/trial-deps/fuzz/Cargo.toml check --config "$DENY_CONFIG" --disable-fetch advisories bans licenses sources
-cargo audit --no-fetch --file crates/trial-deps/fuzz/Cargo.lock
-git diff --exit-code crates/trial-deps/fuzz/Cargo.lock   # fuzz 側の Cargo.lock の書き換えが無いこと
 
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
 # SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形。無ければ空）
@@ -116,19 +105,6 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
 cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
 cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
-
-# K7: 試験の道具が本番の依存の木に入らない（D-2026-11-20-7）。trial-deps を除くのはこの確認だけ。
-# 本番の順方向の木を取り出し、パッケージ名が完全に一致する行が無いことで判定する。dev 依存は lock で解決されていても
-# -e normal,build の木には出ず、-i では「一致なし」の文言が出ない場合があるため使わない。
-# 取り出しの失敗で止まるよう、サブシェルの中だけ set -euo pipefail にする（上の -i の行は「失敗」が合格なので外で流す）。
-# 一時ファイルの置き場は repo の外（mktemp -d）。
-(
-  set -euo pipefail
-  PROD_TREE="$(mktemp -d)/prod-tree.txt"
-  cargo tree --locked --workspace --exclude fandhe-auth-trial-deps -e normal,build --target all --features "$PROD_FEATURES" --prefix none --format '{p}' > "$PROD_TREE"
-  test -s "$PROD_TREE"                                                        # 取り出しの成功（空でない）
-  if grep -E '^(tracing-subscriber|proptest|libfuzzer-sys) ' "$PROD_TREE"; then echo 'K7 violation' >&2; exit 1; fi   # 合格: 一致 0 件・終了コード 0
-)
 ```
 
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
@@ -145,16 +121,16 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
     fuzz の nightly は日付で固定せず最新を追う。実行の記録に nightly の版を残すかは **未定**（`D-2026-11-20-9`）
   - `SECR-21` の構文木の走査は `syn` を使う自前の検査（`D-2026-11-20-10`）。置き場は spec に記録が無く **未定**。
     マクロ呼び出しの中の型を見落とすかは `TASK-514` の試し実装で確かめる（main の読み）
-  - 最小の試し実装（TASK-4 の成果物）は `crates/trial-deps`（#35）に実施した。normal は `fandhe-auth-secret`・`tracing`・`metrics`、
-    dev は `tracing-subscriber`・`proptest`・`syn`（`default-features = false`、`full`・`parsing`）。fuzz は別 workspace の `crates/trial-deps/fuzz/`（ルートの `exclude`）で、nightly を使い CI には載せていない。
-    口の feature の選び・K11 の閾値・`deny.toml` の形は **未定**（K11 を記入して人が決める）
-    fuzz の workspace はルートの `cargo deny`・`cargo audit --file Cargo.lock` の対象に入らない（`libfuzzer-sys` とその推移依存を見ない）ので、
-    上の確認手順の bash ブロックにある fuzz 側の 3 行（`--manifest-path crates/trial-deps/fuzz/Cargo.toml` と `crates/trial-deps/fuzz/Cargo.lock`）も流す（DPOL-33・DPOL-34）。
-    `deny.toml` が無い間の設定は、確認手順のブロック先頭の `DENY_CONFIG` の 1 か所で定める（ルートも fuzz も同じ `--config "$DENY_CONFIG"`）。厳格版の場所は spec の `03-poc/quality-checks/qp2-deps/deny.toml` で、本文は写さず場所だけを引く。`--config` は `check` の後ろに置く（`--manifest-path` と同じ階層には置けない）。正式な設定は TASK-668 が作る。
-    この crate は workspace のメンバーで、`tracing`・`metrics` とその推移依存を normal に持つ。試験用の依存（`tracing-subscriber`・`proptest` 等）も bans の対象で、
-    禁止の逆引き（`rsa`・`native-tls`・`openssl`・`web-sys`・`reqwest`）は trial-deps を含めて流す（`--exclude` で除かない。DPOL-40・DPOL-46）。
-    K7 の確認（`tracing-subscriber`・`proptest`・`libfuzzer-sys`）だけは `--exclude fandhe-auth-trial-deps` を付けた本番の順方向の木を取り出し、取り出しの成功を確かめたうえで、パッケージ名が完全に一致する行が無いことで判定する（`D-2026-11-20-7`。dev 依存は lock で解決されても本番の木には出ないため `-i` の文言では判定しない）。
-    試験用の依存の確認は別に `cargo tree --locked -p fandhe-auth-trial-deps -e normal,build,dev --target all` で行う。
+  - 最小の試し実装（TASK-4 の成果物）は `crates/trial-deps`（#35）に実施した。
+    normal は `fandhe-auth-secret`・`tracing`・`metrics`、dev は `tracing-subscriber`・`proptest`・`syn`（`default-features = false`、`full`・`parsing`）。
+    fuzz は別の workspace の `crates/trial-deps/fuzz/`（ルートの `exclude`）で、nightly を使い、CI には載せていない。
+    口の feature の選び・K11 の閾値・`deny.toml` の形は **未定**（人が決める）。
+    監査の範囲は次の 3 点（DPOL-33・DPOL-34・DPOL-40・DPOL-46、K7・`D-2026-11-20-7`）:
+    fuzz の workspace は独自の `Cargo.lock` を持ち、ルートの `cargo deny`・`cargo audit` の対象に入らないので、fuzz 側にも同じ監査を流す。
+    禁止の逆引きは trial-deps を含めて流す（試験用の依存も bans の対象である）。
+    K7 は trial-deps を除いた本番の木で確かめる。
+    `deny.toml` が無い間に使う設定と、実行の形（コマンド・合否の判定・記録）は `TASK-668` で決める。
+    試しに流したコマンドと結果は PR #5980 の本文に記録した
   上の対象以外の依存は選定の記録に無いので、足す前に利用者へ確かめる。メール送信と外向き HTTP クライアントは選定の対象から外れた。本体は口と契約テストだけを持ち、具象は組込み先が選ぶ（`D-2026-11-20-4`・`HOST-7`・`AMTH-14`・`AAUD-40`・`DPOL-46`）ので、本体の依存に足さない。
 
 ## 関連 rule
