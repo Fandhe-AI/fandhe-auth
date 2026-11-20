@@ -31,6 +31,10 @@ impl E2eComponent for Fake {
     fn kind(&self) -> E2eComponentKind {
         self.kind
     }
+    fn browser(&self) -> Option<Browser> {
+        // BrowserDriver は config() のブラウザ（Chrome）に結び付く。他は結び付かない。
+        (self.kind == E2eComponentKind::BrowserDriver).then_some(Browser::Chrome)
+    }
     fn start(&mut self) -> Result<(), E2eError> {
         if self.fail_start {
             return Err(E2eError::new(E2eErrorKind::StartFailed, self.kind));
@@ -154,4 +158,25 @@ fn drop_stops_components() {
         entries(&log),
         vec!["start RelyingParty", "stop RelyingParty"]
     );
+}
+
+/// browser() 未実装（None）の BrowserDriver は起動前に拒否する。
+#[test]
+fn browser_driver_without_browser_is_rejected() {
+    struct Unbound;
+    impl E2eComponent for Unbound {
+        fn kind(&self) -> E2eComponentKind {
+            E2eComponentKind::BrowserDriver
+        }
+        fn start(&mut self) -> Result<(), E2eError> {
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), E2eError> {
+            Ok(())
+        }
+    }
+    let Err(err) = E2eHarness::start(config().with(Box::new(Unbound))) else {
+        panic!("started");
+    };
+    assert_eq!(err.kind(), E2eErrorKind::BrowserMismatch);
 }

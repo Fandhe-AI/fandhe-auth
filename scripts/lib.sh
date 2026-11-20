@@ -58,8 +58,10 @@ run_e2e_registration() {
   require_cmd grep
   cd "${ROOT_DIR}"
   out="$(mktemp)"
-  # shellcheck disable=SC2064 # out は定義済みの値を trap に固定する
-  trap "rm -f '${out}'" EXIT
+  # trap 本文にパスを埋め込まない（TMPDIR 由来の文字がシェルコードとして解釈されるのを避ける）。
+  # 固定の本文から、スクリプト全体で生きるグローバル変数を引用付きで渡す。
+  E2E_REG_OUT="${out}"
+  trap 'rm -f -- "${E2E_REG_OUT:-}"' EXIT
   cargo test -p fandhe-auth-e2e-harness --locked --test "${target}" -- --ignored 2>&1 | tee "${out}"
   if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' "${out}"; then
     echo "${script_name}: no registration test ran (non-unix target or runner?); failing instead of passing with 0 tests" >&2

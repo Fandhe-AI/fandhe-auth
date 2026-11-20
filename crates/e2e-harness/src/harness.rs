@@ -105,7 +105,13 @@ impl E2eHarness {
         }
         // ドライバのブラウザと構成のブラウザが食い違う構成は起動前に拒否する（Chrome の構成に geckodriver 等）。
         for c in &components {
-            if c.browser().is_some_and(|b| b != browser) {
+            // BrowserDriver は Some(config.browser) を必須とする（browser() 未実装の None を通さない）。
+            // ブラウザに結び付かない要素だけが None を許す。
+            let ok = match (c.kind(), c.browser()) {
+                (E2eComponentKind::BrowserDriver, b) => b == Some(browser),
+                (_, b) => b.is_none_or(|b| b == browser),
+            };
+            if !ok {
                 return Err(E2eError::new(E2eErrorKind::BrowserMismatch, c.kind()));
             }
         }
