@@ -2,7 +2,7 @@
 //! 時間に依る試験は下限だけを確かめる。値は試験の中だけの仮の値（THRT-29・A-2026-10-28-1）。
 //! 記録は事実の出力で合否の判定ではない（ACPT-7）。
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
@@ -55,13 +55,68 @@ fn connect(port: u16) -> TcpStream {
     s
 }
 
-/// 1 往復。つながっていれば Some(応答)、切れていれば None。
-fn roundtrip(s: &mut TcpStream, msg: &[u8]) -> Option<Vec<u8>> {
-    if s.write_all(msg).is_err() {
-        return None;
+/// 往復の結果。タイムアウトは切断と区別する（応答を止めるだけの実装を「切れた」と読まないため。AUDB-6）。
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Echoed(Vec<u8>),
+    Disconnected,
+    TimedOut,
+}
+
+/// 切断を示す I/O エラーだけを `Disconnected` にする。タイムアウトは `TimedOut`、それ以外は試験の失敗。
+fn classify(e: &std::io::Error) -> Outcome {
+    match e.kind() {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => Outcome::TimedOut,
+        ErrorKind::UnexpectedEof
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe => Outcome::Disconnected,
+        kind => panic!("unexpected io error kind: {kind:?}"),
+    }
+}
+
+fn outcome(s: &mut TcpStream, msg: &[u8]) -> Outcome {
+    if let Err(e) = s.write_all(msg) {
+        return classify(&e);
     }
     let mut buf = vec![0u8; msg.len()];
-    s.read_exact(&mut buf).ok().map(|()| buf)
+    match s.read_exact(&mut buf) {
+        Ok(()) => Outcome::Echoed(buf),
+        Err(e) => classify(&e),
+    }
+}
+
+/// 1 往復。つながっていれば Some(応答)、明示の切断なら None。タイムアウトは失敗にする。
+fn roundtrip(s: &mut TcpStream, msg: &[u8]) -> Option<Vec<u8>> {
+    match outcome(s, msg) {
+        Outcome::Echoed(b) => Some(b),
+        Outcome::Disconnected => None,
+        Outcome::TimedOut => panic!("round trip timed out (not a disconnect)"),
+    }
+}
+
+/// 遮断中の新しい接続。待ち受けは閉じないので connect は成功し、転送器が accept した直後に切る。
+/// 往復は明示の切断になる。タイムアウト・別のエラーは失敗にする。
+fn assert_cut_while_blocked(port: u16) {
+    let mut s = TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_secs(5),
+    )
+    .expect("connect succeeds while blocked");
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(outcome(&mut s, b"c"), Outcome::Disconnected);
+}
+
+/// 応答を返さずに黙る接続は `TimedOut` と分類する（`roundtrip` が切断として通さないことの確認）。
+#[test]
+fn silent_peer_is_timed_out_not_disconnected() {
+    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = l.local_addr().unwrap().port();
+    let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let (_held, _) = l.accept().unwrap();
+    assert_eq!(outcome(&mut c, b"x"), Outcome::TimedOut);
 }
 
 #[test]
@@ -82,9 +137,8 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
 
     p.block(&mut tl).unwrap();
     assert!(roundtrip(&mut open, b"b").is_none(), "open conn is cut");
-    let mut fresh = connect(p.listen_port());
-    assert!(roundtrip(&mut fresh, b"c").is_none(), "new conn is closed");
-    assert!(p.refused_count() >= 1);
+    assert_cut_while_blocked(p.listen_port());
+    assert!(p.refused_count() >= 1, "blocked conn is counted as refused");
 
     p.release_block(&mut tl).unwrap();
     let mut again = connect(p.listen_port());
