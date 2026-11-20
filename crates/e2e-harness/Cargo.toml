@@ -11,8 +11,7 @@ publish.workspace = true
 workspace = true
 
 # 試験専用・仮称（人が確定する）。どの crate からも依存しない。workspace 内の依存は 0。
-# 外部依存は serde_json だけ（Cargo.lock に既存。hub-stub・console-stub と同じ暫定採用で、人の確認待ち）。
+# 外部依存は 0 件（JSON は src/json.rs の自前の最小実装。依存の採否は人の確認待ちのため、足さない）。
 # WebDriver のクライアントは std の自前（loopback 限定・同期）。HTTP クライアント・非同期ランタイムは足さない。
 # it-harness・minimal-host（TASK-716）への辺が要るときは、辺を足す段で scripts/check-crate-deps.sh の許可表を人に確かめる。
 [dependencies]
-serde_json = "1"

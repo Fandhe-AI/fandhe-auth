@@ -9,7 +9,7 @@
 //! Safari と実機（`TASK-784`・`TASK-75`〜`78`）、結合試験（`TASK-10`。it-harness）、計測と負荷（`TASK-12`）。
 //!
 //! 依存の向き: どの crate もこの crate に依存しない（LIB-2・LIB-4）。段階 1 のリリースのメンバーではない
-//! （LIB-14・LIB-15）。名前・置き場は仮称で、人が確定する。外部依存は `serde_json` だけ（暫定・人の確認待ち）。
+//! （LIB-14・LIB-15）。名前・置き場は仮称で、人が確定する。外部依存は 0 件（JSON は [`json`] の自前の最小実装）。
 //!
 //! 安全: 検証を外す意味の分岐・feature は作らない（DPOL-30〜32）。誤りの値に秘密値・URL・パスを載せない
 //! （SECR-11・SECR-23）。仮想 authenticator の合格を実機・Safari の合格に数えない（ACPT-7・ACPT-8）。
@@ -24,6 +24,7 @@ pub mod browser;
 pub mod chrome;
 pub mod component;
 pub mod harness;
+pub mod json;
 #[cfg(unix)]
 pub mod registration;
 pub mod scope;

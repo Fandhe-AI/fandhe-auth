@@ -1,7 +1,7 @@
 //! loopback 限定の最小の WebDriver クライアント（同期・HTTP/1.1・`Connection: close`）。
 //!
 //! 役割: [`crate::chrome`] が起動したドライバ（chromedriver）へ、W3C WebDriver と WebAuthn の拡張の命令を送る。
-//! 外部の HTTP クライアント・非同期ランタイムを足さないための自前実装で、人の確認待ちの暫定（`docs/harness/e2e.md`）。
+//! 外部の HTTP クライアント・非同期ランタイム・JSON の crate を足さないための自前実装（`docs/harness/e2e.md`）。
 //!
 //! 安全: 宛先は型で `127.0.0.1:<port>` に固定しホストを受けない・リダイレクトを追わない（A10）。メソッドは列挙型、
 //! path は許可文字だけ、path に埋める id は英数字と `-` だけ（A03）。応答はステータス行・ヘッダーの構文が正しくない・
@@ -9,17 +9,17 @@
 //! 誤りに URL・ポート・path・応答本文を載せない（SECR-11・SECR-23）。
 //! 余分なバイトの拒否は、宣言した長さに届いた後の猶予（50ms と残り時間の小さい方）内に届いた分と、同じ受信に含まれた分までが保証の範囲
 //! （接続は 1 命令で捨てる）。
-//! 生の応答（`privateKey` を含み得る）を返す入口は crate 内に閉じ、外へは型付きの値だけを出す（SECR-10・SECR-11）。
+//! 資格情報の応答（`privateKey` を含み得る）は汎用の値の木へ展開せず、`rpId`・`isResidentCredential` だけを読む専用の解析で
+//! 読み、他の欄は値を保持せずに捨てる。読み終えた受信バッファは上書きして捨てる（SECR-10・SECR-11・SECR-29）。
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
-
 use crate::component::E2eComponentKind;
 use crate::harness::{E2eError, E2eErrorKind};
+use crate::json::{Parser, Value};
 use crate::virtual_authenticator::VirtualAuthenticatorOptions;
 
 /// 応答の大きさの上限。ハーネスの安全上の上限で、要件の値ではない。
@@ -131,47 +131,6 @@ pub(crate) struct WebDriverClient {
     alive: Option<AliveGuard>,
 }
 
-/// `"privateKey":"<値>"` の値の部分を、長さを保ったまま `0` で上書きする（SECR-10・SECR-29）。
-/// 応答を JSON へ展開する前に呼び、秘密鍵の値を値の木・戻り値に入れない。値に `\` を含む・閉じが無い形は
-/// 想定外の形として誤りにする（fail-closed。base64 の値は引用符・`\` を含まない）。
-fn blank_private_keys(buf: &mut [u8]) -> Result<(), E2eError> {
-    const KEY: &[u8] = b"\"privateKey\"";
-    let mut i = 0;
-    while let Some(off) = buf[i..].windows(KEY.len()).position(|w| w == KEY) {
-        let mut j = i + off + KEY.len();
-        let skip_ws = |buf: &[u8], mut k: usize| {
-            while k < buf.len() && matches!(buf[k], b' ' | b'\t' | b'\r' | b'\n') {
-                k += 1;
-            }
-            k
-        };
-        j = skip_ws(buf, j);
-        if buf.get(j) != Some(&b':') {
-            // 文字列の中の語など（キーではない）。次を探す。
-            i = j.max(i + off + 1);
-            continue;
-        }
-        j = skip_ws(buf, j + 1);
-        if buf.get(j) != Some(&b'"') {
-            return Err(failed());
-        }
-        j += 1;
-        let start = j;
-        while j < buf.len() && buf[j] != b'"' {
-            if buf[j] == b'\\' {
-                return Err(failed());
-            }
-            j += 1;
-        }
-        if j >= buf.len() {
-            return Err(failed());
-        }
-        buf[start..j].fill(b'0');
-        i = j;
-    }
-    Ok(())
-}
-
 /// 期限までに `bytes` をすべて書く。部分書き込みのたびに残り時間を取り直す。
 fn write_all_deadline(
     stream: &mut TcpStream,
@@ -216,34 +175,50 @@ impl WebDriverClient {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, E2eError> {
-        self.request_inner(method, path, body, false)
+        let deadline = deadline_after(self.timeout)?;
+        let (status, mut raw) = self.exchange_with(method, path, body, deadline)?;
+        let r = finish_value(status, &raw);
+        raw.fill(0);
+        // 解析に時間がかかった場合も、成功を返す直前に絶対期限を確かめる。
+        remaining(deadline)?;
+        r
     }
 
-    /// `request` と同じ。応答の `privateKey` の値を展開の前に潰す（credential の取得だけが使う）。
-    fn request_redacted(
+    /// credential の取得。応答を値の木へ展開せず、`rpId`・`isResidentCredential` だけを読む（SECR-10・SECR-29）。
+    fn request_credentials(&self, path: &str) -> Result<Vec<CredentialSummary>, E2eError> {
+        let deadline = deadline_after(self.timeout)?;
+        let (status, mut raw) = self.exchange_with(Method::Get, path, None, deadline)?;
+        let parsed = if (200..300).contains(&status) {
+            Parser::credentials(&raw).map_err(|_| failed())
+        } else {
+            Err(failed())
+        };
+        raw.fill(0);
+        remaining(deadline)?;
+        Ok(parsed?
+            .into_iter()
+            .map(|c| CredentialSummary {
+                rp_id: c.rp_id,
+                is_resident: c.is_resident,
+            })
+            .collect())
+    }
+
+    /// 1 命令を送り、ステータスと本文のバイト列を返す。本文は呼び出し元が用途に応じて解析し、上書きして捨てる。
+    fn exchange_with(
         &self,
         method: Method,
         path: &str,
         body: Option<&Value>,
-    ) -> Result<Value, E2eError> {
-        self.request_inner(method, path, body, true)
-    }
-
-    fn request_inner(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&Value>,
-        redact_private_key: bool,
-    ) -> Result<Value, E2eError> {
+        deadline: Instant,
+    ) -> Result<(u16, Vec<u8>), E2eError> {
         let path = validated_path(path)?;
         let payload = match body {
-            Some(v) => serde_json::to_vec(v).map_err(|_| failed())?,
+            Some(v) => v.to_json_string().into_bytes(),
             None => Vec::new(),
         };
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
-        // 命令全体の期限。少量ずつ返す・受け取るドライバでも `timeout` を超えて続けない。
-        let deadline = deadline_after(self.timeout)?;
+        // 命令全体の期限（呼び出し元が作る）。少量ずつ返す・受け取るドライバでも `timeout` を超えて続けない。
         let mut stream =
             TcpStream::connect_timeout(&addr, remaining(deadline)?).map_err(|_| failed())?;
         // 接続の後に子の生存を確かめる。生きていれば繋がった先は子の待ち受けで、ポートの再利用先ではない（A10）。
@@ -261,7 +236,7 @@ impl WebDriverClient {
         .into_bytes();
         message.extend_from_slice(&payload);
         write_all_deadline(&mut stream, &message, deadline)?;
-        parse_response(&mut stream, deadline, redact_private_key)
+        read_response(&mut stream, deadline)
     }
 
     /// `GET /status` の `ready` が真か。
@@ -283,7 +258,8 @@ impl WebDriverClient {
             .and_then(Value::as_str)
             .ok_or_else(failed)?;
         let version = v
-            .pointer("/capabilities/browserVersion")
+            .get("capabilities")
+            .and_then(|c| c.get("browserVersion"))
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
@@ -383,12 +359,8 @@ fn parse_head(head: &[u8]) -> Result<Head, E2eError> {
     })
 }
 
-/// 応答を読んで `value` を返す。Content-Length が分かればその分で止め、無ければ EOF まで読む。
-fn parse_response(
-    stream: &mut TcpStream,
-    deadline: Instant,
-    redact_private_key: bool,
-) -> Result<Value, E2eError> {
+/// 応答を読んでステータスと本文を返す。Content-Length が分かればその分で止め、無ければ EOF まで読む。
+fn read_response(stream: &mut TcpStream, deadline: Instant) -> Result<(u16, Vec<u8>), E2eError> {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut head: Option<(usize, Head)> = None;
@@ -449,9 +421,6 @@ fn parse_response(
     }
     // 結果を受理する時点でも絶対期限を確かめる。期限を過ぎた応答は成功にしない。
     remaining(deadline)?;
-    if redact_private_key {
-        blank_private_keys(&mut buf[end..])?;
-    }
     let body = &buf[end..];
     let body = match head.content_length {
         // 宣言より多い・少ない本文は曖昧なフレーミングとして拒否する。
@@ -459,13 +428,20 @@ fn parse_response(
         Some(_) => return Err(failed()),
         None => body,
     };
-    let json: Value = serde_json::from_slice(body).map_err(|_| failed())?;
+    let status = head.status;
+    let body = body.to_vec();
+    // ヘッダーを含む受信バッファは、本文（`privateKey` を含み得る）を複製した後に上書きして捨てる。
+    buf.fill(0);
+    Ok((status, body))
+}
+
+/// 本文を汎用の値として解析し、`value` を返す。WebDriver の誤り応答・非 2xx・形の不一致は `CommandFailed`。
+fn finish_value(status: u16, body: &[u8]) -> Result<Value, E2eError> {
+    let json = Value::parse(body).map_err(|_| failed())?;
     let value = json.get("value").cloned().ok_or_else(failed)?;
-    if !(200..300).contains(&head.status) || value.get("error").is_some_and(Value::is_string) {
+    if !(200..300).contains(&status) || value.get("error").is_some_and(Value::is_string) {
         return Err(failed());
     }
-    // 復号・展開に時間がかかった場合も、成功を返す直前に絶対期限を確かめる。
-    remaining(deadline)?;
     Ok(value)
 }
 
@@ -494,7 +470,7 @@ impl WebDriverSession {
             .request(
                 Method::Post,
                 &self.path("/url"),
-                Some(&json!({ "url": url })),
+                Some(&Value::object([("url", Value::from(url))])),
             )
             .map(|_| ())
     }
@@ -512,7 +488,7 @@ impl WebDriverSession {
             .request(
                 Method::Post,
                 &self.path("/timeouts"),
-                Some(&json!({ "script": ms })),
+                Some(&Value::object([("script", Value::from(ms))])),
             )
             .map(|_| ())
     }
@@ -522,7 +498,10 @@ impl WebDriverSession {
         self.client.request(
             Method::Post,
             &self.path("/execute/async"),
-            Some(&json!({ "script": script, "args": args })),
+            Some(&Value::object([
+                ("script", Value::from(script)),
+                ("args", Value::array(args.iter().cloned())),
+            ])),
         )
     }
 
@@ -544,28 +523,9 @@ impl WebDriverSession {
         &self,
         id: &AuthenticatorId,
     ) -> Result<Vec<CredentialSummary>, E2eError> {
-        let v = self.client.request_redacted(
-            Method::Get,
+        self.client.request_credentials(
             &self.path(&format!("/webauthn/authenticator/{}/credentials", id.0)),
-            None,
-        )?;
-        v.as_array()
-            .ok_or_else(failed)?
-            .iter()
-            .map(|c| {
-                Ok(CredentialSummary {
-                    rp_id: c
-                        .get("rpId")
-                        .and_then(Value::as_str)
-                        .ok_or_else(failed)?
-                        .to_owned(),
-                    is_resident: c
-                        .get("isResidentCredential")
-                        .and_then(Value::as_bool)
-                        .ok_or_else(failed)?,
-                })
-            })
-            .collect()
+        )
     }
 }
 

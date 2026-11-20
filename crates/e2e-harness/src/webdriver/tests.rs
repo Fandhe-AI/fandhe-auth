@@ -13,6 +13,7 @@ use std::time::Duration;
 use super::{Method, WebDriverClient};
 use crate::chrome::new_session_request;
 use crate::harness::E2eErrorKind;
+use crate::json::Value;
 use crate::virtual_authenticator::{Protocol, Transport, VirtualAuthenticatorOptions};
 
 /// 1 接続だけ受け、受けた要求（先頭行と本文）を返し、`response` をそのまま書く。
@@ -88,7 +89,7 @@ fn huge_content_length_is_rejected_without_panic() {
 fn request_returns_value_on_success() {
     let (port, h, rx) = fake_driver(http("200 OK", r#"{"value":{"ready":true}}"#));
     let v = client(port).request(Method::Get, "/status", None).unwrap();
-    assert_eq!(v["ready"], true);
+    assert_eq!(v["ready"], Value::Bool(true));
     let req = rx.recv().unwrap();
     assert!(req.starts_with("GET /status HTTP/1.1"));
     assert!(req.contains("Connection: close"));
@@ -320,17 +321,24 @@ fn credentials_returns_only_summary_fields() {
 }
 
 #[test]
-fn private_key_values_are_blanked_before_parsing() {
-    use super::blank_private_keys;
-    let mut b = br#"[{"rpId":"x","privateKey" : "QUJDRA==","isResidentCredential":true}]"#.to_vec();
-    blank_private_keys(&mut b).unwrap();
-    let t = String::from_utf8(b).unwrap();
-    assert!(!t.contains("QUJDRA"));
-    assert!(t.contains("\"rpId\":\"x\""));
-    assert!(serde_json::from_str::<serde_json::Value>(&t).is_ok());
-    // 想定外の形（エスケープ・閉じ無し）は誤り。
-    let mut bad = br#"{"privateKey":"a\"b"}"#.to_vec();
-    assert!(blank_private_keys(&mut bad).is_err());
-    let mut open = br#"{"privateKey":"abc"#.to_vec();
-    assert!(blank_private_keys(&mut open).is_err());
+fn credentials_with_escaped_private_key_name_still_return_only_summary_fields() {
+    // キー名のエスケープ表記（`\u0070rivateKey`）でも、必要な 2 欄以外は値の木に保持しない（SECR-10・SECR-29）。
+    let (port, h, _) = fake_driver_seq(vec![
+        http(
+            "200 OK",
+            r#"{"value":{"sessionId":"s1","capabilities":{}}}"#,
+        ),
+        http(
+            "200 OK",
+            r#"{"value":[{"rpId":"localhost","isResidentCredential":false,"\u0070rivateKey":"PK2"}]}"#,
+        ),
+    ]);
+    let (sess, _) = client(port).new_session(&new_session_request()).unwrap();
+    let aid = super::AuthenticatorId::new("a-1").unwrap();
+    let creds = sess.credentials(&aid).unwrap();
+    assert_eq!(creds.len(), 1);
+    assert_eq!(creds[0].rp_id, "localhost");
+    assert!(!creds[0].is_resident);
+    assert!(!format!("{creds:?}").contains("PK2"));
+    h.join().unwrap();
 }

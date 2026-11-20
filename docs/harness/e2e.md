@@ -77,7 +77,10 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 `--disable-*`・`--no-sandbox` は足さない。`navigate` は移動後の URL も許可リストで確かめ、外れたら空白ページへ戻して誤りにする。
 A10 の保証範囲は Chrome の HTTP(S) の送信先までで、proxy を通らない WebRTC の直接 UDP などは flag では制限できず保証しない（試験用ページは使わない。ネットワーク層の隔離は実行環境の担当で、ここでは主張しない）。
 chromedriver の起動はプロセスグループを使うため、Chrome 側の実装・公開経路・試験は `cfg(unix)` に限る。
-停止は、子を回収する前にグループへ SIGKILL を送り、そのあと wait する（回収後の PID を宛先にしない）。
+停止は、子を回収する前にグループへ SIGKILL を送り、そのあと wait する（回収後の PID を宛先にしない）。子の終了の観測は
+`try_wait` を使わず `/proc`（無ければ `ps`）で状態（zombie）だけを読み、終了を観測しても回収しない。signal の失敗は、グループに生きた構成員が
+居ないと確かめられた場合だけ消滅済みとみなし、それ以外は `StopFailed` で子・一時領域を保持して再試行する。
+credential の応答は `rpId`・`isResidentCredential` だけを読む専用の解析で読み、他の欄（`privateKey` 等。キー名のエスケープ表記を含む）は値を保持せず捨てる（SECR-10・SECR-29）。
 WebDriver の応答は、ヘッダー名の token 検査・値と理由句の制御文字の拒否を行う。宣言した長さを超える余分なバイトの拒否は、
 長さに届いた後の短い猶予（50ms と残り時間の小さい方）内に届いた分までを保証の範囲とする（接続は 1 命令で捨てる）。
 
@@ -119,8 +122,8 @@ WebDriver の応答は、ヘッダー名の token 検査・値と理由句の制
 
 - crate の追加・名前 `fandhe-auth-e2e-harness`・置き場 `crates/e2e-harness`・許可表の行
 - `LIB-14`・`LIB-15` との関係（段階 1 のリリースのメンバーに含めない扱い）
-- `serde_json` の暫定採用（Cargo.lock に既存。hub-stub・console-stub と同じ）と、std の自前の WebDriver クライアント
-  （外部の WebDriver クライアント crate・非同期ランタイムを足さない判断。`dependency-policy.md`）
+- std の自前の WebDriver クライアントと自前の最小の JSON（`src/json.rs`。外部の WebDriver クライアント crate・JSON の crate・
+  非同期ランタイムを足さない判断。`dependency-policy.md`）
 - 試験用ページと origin の置き場（上の (a)〜(c)。2/6 は (b) を暫定採用）
 - 仮想 authenticator の options の値（2/6 の値は PoC の値）
 - make ターゲット名 `e2e-chrome`
@@ -130,5 +133,5 @@ WebDriver の応答は、ヘッダー名の token 検査・値と理由句の制
 
 ## 依存の判断待ち（人が決める）
 
-`serde_json` を直接の依存にしている（`hub-stub`・`console-stub` と同じ暫定の採用で、`Cargo.lock` に既存）。
-`dependency-policy.md` に従い、採用の可否は人の確認待ち。確認が取れるまで、この依存を前提に進めた段であることを PR に記録する。
+外部依存は 0 件。`serde_json` の採否が人の確認待ちのため、直接の依存にせず、JSON は `src/json.rs` の自前の最小実装（厳格な構文解析・
+深さの上限・重複キーの拒否）で扱う。採否を人が決めたら、置き換えるかを改めて判断する。

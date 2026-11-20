@@ -4,7 +4,7 @@
 //! （PoC の値〔QP-1〕を要件の値として置かない。`A-2026-10-28-1`〜`14`）。結果は
 //! [`crate::browser::AuthenticatorKind::WebDriverVirtual`]、つまり〔仮想〕で、実機・Safari に数えない（ACPT-7・ACPT-8）。
 
-use serde_json::{Value, json};
+use crate::json::Value;
 
 /// authenticator のプロトコル。今使う変種だけ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,12 +39,25 @@ impl VirtualAuthenticatorOptions {
     /// WebDriver の WebAuthn 拡張のキー（`protocol`・`transport`・`hasResidentKey`・`hasUserVerification`・
     /// `isUserVerified`）への写像。ここだけに置く。
     pub fn to_webdriver_json(&self) -> Value {
-        json!({
-            "protocol": match self.protocol { Protocol::Ctap2 => "ctap2" },
-            "transport": match self.transport { Transport::Internal => "internal" },
-            "hasResidentKey": self.has_resident_key,
-            "hasUserVerification": self.has_user_verification,
-            "isUserVerified": self.is_user_verified,
-        })
+        Value::object([
+            (
+                "protocol",
+                Value::from(match self.protocol {
+                    Protocol::Ctap2 => "ctap2",
+                }),
+            ),
+            (
+                "transport",
+                Value::from(match self.transport {
+                    Transport::Internal => "internal",
+                }),
+            ),
+            ("hasResidentKey", Value::from(self.has_resident_key)),
+            (
+                "hasUserVerification",
+                Value::from(self.has_user_verification),
+            ),
+            ("isUserVerified", Value::from(self.is_user_verified)),
+        ])
     }
 }

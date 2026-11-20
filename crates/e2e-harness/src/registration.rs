@@ -8,7 +8,7 @@
 //! `crypto.getRandomValues` で作る。credential の生の値・公開鍵・attestation の中身は返さない（SECR-11）。
 //! 失敗時の `DOMException.name` は既知の名前を列挙型に写し、未知の値は固定の分類にする（応答由来の文字列を出さない。SECR-23）。
 
-use serde_json::{Value, json};
+use crate::json::Value;
 
 use crate::browser::{AuthenticatorKind, Evidence};
 use crate::chrome::ChromeHandle;
@@ -165,7 +165,7 @@ pub fn register_once(
             E2eComponentKind::BrowserDriver,
         ));
     }
-    let v = handle.execute_async(REGISTER_SCRIPT, &[json!(rp_id), json!(origin)])?;
+    let v = handle.execute_async(REGISTER_SCRIPT, &[Value::from(rp_id), Value::from(origin)])?;
     RegistrationOutcome::from_value(&v).ok_or(E2eError::new(
         E2eErrorKind::CommandFailed,
         E2eComponentKind::BrowserDriver,
@@ -178,7 +178,10 @@ mod tests {
 
     #[test]
     fn unknown_error_name_becomes_other_and_is_not_echoed() {
-        let v = json!({ "ok": false, "errorName": "secret-like-value-xyz" });
+        let v = Value::object([
+            ("ok", Value::from(false)),
+            ("errorName", Value::from("secret-like-value-xyz")),
+        ]);
         let o = RegistrationOutcome::from_value(&v).unwrap();
         assert_eq!(o.error(), Some(RegistrationErrorKind::Other));
         assert!(!format!("{o:?}").contains("secret-like-value-xyz"));
@@ -187,7 +190,10 @@ mod tests {
 
     #[test]
     fn known_error_name_is_mapped() {
-        let v = json!({ "ok": false, "errorName": "NotAllowedError" });
+        let v = Value::object([
+            ("ok", Value::from(false)),
+            ("errorName", Value::from("NotAllowedError")),
+        ]);
         let o = RegistrationOutcome::from_value(&v).unwrap();
         assert_eq!(o.error(), Some(RegistrationErrorKind::NotAllowed));
     }

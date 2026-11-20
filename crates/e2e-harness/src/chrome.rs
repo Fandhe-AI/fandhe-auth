@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use crate::json::Value;
 
 use crate::component::{E2eComponent, E2eComponentKind};
 use crate::harness::{E2eError, E2eErrorKind};
@@ -157,14 +157,19 @@ pub fn new_session_request_with_profile(
     if let Some(dir) = profile_dir {
         args.push(format!("--user-data-dir={}", dir.display()));
     }
-    json!({
-        "capabilities": {
-            "alwaysMatch": {
-                "browserName": "chrome",
-                "goog:chromeOptions": { "args": args }
-            }
-        }
-    })
+    Value::object([(
+        "capabilities",
+        Value::object([(
+            "alwaysMatch",
+            Value::object([
+                ("browserName", Value::from("chrome")),
+                (
+                    "goog:chromeOptions",
+                    Value::object([("args", Value::array(args.into_iter().map(Value::from)))]),
+                ),
+            ]),
+        )]),
+    )])
 }
 
 /// 許可 origin なしの `POST /session` の本文（すべての通信が失敗する）。
@@ -453,8 +458,8 @@ impl ChromeDriverComponent {
     }
 }
 
-/// ドライバの子と、その終了を観測したか。終了を観測しても子は手放さない（Chrome が残り得るので、
-/// プロセスグループへの終了通知が済むまで所有を保持する）。
+/// ドライバの子と、その終了（zombie）を観測したか。終了を観測しても子は回収せず手放さない（Chrome が残り得るので、
+/// プロセスグループへの終了通知が済むまで所有と PID を保持する）。
 struct Driver {
     child: Child,
     exited: bool,
@@ -467,21 +472,61 @@ fn lock_driver(driver: &Mutex<Option<Driver>>) -> std::sync::MutexGuard<'_, Opti
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// 子の状態。
+enum ProcState {
+    /// 動いている（zombie ではない）。
+    Running,
+    /// 終了済みで未回収（zombie）。PID はこちらが回収するまで再利用されない。
+    Zombie,
+}
+
+/// 子を回収せずに状態を読む。`wait`・`try_wait` は終了を見つけると子を回収し PID が再利用され得るため使わない
+/// （回収前にグループへ終了通知を送るため。`docs/harness/e2e.md` の停止契約）。取れないときは `None`。
+/// Linux は `/proc/<pid>/stat`、それ以外は `ps -o stat= -p <pid>` で読む。
+fn child_state(pid: u32) -> Option<ProcState> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // comm は括弧で囲まれ空白・括弧を含み得るので、最後の `)` の後の最初の欄が状態。
+        Ok(t) => t
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.trim_start().chars().next())?,
+        Err(_) => {
+            let out = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            String::from_utf8_lossy(&out.stdout)
+                .trim_start()
+                .chars()
+                .next()?
+        }
+    };
+    Some(if stat == 'Z' {
+        ProcState::Zombie
+    } else {
+        ProcState::Running
+    })
+}
+
 /// 所有するドライバの子がまだ動いているか。終了を観測した・状態を取れない・子が無いときは `false`。
-/// 終了の検知だけで、子の保持は変えない（所有権・グループへの終了通知は失わせない）。
+/// 終了の検知だけで、子は回収しない（所有権・PID・グループへの終了通知を失わせない）。
 fn driver_is_alive(driver: &Mutex<Option<Driver>>) -> bool {
     let mut g = lock_driver(driver);
     let Some(d) = g.as_mut() else { return false };
     if d.exited {
         return false;
     }
-    match d.child.try_wait() {
-        Ok(None) => true,
-        Ok(Some(_)) => {
+    match child_state(d.child.id()) {
+        Some(ProcState::Running) => true,
+        Some(ProcState::Zombie) => {
             d.exited = true;
             false
         }
-        Err(_) => false,
+        None => false,
     }
 }
 
@@ -565,20 +610,39 @@ fn send_signal(sig: &str, group: &str) -> std::io::Result<()> {
     }
 }
 
+/// プロセスグループ `pgid` に、zombie でない構成員が居るか。`ps` の出力を読めないときは誤り（fail-closed）。
+fn group_has_live_member(pgid: u32) -> std::io::Result<bool> {
+    let out = Command::new("ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()?;
+    if !out.status.success() {
+        return Err(std::io::Error::other("ps failed"));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let want = pgid.to_string();
+    Ok(text.lines().any(|l| {
+        let mut it = l.split_whitespace();
+        it.next() == Some(want.as_str()) && it.next().is_some_and(|st| !st.starts_with('Z'))
+    }))
+}
+
 /// 子のプロセスグループ（chromedriver と配下の Chrome）へ SIGKILL を送り、そのあとで子を wait する。
-/// 子を回収する前に signal を送るので、グループ ID（= 子の PID）は signal を送り終えるまで再利用されない
-/// （回収済みの PID を宛先にしない）。Chrome の一時領域は回収後にハーネスが消すため、SIGTERM の猶予は置かない。
-/// グループへの signal が失敗したら、子自身は止めるが回収しない（PID を確保したままにし、呼び出し元が子を保持して再試行できる。
-/// 回収すると、残った Chrome のグループの PID が再利用され得る）。
+/// 子は終了を観測した後も回収していない（`driver_is_alive` は回収しない）ので、グループ ID（= 子の PID）は
+/// signal を送り終えるまで再利用されない（回収済みの PID を宛先にしない）。Chrome の一時領域は回収後にハーネスが消すため、
+/// SIGTERM の猶予は置かない。
 ///
-/// 子の終了を既に観測している（`exited`）ときは回収済みで、配下の Chrome にだけグループの signal を送る。
-/// グループが空なら signal は失敗するが、その区別を付けられないため成功として扱う（残る Chrome が居れば
-/// グループ ID は再利用されない）。
+/// グループへの signal が失敗したら、グループに生きた構成員が居ないと確かめられた場合だけ消滅済みとみなし、それ以外は誤りを返す。
+/// 子自身は止めるが回収しない（PID を確保したままにし、呼び出し元が子を保持して再試行できる。
+/// 回収すると、残った Chrome のグループの PID が再利用され得る）。成功は、signal を送れて子を回収できたときだけ。
 fn kill_group_and_reap(d: &mut Driver) -> std::io::Result<()> {
     let group = format!("-{}", d.child.id());
-    let sent = send_signal("-KILL", &group);
-    if d.exited {
-        return Ok(());
+    let mut sent = send_signal("-KILL", &group);
+    if sent.is_err() && matches!(group_has_live_member(d.child.id()), Ok(false)) {
+        // 外部の `kill` はグループに未回収の終了済みの子しか居ないと失敗する。生きた構成員が 0 だと確かめられたときだけ
+        // 「グループは消滅済み」とみなす。確かめられない・生きた構成員が居るなら誤りのまま返す（状態を保持して再試行）。
+        sent = Ok(());
     }
     let _ = d.child.kill();
     sent?;
@@ -699,5 +763,37 @@ mod tests {
             None
         );
         assert_eq!(parse_started_port("other"), None);
+    }
+
+    #[test]
+    fn exited_child_is_observed_without_being_reaped() {
+        // 終了を観測しても回収しない（PID が再利用されない）ので、その後のグループへの signal と wait が成り立つ。
+        let child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut d = Driver {
+            child,
+            exited: false,
+        };
+        let pid = d.child.id();
+        assert!(matches!(child_state(pid), Some(ProcState::Running)));
+        let _ = d.child.kill();
+        let mut zombie = false;
+        for _ in 0..100 {
+            if matches!(child_state(pid), Some(ProcState::Zombie)) {
+                zombie = true;
+                break;
+            }
+            sleep(Duration::from_millis(20));
+        }
+        assert!(
+            zombie,
+            "{:?}",
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        );
+        // 未回収の子がグループに残るので、signal は成功し、wait で回収できる。
+        assert!(kill_group_and_reap(&mut d).is_ok());
     }
 }

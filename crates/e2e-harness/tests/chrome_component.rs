@@ -3,6 +3,7 @@
 #![cfg(unix)]
 
 use fandhe_auth_e2e_harness::chrome;
+use fandhe_auth_e2e_harness::json::Value;
 use fandhe_auth_e2e_harness::{
     AuthenticatorId, ChromeDriverComponent, ChromeDriverConfig, E2eComponent, E2eErrorKind,
     Protocol, Transport, VirtualAuthenticatorOptions,
@@ -31,13 +32,16 @@ fn new_session_request_has_only_headless_and_outbound_restrictions() {
     let args = &v["capabilities"]["alwaysMatch"]["goog:chromeOptions"]["args"];
     assert_eq!(
         args,
-        &serde_json::json!([
-            "--headless=new",
-            chrome::HOST_RESOLVER_RULES_ARG,
-            chrome::PROXY_SERVER_ARG,
-            "--proxy-bypass-list=<-loopback>;http://localhost:8080",
-            "--user-data-dir=/tmp/fandhe-e2e-chrome-test"
-        ])
+        &Value::array(
+            [
+                "--headless=new",
+                chrome::HOST_RESOLVER_RULES_ARG,
+                chrome::PROXY_SERVER_ARG,
+                "--proxy-bypass-list=<-loopback>;http://localhost:8080",
+                "--user-data-dir=/tmp/fandhe-e2e-chrome-test"
+            ]
+            .map(Value::from)
+        )
     );
 }
 
@@ -52,7 +56,7 @@ fn unvalidated_origins_never_reach_the_bypass_list() {
     let args = &v["capabilities"]["alwaysMatch"]["goog:chromeOptions"]["args"];
     assert_eq!(
         args[3],
-        serde_json::json!("--proxy-bypass-list=<-loopback>;http://127.0.0.1:9000")
+        Value::from("--proxy-bypass-list=<-loopback>;http://127.0.0.1:9000")
     );
 }
 
