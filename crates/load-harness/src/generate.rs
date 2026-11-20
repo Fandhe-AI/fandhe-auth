@@ -300,8 +300,10 @@ where
 /// - 枠の取得と誤りの記録は同じロックの下で全順序に並ぶ。記録と停止は同時に確定する。
 /// - 記録より後に枠を取ろうとしたワーカーは必ず取れない。記録の後に新しく取得できる枠は 0 件（保証するのは枠の取得だけ）。
 /// - 記録より前に取得済みの枠の試行は止めない。対象の呼び出しまで進んで締めるか誤りで抜ける。記録時点で未完了の
-///   試行は各ワーカー最大 1 件で、設定の並行数が上限。ただしワーカーの panic は起動側が join で検出して初めて記録
-///   されるので、検出・記録までに他のワーカーが新しく取得して進める件数の累計は上限を保証しない。
+///   試行は各ワーカー最大 1 件で、設定の並行数が上限。対象の閉包の panic はワーカー内の `catch_unwind` が捕捉し、
+///   その場で記録する（上の保証が及ぶ）。join で初めて記録されるのは、ワーカー内で捕捉されずにスレッドを終了させた
+///   panic（`begin_trial`・`finish` 等、対象の閉包の外）だけで、検出・記録までに他のワーカーが新しく取得して進める
+///   件数の累計は上限を保証しない。
 ///   記録の後に `begin_trial` や対象の呼び出しへ進む試行があり得る（取得済みの枠だけ）。
 /// - 返す誤りは最初の 1 件だけ。
 ///
@@ -369,6 +371,43 @@ mod tests {
         s.fail(LoadError::SpawnFailed);
         assert!(!s.claim(10));
         assert_eq!(next_of(&s), 1);
+    }
+
+    /// 同期点を制御した順序の試験。取得者が枠のロックの待ちに入っている間に、ロックを持つ側が記録を確定する。
+    /// 待っていた取得は記録の後に走るので、枠を更新できず `false` になる。記録と枠の更新が別のロックなら、
+    /// 記録を確定した後でも待っていた取得が枠を進められる。待ちは有限回で打ち切る。
+    #[test]
+    fn claim_blocked_across_fail_does_not_advance() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const MAX_SPINS: u32 = 1_000_000;
+        let s = Shared::new();
+        let about_to_claim = AtomicBool::new(false);
+        let claimed = thread::scope(|scope| {
+            let mut guard = s.lock();
+            let h = thread::Builder::new()
+                .spawn_scoped(scope, || {
+                    about_to_claim.store(true, Ordering::SeqCst);
+                    s.claim(u64::MAX)
+                })
+                .expect("claimer thread must start");
+            let mut spins = 0;
+            while !about_to_claim.load(Ordering::SeqCst) && spins < MAX_SPINS {
+                thread::yield_now();
+                spins += 1;
+            }
+            // 取得者がロックの待ちに入る時間を与える。記録は必ずロックを持ったまま確定するので、順序は保たれる。
+            for _ in 0..1000 {
+                thread::yield_now();
+            }
+            guard.first_error = Some(LoadError::InvalidOutcome);
+            drop(guard);
+            h.join().expect("claimer must not panic")
+        });
+        assert!(
+            !claimed,
+            "a blocked claim succeeded after fail was recorded"
+        );
+        assert_eq!(next_of(&s), 0);
     }
 
     /// 記録の後に枠が 1 件も通らない。取得者は停止まで枠を取り続け、その最中に記録者が記録を確定する。
