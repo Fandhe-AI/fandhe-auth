@@ -98,14 +98,20 @@ fn secr26_probe_counter_key_label_and_increment_received() {
     metrics::with_local_recorder(&rec, emit_probe_counter);
 
     let reg = rec.registered.lock().unwrap();
-    assert_eq!(
-        reg.keys,
-        vec![(
-            "trial_probe_total".to_owned(),
-            vec![("kind".to_owned(), "probe".to_owned())]
-        )]
+    // SECR-26・SECR-27: assert_eq! は失敗時に key・ラベルの全体を Debug で出すため、
+    // 完全一致の判定は保ったまま、失敗時の出力は固定の文と件数だけにする。
+    let expected = vec![(
+        "trial_probe_total".to_owned(),
+        vec![("kind".to_owned(), "probe".to_owned())],
+    )];
+    let keys_exact = reg.keys == expected;
+    assert!(
+        keys_exact,
+        "registered keys differ from expected (count={})",
+        reg.keys.len()
     );
-    assert_eq!(*rec.calls.increments.lock().unwrap(), vec![1]);
+    let increments_exact = *rec.calls.increments.lock().unwrap() == vec![1];
+    assert!(increments_exact, "increments differ from expected");
     assert!(rec.calls.absolutes.lock().unwrap().is_empty());
     // 想定外の計測・説明文が 0 件であること。件数だけを出し、key・label・説明文は出さない。
     let unexpected = rec.unexpected.load(Ordering::SeqCst);
