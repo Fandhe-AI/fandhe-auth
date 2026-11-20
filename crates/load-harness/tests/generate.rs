@@ -125,6 +125,24 @@ fn warmup_is_excluded() {
 }
 
 #[test]
+fn warmup_timeout_with_open_interval_is_excluded() {
+    let clock = FakeClock::new();
+    let name = iv();
+    let run = run_closed_loop(meter(&clock), &cfg(2, 4, 3), |t| {
+        if t.id() <= 3 {
+            t.start(&name).unwrap();
+            Outcome::Timeout
+        } else {
+            t.measure(&name, || clock.advance(1)).unwrap();
+            Outcome::Success
+        }
+    })
+    .unwrap();
+    let s = &run.samples;
+    assert_eq!((s.excluded, s.executed, s.timeout, s.success), (3, 4, 0, 4));
+}
+
+#[test]
 fn outcome_kinds_are_counted() {
     let clock = FakeClock::new();
     let name = iv();

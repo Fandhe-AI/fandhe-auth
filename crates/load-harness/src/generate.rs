@@ -8,10 +8,11 @@
 //! ワーカーは 1 度に 1 試行だけ持つので、実測の最大同時実行数は設定の並行数を超えない。
 //! 対象の経路を実際に呼ぶ部分は 6/10 の担当で、ここは対象を閉包として受けるだけ。合否は付けない（ACPT-7）。
 
+use std::cell::Cell;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, Once, PoisonError};
 use std::thread;
 
 use crate::meter::{MeterError, Outcome, RunMeter, RunSamples, Trial};
@@ -121,6 +122,43 @@ pub struct LoadRun {
     pub samples: RunSamples,
 }
 
+thread_local! {
+    /// このスレッドが対象の閉包を実行中か。実行中の panic は既定の hook に出力させない。
+    static IN_TARGET: Cell<bool> = const { Cell::new(false) };
+}
+
+static HOOK_ONCE: Once = Once::new();
+
+/// 対象の閉包の実行中だけ panic のメッセージとソース位置を出さない hook を、直前の hook を包んで 1 度だけ入れる。
+/// 抑止はスレッドローカルの印で絞るので、他のスレッドの panic は直前の hook に渡す（SECR-23）。
+fn install_quiet_hook() {
+    HOOK_ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if IN_TARGET.try_with(Cell::get).unwrap_or(false) {
+                return;
+            }
+            prev(info);
+        }));
+    });
+}
+
+/// 印を立て、スコープを抜けたとき（panic 後も）下ろす。
+struct QuietGuard;
+
+impl QuietGuard {
+    fn new() -> Self {
+        IN_TARGET.with(|c| c.set(true));
+        Self
+    }
+}
+
+impl Drop for QuietGuard {
+    fn drop(&mut self) {
+        let _ = IN_TARGET.try_with(|c| c.set(false));
+    }
+}
+
 /// ワーカー間で共有する試行の枠・停止の印・最初の誤り。
 struct Shared {
     next: AtomicU64,
@@ -163,7 +201,7 @@ impl Shared {
     }
 }
 
-/// 1 つの段（暖機または本計測）を回す。`warm` のとき試行は結果にかかわらず `Excluded` で締める。
+/// 1 つの段（暖機または本計測）を回す。`warm` のとき試行は結果にかかわらず `Excluded` で締める（開いた区間は計測の部品が破棄する）。
 fn run_phase<F>(
     meter: &RunMeter,
     workers: u64,
@@ -174,6 +212,7 @@ fn run_phase<F>(
 where
     F: Fn(&mut Trial<'_>) -> Outcome + Sync,
 {
+    install_quiet_hook();
     let shared = Shared::new();
     let worker = || {
         while shared.claim(count) {
@@ -181,7 +220,11 @@ where
                 Ok(t) => t,
                 Err(e) => return shared.fail(e.into()),
             };
-            let outcome = match catch_unwind(AssertUnwindSafe(|| target(&mut trial))) {
+            let caught = {
+                let _quiet = QuietGuard::new();
+                catch_unwind(AssertUnwindSafe(|| target(&mut trial)))
+            };
+            let outcome = match caught {
                 Ok(o) => o,
                 // 試行は捨てられ、`unfinished` として数えられる。panic の中身は載せない。
                 Err(_) => return shared.fail(LoadError::WorkerPanicked),
