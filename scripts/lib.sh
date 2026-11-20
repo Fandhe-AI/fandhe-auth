@@ -10,13 +10,36 @@ set -euo pipefail
 
 # 本ファイルの親ディレクトリ（= リポジトリルート）を cwd に依存せず解決する。
 # `scripts/check.sh` を直接叩いても `make check` 経由でも同じ対象を扱うための前提。
+# 末尾の改行で終わるパスも保つため、`$(...)` が末尾の改行を落とす点を番兵（x）で避ける。
+# 出力は改行を足さないパスそのもので、受け取る側も番兵を付けて受けてから外す（下の ROOT_DIR）。
 repo_root() {
-  local lib_dir
-  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  (cd "${lib_dir}/.." && pwd)
+  local lib_dir root src src_dir
+  # 組み込みだけでパスを解決する（依存の確認より前に外部コマンド dirname を呼ばない）。
+  src="${BASH_SOURCE[0]}"
+  case "${src}" in
+    */*) src_dir="${src%/*}" ;;
+    *) src_dir="." ;;
+  esac
+  [ -n "${src_dir}" ] || src_dir="/"
+  lib_dir="$(cd -- "${src_dir}" && pwd)" || return 1
+  root="$(cd "${lib_dir}/.." && pwd && printf x)" || return 1
+  root="${root%x}"
+  root="${root%$'\n'}"
+  [ -n "${root}" ] || return 1
+  printf '%s' "${root}"
 }
 
-ROOT_DIR="$(repo_root)"
+# 解決の失敗・空の結果は、空の ROOT_DIR のまま先へ進めず終了コード 2（検査不能・環境の誤り）で止める。
+# `&&` の左では errexit が効かないため、代入の終了状態を明示して確かめる。
+if ! ROOT_DIR="$(repo_root && printf x)"; then
+  echo "error: cannot resolve the repository root" >&2
+  exit 2
+fi
+ROOT_DIR="${ROOT_DIR%x}"
+if [ -z "${ROOT_DIR}" ]; then
+  echo "error: cannot resolve the repository root" >&2
+  exit 2
+fi
 # shellcheck disable=SC2034 # source した側のスクリプトで参照する
 readonly ROOT_DIR
 

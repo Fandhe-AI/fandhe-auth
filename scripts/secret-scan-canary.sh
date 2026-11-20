@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 秘密情報の検査（scripts/hooks/secret-scan.sh --tracked --summary。CI と同じ引数）の陰性対照（TASK-6。2 段目で CI の secret-scan ジョブが
+# 秘密情報の検査（scripts/hooks/secret-scan.sh --tracked --summary。CI と同じ引数）の陰性対照（TASK-6。CI の secret-scan ジョブが
 # `scripts/secret-scan-ci.sh` 経由で呼ぶ）。検出器が壊れて常に合格する状態（fail-open）を CI で見逃さないため、
 # 実行時に組み立てた既知のダミーだけを入れた一時 index（空から開始）を検出器に走査させ、
 # 終了コード 1・出力が許可した集計行の集合と完全に一致すること（余計な行は失敗）・ダミーの値が出力に無いことを確かめる。リポジトリの内容（PR・base の検出対象の有無）に結果が依存しない。「意図的に混入させたダミーで検査が失敗する」ことの証拠をログに残す役割を持つ。
@@ -19,11 +19,19 @@ unset CDPATH
 # 想定外の失敗（set -e 相当）は検査不能（2）として止める。
 set -E
 trap 'echo "scan-canary: internal error; aborting" >&2; exit 2' ERR
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 起動時のパス解決は bash の組み込みだけで行う（依存の確認より前に外部コマンド dirname を呼ばない）。
+_src="${BASH_SOURCE[0]}"
+case "${_src}" in
+  */*) _src_dir="${_src%/*}" ;;
+  *) _src_dir="." ;;
+esac
+[ -n "${_src_dir}" ] || _src_dir="/"
+DIR="$(cd -- "${_src_dir}" && pwd)"
+unset _src _src_dir
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
 
-reject_args "$(basename "$0")" "$@"
+reject_args "${0##*/}" "$@"
 
 # 単独で起動されても、呼び出し元の GIT_*（GIT_DIR・GIT_WORK_TREE・GIT_CONFIG_* 等）に左右されないよう外し、
 # 置換参照（refs/replace/）も無効にする（このあと本スクリプトが自前の一時 index・object dir を設定する）。
@@ -38,7 +46,11 @@ for _v in ${env_names}; do
 done
 unset _v env_names
 export GIT_NO_REPLACE_OBJECTS=1
-require_cmd git
+# 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
+for _c in git mktemp mkdir rm sort cmp grep; do
+  require_cmd "${_c}" || exit 2
+done
+unset _c
 
 die() {
   echo "scan-canary: $*" >&2
@@ -50,14 +62,27 @@ g() {
   git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 
+# 一時領域は cd の前に作り、作った直後に絶対パスへ解決する（相対の TMPDIR が cd で別の場所を指さないように）。
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/scan-canary.XXXXXX" 2> /dev/null)" || die "mktemp failed"
+trap 'rm -rf "${work_dir}"' EXIT
+# work_dir は解決と検証が成功するまで mktemp の生のパスのままにする（EXIT トラップが作ったディレクトリを確実に消せるように）。
+resolved_dir="$(cd "${work_dir}" 2> /dev/null && pwd -P && printf x)" || die "cannot resolve the temporary directory"
+resolved_dir="${resolved_dir%x}"
+resolved_dir="${resolved_dir%$'\n'}"
+case "${resolved_dir}" in
+  /*) ;;
+  *) die "cannot resolve the temporary directory" ;;
+esac
+work_dir="${resolved_dir}"
+# 検出器の mktemp なども絶対パスの一時領域を使うよう、TMPDIR も解決済みの値に置き換える。
+export TMPDIR="${work_dir}"
+
 cd "${ROOT_DIR}" 2> /dev/null || die "cannot enter the repository root"
 
 if ! real_objects="$(g rev-parse --path-format=absolute --git-path objects 2> /dev/null)" || [ -z "${real_objects}" ]; then
   die "failed to resolve the object directory"
 fi
 
-work_dir="$(mktemp -d "${TMPDIR:-/tmp}/scan-canary.XXXXXX" 2> /dev/null)" || die "mktemp failed"
-trap 'rm -rf "${work_dir}"' EXIT
 mkdir "${work_dir}/objects" 2> /dev/null || die "mkdir failed"
 
 # 以降の git は一時 index・一時 object dir だけを書き換える。
