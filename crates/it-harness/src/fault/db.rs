@@ -757,6 +757,36 @@ mod tests {
         port
     }
 
+    /// 待ち受けの accept 待ち行列の長さが `want` 以上になるまで、期限付きで待つ（Linux の `/proc/net/tcp` の rx_queue）。
+    /// 読めない環境（Linux 以外）では短く待つだけにする。待ち行列の外から見える手段が他に無いため。
+    fn wait_backlog(port: u16, want: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let local = format!("0100007F:{port:04X}");
+        loop {
+            let Ok(text) = std::fs::read_to_string("/proc/net/tcp") else {
+                thread::sleep(Duration::from_millis(200));
+                return;
+            };
+            let queued = text
+                .lines()
+                .skip(1)
+                .filter_map(|l| {
+                    let f: Vec<&str> = l.split_whitespace().collect();
+                    (f.get(1) == Some(&local.as_str()) && f.get(3) == Some(&"0A"))
+                        .then(|| f.get(4).and_then(|q| q.split(':').nth(1)))
+                        .flatten()
+                        .and_then(|rx| usize::from_str_radix(rx, 16).ok())
+                })
+                .next()
+                .unwrap_or(0);
+            if queued >= want {
+                return;
+            }
+            assert!(Instant::now() < deadline, "backlog never reached {want}");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn connect(port: u16) -> TcpStream {
         let s = TcpStream::connect_timeout(
             &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
@@ -1004,7 +1034,8 @@ mod tests {
         let mut c2 = connect(p.listen_port());
         assert_eq!(p.refused_count(), 0);
         // 公開の `release_block` を直接呼ぶ。排出の呼び出しが抜ければ、待ち行列の 2 本は切られず拒否件数は 0 のまま。
-        // 待ち行列への到達は、loopback では connect の戻りで握手が済み接続が待ち行列に入っている（カーネルの挙動）。
+        // connect の戻りは待ち行列への到達を保証しないので、2 本が届いたことを期限付きで確かめてから排出する。
+        wait_backlog(p.listen_port(), 2);
         p.release_block(&mut tl).unwrap();
         assert_eq!(p.refused_count(), 2);
         assert_eq!(p.accepted_count(), 0);
@@ -1064,6 +1095,47 @@ mod tests {
             let mut conns = shared.conns.lock().unwrap();
             shared.engage_block(&mut conns);
         }
+        start_relay(connected, &shared);
+        let (mut up_side, _) = up_l.accept().unwrap();
+        up_side
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 16];
+        match up_side.read(&mut buf) {
+            Ok(n) => assert_eq!(n, 0, "no client bytes reach upstream"),
+            Err(e) => assert!(
+                matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                ),
+                "unexpected: {:?}",
+                e.kind()
+            ),
+        }
+        assert_eq!(echo_or_cut(&mut client, b"x"), None);
+        assert_eq!(shared.refused.load(Ordering::SeqCst), 1);
+        assert_eq!(shared.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    /// 上流への接続の後に遮断と解除の両方が済んでも（`blocked` は偽に戻る）、世代の差だけで中継を始めず切る（ORST-17）。
+    /// 世代の比較を消すと `halted()` は偽なので中継が始まり、この試験は落ちる。
+    #[test]
+    fn stale_generation_is_refused_after_block_and_release() {
+        let shared = Arc::new(Shared::new());
+        let (l, port) = nb_listener();
+        let mut client = connect(port);
+        client.write_all(b"payload").unwrap();
+        let accepted = accept_blocking(&l, &shared);
+        let up_l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let up_port = up_l.local_addr().unwrap().port();
+        let connected = connect_upstream(accepted, &shared, &Upstream::Port(up_port))
+            .expect("upstream connected before block");
+        {
+            let mut conns = shared.conns.lock().unwrap();
+            shared.engage_block(&mut conns);
+        }
+        shared.blocked.store(false, Ordering::SeqCst);
+        assert!(!shared.halted(), "released: only the generation differs");
         start_relay(connected, &shared);
         let (mut up_side, _) = up_l.accept().unwrap();
         up_side

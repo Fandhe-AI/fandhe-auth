@@ -460,15 +460,23 @@ fn streaming_conn_ends_after_block_returns() {
     p.block(&mut tl).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
+        // 各読み取りに残り時間を当てる。期限を過ぎた後の切断は期限内の観測にならない。
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "still streaming after block");
+        c.set_read_timeout(Some(left)).unwrap();
         match c.read(&mut buf) {
             Ok(0) => break,
-            Ok(_) => assert!(Instant::now() < deadline, "still streaming after block"),
+            Ok(_) => {}
             Err(e) => {
                 assert_eq!(classify(&e), Outcome::Disconnected);
                 break;
             }
         }
     }
+    assert!(
+        Instant::now() <= deadline,
+        "disconnect observed after deadline"
+    );
 }
 
 /// #5983: `Applied`・`Released` の `offset_ms` は、呼び出しが戻る時刻より後にならない（下限の契約）。
