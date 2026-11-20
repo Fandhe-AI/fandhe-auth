@@ -1,24 +1,22 @@
 //! 負荷の対象の呼び出しの部品（TASK-12 6/10）。名前・語・値はすべて仮置きで、人が確認する。
 //!
-//! 役割: 経路の名前・測る区間・呼び出しを 1 組で受け、[`crate::generate::run_closed_loop_until`]（停止の印を受ける）の上で閉ループで呼び、
+//! 役割: 経路の名前・測る区間・呼び出しを 1 組で受け、[`crate::generate::run_closed_loop`] の上で閉ループで呼び、
 //! 呼び出しの結果を固定の語彙（[`CallResult`]）で [`Outcome`] に写し、結果を [`TargetRun`] に残す。
 //! 呼び出し元: 結合試験のハーネスの上で構成要素へ負荷をかける試験（試験ビルド）。
 //! 呼び出し先: 計測の部品・生成器・集計だけ。対象を具体の stub に結ぶ部分は呼び出し元（試験）が書く。
 //! 時計は注入で受け、環境変数・設定ファイル・壁時計を読まない（DPOL-32）。
 //!
-//! 結果の記録: [`TargetRun`] の `run`・`summary` に残る。試行番号と時間の標本が残るのは成功と失敗（種類を問わない）だけで、
-//! 失敗の種類（`rejected`・`unavailable`）・時間切れ・暖機の除外は件数だけが残り、標本は残らない。
+//! 結果の記録: 呼び出しごとの種類と区間の時間は [`TargetRun`] の `run`・`summary` に残る。
 //! `fandhe-auth-load-record/1` のファイルへの出力は未提供で、担当の段は未決（`docs/harness/load.md`）。
 //! 対象は stub だけで、実物の経路は最小の組込み先の完成後に呼ぶ。
 //! TODO(TASK-716): 実物の経路の呼び出しは最小の組込み先の完成後に足す。stub の合格を実物の合格に数えない
 //! （A-2026-10-28-9・ACPT-7）。合否は付けない。
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::aggregate::{AggregateError, RunSummary, summarize_run};
-use crate::generate::{LoadConfig, LoadError, LoadRun, run_closed_loop_until};
+use crate::generate::{LoadConfig, LoadError, LoadRun, run_closed_loop};
 use crate::meter::{
     FailureKind, IntervalName, MeterError, MonotonicClock, Outcome, RunMeter, validate_name,
 };
@@ -151,19 +149,9 @@ impl From<MeterError> for TargetError {
 /// 対象を閉ループで呼び、結果を [`TargetRun`] に残す。
 ///
 /// 閉包は試行ごとに 1 回呼ばれ、`spec` の区間で測られる。対象の中で計測の誤りが起きたら最初の誤りを残し、
-/// 試行の締め方は段で異なる。暖機の試行は `Excluded` で締める。本計測の試行は、閉包が `Excluded` を返すと
-/// 生成器が `finish` の前に `InvalidOutcome` で段を抜けるため締められず、`Drop` により `unfinished` として数える。
-/// どちらの段でも、残した誤りは戻りで [`TargetError::Meter`] として優先して返す。停止の印（`Outcome` とは別の経路）を生成器へ渡す。
-/// 印が立つと生成器は暖機・本計測のどちらでも新しい試行を始めず、本計測の段へも進まない。
-///
-/// 停止と呼び出しの受け付け: 閉包を呼ぶ直前（区間の始点の時計を読んだ後）に印を確かめ、立っていれば呼ばない。
-/// 保証できるのは新規の受け付けの抑止までで、確認を通った受け付け済みの呼び出しは、確認の後に印が立っても
-/// 止めずに最後まで続く（途中で止めない。終点の時計の誤りがあれば同じ規則で残す）。
-/// 「記録より後に始まる呼び出しは 0 件」までは保証しない（確認と閉包の実行開始の間に印が立ち得る）。
-/// 閉包を呼ばずに返した試行（`Outcome::Excluded`）は、停止の印が先に立った経路でだけ生じ、同時に誤りが
-/// 残っているので、本計測の `InvalidOutcome` ではなく、戻りで残した誤りが先に [`TargetError::Meter`] で返る。
-/// 戻ったら結果より先に残した誤りを見て、黙って数えず [`TargetError::Meter`] を返す。
-/// panic・`unwrap` は使わない。
+/// 試行を `Excluded` で締めて生成器に新しい試行を止めさせる（本計測の段では `InvalidOutcome` で止まる。
+/// この挙動は生成器の fail-closed に依存する）。戻ったら結果より先に残した誤りを見て、
+/// 黙って数えず [`TargetError::Meter`] を返す。panic・`unwrap` は使わない。
 ///
 /// # Errors
 /// 計測の誤り・生成の誤り・集計の誤り。
@@ -179,30 +167,15 @@ where
     let interval = spec.interval();
     let meter = RunMeter::new(clock, std::slice::from_ref(interval))?;
     let first_error: Mutex<Option<MeterError>> = Mutex::new(None);
-    let failed = AtomicBool::new(false);
     let record = |e: MeterError| {
-        // 先頭の誤りの保存と停止の公開を同じ区間で行い、保存の後に公開する。
         let mut g = first_error.lock().unwrap_or_else(PoisonError::into_inner);
         if g.is_none() {
             *g = Some(e);
         }
-        failed.store(true, Ordering::SeqCst);
-        drop(g);
     };
-    let result = run_closed_loop_until(meter, config, &failed, |trial| {
-        if failed.load(Ordering::SeqCst) {
-            return Outcome::Excluded;
-        }
-        // 受け付けは始点の時計の後・呼び出しの直前で確かめる（時計を待つ間に立った印を見逃さない）。
-        let called = match trial.measure(interval, || {
-            if failed.load(Ordering::SeqCst) {
-                None
-            } else {
-                Some(call())
-            }
-        }) {
-            Ok(Some(r)) => r,
-            Ok(None) => return Outcome::Excluded,
+    let result = run_closed_loop(meter, config, |trial| {
+        let called = match trial.measure(interval, &call) {
+            Ok(r) => r,
             Err(e) => {
                 record(e);
                 return Outcome::Excluded;

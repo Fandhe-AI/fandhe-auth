@@ -274,12 +274,12 @@ judgment:
 名前・語・値はすべて仮置きで、人が確認する。対象の経路を呼ぶ部分（6/10）・機材と構成の取得（7/10）・段階を変える実行（8/10）は含まない。
 合否は付けない（`ACPT-7`）。
 
-- API: `LoadConfig::new(concurrency, trials_planned, warmup)`（既定値なし。並行数は 1〜1024）、`run_closed_loop(meter, &config, target)`、結果 `LoadRun`、誤り `LoadError`（7 種）。
+- API: `LoadConfig::new(concurrency, trials_planned, warmup)`（既定値なし。並行数は 1〜1024）、`run_closed_loop(meter, &config, target)`、結果 `LoadRun`、誤り `LoadError`（6 種）。
 - 閉ループを仮置きで採る（`LoopModel::Closed`。記録の `condition_loop` の材料は `closed`）。各ワーカーは 1 度に 1 試行だけ持つ。
 - 暖機の段（`warmup > 0` のときだけ）を回してから本計測の段を回す。2 つの段は重ならない。暖機の試行は結果にかかわらず `Excluded` で締める。
   暖機の試行も通し番号を消費するため、本計測の標本の番号は `warmup + 1` から始まる。
 - 本計測で対象が `Excluded` を返したら `InvalidOutcome`（除外は生成器だけが付ける）。
-- 停止の規則: 呼び出し元の停止の印（`run_closed_loop_until` の `cancel`）が立つと新しい枠を取らせず、次の段へ進まず、`Cancelled` を返す（走っている試行は締めるまで続く）。枠の割り当てと内部の停止の確認は同じ Mutex の中で行い、枠の取得は印の確認の瞬間に決まる。誤りが出たら停止の印を立てて新しい試行を止め、立てたワーカーを join してから最初の誤りを返す。panic の中身・`io::Error` の文言は載せない。
+- 停止の規則: 誤りが出たら停止の印を立てて新しい試行を止め、立てたワーカーを join してから最初の誤りを返す。panic の中身・`io::Error` の文言は載せない。
 - 不変条件: 実測の最大同時実行数 <= 設定の並行数（2/10 の 4 の候補を閉ループで採る）、`executed == trials_planned`、`excluded == warmup`（違えば `CountMismatch`）。
 - ハーネスの上で動くこと: 試験（dev）だけ `it-harness`・`hub-stub` に依存する（`tests/on_it_harness.rs`。Docker・ネットワークなし）。許可表の行は人の確認待ち。
 - 記録の出力（`fandhe-auth-load-record/1`）を担当する段は未決のまま持ち越す。
@@ -300,8 +300,8 @@ judgment:
   | `TimedOut` | `Timeout` |
 
   対象から `Excluded` を返す道は作らない（除外は生成器だけが付ける）。
-- 対象の中の計測の誤りは、最初の誤りを残して停止の印を立て、`Outcome` とは別の経路で生成器へ伝える（`run_closed_loop_until`。印が立つと暖機・本計測のどちらでも新しい試行を始めず、本計測の段へも進まない。誤りが無く印だけのときは `LoadError::Cancelled`）。呼び出しの受け付けは始点の時計の後・閉包を呼ぶ直前に印を確かめて決める。保証するのは新規の受け付けの抑止までで、確認を通った受け付け済みの呼び出しは、並行する別のワーカーが誤りを記録しても最後まで続く（途中で止めない）。確認と閉包の実行開始の間に印が立ち得るため、「記録より後に始まる呼び出しは 0 件」とは保証しない。閉包を呼ばずに返した試行（`Excluded`）は誤りの記録と同時にだけ生じ、本計測でも `InvalidOutcome` より先に記録した誤りが `TargetError::Meter` で返る。戻ったら `TargetError::Meter`（元の種類を保つ）で返す。panic・`unwrap` は使わない。
-- 結果の記録: `TargetRun` に残すところまで。試行番号と時間の標本が残るのは成功と失敗（種類を問わない）だけで、失敗の種類・時間切れ・暖機の除外は件数だけが残る。`fandhe-auth-load-record/1` のファイルへの出力は未提供で、担当の段は未決。
+- 対象の中の計測の誤りは、最初の誤りを残して生成器に試行を止めさせ、戻ったら `TargetError::Meter`（元の種類を保つ）で返す。panic・`unwrap` は使わない。この停止は生成器の `InvalidOutcome` の拒否に依る。
+- 結果の記録: 呼び出しごとの種類と区間の時間を `TargetRun` に残すところまで。`fandhe-auth-load-record/1` のファイルへの出力は未提供で、担当の段は未決。
 - 対象は stub だけ（`TODO(TASK-716)`。実物の経路は最小の組込み先の完成後）。stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）。
   `tests/on_it_harness.rs` で it-harness の上の Hub の stub の JWKS の配信を呼ぶ。stub は Mutex でワーカーを直列化するため、測った時間に意味は無く、試験は件数だけを見る。
 - 依存の辺は変えない（通常の依存は 0。試験の依存は 5/10 のまま）。

@@ -11,7 +11,7 @@
 use std::cell::Cell;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, Once, PoisonError};
 use std::thread;
 
@@ -35,8 +35,6 @@ pub enum LoadError {
     WorkerPanicked,
     /// 終了時の件数が計画と合わない。
     CountMismatch,
-    /// 呼び出し元の停止の印が立ち、新しい試行を止めた（[`run_closed_loop_until`]）。
-    Cancelled,
 }
 
 impl fmt::Display for LoadError {
@@ -48,7 +46,6 @@ impl fmt::Display for LoadError {
             Self::SpawnFailed => "worker spawn failed",
             Self::WorkerPanicked => "worker panicked",
             Self::CountMismatch => "trial count mismatch",
-            Self::Cancelled => "load cancelled",
         };
         f.write_str(msg)
     }
@@ -163,24 +160,17 @@ impl Drop for QuietGuard {
 }
 
 /// ワーカー間で共有する試行の枠・停止の印・最初の誤り。
-struct Shared<'a> {
-    /// 次の枠の番号。枠の割り当てと内部の停止の確認は、この Mutex の中で 1 つの区間として行う。
-    next: Mutex<u64>,
+struct Shared {
+    next: AtomicU64,
     stop: AtomicBool,
-    /// 呼び出し元が立てる停止の印。立っている間は新しい枠を取らせない。
-    cancel: &'a AtomicBool,
-    /// `claim` が `cancel` の立っていることを観測した事実。呼び出し元が後で印を戻しても残す。
-    cancelled: AtomicBool,
     first_error: Mutex<Option<LoadError>>,
 }
 
-impl<'a> Shared<'a> {
-    fn new(cancel: &'a AtomicBool) -> Self {
+impl Shared {
+    fn new() -> Self {
         Self {
-            next: Mutex::new(0),
+            next: AtomicU64::new(0),
             stop: AtomicBool::new(false),
-            cancel,
-            cancelled: AtomicBool::new(false),
             first_error: Mutex::new(None),
         }
     }
@@ -195,51 +185,19 @@ impl<'a> Shared<'a> {
             *g = Some(e);
         }
         drop(g);
-        // 枠の割り当てと同じ Mutex の中で立て、立てた後に枠が取れないことを 1 つの順序で決める。
-        let _slots = self.next.lock().unwrap_or_else(PoisonError::into_inner);
         self.stop.store(true, Ordering::SeqCst);
     }
 
-    /// 起動側がワーカーを立てる前に、停止の印を確認して観測の事実を残す。立っていれば `true`。
-    /// `claim` と同じ Mutex の中で行い、観測済みの停止は印が戻っても残る。
-    fn observe_cancel(&self) -> bool {
-        let _slots = self.next.lock().unwrap_or_else(PoisonError::into_inner);
-        if self.cancelled.load(Ordering::SeqCst) {
-            return true;
-        }
-        if self.cancel.load(Ordering::SeqCst) {
-            self.cancelled.store(true, Ordering::SeqCst);
-            return true;
-        }
-        false
-    }
-
     /// 試行の枠を 1 つ取る。上限に達した・停止中・溢れたときは `false`。
-    ///
-    /// 停止の確認（内部の `stop`・呼び出し元の `cancel`）と枠の加算は同じ Mutex の中で行う。
-    /// 内部の停止（`fail`）は同じ Mutex の中で立つので、立った後に枠が取れることは無い。
-    /// 呼び出し元の `cancel` は外の `AtomicBool` なので、確認の瞬間が停止との先後の境になる
-    /// （確認より後に立った印は、その枠には効かない）。
     fn claim(&self, count: u64) -> bool {
-        let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
-        // 観測済みの停止は、呼び出し元が印を戻しても以後の枠を取らせない。
-        if self.cancelled.load(Ordering::SeqCst) {
+        if self.stop.load(Ordering::SeqCst) {
             return false;
         }
-        if self.cancel.load(Ordering::SeqCst) {
-            self.cancelled.store(true, Ordering::SeqCst);
-            return false;
-        }
-        if self.stop.load(Ordering::SeqCst) || *next >= count {
-            return false;
-        }
-        match next.checked_add(1) {
-            Some(v) => {
-                *next = v;
-                true
-            }
-            None => false,
-        }
+        self.next
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v < count { v.checked_add(1) } else { None }
+            })
+            .is_ok()
     }
 }
 
@@ -249,14 +207,13 @@ fn run_phase<F>(
     workers: u64,
     count: u64,
     warm: bool,
-    cancel: &AtomicBool,
     target: &F,
 ) -> Result<(), LoadError>
 where
     F: Fn(&mut Trial<'_>) -> Outcome + Sync,
 {
     install_quiet_hook();
-    let shared = Shared::new(cancel);
+    let shared = Shared::new();
     let worker = || {
         while shared.claim(count) {
             let mut trial = match meter.begin_trial() {
@@ -290,10 +247,6 @@ where
     thread::scope(|s| {
         let mut handles = Vec::with_capacity(n);
         for _ in 0..n {
-            // 立てる前に停止を確認する。停止中は残りのワーカーを立てず、`Cancelled` を返させる。
-            if shared.observe_cancel() {
-                break;
-            }
             match thread::Builder::new()
                 .name("load-worker".to_owned())
                 .spawn_scoped(s, worker)
@@ -315,15 +268,7 @@ where
         .first_error
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if let Some(e) = err {
-        return Err(e);
-    }
-    // 停止の印で枠の取得が止まった段は、件数が計画に届かない。次の段へ進ませない。
-    // 呼び出し元が join 後に印を戻していても、観測済みの停止は落とさない。
-    if shared.cancelled.load(Ordering::SeqCst) {
-        return Err(LoadError::Cancelled);
-    }
-    Ok(())
+    err.map_or(Ok(()), Err)
 }
 
 /// 閉ループで対象を繰り返し呼ぶ。暖機の段（`warmup > 0` のときだけ）を回してから本計測の段を回す。
@@ -343,42 +288,14 @@ pub fn run_closed_loop<F>(
 where
     F: Fn(&mut Trial<'_>) -> Outcome + Sync,
 {
-    run_closed_loop_until(meter, config, &AtomicBool::new(false), target)
-}
-
-/// [`run_closed_loop`] に、呼び出し元の停止の印を足したもの。`cancel` が立つと、暖機・本計測のどちらでも
-/// 新しい試行の枠を取らせず、次の段へ進まず、立てたワーカーを join してから最初の誤りを返す。
-/// 誤りが無く印だけが立っていたときは [`LoadError::Cancelled`]。印は対象が結果（`Outcome`）とは別の経路で
-/// 生成器へ伝えるための道で、暖機の段が結果を問わず `Excluded` で締める規則は変えない。
-/// 枠を取り終えて走っている試行は、印が立っても締めるまで続く（途中で止めない）。枠の取得は印の確認の瞬間に決まり、確認より後に立った印は、その確認を通った枠には効かない。
-///
-/// # Errors
-/// [`run_closed_loop`] と同じ。加えて停止の印が立ったとき [`LoadError::Cancelled`]。
-pub fn run_closed_loop_until<F>(
-    meter: RunMeter,
-    config: &LoadConfig,
-    cancel: &AtomicBool,
-    target: F,
-) -> Result<LoadRun, LoadError>
-where
-    F: Fn(&mut Trial<'_>) -> Outcome + Sync,
-{
     if config.warmup > 0 {
-        run_phase(
-            &meter,
-            config.concurrency,
-            config.warmup,
-            true,
-            cancel,
-            &target,
-        )?;
+        run_phase(&meter, config.concurrency, config.warmup, true, &target)?;
     }
     run_phase(
         &meter,
         config.concurrency,
         config.trials_planned,
         false,
-        cancel,
         &target,
     )?;
     let samples = meter.finish()?;
@@ -390,36 +307,4 @@ where
         loop_model: LoopModel::Closed,
         samples,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 観測済みの停止は、呼び出し元が印を戻しても以後の枠を取らせない（`run_closed_loop_until` の停止契約）。
-    #[test]
-    fn observed_cancel_blocks_claims_after_reset() {
-        let cancel = AtomicBool::new(false);
-        let shared = Shared::new(&cancel);
-        assert!(shared.claim(10));
-        cancel.store(true, Ordering::SeqCst);
-        assert!(!shared.claim(10));
-        cancel.store(false, Ordering::SeqCst);
-        assert!(!shared.claim(10));
-        assert!(shared.cancelled.load(Ordering::SeqCst));
-    }
-
-    /// 起動側の確認: 立っている印を観測し、印が戻っても観測済みとして残る。
-    /// 立っていれば `run_phase` はワーカーを 1 本も立てない（スレッド生成の失敗より `Cancelled` が先）。
-    #[test]
-    fn observe_cancel_sees_preset_and_persists() {
-        let cancel = AtomicBool::new(false);
-        let shared = Shared::new(&cancel);
-        assert!(!shared.observe_cancel());
-        cancel.store(true, Ordering::SeqCst);
-        assert!(shared.observe_cancel());
-        cancel.store(false, Ordering::SeqCst);
-        assert!(shared.observe_cancel());
-        assert!(!shared.claim(10));
-    }
 }
