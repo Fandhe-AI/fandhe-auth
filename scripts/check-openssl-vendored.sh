@@ -15,7 +15,7 @@
 # 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。本番 feature 構成の明示（PROD_FEATURES）が決まったら、A をそれに置き換える。
 # B は依存の列挙にだけ使い、ビルド・clippy には使わない（DPOL-31。check-crate-deps.sh と同じ扱い）。
 # 本番の範囲は normal・build（dev は見ない）。`cargo tree -i` は一致が無いと非 0 のため使わない。
-# 実行のたびに自己試験（陰性対照 F1〜F5）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陰性対照 F1〜F6）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は件数と規則名だけ。cargo tree の生の出力には絶対パスが入るため出さない。
 # 限界: dev の依存・別 workspace の crates/trial-deps/fuzz・Hub の最終バイナリは対象外。
 # TODO(TASK-667): 動的リンクと版の記録の対応（#318 の 2/4）を足す
@@ -60,12 +60,20 @@ EXCLUDE_ARGS=()
 for p in "${TEST_ONLY_PKGS[@]}"; do EXCLUDE_ARGS+=(--exclude "${p}"); done
 
 # run_tree <dir> <locked|offline> [追加引数...]: cargo tree の出力を stdout に返す。失敗は 2（生の出力は出さない）。
+# 失敗の原因は分類名だけ出す（絶対パス・認証情報を含み得る生の stderr は出さない）。
 run_tree() {
-  local dir="$1" mode="$2" out flag="--offline"
+  local dir="$1" mode="$2" out flag="--offline" err="${WORK}/tree.err" kind="other"
   shift 2
   [ "${mode}" = "locked" ] && flag="--locked"
-  if ! out="$(cd "${dir}" && cargo tree "${flag}" -e features,normal,build --target all --prefix none "$@" 2>/dev/null)"; then
-    log "error: cargo tree failed (${dir##*/}); cannot inspect"
+  if ! out="$(cd "${dir}" && cargo tree "${flag}" -e features,normal,build --target all --prefix none "$@" 2>"${err}")"; then
+    if grep -qi 'lock file' "${err}" 2>/dev/null; then
+      kind="lockfile"
+    elif grep -qiE 'failed to (download|get|fetch)|network|registry|index' "${err}" 2>/dev/null; then
+      kind="fetch"
+    elif grep -qiE 'failed to (parse|load) manifest|could not find|no matching package' "${err}" 2>/dev/null; then
+      kind="manifest"
+    fi
+    log "error: cargo tree failed (${dir##*/}, cause: ${kind}); cannot inspect"
     exit 2
   fi
   printf '%s\n' "${out}"
@@ -80,7 +88,7 @@ count_rule() {
       R2) case "${line}" in 'openssl feature "vendored"' | 'openssl feature "vendored" '*) n=$((n + 1)) ;; esac ;;
       R3) case "${line}" in 'openssl-src v'*) n=$((n + 1)) ;; esac ;;
     esac
-  done <<<"${tree}"
+  done <<<"${tree}" || return 2
   echo "${n}"
 }
 
@@ -98,7 +106,7 @@ mkpkg() {
 # expect_count <label> <rule> <tree> <eq0|ge1>: 自己試験の期待と違えば 1 で止める。
 expect_count() {
   local n
-  n="$(count_rule "$2" "$3")"
+  n="$(count_rule "$2" "$3")" || exit 2
   if [ "$4" = "eq0" ] && [ "${n}" -ne 0 ]; then
     log "FAIL selftest $1: false positive ${2}"
     exit 1
@@ -121,41 +129,56 @@ selftest() {
 
   # F1: openssl-sys の vendored を直接有効にする → R1
   mkpkg "${f}/f1" "f1" $'[dependencies]\nopenssl-sys = { path = "../openssl-sys", features = ["vendored"] }'
-  t="$(run_tree "${f}/f1" offline)"
+  t="$(run_tree "${f}/f1" offline)" || exit 2
   expect_count F1 R1 "${t}" ge1
 
   # F2: openssl 経由の vendored → R1・R2・R3
   mkpkg "${f}/f2" "f2" $'[dependencies]\nopenssl = { path = "../openssl", features = ["vendored"] }'
-  t="$(run_tree "${f}/f2" offline)"
+  t="$(run_tree "${f}/f2" offline)" || exit 2
   for r in R1 R2 R3; do expect_count F2 "${r}" "${t}" ge1; done
 
   # F3: vendored なしの openssl → 0 件
   mkpkg "${f}/f3" "f3" $'[dependencies]\nopenssl = { path = "../openssl" }'
-  t="$(run_tree "${f}/f3" offline)"
+  t="$(run_tree "${f}/f3" offline)" || exit 2
   for r in R1 R2 R3; do expect_count F3 "${r}" "${t}" eq0; done
 
   # F4: 依存なし → 0 件
   mkpkg "${f}/f4" "f4" ""
-  t="$(run_tree "${f}/f4" offline)"
+  t="$(run_tree "${f}/f4" offline)" || exit 2
   for r in R1 R2 R3; do expect_count F4 "${r}" "${t}" eq0; done
 
   # F5: 既定外の feature の後ろに vendored → 走査 A で 0 件、走査 B で検出。cargo tree は feature 行を出さず openssl-src の package だけを出すため R3 で拾う
   mkpkg "${f}/f5" "f5" $'[features]\nx = ["openssl-sys/vendored"]\n[dependencies]\nopenssl-sys = { path = "../openssl-sys" }'
-  a="$(run_tree "${f}/f5" offline)"
-  b="$(run_tree "${f}/f5" offline --all-features)"
+  a="$(run_tree "${f}/f5" offline)" || exit 2
+  b="$(run_tree "${f}/f5" offline --all-features)" || exit 2
   for r in R1 R2 R3; do expect_count F5A "${r}" "${a}" eq0; done
   expect_count F5B R3 "${b}" ge1
 
-  log "selftest ok (F1-F5)"
+  # F6: 本番メンバーと試験専用メンバーを含む workspace → 走査 A（--exclude）で 0 件、全メンバーの走査 C で検出
+  local w="${f}/f6" tp="${TEST_ONLY_PKGS[0]}"
+  if ! mkdir -p "${w}/prod/src" "${w}/${tp}/src" ||
+    ! printf '[workspace]\nmembers = ["prod", "%s"]\n' "${tp}" >"${w}/Cargo.toml" ||
+    ! printf '[package]\nname = "prod"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys" }\n' >"${w}/prod/Cargo.toml" ||
+    ! printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nopenssl-sys = { path = "../../openssl-sys", features = ["vendored"] }\n' "${tp}" >"${w}/${tp}/Cargo.toml" ||
+    ! : >"${w}/prod/src/lib.rs" || ! : >"${w}/${tp}/src/lib.rs"; then
+    log "error: cannot write fixture (f6); cannot inspect"
+    exit 2
+  fi
+  a="$(run_tree "${w}" offline --workspace "${EXCLUDE_ARGS[@]}")" || exit 2
+  b="$(run_tree "${w}" offline --workspace)" || exit 2
+  for r in R1 R2 R3; do expect_count F6A "${r}" "${a}" eq0; done
+  expect_count F6C R1 "${b}" ge1
+
+  log "selftest ok (F1-F6)"
 }
 
 selftest
 
 # 走査 A（合否）。検査不能（2）と違反（1）はここで確定し、参考の走査 B より先に返す。
 total=0
-tree="$(run_tree "${ROOT_DIR}" locked --workspace "${EXCLUDE_ARGS[@]}")"
+tree="$(run_tree "${ROOT_DIR}" locked --workspace "${EXCLUDE_ARGS[@]}")" || exit 2
 for r in R1 R2 R3; do
-  n="$(count_rule "${r}" "${tree}")"
+  n="$(count_rule "${r}" "${tree}")" || exit 2
   log "scan A ${r}: ${n}"
   total=$((total + n))
 done
@@ -170,7 +193,7 @@ scan_info() {
   shift
   if t="$(run_tree "${ROOT_DIR}" locked "$@")"; then
     for r in R1 R2 R3; do
-      n="$(count_rule "${r}" "${t}")"
+      n="$(count_rule "${r}" "${t}")" || exit 2
       log "scan ${label} (info, not gated) ${r}: ${n}"
       [ "${n}" -ne 0 ] && log "warn: vendored path found in scan ${label} (${r}); confirm it is not a production dependency"
     done
