@@ -14,10 +14,18 @@ reject_args "$(basename "$0")" "$@"
 require_cmd cargo
 require_cmd docker
 require_cmd openssl
+# Compose プラグインが無いと Rust のビルド後に汎用エラーしか出ないため、入口で確かめる
+if ! docker compose version >/dev/null 2>&1; then
+  echo "error: 'docker compose version' failed (Docker Compose plugin is required)" >&2
+  exit 1
+fi
 cd "${ROOT_DIR}"
 
 # 一致 0 件でも cargo test は 0 で終わるため、先に数えて 0 件なら失敗にする（AUDB-6 の向き）
-listed="$(cargo test -p fandhe-auth-it-harness --test db_job_frame --locked -- --ignored --list)"
+listed="$(cargo test -p fandhe-auth-it-harness --test db_job_frame --locked -- --ignored --list)" || {
+  echo "error: failed to list DB frame tests" >&2
+  exit 1
+}
 # grep -c は未一致で 1、計数エラーで 2 以上を返す。未一致（0 件）もエラーも失敗にする
 rc=0
 count="$(printf '%s\n' "${listed}" | grep -c ': test$')" || rc=$?
@@ -36,4 +44,5 @@ if [ "${count}" -lt 1 ]; then
   exit 1
 fi
 
-cargo test -p fandhe-auth-it-harness --test db_job_frame --locked -- --ignored
+# 試験の失敗は契約どおり 1 に揃える（cargo の 101 等を伝播しない）
+cargo test -p fandhe-auth-it-harness --test db_job_frame --locked -- --ignored || exit 1
