@@ -259,3 +259,30 @@ fn unrepresentable_timeout_is_an_error_not_a_panic() {
         .unwrap_err();
     assert_eq!(e.kind(), E2eErrorKind::CommandFailed);
 }
+
+#[test]
+fn debug_output_has_no_session_id_authenticator_id_or_port() {
+    // SECR-11: Debug にセッション ID・authenticator の ID・ポートを出さない。
+    let (port, h, _) = fake_driver_seq(vec![
+        http(
+            "200 OK",
+            r#"{"value":{"sessionId":"sid-visible-1","capabilities":{"browserVersion":"1"}}}"#,
+        ),
+        http("200 OK", r#"{"value":"aid-visible-2"}"#),
+    ]);
+    let c = client(port);
+    let (sess, _) = c.new_session(&caps()).unwrap();
+    let aid = sess.add_virtual_authenticator(&opts()).unwrap();
+    for shown in [
+        format!("{sess:?}"),
+        format!("{sess:#?}"),
+        format!("{c:?}"),
+        format!("{aid:?}"),
+    ] {
+        assert!(!shown.contains("sid-visible-1"), "{shown}");
+        assert!(!shown.contains("aid-visible-2"), "{shown}");
+        assert!(!shown.contains(&port.to_string()), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+    }
+    h.join().unwrap();
+}

@@ -8,6 +8,7 @@
 //! 英数字と `-` だけ（A03）。応答は上限を超えたら・chunked なら・形が合わなければ誤りにする（fail-closed）。
 //! 誤りに URL・ポート・path・応答本文を載せない（SECR-11・SECR-23）。
 
+use std::fmt;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -45,9 +46,20 @@ fn validated_id(raw: &str) -> Result<String, E2eError> {
     }
 }
 
+/// `Debug` で値の代わりに出す固定の文字列（SECR-11）。
+const REDACTED: &str = "<redacted>";
+
 /// 仮想 authenticator の識別子。ドライバが返した値を検証して持つ。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` は値を出さない（SECR-11。authenticator の操作に使う値のため）。
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthenticatorId(String);
+
+impl fmt::Debug for AuthenticatorId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("AuthenticatorId").field(&REDACTED).finish()
+    }
+}
 
 impl AuthenticatorId {
     /// 検証して作る。英数字と `-` 以外を含む値は拒否する。
@@ -66,10 +78,21 @@ pub struct CredentialSummary {
 }
 
 /// ドライバ 1 つへの接続先。ポートだけを持つ。
-#[derive(Debug, Clone, Copy)]
+///
+/// `Debug` はポートを出さない（SECR-11・SECR-23）。
+#[derive(Clone, Copy)]
 pub struct WebDriverClient {
     port: u16,
     timeout: Duration,
+}
+
+impl fmt::Debug for WebDriverClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebDriverClient")
+            .field("port", &REDACTED)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl WebDriverClient {
@@ -227,10 +250,21 @@ fn header_value(head: &[u8], name: &str) -> Option<String> {
 }
 
 /// 確立したセッション。命令の path に session id を埋める操作をここに集める。
-#[derive(Debug, Clone)]
+///
+/// `Debug` はセッション ID とポートを出さない（SECR-11・SECR-23。セッションを操作できる値のため）。
+#[derive(Clone)]
 pub struct WebDriverSession {
     client: WebDriverClient,
     id: String,
+}
+
+impl fmt::Debug for WebDriverSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebDriverSession")
+            .field("client", &self.client)
+            .field("id", &REDACTED)
+            .finish()
+    }
 }
 
 impl WebDriverSession {
