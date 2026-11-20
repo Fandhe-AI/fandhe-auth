@@ -299,9 +299,10 @@ where
 /// 誤りの記録・停止・枠の取得の順序（#5984。人の確認待ちの仮置き、ACPT-7）:
 /// - 枠の取得と誤りの記録は同じロックの下で全順序に並ぶ。記録と停止は同時に確定する。
 /// - 記録より後に枠を取ろうとしたワーカーは必ず取れない。記録の後に新しく取得できる枠は 0 件（保証するのは枠の取得だけ）。
-/// - 記録より前に取得済みの枠の試行は止めない。対象の呼び出しまで進んで締めるか誤りで抜ける。取得済みの枠は、
-///   ワーカー自身の誤りの記録でも、起動側が join で panic を検出するまでの間でも残り得るため、件数の上限は保証しない。
-///   記録の後に `begin_trial` や対象の呼び出しへ進む試行があり得る。
+/// - 記録より前に取得済みの枠の試行は止めない。対象の呼び出しまで進んで締めるか誤りで抜ける。記録時点で未完了の
+///   試行は各ワーカー最大 1 件で、設定の並行数が上限。ただしワーカーの panic は起動側が join で検出して初めて記録
+///   されるので、検出・記録までに他のワーカーが新しく取得して進める件数の累計は上限を保証しない。
+///   記録の後に `begin_trial` や対象の呼び出しへ進む試行があり得る（取得済みの枠だけ）。
 /// - 返す誤りは最初の 1 件だけ。
 ///
 /// # Errors
@@ -371,35 +372,41 @@ mod tests {
         assert_eq!(next_of(&s), 1);
     }
 
-    /// 記録の後に枠が 1 件も通らない。時間ではなく、記録直後の `next` と最終の `next`・成功の合計の一致で断定する。
+    /// 記録の後に枠が 1 件も通らない。各取得者が枠を 1 件取った後に記録を確定し、その後の取得を試みる。
+    /// 段を 2 つの待ち合わせで区切るので時間に依らず、取得は有限回で必ず終わる（停止処理が壊れても join が戻る）。
     #[test]
     fn no_claim_succeeds_after_fail_is_recorded() {
         const CLAIMERS: usize = 4;
+        const AFTER_TRIES: usize = 3;
         let s = Shared::new();
-        let barrier = Barrier::new(CLAIMERS + 1);
-        let (snapshot, total) = thread::scope(|scope| {
+        let before = Barrier::new(CLAIMERS + 1);
+        let after = Barrier::new(CLAIMERS + 1);
+        let (snapshot, late_successes) = thread::scope(|scope| {
             let hs: Vec<_> = (0..CLAIMERS)
                 .map(|_| {
                     scope.spawn(|| {
-                        barrier.wait();
-                        let mut n = 0u64;
-                        while s.claim(u64::MAX) {
-                            n += 1;
-                        }
-                        n
+                        let first = s.claim(1_000);
+                        before.wait();
+                        after.wait();
+                        let late = (0..AFTER_TRIES).filter(|_| s.claim(1_000)).count();
+                        (first, late)
                     })
                 })
                 .collect();
-            barrier.wait();
-            while next_of(&s) == 0 {
-                thread::yield_now();
-            }
-            // 記録を確定したロックの中で件数を観測する（ロック解放から再取得までの空白を作らない）。
+            before.wait();
+            // 記録を確定したロックの中で件数を観測する。
             let snapshot = s.fail_observing(LoadError::InvalidOutcome);
-            let total: u64 = hs.into_iter().map(|h| h.join().unwrap_or(0)).sum();
-            (snapshot, total)
+            after.wait();
+            let mut late_successes = 0;
+            for h in hs {
+                let (first, late) = h.join().expect("claimer must not panic");
+                assert!(first, "claim before the failure must succeed");
+                late_successes += late;
+            }
+            (snapshot, late_successes)
         });
+        assert_eq!(snapshot, CLAIMERS as u64);
+        assert_eq!(late_successes, 0, "claim succeeded after fail was recorded");
         assert_eq!(next_of(&s), snapshot);
-        assert_eq!(total, snapshot);
     }
 }

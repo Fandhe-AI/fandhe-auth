@@ -1,7 +1,7 @@
 //! 負荷の生成の単体試験（TASK-12 5/10）。時間は偽の時計を手で進め、実際の経過・sleep・時間の値では判定しない。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use fandhe_auth_load_harness::{
@@ -27,11 +27,13 @@ impl MonotonicClock for FakeClock {
     }
 }
 
-/// 期限付きの待ち合わせ。ワーカーの起動に失敗して参加者が揃わなくても、期限で戻って試験を終えられる
-/// （判定は件数・最大同時実行数の断定で行い、期限の長さでは行わない）。
+/// 期限付きの待ち合わせ。ワーカーの起動に失敗して参加者が揃わなくても試験が止まらないよう、中断（`abort`）か
+/// 期限で全員を放す。ただし放されたことは `completed` が false になって残るので、試験は必ず `completed` を断定し、
+/// 全員の到着を確かめてから判定する（判定は件数・最大同時実行数の断定で、期限の長さでは行わない）。
 struct Rendezvous {
     arrived: AtomicU64,
     parties: u64,
+    aborted: AtomicBool,
 }
 
 impl Rendezvous {
@@ -39,14 +41,34 @@ impl Rendezvous {
         Self {
             arrived: AtomicU64::new(0),
             parties,
+            aborted: AtomicBool::new(false),
         }
     }
-    fn wait(&self) {
+    /// 待ち合わせを明示的に中断する。待っている参加者は放される。
+    fn abort(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+    }
+    /// 全員が到着したら true。中断・期限切れなら false で、中断の印を残す。
+    fn wait(&self) -> bool {
         self.arrived.fetch_add(1, Ordering::SeqCst);
         let deadline = Instant::now() + Duration::from_secs(30);
-        while self.arrived.load(Ordering::SeqCst) < self.parties && Instant::now() < deadline {
+        loop {
+            if self.aborted.load(Ordering::SeqCst) {
+                return false;
+            }
+            if self.arrived.load(Ordering::SeqCst) >= self.parties {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                self.abort();
+                return false;
+            }
             std::thread::yield_now();
         }
+    }
+    /// 全員が揃い、中断も期限切れも起きなかったか。
+    fn completed(&self) -> bool {
+        !self.aborted.load(Ordering::SeqCst) && self.arrived.load(Ordering::SeqCst) >= self.parties
     }
 }
 
@@ -115,6 +137,7 @@ fn reaches_configured_concurrency() {
         Outcome::Success
     })
     .unwrap();
+    assert!(barrier.completed(), "rendezvous aborted or timed out");
     assert_eq!(run.samples.max_in_flight, 4);
 }
 
@@ -212,6 +235,7 @@ fn all_in_flight_failures_stop_without_new_trials() {
         barrier.wait();
         Outcome::Excluded
     });
+    assert!(barrier.completed(), "rendezvous aborted or timed out");
     assert_eq!(r.unwrap_err(), LoadError::InvalidOutcome);
     assert_eq!(calls.load(Ordering::SeqCst), C);
 }
