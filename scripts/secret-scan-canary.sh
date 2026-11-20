@@ -49,8 +49,19 @@ plant() {
   [ -n "${blob}" ] || die "hash-object returned nothing"
   git update-index --add --cacheinfo "100644,${blob},${path}" || die "update-index failed"
 }
-plant "secret-scan-canary/dummy.txt" "${key_line}"
-plant "secret-scan-canary/.env" "canary placeholder"
+# HEAD に追跡ファイル・ディレクトリとして存在しない名前を選ぶ（同名があると update-index が衝突して失敗する）。
+canary_dir=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  candidate="secret-scan-canary-${RANDOM}${RANDOM}"
+  existing="$(git ls-files --cached -- "${candidate}")" || die "ls-files failed"
+  if [ -z "${existing}" ]; then
+    canary_dir="${candidate}"
+    break
+  fi
+done
+[ -n "${canary_dir}" ] || die "could not pick a canary path absent from HEAD"
+plant "${canary_dir}/dummy.txt" "${key_line}"
+plant "${canary_dir}/.env" "canary placeholder"
 
 rc=0
 "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked > "${work_dir}/out" 2>&1 || rc=$?
