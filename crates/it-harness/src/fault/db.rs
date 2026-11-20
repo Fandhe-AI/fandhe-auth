@@ -758,26 +758,27 @@ mod tests {
     }
 
     /// 待ち受けの accept 待ち行列の長さが `want` 以上になるまで、期限付きで待つ（Linux の `/proc/net/tcp` の rx_queue）。
-    /// 読めない環境（Linux 以外）では短く待つだけにする。待ち行列の外から見える手段が他に無いため。
+    /// 待ち行列の外から見える手段が他に無いため。アドレスの表記（エンディアン）に依らないよう、
+    /// 状態が LISTEN（`0A`）でポートが一致する行だけを見る。`/proc/net/tcp` が読めなければ観測できないので panic する
+    /// （合格に数えない。Linux 以外ではこの試験を `ignore` にしている）。
     fn wait_backlog(port: u16, want: usize) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let local = format!("0100007F:{port:04X}");
+        let suffix = format!(":{port:04X}");
         loop {
-            let Ok(text) = std::fs::read_to_string("/proc/net/tcp") else {
-                thread::sleep(Duration::from_millis(200));
-                return;
-            };
+            let text = std::fs::read_to_string("/proc/net/tcp")
+                .expect("cannot observe the accept queue: /proc/net/tcp is unreadable");
             let queued = text
                 .lines()
                 .skip(1)
                 .filter_map(|l| {
                     let f: Vec<&str> = l.split_whitespace().collect();
-                    (f.get(1) == Some(&local.as_str()) && f.get(3) == Some(&"0A"))
-                        .then(|| f.get(4).and_then(|q| q.split(':').nth(1)))
-                        .flatten()
-                        .and_then(|rx| usize::from_str_radix(rx, 16).ok())
+                    if f.get(1)?.ends_with(&suffix) && *f.get(3)? == "0A" {
+                        usize::from_str_radix(f.get(4)?.split(':').nth(1)?, 16).ok()
+                    } else {
+                        None
+                    }
                 })
-                .next()
+                .max()
                 .unwrap_or(0);
             if queued >= want {
                 return;
@@ -1015,6 +1016,10 @@ mod tests {
     /// 公開の `release_block` が排出を呼ぶ（ORST-17）。accept のスレッドを止めて待ち行列に接続を残し、
     /// 解除を通して切断数と拒否件数を確かめる。`drain_backlog` が呼ばれなければ `refused` は 0 のまま。
     #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "accept queue is observable only via /proc/net/tcp"
+    )]
     fn release_block_drains_queued_conns() {
         let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let up_port = up.local_addr().unwrap().port();
@@ -1042,6 +1047,32 @@ mod tests {
         assert_eq!(echo_or_cut(&mut c1, b"a"), None);
         assert_eq!(echo_or_cut(&mut c2, b"b"), None);
         let _ = tl.finish(UtcTimestamp::from_unix_seconds(1_700_000_060));
+    }
+
+    /// 排出は成功しても `Released` の記録が拒否されたら、`Record` で戻り遮断を保つ。正しいタイムラインで解除を再試行できる（ORST-17）。
+    #[test]
+    fn release_block_record_rejected_keeps_block_and_allows_retry() {
+        let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut p = DbFaultProxy::start_to_port(up.local_addr().unwrap().port()).unwrap();
+        let mut tl = timeline();
+        p.block(&mut tl).unwrap();
+        let mut baseline = FaultTimeline::baseline(
+            Instant::now(),
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        )
+        .unwrap();
+        let r = p.release_block(&mut baseline);
+        assert!(matches!(r, Err(DbFaultError::Record(_))), "{r:?}");
+        assert!(p.shared.blocked.load(Ordering::SeqCst), "still blocked");
+        assert!(p.block_active);
+        p.release_block(&mut tl).unwrap();
+        assert!(!p.shared.blocked.load(Ordering::SeqCst));
+        assert!(!p.block_active);
+        let text = tl
+            .finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
+            .unwrap()
+            .to_string();
+        assert!(text.contains(" released db_block"), "{text}");
     }
 
     /// 排出が失敗（割り込みの使い切り・`Failed`）なら `Released` を記録せず遮断のまま `DrainFailed` で戻る。
