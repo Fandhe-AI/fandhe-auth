@@ -79,10 +79,7 @@ fn golden_matches_sample_with_closed_loop() {
         "condition_component: ConsoleStub not_started {TAIL}\n"
     ));
     expected.push_str("note: stub results are not counted as real results\n");
-    expected.push_str(&format!(
-        "condition_loop: {} {TAIL}\n",
-        LoopModel::Closed.as_str()
-    ));
+    expected.push_str(&format!("condition_loop: closed {TAIL}\n"));
     assert_eq!(out, expected);
 }
 
@@ -93,7 +90,12 @@ fn rows_always_present_and_note_only_with_stub() {
     assert_eq!(out.matches("condition_component: ").count(), 4);
     assert_eq!(out.matches("not_started").count(), 4);
     assert_eq!(out.matches("note:").count(), 0);
-    assert_eq!(out.matches("condition_loop: closed").count(), 1);
+    assert_eq!(
+        out.lines()
+            .filter(|l| *l == format!("condition_loop: closed {TAIL}"))
+            .count(),
+        1
+    );
 
     for started in [
         vec![(ConditionComponent::ConsoleStub, true)],

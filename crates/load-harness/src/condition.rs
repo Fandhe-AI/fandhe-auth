@@ -84,6 +84,7 @@ impl BuildProfile {
 }
 
 /// 機材の生の値の取得元。環境から入る値なので、許可語彙の検査は [`MachineCondition::detect_with`] が行う。
+/// 取得元は検査せず、取得できなかった値だけを `None` にする。
 /// 試験では偽の実装を渡して決定的にする。
 pub trait MachineProbe {
     fn cpu_count(&self) -> Option<u64>;
@@ -98,8 +99,8 @@ pub trait MachineProbe {
 ///
 /// - `cpu_count`: `available_parallelism`。affinity・cgroup の上限が効く「使える並列数」で、物理 CPU 数ではない。
 /// - `memory_mib`: Linux だけ `/proc/meminfo` の `MemTotal`。コンテナでは cgroup の上限ではなくホストの総量が出る。
-/// - `arch`・`os_family`: `std::env::consts` の `ARCH`・`OS`。許可語彙の外（対象外のプラットフォーム）は誤りにせず
-///   `None`（未取得）にして、他の測定条件の記録を妨げない。外から注入された値の拒否は [`in_vocab`] が維持する。
+/// - `arch`・`os_family`: `std::env::consts` の `ARCH`・`OS` を検査せずそのまま返す。語彙の外の値は
+///   [`MachineCondition::detect_with`] が誤りにする（`None` は取得できなかったときだけ）。
 /// - `virtualization`: 判別の方法が未決のため常に `Unknown`。
 /// - `build_profile`: 実行時にプロファイルを確かめる手段が無い（`debug_assertions` はプロファイルの設定で上書きされ誤記録になる）ため
 ///   常に `Unknown`。確かな値は呼び出し元が [`MachineCondition::new`] で明示する。
@@ -118,11 +119,11 @@ impl MachineProbe for StdMachineProbe {
     }
 
     fn arch(&self) -> Option<String> {
-        std_value_in_vocab(std::env::consts::ARCH, ARCH_VOCAB)
+        Some(std::env::consts::ARCH.to_owned())
     }
 
     fn os_family(&self) -> Option<String> {
-        std_value_in_vocab(std::env::consts::OS, OS_VOCAB)
+        Some(std::env::consts::OS.to_owned())
     }
 
     fn virtualization(&self) -> Virtualization {
@@ -241,12 +242,6 @@ const OS_VOCAB: &[&str] = &[
     "nuttx",
     "emscripten",
 ];
-
-/// 標準の取得元の値を許可語彙に照らす。語彙の外は `None`（未取得）。注入値の検査（[`in_vocab`]）とは別で、
-/// 標準の取得元が対象外のプラットフォームで他の測定条件を巻き込まないための入口。
-fn std_value_in_vocab(v: &str, vocab: &'static [&'static str]) -> Option<String> {
-    vocab.iter().find(|w| **w == v).map(|w| (*w).to_owned())
-}
 
 /// 許可語彙の中の値だけを通す。外れは値を載せずに誤りにする（取れない `None` とは区別する）。
 fn in_vocab(
@@ -496,21 +491,52 @@ impl fmt::Display for MeasurementConditions {
 #[cfg(test)]
 mod tests {
     use super::{
-        ARCH_VOCAB, BuildProfile, ConditionError, MachineCondition, OS_VOCAB, Virtualization,
-        parse_mem_total_mib, std_value_in_vocab,
+        ARCH_VOCAB, BuildProfile, ConditionError, MachineCondition, MachineProbe, OS_VOCAB,
+        Virtualization, parse_mem_total_mib,
     };
 
+    struct RawProbe(Option<String>, Option<String>);
+
+    impl MachineProbe for RawProbe {
+        fn cpu_count(&self) -> Option<u64> {
+            None
+        }
+        fn memory_mib(&self) -> Option<u64> {
+            None
+        }
+        fn arch(&self) -> Option<String> {
+            self.0.clone()
+        }
+        fn os_family(&self) -> Option<String> {
+            self.1.clone()
+        }
+        fn virtualization(&self) -> Virtualization {
+            Virtualization::Unknown
+        }
+        fn build_profile(&self) -> BuildProfile {
+            BuildProfile::Unknown
+        }
+    }
+
     #[test]
-    fn std_probe_value_outside_vocab_is_unobtained() {
-        assert_eq!(std_value_in_vocab("someos", OS_VOCAB), None);
-        assert_eq!(std_value_in_vocab("somearch", ARCH_VOCAB), None);
+    fn detect_with_rejects_out_of_vocab_and_keeps_unobtained() {
+        let bad_os = RawProbe(None, Some("someos".to_owned()));
         assert_eq!(
-            std_value_in_vocab("tvos", OS_VOCAB).as_deref(),
-            Some("tvos")
+            MachineCondition::detect_with(&bad_os),
+            Err(ConditionError::InvalidMachineValue)
         );
+        let bad_arch = RawProbe(Some("somearch".to_owned()), None);
         assert_eq!(
-            std_value_in_vocab("mips32r6", ARCH_VOCAB).as_deref(),
-            Some("mips32r6")
+            MachineCondition::detect_with(&bad_arch),
+            Err(ConditionError::InvalidMachineValue)
+        );
+        assert!(MachineCondition::detect_with(&RawProbe(None, None)).is_ok());
+        assert!(
+            MachineCondition::detect_with(&RawProbe(
+                Some(ARCH_VOCAB[0].to_owned()),
+                Some(OS_VOCAB[0].to_owned())
+            ))
+            .is_ok()
         );
     }
 
