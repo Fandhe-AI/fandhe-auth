@@ -33,7 +33,8 @@ pub use hub_stub::{
 #[cfg(unix)]
 pub use instance::{InstanceExit, InstanceFaultError, InstanceFaultHandle};
 pub use record::{
-    FAULT_RECORD_FORMAT, FaultEvent, FaultRecord, FaultRecordError, FaultTimeline, RunMode,
+    FAULT_RECORD_FORMAT, FaultEvent, FaultFinishFailure, FaultRecord, FaultRecordError,
+    FaultTimeline, RunMode,
 };
 
 /// 注入の対象。[`crate::ComponentKind`] とは別の型（DB の外の保存先は構成要素ではないため）。

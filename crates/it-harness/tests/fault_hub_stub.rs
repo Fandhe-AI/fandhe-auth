@@ -473,7 +473,8 @@ fn record_lines_and_no_token_leak() {
     }
 }
 
-/// ハーネスで起動した stub のセッションの口へ注入できる。
+/// ハーネスで起動した stub のセッションの口へ注入できる。`with` のクロージャ内ではセッションのロックを握ったまま
+/// `Wait` が走るので、ここで使う `Wait` は同じハンドルを参照しない。
 #[test]
 fn injects_into_harness_started_stub() {
     let comp = HubStubComponent::new(config());
@@ -606,9 +607,37 @@ fn bound_timeline_rejects_direct_finish_and_direct_hub_stub_events() {
             .unwrap_err(),
         FaultRecordError::HubStubEventOutsideInjector
     );
+    // 拒否してもタイムラインを失わない（蓄積した事象を持ったまま返る）。
+    let failure = tl
+        .finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
+        .unwrap_err();
+    assert_eq!(failure.error, FaultRecordError::InjectorBound);
+    let _tl_back: FaultTimeline = failure.timeline;
+}
+
+/// 一度も apply が通っていない注入器を破棄すると結合が取り消され、結び直せる。
+#[test]
+fn dropping_unused_injector_unbinds_the_run() {
+    let tl = timeline();
+    let (inj, _) = injector(&tl);
+    assert!(matches!(
+        HubStubFaultInjector::new(|_: Duration| {}, &tl).unwrap_err(),
+        HubStubFaultError::AlreadyBound
+    ));
+    drop(inj);
+    let (mut inj2, _) = injector(&tl);
+    let mut tl = tl;
+    inj2.apply(
+        &mut tl,
+        refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503)),
+    )
+    .unwrap();
+    // 使った注入器は破棄しても印を残す（直接の終了は拒否のまま）。
+    drop(inj2);
     assert_eq!(
         tl.finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
-            .unwrap_err(),
+            .unwrap_err()
+            .error,
         FaultRecordError::InjectorBound
     );
 }

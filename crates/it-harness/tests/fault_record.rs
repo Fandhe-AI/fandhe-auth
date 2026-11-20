@@ -103,7 +103,7 @@ fn rejected_cases() {
         Err(FaultRecordError::EventsInBaseline)
     );
     assert_eq!(
-        fault().finish(ts(1)).unwrap_err(),
+        fault().finish(ts(1)).unwrap_err().error,
         FaultRecordError::NoInjectionInFaultRun
     );
     let mut f = fault();

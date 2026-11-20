@@ -18,6 +18,7 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 
@@ -112,7 +113,7 @@ pub struct FaultEvent {
 #[derive(Debug)]
 pub struct FaultTimeline {
     run_id: u64,
-    injector_bound: AtomicBool,
+    injector_bound: Arc<AtomicBool>,
     mode: RunMode,
     started_at: UtcTimestamp,
     origin: Instant,
@@ -137,7 +138,7 @@ impl FaultTimeline {
         static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
         Ok(Self {
             run_id: RUN_SEQ.fetch_add(1, Ordering::Relaxed),
-            injector_bound: AtomicBool::new(false),
+            injector_bound: Arc::new(AtomicBool::new(false)),
             mode,
             started_at,
             origin,
@@ -151,12 +152,13 @@ impl FaultTimeline {
         self.run_id
     }
 
-    /// 注入器をこの実行へ結ぶ。すでに結んでいれば `false`（1 つの実行に注入器は 1 つ。呼び出しの位置の照合のため）。
+    /// 注入器をこの実行へ結ぶ。すでに結んでいれば `None`（1 つの実行に注入器は 1 つ。呼び出しの位置の照合のため）。
+    /// 結べたら結合の印を返す。注入器が未使用のまま破棄されたとき、その印を下ろして結び直せるようにする。
     /// 結ぶ前に注入器の外で積まれた Hub の stub の事象があれば `HubStubEventsBeforeBind`（`log_pos` の無い事象と注入状態が食い違うため）。
-    pub(crate) fn bind_injector(&self) -> Result<bool, FaultRecordError> {
-        // 結合済みの判定を先に行う（二重登録は事象の有無にかかわらず `false`。`AlreadyBound` に当たる）。
+    pub(crate) fn bind_injector(&self) -> Result<Option<Arc<AtomicBool>>, FaultRecordError> {
+        // 結合済みの判定を先に行う（二重登録は事象の有無にかかわらず `None`。`AlreadyBound` に当たる）。
         if self.injector_bound.load(Ordering::SeqCst) {
-            return Ok(false);
+            return Ok(None);
         }
         if self
             .events
@@ -165,7 +167,10 @@ impl FaultTimeline {
         {
             return Err(FaultRecordError::HubStubEventsBeforeBind);
         }
-        Ok(!self.injector_bound.swap(true, Ordering::SeqCst))
+        if self.injector_bound.swap(true, Ordering::SeqCst) {
+            return Ok(None);
+        }
+        Ok(Some(Arc::clone(&self.injector_bound)))
     }
 
     /// ハーネスの時計で現在の時刻を押して積む。
@@ -278,12 +283,21 @@ impl FaultTimeline {
     /// 解除しなかった `Applied` は `unreleased_count` に数える（黙って省かない）。
     ///
     /// # Errors
-    /// 注入器を結んだ実行は `InjectorBound`（注入器が有効なまま残らないよう、`HubStubFaultInjector::finish` だけが確定する）。
-    pub fn finish(self, recorded_at: UtcTimestamp) -> Result<FaultRecord, FaultRecordError> {
-        if self.injector_bound.load(Ordering::SeqCst) {
-            return Err(FaultRecordError::InjectorBound);
+    /// 注入器を結んだ実行は `InjectorBound`（注入器が有効なまま残らないよう、`HubStubFaultInjector::finish` が確定する）。
+    /// 失敗のときは `FaultFinishFailure` にタイムラインを入れて返す（蓄積した事象を失わず、正しい経路で再試行できる）。
+    pub fn finish(self, recorded_at: UtcTimestamp) -> Result<FaultRecord, Box<FaultFinishFailure>> {
+        let checked = if self.injector_bound.load(Ordering::SeqCst) {
+            Err(FaultRecordError::InjectorBound)
+        } else {
+            self.check_finishable()
+        };
+        match checked {
+            Ok(()) => Ok(self.into_record(recorded_at)),
+            Err(error) => Err(Box::new(FaultFinishFailure {
+                error,
+                timeline: self,
+            })),
         }
-        self.finish_bound(recorded_at)
     }
 
     /// 確定できるか。消費する前に確かめ、失敗しても記録を失わないようにする（注入器の内部だけ）。
@@ -292,15 +306,6 @@ impl FaultTimeline {
             return Err(FaultRecordError::NoInjectionInFaultRun);
         }
         Ok(())
-    }
-
-    /// 注入器と一緒に確定する入口（注入器の内部だけ）。
-    pub(crate) fn finish_bound(
-        self,
-        recorded_at: UtcTimestamp,
-    ) -> Result<FaultRecord, FaultRecordError> {
-        self.check_finishable()?;
-        Ok(self.into_record(recorded_at))
     }
 
     /// 検査（`check_finishable`）を通した後の確定。
@@ -312,6 +317,23 @@ impl FaultTimeline {
             unreleased: self.open.len(),
             events: self.events,
         }
+    }
+}
+
+/// `FaultTimeline::finish` の失敗。タイムラインを返すので、記録を失わずに再試行できる。
+pub struct FaultFinishFailure {
+    /// 失敗の理由。
+    pub error: FaultRecordError,
+    /// 渡されたタイムライン。
+    pub timeline: FaultTimeline,
+}
+
+impl fmt::Debug for FaultFinishFailure {
+    /// 理由だけを出す（SECR-23〜27）。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FaultFinishFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 
@@ -466,7 +488,7 @@ mod tests {
     #[test]
     fn injector_binds_once() {
         let t = tl();
-        assert!(t.bind_injector().unwrap());
-        assert!(!t.bind_injector().unwrap());
+        assert!(t.bind_injector().unwrap().is_some());
+        assert!(t.bind_injector().unwrap().is_none());
     }
 }
