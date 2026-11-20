@@ -27,6 +27,7 @@ cat <<'EOF'
   crate-deps  scripts/check-crate-deps.sh    crate 間の依存の向きの検査（許可表との照合）
   pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
   it-db       scripts/it-db.sh               ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）
+  it-db-ci    scripts/it-db-ci.sh            CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験だけを流す。0 件は失敗）
   e2e-chrome  scripts/e2e-chrome.sh          ハーネスの Chrome の E2E（chromedriver 必須・#[ignore] の試験を流す。CI 外）
 
 CI 向けに直接実行するコマンド:

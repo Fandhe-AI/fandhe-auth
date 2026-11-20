@@ -15,7 +15,7 @@
 //!   どれかが満たされなければ起動の失敗にする。平文の拒否は compose 側の構成（AUDP-9）に任せ、ここで変えない。
 //! - SQL は固定文字列だけで値を連結しない（AUDB-43）。
 //!
-//! 範囲外: DB を使う試験を CI に載せること（TASK-6）。この構成要素の合格は実物の Hub の DB の合格に数えない（ACPT-7）。
+//! CI の DB ジョブは枠の試験だけを流す（`tests/db_job_frame.rs`。#52）。他の Docker の試験を CI に載せるかは人が決める（TASK-6）。この構成要素の合格は実物の Hub の DB の合格に数えない（ACPT-7）。
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};

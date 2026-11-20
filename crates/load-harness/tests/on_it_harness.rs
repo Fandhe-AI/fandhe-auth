@@ -9,10 +9,11 @@ use std::time::Duration;
 
 use fandhe_auth_hub_stub::assertion::AssertionSigningKey;
 use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
-use fandhe_auth_it_harness::{Harness, HarnessConfig, HubStubComponent};
+use fandhe_auth_it_harness::{ComponentKind, Harness, HarnessConfig, HubStubComponent};
 use fandhe_auth_load_harness::{
-    CallResult, FailureKind, IntervalName, LoadConfig, Outcome, RunMeter, StdMonotonicClock,
-    TargetName, TargetSpec, Trial, run_closed_loop, run_target, summarize_run,
+    CallResult, ComponentConditions, ConditionComponent, FailureKind, IntervalName, LoadConfig,
+    LoopModel, MeasurementConditions, Outcome, RunMeter, StdMonotonicClock, TargetName, TargetSpec,
+    Trial, run_closed_loop, run_target, summarize_run,
 };
 
 const T0: u64 = 1_000;
@@ -122,4 +123,60 @@ fn run_target_calls_hub_stub_jwks_on_harness() {
     let config = LoadConfig::new(2, 6, 0).unwrap();
     let r = run_target(Box::new(StdMonotonicClock::new()), &spec, &config, call).unwrap();
     assert_eq!(r.run.samples.failure, 6);
+}
+
+/// it-harness の種類から条件の種類への写し。網羅の `match` で、種類が増えたらコンパイルで気づく。
+fn to_condition(kind: ComponentKind) -> ConditionComponent {
+    match kind {
+        ComponentKind::Database => ConditionComponent::Database,
+        ComponentKind::Host => ConditionComponent::Host,
+        ComponentKind::HubStub => ConditionComponent::HubStub,
+        ComponentKind::ConsoleStub => ConditionComponent::ConsoleStub,
+    }
+}
+
+#[test]
+fn condition_vocabulary_and_order_match_it_harness() {
+    let names: Vec<String> = ComponentKind::START_ORDER
+        .iter()
+        .map(|k| format!("{k:?}"))
+        .collect();
+    let ours: Vec<&str> = ConditionComponent::ORDER
+        .iter()
+        .map(|c| c.as_str())
+        .collect();
+    assert_eq!(names, ours);
+    for k in ComponentKind::START_ORDER {
+        assert_eq!(to_condition(k).is_stub(), k.is_stub());
+    }
+}
+
+#[test]
+fn conditions_from_running_harness_composition() {
+    let hub = HubStubComponent::new(hub_config());
+    let running = Harness::start(HarnessConfig::new().with(Box::new(hub))).unwrap();
+    let started: Vec<(ConditionComponent, bool)> = running
+        .composition_record()
+        .entries
+        .iter()
+        .map(|e| (to_condition(e.kind), e.stub))
+        .collect();
+    let conditions = MeasurementConditions::detect(
+        ComponentConditions::new(&started).unwrap(),
+        LoopModel::Closed,
+    )
+    .unwrap();
+    let out = conditions.to_string();
+    let tail = "class=test_condition refs=harness_config";
+    assert!(out.contains(&format!(
+        "condition_component: HubStub started stub {tail}\n"
+    )));
+    for k in ["Database", "Host", "ConsoleStub"] {
+        assert!(out.contains(&format!("condition_component: {k} not_started {tail}\n")));
+    }
+    assert_eq!(out.matches("note:").count(), 1);
+    assert!(!out.contains(HOST_MARK) && !out.contains(CLIENT_MARK));
+    let dbg = format!("{conditions:?}");
+    assert!(!dbg.contains(HOST_MARK) && !dbg.contains(CLIENT_MARK));
+    running.stop().unwrap();
 }
