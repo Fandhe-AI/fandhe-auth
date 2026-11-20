@@ -66,6 +66,11 @@ impl Drop for TestOrigin {
     }
 }
 
+/// 全応答に付ける安全ヘッダー（CSRF-28・CSRF-31・CSRF-32・CSRF-51。`security.md` の「CSP とヘッダ」）。
+/// ページはスクリプト・スタイル・外部資源を持たないため `unsafe-*` は足さない。試験用ページは WebAuthn の
+/// 呼び出し元の origin になるだけで、wasm は読まないため `'wasm-unsafe-eval` も足さない。
+const SAFETY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'\r\nX-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n";
+
 /// ヘッダー部の上限。ハーネスの安全上の値で、要件の値ではない。
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// 1 接続がヘッダーを送り終えるまでの期限（スローロリス対策。試験用の安い上限）。
@@ -155,7 +160,7 @@ fn handle(mut s: TcpStream, port: u16, _slot: Slot) {
         )
     };
     let resp = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n{SAFETY_HEADERS}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = s.write_all(resp.as_bytes());

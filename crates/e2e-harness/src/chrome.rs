@@ -223,26 +223,25 @@ impl ChromeDriverComponent {
                 .filter(|d| !d.is_zero())
                 .ok_or_else(fail)?;
             let probe = WebDriverClient::new(port, left.min(self.config.command_timeout));
-            let ready = probe.is_ready() && Instant::now() < deadline;
+            let ready = probe.is_ready();
             // ready を受理する前に子の生存を確かめる。子が終了していたら、応答したのは別のプロセスの可能性があり、
             // 起動の失敗にする（ポートの所有の完全な照合ではない。試験環境の上の攻撃者の仮定は P2 以下）。
-            match self.child.as_mut().map(child_state) {
+            // 状態の確認（`ps`）にも起動待ちの期限を渡す。
+            let state_limit = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO);
+            match self.child.as_mut().map(|c| child_state(c, state_limit)) {
                 Some(ChildState::Alive) => {
-                    if ready {
+                    // ready を受け付ける直前にも期限を確かめる。
+                    if ready && Instant::now() < deadline {
                         break;
                     }
                 }
                 // 終了しているが未回収（zombie）。所有を保ったまま返し、呼び出し元（`start`）の teardown が
                 // 回収の前にグループへ送って止める。止められなければ所有を保ち、後の stop・Drop で再試行できる。
                 Some(ChildState::ExitedUnreaped) => return Err(fail()),
-                // 状態を見分けられず `try_wait` で回収した場合。PID が再利用され得るので手放し、直後にグループへ送る。
-                Some(ChildState::Reaped) => {
-                    if let Some(c) = self.child.take() {
-                        let _ = kill_group(c.id());
-                    }
-                    return Err(fail());
-                }
-                _ => return Err(fail()),
+                // `ps` で状態を取れない。子は回収しないまま返し、teardown がグループを止めてから回収する。
+                Some(ChildState::Unknown) | None => return Err(fail()),
             }
             // 残り時間は probe・try_wait の後で計算し直す（古い `left` でスリープして期限を超えない）。
             let Some(left_now) = deadline
@@ -300,33 +299,26 @@ enum ChildState {
     Alive,
     /// 終了したが回収していない（zombie）。グループ ID はまだ保たれている。
     ExitedUnreaped,
-    /// `try_wait` が回収した（`ps` で見分けられなかったときの代替）。
-    Reaped,
-    /// 見分けられない。
+    /// `ps` で見分けられない（期限切れ・実行失敗）。子は回収していない。
     Unknown,
 }
 
-/// 子を回収せずに状態を見る。`ps` の状態（`Z` は zombie）で見分け、見分けられなければ `try_wait` に落とす。
+/// 子を回収せずに状態を見る。`ps` の状態（`Z` は zombie）で見分け、見分けられなければ `Unknown`（回収しない）。
 /// 回収の前にグループへ送れるようにするため（回収すると、再利用され得る PGID へ送ることになる）。
-fn child_state(child: &mut Child) -> ChildState {
-    if let Some(stat) = ps_stat(child.id())
-        && !stat.is_empty()
-    {
-        return if stat.starts_with('Z') {
-            ChildState::ExitedUnreaped
-        } else {
-            ChildState::Alive
-        };
-    }
-    match child.try_wait() {
-        Ok(None) => ChildState::Alive,
-        Ok(Some(_)) => ChildState::Reaped,
-        Err(_) => ChildState::Unknown,
+/// `limit` は `ps` に許す時間の上限（呼び出し元の期限の残りと `KILL_TIMEOUT` の短い方）。
+fn child_state(child: &mut Child, limit: Duration) -> ChildState {
+    match ps_stat(child.id(), limit.min(KILL_TIMEOUT)) {
+        Some(stat) if stat.starts_with('Z') => ChildState::ExitedUnreaped,
+        Some(stat) if !stat.is_empty() => ChildState::Alive,
+        _ => ChildState::Unknown,
     }
 }
 
 /// `ps -o stat= -p <pid>` の出力（期限付き。無期限に待たない）。
-fn ps_stat(pid: u32) -> Option<String> {
+fn ps_stat(pid: u32, limit: Duration) -> Option<String> {
+    if limit.is_zero() {
+        return None;
+    }
     let mut child = Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .env("LC_ALL", "C")
@@ -335,7 +327,7 @@ fn ps_stat(pid: u32) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + KILL_TIMEOUT;
+    let deadline = Instant::now() + limit;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -464,13 +456,36 @@ mod tests {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while child_state(&mut leader) == ChildState::Alive && Instant::now() < deadline {
+        while child_state(&mut leader, KILL_TIMEOUT) == ChildState::Alive
+            && Instant::now() < deadline
+        {
             sleep(Duration::from_millis(20));
         }
-        assert_eq!(child_state(&mut leader), ChildState::ExitedUnreaped);
+        assert_eq!(
+            child_state(&mut leader, KILL_TIMEOUT),
+            ChildState::ExitedUnreaped
+        );
         // 未回収なので PGID はまだ自分の子のもの。回収の前に送る。
         assert!(kill_group(leader.id()).is_ok());
         assert!(wait_until(&mut leader, Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
+    fn unreadable_state_is_unknown_and_the_child_is_not_reaped() {
+        // `ps` に時間を与えない（取れない）場合は Unknown で、子を回収しない（`try_wait` に落とさない）。
+        let mut c = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        sleep(Duration::from_millis(200));
+        assert_eq!(child_state(&mut c, Duration::ZERO), ChildState::Unknown);
+        // 回収していなければ、続く判定で zombie として見える。
+        assert_eq!(
+            child_state(&mut c, KILL_TIMEOUT),
+            ChildState::ExitedUnreaped
+        );
+        assert!(wait_until(&mut c, Duration::from_secs(5)).is_ok());
     }
 
     #[test]

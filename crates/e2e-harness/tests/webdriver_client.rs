@@ -376,6 +376,11 @@ fn malformed_header_lines_are_rejected() {
         "Bad Name: x",
         "Na(me: x",
         "X-Tab\t: x",
+        "X-Ctl: a\x01b",
+        "X-Nul: a\0b",
+        "X-Del: a\x7fb",
+        "Content-Length: \x0b12",
+        "Content-Length: 12\x0c",
     ] {
         let resp =
             format!("HTTP/1.1 200 OK\r\n{headers}\r\nConnection: close\r\n\r\n{{\"value\":{{}}}}")

@@ -82,6 +82,7 @@ const REDACTED: &str = "<redacted>";
 /// 組み立てるときだけ [`SessionId::expose`] で借りる（SECR-11・SECR-16）。
 #[derive(Clone)]
 struct SessionId(SecretString);
+// 秘密値を持つ型の一覧への記録: `SessionId`・`WebDriverSession`（`.claude/rules/secret-values.md`。SECR-10・SECR-29）。
 
 impl fmt::Debug for SessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -308,6 +309,11 @@ fn parse_status_line(head: &[u8]) -> Result<u16, E2eError> {
     code.parse::<u16>().map_err(|_| failed())
 }
 
+/// 値に許さない制御文字（HTAB を除く 0x00〜0x1f と 0x7f）。
+fn is_ctl(b: u8) -> bool {
+    (b < 0x20 && b != b'\t') || b == 0x7f
+}
+
 /// HTTP の token（空でなく、英数字と ``!#$%&'*+-.^_`|~`` だけ）。
 fn is_token(name: &str) -> bool {
     !name.is_empty()
@@ -328,7 +334,8 @@ fn validate_head(head: &[u8]) -> Result<(), E2eError> {
         if i > 0 {
             // 名前は HTTP の token の文字だけ（RFC 9110）。コロンの前の空白も拒否する（名前を trim しない）。
             match line.split_once(':') {
-                Some((name, _)) if is_token(name) => {}
+                // 値に制御文字（HTAB 以外の 0x00〜0x1f・0x7f）があれば拒否する。
+                Some((name, value)) if is_token(name) && !value.bytes().any(is_ctl) => {}
                 _ => return Err(failed()),
             }
         }
@@ -360,9 +367,9 @@ fn header_values(head: &[u8], name: &str) -> Vec<String> {
         .skip(1)
         .filter_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.trim()
-                .eq_ignore_ascii_case(name)
-                .then(|| v.trim().to_owned())
+            // 取り除くのは HTTP が許す空白（SP・HTAB）だけ（`trim` は VT・FF 等も取り除くため使わない）。
+            k.eq_ignore_ascii_case(name)
+                .then(|| v.trim_matches([' ', '\t']).to_owned())
         })
         .collect()
 }

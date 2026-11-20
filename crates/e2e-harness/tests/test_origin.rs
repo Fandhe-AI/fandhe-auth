@@ -118,3 +118,37 @@ fn stalled_connections_do_not_block_a_following_request() {
     let r = get(o.port(), &format!("localhost:{}", o.port()), "GET", "/");
     assert!(r.starts_with("HTTP/1.1 200"));
 }
+
+/// ヘッダー名の大文字小文字を無視して値を返す（応答のヘッダー部だけを見る）。
+fn header<'a>(resp: &'a str, name: &str) -> Option<&'a str> {
+    let head = resp.split("\r\n\r\n").next()?;
+    head.split("\r\n").skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+#[test]
+fn page_carries_the_safety_headers() {
+    // CSRF-28・CSRF-31・CSRF-32・CSRF-51: 試験用ページにも CSP・X-Frame-Options・nosniff・Referrer-Policy を付ける。
+    let o = TestOrigin::start();
+    let r = get(o.port(), &format!("localhost:{}", o.port()), "GET", "/");
+    assert!(r.starts_with("HTTP/1.1 200"));
+    let csp = header(&r, "content-security-policy").expect("CSP");
+    let directives: Vec<&str> = csp.split(';').map(str::trim).collect();
+    for d in [
+        "default-src 'none'",
+        "script-src 'self'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    ] {
+        assert!(directives.contains(&d), "{d} in {csp}");
+    }
+    // `unsafe-inline`・`unsafe-eval`・ワイルドカードを足さない。
+    assert!(!csp.contains("unsafe"), "{csp}");
+    assert!(!csp.contains('*'), "{csp}");
+    assert_eq!(header(&r, "x-frame-options"), Some("DENY"));
+    assert_eq!(header(&r, "x-content-type-options"), Some("nosniff"));
+    assert_eq!(header(&r, "referrer-policy"), Some("no-referrer"));
+}
