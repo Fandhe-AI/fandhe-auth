@@ -146,7 +146,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make it-db-ci` | `scripts/it-db-ci.sh` | CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験 `db_job_frame` だけを流す。0 件は失敗。名前は暫定） |
 | `make e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネスの Chrome の E2E（chromedriver 必須・`#[ignore]` の試験を流す。結果は〔仮想〕。CI では流さない。名前は暫定） |
 | `make pg-check` | `scripts/dev-pg-check.sh` | 開発・検証用 PostgreSQL の起動の確かめ（起動中のインスタンスが対象。起動・停止はしない。CI では流さない。名前は暫定） |
-| `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。`.env` 系の名前の検査は全パスに掛かり、`.agents/skills/**`・`.claude/skills/**`・`*.lock` の除外は本文の走査にだけ効く。CI への組み込みは 2 段目の PR〔#51〕で行う予定。名前は暫定） |
+| `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。`.env` 系の名前の検査は全パスに掛かり、`.agents/skills/**`・`.claude/skills/**`・`*.lock` の除外は本文の走査にだけ効く。CI では `secret scan (tracked files)` ジョブが `scripts/secret-scan-ci.sh` 経由で呼ぶ〔#51〕。名前は暫定） |
 | `make scan-canary` | `scripts/secret-scan-canary.sh` | `make secret-scan` の陰性対照（ダミーで検出器が 1 を返し、`--summary` の集計行が期待と完全に一致し、ダミー値が出力に無いことを確かめる。何も変更しない。名前は暫定） |
 | `make test-hooks` | `scripts/hooks/test-hooks.sh` | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
 

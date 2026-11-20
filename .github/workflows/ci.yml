@@ -2,7 +2,7 @@
 #
 # ローカル（`make check`）・Git hooks（lefthook.yml）・CI が同じコマンド契約を共有する。
 # CI 側で独自のチェックを定義せず、scripts/ の実体を呼ぶ（make スキルの「入口は複数でも
-# 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブ、DB の結合試験の枠は it-db-ci ジョブで流す（TASK-6）。
+# 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブ、秘密情報の検査は secret-scan ジョブ、DB の結合試験の枠は it-db-ci ジョブで流す（TASK-6）。
 # 言語固有のジョブを足すときは、必ず ci-complete の needs にも追加すること。
 # ジョブ・発火条件の追加・変更時は .claude/rules/github-actions.md に従う。
 #
@@ -173,6 +173,75 @@ jobs:
       - name: make lint
         run: make lint
 
+  # 追跡ファイル全体の秘密情報の混入検査（TASK-6 4/10。#51）。処理は scripts/secret-scan-ci.sh に置き、ここは呼ぶだけ。
+  # 検出器（scripts/secret-scan-ci.sh・scripts/hooks/secret-scan.sh・陰性対照）は、PR では保護された main の先端
+  # （refs/heads/main。PR の base ブランチではない。stacked PR でも未承認のブランチの版を使わない）を trusted/ へ
+  # 取得した版だけを使い、PR の head（target/。作業ツリーを展開せずオブジェクトだけを取る）は走査対象のデータとして
+  # 渡す。PR 側の検出器は呼ばない（検出器の書き換えで検査を迂回させない）。push（main）では github.sha を両方に取得する。
+  # trusted/・target/ とも actions/checkout は使わない（コミット件名・ファイルのパスが公開ログへ出る。SECR-23）。
+  # 取得したコミットの sha だけを固定の書式でログに出す。
+  # 公開ログへ出るのは規則 ID・件数の集計行と固定の診断文だけで、パス・値は出さない（--summary の契約。SECR-23）。
+  # 既知の限界: pull_request の workflow 定義（本ファイル）自体は PR が書き換えられる（#5985 で追跡。人の担当）。
+  # 他のジョブと同じく if: で skip させない（edited でも走らせる。上の on: のコメント）。
+  secret-scan:
+    name: "secret scan (tracked files)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # 取得は匿名で、GITHUB_TOKEN を使わない（トークンを渡さない）ため、権限は付けない。
+    permissions: {}
+    steps:
+      # 検出器（trusted/）の取得。PR では main の先端（refs/heads/main）、push では github.sha。検出器を実行するため
+      # 作業ツリーは展開するが、git の出力はすべて捨てる（checkout の `HEAD is now at <件名>` を出さない）。
+      # 取得処理は scripts/ に置かず workflow に直接書く（取得の前には trusted/ 自体が無いため）。
+      # 値は env 経由で渡し、ref は `refs/heads/main` か 40 桁の小文字 16 進数 sha だけを通す。トークンは渡さない。
+      - name: Fetch trusted detector (main tip for PRs / pushed commit)
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          TRUSTED_REF: ${{ github.event_name == 'pull_request' && 'refs/heads/main' || github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -uo pipefail
+          fail() { echo "secret-scan: failed to prepare the trusted detector" >&2; exit 2; }
+          [[ "${TRUSTED_REF}" == "refs/heads/main" || "${TRUSTED_REF}" =~ ^[0-9a-f]{40}$ ]] || fail
+          trusted="${WORKSPACE}/trusted"
+          git -c core.hooksPath=/dev/null init -q "${trusted}" > /dev/null 2>&1 || fail
+          git -c core.hooksPath=/dev/null -C "${trusted}" fetch --quiet --no-tags --depth=1 \
+            "${SERVER_URL}/${REPOSITORY}.git" "${TRUSTED_REF}" > /dev/null 2>&1 || fail
+          git -c core.hooksPath=/dev/null -C "${trusted}" checkout -q --detach FETCH_HEAD > /dev/null 2>&1 || fail
+          trusted_sha="$(git -c core.hooksPath=/dev/null -C "${trusted}" rev-parse HEAD 2> /dev/null)" || fail
+          [[ "${trusted_sha}" =~ ^[0-9a-f]{40}$ ]] || fail
+          echo "trusted detector: ${trusted_sha}"
+
+      # 走査対象（PR の head・push のコミット）は actions/checkout で取らない。checkout は取得したコミットの
+      # 件名（HEAD is now at ...）や展開するファイルのパスを公開ログへ出し、PR 由来の未加工の文字列が出る（SECR-23）。
+      # 作業ツリーを展開せず、オブジェクトだけを取って HEAD を張る（検出器は HEAD の tree から一時 index を作る）。
+      # この処理は scripts/ に置かない（PR の CI では trusted/ が main の先端の版で、新しいスクリプトが無いため）。
+      # 値は env 経由で渡し、sha は 40 桁の小文字 16 進数だけを通す。トークンは渡さない（public の repo）。
+      # git の出力はすべて捨て、失敗は固定の文言で exit 2（検査不能）にする。
+      - name: Fetch scan target objects (PR head / pushed commit; no working tree)
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -uo pipefail
+          fail() { echo "secret-scan: failed to prepare the scan target" >&2; exit 2; }
+          [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || fail
+          target="${WORKSPACE}/target"
+          git -c core.hooksPath=/dev/null init -q "${target}" > /dev/null 2>&1 || fail
+          git -c core.hooksPath=/dev/null -C "${target}" fetch --quiet --no-tags --depth=1 \
+            "${SERVER_URL}/${REPOSITORY}.git" "${HEAD_SHA}" > /dev/null 2>&1 || fail
+          git -c core.hooksPath=/dev/null -C "${target}" update-ref HEAD "${HEAD_SHA}" > /dev/null 2>&1 || fail
+
+      - name: Scan tracked files with the trusted detector
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: bash "${WORKSPACE}/trusted/scripts/secret-scan-ci.sh" "${WORKSPACE}/target"
+
   # DB を使う結合試験の枠（TASK-6 5/10。#52）。ローカルの `make it-db-ci` と同じ契約。
   # DB は試験プロセスの中で crates/it-harness の Database が起動・停止する（パスワードは試験プロセスの中で
   # 生成し、ステップ間・GITHUB_ENV・ファイルに渡さない。SECR-6）。services: は使わない（TLS の初期化
@@ -241,6 +310,7 @@ jobs:
       - build-test
       - lint
       - it-db-ci
+      - secret-scan
       - pr-title
     steps:
       - name: 全ジョブ結果の検証
