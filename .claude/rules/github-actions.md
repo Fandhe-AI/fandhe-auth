@@ -285,5 +285,6 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
   - `trusted/`: `git init`・`git fetch --depth=1`・`git checkout -q --detach FETCH_HEAD`（検出器を実行するので作業ツリーを展開する）
   - `target/`: `git init`・`git fetch --depth=1`・`git update-ref HEAD`（作業ツリーを展開せずオブジェクトだけを取る）
   - 取得処理は `scripts/` に置かない（取得の前に `trusted/` が無く、PR の CI では main の版に新しいスクリプトが無いため）
+- 取得は匿名で `GITHUB_TOKEN` を使わないため、ジョブの権限は `permissions: {}` にする
 - 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
 - 既知の限界: pull_request の workflow 定義自体は PR が書き換えられる（#5985 で追跡。人の担当）

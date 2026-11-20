@@ -13,8 +13,15 @@ set -euo pipefail
 # 末尾の改行で終わるパスも保つため、`$(...)` が末尾の改行を落とす点を番兵（x）で避ける。
 # 出力は改行を足さないパスそのもので、受け取る側も番兵を付けて受けてから外す（下の ROOT_DIR）。
 repo_root() {
-  local lib_dir root
-  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+  local lib_dir root src src_dir
+  # 組み込みだけでパスを解決する（依存の確認より前に外部コマンド dirname を呼ばない）。
+  src="${BASH_SOURCE[0]}"
+  case "${src}" in
+    */*) src_dir="${src%/*}" ;;
+    *) src_dir="." ;;
+  esac
+  [ -n "${src_dir}" ] || src_dir="/"
+  lib_dir="$(cd -- "${src_dir}" && pwd)" || return 1
   root="$(cd "${lib_dir}/.." && pwd && printf x)" || return 1
   root="${root%x}"
   root="${root%$'\n'}"

@@ -187,8 +187,8 @@ jobs:
     name: "secret scan (tracked files)"
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
+    # 取得は匿名で、GITHUB_TOKEN を使わない（トークンを渡さない）ため、権限は付けない。
+    permissions: {}
     steps:
       # 検出器（trusted/）の取得。PR では main の先端（refs/heads/main）、push では github.sha。検出器を実行するため
       # 作業ツリーは展開するが、git の出力はすべて捨てる（checkout の `HEAD is now at <件名>` を出さない）。
@@ -217,7 +217,7 @@ jobs:
       # 走査対象（PR の head・push のコミット）は actions/checkout で取らない。checkout は取得したコミットの
       # 件名（HEAD is now at ...）や展開するファイルのパスを公開ログへ出し、PR 由来の未加工の文字列が出る（SECR-23）。
       # 作業ツリーを展開せず、オブジェクトだけを取って HEAD を張る（検出器は HEAD の tree から一時 index を作る）。
-      # この処理は scripts/ に置かない（PR の CI では trusted/ が base の版で、新しいスクリプトが無いため）。
+      # この処理は scripts/ に置かない（PR の CI では trusted/ が main の先端の版で、新しいスクリプトが無いため）。
       # 値は env 経由で渡し、sha は 40 桁の小文字 16 進数だけを通す。トークンは渡さない（public の repo）。
       # git の出力はすべて捨て、失敗は固定の文言で exit 2（検査不能）にする。
       - name: Fetch scan target objects (PR head / pushed commit; no working tree)

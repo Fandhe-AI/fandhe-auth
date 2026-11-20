@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 秘密情報検査の CI 向け入口（TASK-6。CI の secret-scan ジョブから呼ぶ〔#51〕。ローカルからも同じ形で呼べる）。
 #   scripts/secret-scan-ci.sh [<走査対象のリポジトリのパス>]   既定は本スクリプトのあるリポジトリ
-# 検出器・陰性対照は本スクリプトと同じリポジトリ（CI では PR が書き換えられない base の版）のものを使い、
+# 検出器・陰性対照は本スクリプトと同じリポジトリ（CI では PR が書き換えられない版。PR では保護された main の先端）のものを使い、
 # 走査対象はデータとして渡す。公開ログには規則 ID・件数・固定の診断文だけを出す。
 # 走査するのは HEAD を sha に固定して作った専用の一時 index（作業ツリーの index は読まない）。
 # 検出器の出力は一度ファイルへ受け、規則 ID・件数の行（--summary の出力形）だけを通す。ファイル名・値・
@@ -15,7 +15,15 @@ unset CDPATH
 # lib.sh の読み込み・DIR の解決の失敗も対象にするため、source より前に置く。
 set -E
 trap 'echo "secret-scan-ci: internal error; aborting" >&2; exit 2' ERR
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 起動時のパス解決は bash の組み込みだけで行う（依存の確認より前に外部コマンド dirname を呼ばない）。
+_src="${BASH_SOURCE[0]}"
+case "${_src}" in
+  */*) _src_dir="${_src%/*}" ;;
+  *) _src_dir="." ;;
+esac
+[ -n "${_src_dir}" ] || _src_dir="/"
+DIR="$(cd -- "${_src_dir}" && pwd)"
+unset _src _src_dir
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
 

@@ -686,7 +686,8 @@ make_ci_target() {
   git -C "${dst}" update-ref HEAD "${sha}"
 }
 new_repo; stage app.txt "hello"; stage sub/b.txt "world"; stage c.txt "plain"
-git config uploadpack.allowAnySHA1InWant true
+# 取得元は到達可能な sha の取得だけを許す（GitHub と同じ条件）。fork の head の取得の互換性は本試験の範囲外
+git config uploadpack.allowReachableSHA1InWant true
 git commit -q -m "chore: files"
 ci_src="${repo}"
 tracked_count="$(git -C "${ci_src}" ls-files | wc -l | tr -d ' ')"
@@ -787,7 +788,7 @@ run_without_cmd() {
   bin="${work_dir}/nobin-${skip}"
   rm -rf "${bin}"
   mkdir -p "${bin}"
-  for c in dirname "$@"; do
+  for c in "$@"; do
     if [ "${c}" != "${skip}" ]; then
       ln -s "$(command -v "${c}")" "${bin}/${c}"
     fi

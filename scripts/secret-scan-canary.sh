@@ -19,7 +19,15 @@ unset CDPATH
 # 想定外の失敗（set -e 相当）は検査不能（2）として止める。
 set -E
 trap 'echo "scan-canary: internal error; aborting" >&2; exit 2' ERR
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 起動時のパス解決は bash の組み込みだけで行う（依存の確認より前に外部コマンド dirname を呼ばない）。
+_src="${BASH_SOURCE[0]}"
+case "${_src}" in
+  */*) _src_dir="${_src%/*}" ;;
+  *) _src_dir="." ;;
+esac
+[ -n "${_src_dir}" ] || _src_dir="/"
+DIR="$(cd -- "${_src_dir}" && pwd)"
+unset _src _src_dir
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
 
