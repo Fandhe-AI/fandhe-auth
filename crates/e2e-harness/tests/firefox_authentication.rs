@@ -13,7 +13,7 @@ use fandhe_auth_e2e_harness::{
     WebAuthnErrorName, authenticate_once,
 };
 use support::TestOrigin;
-use support::passkey::{Verdict, print_result, register};
+use support::passkey::{Verdict, assert_one_localhost_credential, print_result, register};
 
 #[test]
 #[ignore = "geckodriver と Firefox が要る。make e2e-firefox で流す"]
@@ -33,9 +33,7 @@ fn authenticates_after_registration_with_firefox_virtual_authenticator() {
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
 
-    let creds = handle.credentials(&aid).expect("credentials");
-    assert_eq!(creds.len(), 1);
-    assert_eq!(creds[0].rp_id, "localhost");
+    assert_one_localhost_credential(&handle, &aid);
     print_result(
         &handle,
         PasskeyOperation::Authentication,
@@ -64,6 +62,7 @@ fn authentication_fails_when_user_verification_fails_with_firefox() {
         authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("authenticate");
     assert!(!outcome.succeeded());
     assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
+    assert_one_localhost_credential(&handle, &aid);
     print_result(
         &handle,
         PasskeyOperation::Authentication,

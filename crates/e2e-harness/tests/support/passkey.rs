@@ -43,6 +43,8 @@ pub fn register(
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
+    // docs/harness/e2e.md の登録成功条件: credential がちょうど 1 件で RP ID が localhost。検証の後に成功行を出す。
+    assert_one_localhost_credential(handle, &aid);
     print_result(
         handle,
         PasskeyOperation::Registration,
@@ -51,6 +53,13 @@ pub fn register(
     );
     let cred = outcome.credential().expect("credential").clone();
     (aid, cred)
+}
+
+/// 仮想 authenticator の credential がちょうど 1 件で、RP ID が `localhost` であることを確かめる。
+pub fn assert_one_localhost_credential(handle: &DriverHandle, aid: &AuthenticatorId) {
+    let creds = handle.credentials(aid).expect("credentials");
+    assert_eq!(creds.len(), 1);
+    assert_eq!(creds[0].rp_id, "localhost");
 }
 
 pub enum Verdict {
@@ -82,9 +91,10 @@ pub fn result_line(
     version: &str,
     verdict: &Verdict,
 ) -> String {
-    // 版番号の形式（数字と `.` だけで、先頭は数字）に絞る。UUID 形式のセッション ID 等は通さない（SECR-23）。
+    // 版番号の形式（数字と `.` だけで、先頭は数字で `.` を含む）に絞る。UUID 形式のセッション ID 等は通さない（SECR-23）。
     let version = if version.len() <= 32
         && version.bytes().next().is_some_and(|b| b.is_ascii_digit())
+        && version.contains('.')
         && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
     {
         version

@@ -19,16 +19,21 @@ use crate::webauthn_error::WebAuthnErrorName;
 use crate::webdriver::CredentialRef;
 
 /// 認証のスクリプト。`arguments[0]` が RP ID、`[1]` が期待する origin、`[2]` が credential ID（base64url）。
-/// WebAuthn の `timeout`（10 秒）は試験側の script timeout（20 秒）より短いハーネスの安全上の値で、要件の値ではない。
-/// 拒否が遅れても WebDriver の時間切れにならず、結果（`NotAllowed` 等）として観測できるようにするため。
+/// 10 秒の期限はページ内の `AbortController` で明示的に設ける（`publicKey.timeout` はブラウザが調整し得るヒントで、
+/// 打ち切りの保証にならない）。期限切れは `HarnessTimeout`（`NotAllowed` とは別の名前）で返し、試験側の script timeout
+/// （20 秒）より先に結果として観測する。値はハーネスの安全上の値で、要件の値ではない。
 const AUTHENTICATE_SCRIPT: &str = r#"
 const done = arguments[arguments.length - 1];
 const rpId = arguments[0];
 const expectedOrigin = arguments[1];
 const credB64u = arguments[2];
 (async () => {
+    let timedOut = false;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, 10000);
     try {
         if (location.origin !== expectedOrigin) {
+            clearTimeout(timer);
             done({ ok: false, errorName: 'OriginMismatch' });
             return;
         }
@@ -39,13 +44,14 @@ const credB64u = arguments[2];
             return Uint8Array.from(atob(p), (c) => c.charCodeAt(0));
         };
         const challenge = rnd(32);
-        const cred = await navigator.credentials.get({ publicKey: {
+        const cred = await navigator.credentials.get({ signal: ctl.signal, publicKey: {
             challenge,
             rpId,
             allowCredentials: [{ type: 'public-key', id: unb64u(credB64u) }],
             userVerification: 'required',
             timeout: 10000
         }});
+        clearTimeout(timer);
         const cd = JSON.parse(new TextDecoder().decode(cred.response.clientDataJSON));
         const ad = new Uint8Array(cred.response.authenticatorData);
         const sig = new Uint8Array(cred.response.signature);
@@ -66,7 +72,8 @@ const credB64u = arguments[2];
             signatureLen: sig.length
         });
     } catch (e) {
-        done({ ok: false, errorName: String((e && e.name) || 'Error') });
+        clearTimeout(timer);
+        done({ ok: false, errorName: timedOut ? 'HarnessTimeout' : String((e && e.name) || 'Error') });
     }
 })();
 "#;
@@ -133,6 +140,13 @@ impl AuthenticationOutcome {
     }
 }
 
+/// `http://<host>[:<port>]` の形の origin からホストを取り出す。形が違えば `None`。
+fn origin_host(origin: &str) -> Option<&str> {
+    let rest = origin.strip_prefix("http://")?;
+    let host = rest.split_once(':').map_or(rest, |(h, _)| h);
+    (!host.is_empty() && !host.contains(['/', '@', '?', '#'])).then_some(host)
+}
+
 /// 認証を 1 回通す。呼ぶ前に `origin` へ移動済みで、`credential` を持つ仮想 authenticator があること。
 pub fn authenticate_once(
     handle: &DriverHandle,
@@ -140,6 +154,13 @@ pub fn authenticate_once(
     rp_id: &str,
     credential: &CredentialRef,
 ) -> Result<AuthenticationOutcome, E2eError> {
+    // A10: RP ID は試験用 origin のホストと完全一致に限る（無関係な RP ID は Related Origin Requests で外へ通信し得る）。
+    if origin_host(origin) != Some(rp_id) {
+        return Err(E2eError::new(
+            E2eErrorKind::CommandFailed,
+            E2eComponentKind::BrowserDriver,
+        ));
+    }
     let v = handle.execute_async(
         AUTHENTICATE_SCRIPT,
         &[json!(rp_id), json!(origin), json!(credential.as_str())],
@@ -224,6 +245,23 @@ mod tests {
                 !AuthenticationOutcome::from_value(&v).unwrap().succeeded(),
                 "{k}"
             );
+        }
+    }
+
+    #[test]
+    fn origin_host_extracts_host_only_for_plain_origins() {
+        assert_eq!(origin_host("http://localhost:8080"), Some("localhost"));
+        assert_eq!(origin_host("http://localhost"), Some("localhost"));
+        for bad in [
+            "",
+            "localhost",
+            "https://localhost",
+            "http://",
+            "http://:80",
+            "http://a@b:1",
+            "http://a/b",
+        ] {
+            assert_eq!(origin_host(bad), None, "{bad}");
         }
     }
 

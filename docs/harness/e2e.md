@@ -83,8 +83,10 @@ PKEY の振る舞いを満たしたとは主張しない。
   `userVerification: required` で認証すると `NotAllowedError` になる。判定は authenticator 側で完結し、ネットワークに出ない。
 - 採らなかったもの: RP ID を origin の suffix でない値にする案（Chrome は Related Origin Requests で `https://<rpId>/.well-known/webauthn` を
   取りに行くため、外への通信が起きる。A10）。credential を消してから認証する案（timeout まで待つかが確かめられていない）。
-- 時間の上限: 認証スクリプトの WebAuthn の `timeout` は 10 秒、試験側の script timeout は 20 秒、command timeout は 30 秒。
-  拒否が遅れても WebDriver の誤りにならず結果として観測できる。値はハーネスの安全上の値で、要件の値ではない。
+- 時間の上限: 認証スクリプトはページ内の `AbortController` で 10 秒の期限を明示的に設ける（`publicKey.timeout` はブラウザが調整し得る
+  ヒントで、打ち切りの保証にならない）。期限切れは `HarnessTimeout`（`NotAllowedError` とは別の名前）で返す。試験側の script timeout は 20 秒、
+  command timeout は 30 秒。拒否が遅れても WebDriver の誤りにならず結果として観測できる。値はハーネスの安全上の値で、要件の値ではない。
+- RP ID: `authenticate_once` は RP ID が試験用 origin のホストと完全一致しなければ、ブラウザへ渡す前に拒否する（A10）。
 - Firefox で期待と違う結果が出ても、期待を緩めず別の案に黙って差し替えない。結果を記録して人に確かめる。
 
 ### browserName の照合（4/6）

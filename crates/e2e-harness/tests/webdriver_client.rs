@@ -286,6 +286,18 @@ fn debug_output_has_no_session_id_authenticator_id_or_port() {
     h.join().unwrap();
 }
 
+#[test]
+fn browser_version_equal_to_session_id_is_dropped() {
+    // SECR-23: 数字だけのセッション ID が版の欄に返っても、版として持ち出さない。
+    let (port, h, _) = fake_driver(http(
+        "200 OK",
+        r#"{"value":{"sessionId":"1234567890","capabilities":{"browserName":"chrome","browserVersion":"1234567890"}}}"#,
+    ));
+    let (_sess, version) = client(port).new_session(&caps(), "chrome").unwrap();
+    assert_eq!(version, "");
+    h.join().unwrap();
+}
+
 /// 応答の先頭行・ヘッダを指定して返す偽のドライバの応答。本文は `{"value":{}}`（12 バイト）。
 fn raw(status_line: &str, headers: &[&str]) -> Vec<u8> {
     let body = r#"{"value":{}}"#;

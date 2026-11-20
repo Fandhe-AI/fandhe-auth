@@ -294,6 +294,12 @@ impl WebDriverClient {
             client: *self,
             id: SessionId::new(id)?,
         };
+        // SECR-23: ドライバが現在のセッション ID を版の欄に返しても、結果行に出ないよう空にする。
+        let version = if version == id {
+            String::new()
+        } else {
+            version
+        };
         let name_ok = v
             .pointer("/capabilities/browserName")
             .and_then(Value::as_str)

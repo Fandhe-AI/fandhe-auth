@@ -94,6 +94,14 @@ fn geckodriver_receives_port_as_two_separate_arguments() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("e2e-gecko-args-{}-{nanos}", std::process::id()));
     fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+    // panic でも一時ディレクトリを残さない。
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(dir.clone());
     let script = dir.join("fake-driver");
     let args = dir.join("args");
     fs::write(
@@ -120,5 +128,4 @@ fn geckodriver_receives_port_as_two_separate_arguments() {
     assert_eq!(lines[1], "--port");
     let port: u32 = lines[2].parse().expect("ポート番号");
     assert!((1..=65535).contains(&port));
-    let _ = fs::remove_dir_all(&dir);
 }
