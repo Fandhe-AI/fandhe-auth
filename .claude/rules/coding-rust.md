@@ -126,7 +126,9 @@ TASK-3・TASK-5 の追随は「推奨で決めた置き方」と書かれてい�
 - 構造化ログ・計測は、本体の依存に置くのは出す口（facade）だけで、受ける側（subscriber・exporter・保存先）は組込み先が選ぶ（`D-2026-11-20-5`・`LIB-1`）。
   ログの出す口は `tracing`、計測の出す口は `metrics`（利用者の決定。`D-2026-11-20-8`）。
   試験でログを捕まえる受ける側の `tracing-subscriber` は、`SECR-23` の試験のためだけに dev-dependencies へ置いてよい。本番の依存の木には入れない（`D-2026-11-20-7` の K7）。
-  口の feature の選びは、試し実装（`crates/trial-deps`）の後に K11 を記入して人が決める（**未定**。TASK-4 の成果物。#35）。依存の版の固定の手順は **未定**。
+  口の feature は、`tracing` は `std` だけ（`#[instrument]` を使わない）、`metrics` は既定（feature が無い）。利用者の決定（`D-2026-11-20-14` の (4)(b)。feature の選び方は `./dependency-policy.md`）。
+  `log` crate を経由した記録は、本番の `SECR-23` の試験（`TASK-518`）で捕まえる対象に含める（`D-2026-11-20-14` の (4)(f)）。依存の版の固定の手順は spec に記録が無く **未定**。
+  `tracing` と `log` の経路ごとに捕獲を用意し、経路ごとに陽性対照で検出を確かめる（根拠は AAUD-30・AAUD-31〔TASK-500〕）。試し実装の捕獲は `tracing` の経路だけで、`log` の記録は届かない。捕獲の具体の作りは TASK-518 で決める。
   秘密値を出さない要求は変えない（SECR-23・SECR-24・SECR-26・SECR-27）。
 - 監査は業務トランザクションの ROLLBACK の後に書く（AUDB-26）。
   本体が他へ渡すデータに秘密値を出さない（SECR-23・SECR-24・SECR-26・SECR-27。前段のログの `SECR-25` は → Hub `ARUN-78`）。
