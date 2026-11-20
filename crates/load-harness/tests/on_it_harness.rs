@@ -200,6 +200,7 @@ fn run_stages_calls_hub_stub_jwks_on_harness() {
             StageConfig::new(LoadConfig::new(4, 20, 2).unwrap(), 2).unwrap(),
         ],
         MetricKey::P99Ns,
+        1_000_000,
     )
     .unwrap();
     let call = || match handle.with(|s| s.jwks.serve(T0)) {

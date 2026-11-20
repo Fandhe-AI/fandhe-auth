@@ -98,8 +98,15 @@ impl StagePlan {
     /// 段階の並びに制約（並行数の単調増加等）は置かない。
     ///
     /// # Errors
-    /// 段階が 0 件または [`MAX_STAGES`] 超、全体の試行数の計算が溢れるとき [`StageError::InvalidPlan`]。
-    pub fn new(stages: Vec<StageConfig>, by: MetricKey) -> Result<Self, StageError> {
+    /// 段階が 0 件または [`MAX_STAGES`] 超、全体の試行数の計算が溢れる、または 1 回の試行数
+    /// （ウォームアップ + 計測）が `max_trials_per_run` を超える段階があるとき [`StageError::InvalidPlan`]。
+    /// 回の終了まで生標本を保持するため、呼び出し元が実行環境のメモリに合わせた回ごとの予算を明示する
+    /// （既定値は置かない。値の導出は本 crate の範囲外）。
+    pub fn new(
+        stages: Vec<StageConfig>,
+        by: MetricKey,
+        max_trials_per_run: u64,
+    ) -> Result<Self, StageError> {
         let n = u64::try_from(stages.len()).map_err(|_| StageError::InvalidPlan)?;
         if n == 0 || n > MAX_STAGES {
             return Err(StageError::InvalidPlan);
@@ -111,6 +118,9 @@ impl StagePlan {
                 .warmup()
                 .checked_add(s.load.trials_planned())
                 .ok_or(StageError::InvalidPlan)?;
+            if per_run > max_trials_per_run {
+                return Err(StageError::InvalidPlan);
+            }
             let t = s
                 .repetitions
                 .checked_mul(per_run)
