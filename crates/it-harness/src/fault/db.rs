@@ -93,6 +93,11 @@ impl Upstream {
 
 /// 転送のスレッドと注入の入口で共有する状態。
 struct Shared {
+    /// 待ち受け。accept のスレッドと `release_block` の吸い出しが `accept_gate` の下で使う。
+    listener: TcpListener,
+    /// accept 1 回と、その接続の処理（`handle_conn`）を直列にする。`release_block` は遮断を解く前に
+    /// これを取り、待ち行列に残る接続を吸い出して切る（ORST-17）。
+    accept_gate: Mutex<()>,
     stop: AtomicBool,
     blocked: AtomicBool,
     delay_ms: AtomicU64,
@@ -205,6 +210,8 @@ impl DbFaultProxy {
             .map_err(|_| DbFaultError::StartFailed)?
             .port();
         let shared = Arc::new(Shared {
+            listener,
+            accept_gate: Mutex::new(()),
             stop: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             delay_ms: AtomicU64::new(0),
@@ -221,7 +228,7 @@ impl DbFaultProxy {
             let upstream = upstream.clone();
             thread::Builder::new()
                 .name("it-db-fault-accept".into())
-                .spawn(move || accept_loop(&listener, &shared, &upstream))
+                .spawn(move || accept_loop(&shared, &upstream))
                 .map_err(|_| DbFaultError::StartFailed)?
         };
         Ok(Self {
@@ -286,7 +293,23 @@ impl DbFaultProxy {
         timeline
             .record_now(self.block_kind, FaultPhase::Released)
             .map_err(DbFaultError::Record)?;
-        self.shared.blocked.store(false, Ordering::SeqCst);
+        // ORST-17: 遮断中に始めて待ち行列に残った接続を、遮断を解く前にすべて受けて切る。
+        // accept のスレッドの処理中はゲートで待つので、処理中の接続も遮断の状態で決着してから解く。
+        {
+            let _gate = self
+                .shared
+                .accept_gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            loop {
+                match self.shared.listener.accept() {
+                    Ok((client, _)) => refuse(&client, &self.shared),
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            self.shared.blocked.store(false, Ordering::SeqCst);
+        }
         self.block_active = false;
         Ok(())
     }
@@ -363,14 +386,24 @@ impl Drop for DbFaultProxy {
     }
 }
 
-fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, upstream: &Upstream) {
+fn accept_loop(shared: &Arc<Shared>, upstream: &Upstream) {
     while !shared.stop.load(Ordering::SeqCst) {
-        match listener.accept() {
-            Ok((client, _)) => handle_conn(client, shared, upstream),
-            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {
-                thread::sleep(ACCEPT_TICK);
+        let accepted = {
+            // accept と処理をゲートの下で行う。眠りはゲートの外（`release_block` が取れるように）。
+            let _gate = shared
+                .accept_gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match shared.listener.accept() {
+                Ok((client, _)) => {
+                    handle_conn(client, shared, upstream);
+                    true
+                }
+                Err(_) => false,
             }
-            Err(_) => thread::sleep(ACCEPT_TICK),
+        };
+        if !accepted {
+            thread::sleep(ACCEPT_TICK);
         }
     }
 }

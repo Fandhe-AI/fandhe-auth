@@ -64,7 +64,11 @@ PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を�
 - 入口: `start_to_port`・`start_for`・`block`・`release_block`・`stop`・`listen_port`・`proxied_endpoint`。遅延は出さない。
 - 遮断は TCP の経路の遮断。2/8 の転送器（`DbFaultProxy`）を `external_store_block` の種類で包む。開いている接続を切り、
   新しい接続を直ちに閉じる。解除しても切れた接続は戻らない。
-- 境界の契約: `block()` が戻った後に始めた接続は届かない。`release_block()` が戻った後に始めた接続は届く。境界の上（呼び出しの最中に始めた接続）は不定（2/8 の挙動。#5983 で追跡）。
+- 境界の契約: `block()` が戻った後に始めた接続は届かない。`release_block()` が戻った後に始めた接続は届く。
+  遮断中に始めて accept の待ち行列に残った接続（connect が完了したもの）は、`release_block()` が遮断を解く前に
+  すべて受けて切る（accept 1 回とその処理を 1 つのゲートの下で行い、解除はゲートを取って非ブロッキングの accept を
+  `WouldBlock` まで繰り返してから状態を切り替える）。このため解除の後に届くことはない（ORST-17）。
+  境界の上（`block()` の呼び出しの最中に始めた接続）は不定（2/8 の挙動。#5983 で追跡）。
 - 記録は `applied`・`released` の `external_store_block target=external_store`。基準線では記録が拒否し、注入もしない。
 - 誤りと `Debug` にポート・アドレスを載せない（SECR-11・SECR-23）。
 - 根拠: ORST-17・ORST-2。保存先の実体は未決（Hub `ASTORE-38`）。Host への結線は `TODO(TASK-716)`。

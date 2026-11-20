@@ -119,7 +119,12 @@ enum Outcome {
 fn classify(e: &std::io::Error) -> Outcome {
     match e.kind() {
         ErrorKind::WouldBlock | ErrorKind::TimedOut => Outcome::TimedOut,
-        _ => Outcome::Disconnected,
+        // 切断を示す種類だけ。それ以外の I/O エラーは試験の失敗にする（原因を隠さない）。
+        ErrorKind::UnexpectedEof
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe => Outcome::Disconnected,
+        kind => panic!("unexpected io error kind: {kind:?}"),
     }
 }
 
@@ -178,6 +183,29 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
     assert!(text.contains("applied external_store_block target=external_store"));
     assert!(text.contains("released external_store_block target=external_store"));
     assert!(!text.contains("db_block"));
+}
+
+/// ORST-17: 遮断中に始めて accept の待ち行列に残った接続は、`release_block()` が戻る前に切られ、
+/// 解除後の状態で上流へ届かない。拒否を観測せずに connect 完了の直後に解除する。
+#[test]
+fn conn_started_during_block_never_reaches_upstream_after_release() {
+    let up = echo_upstream();
+    let mut p = ExternalStoreFaultProxy::start_to_port(up.port()).unwrap();
+    let mut tl = timeline();
+    for _ in 0..30 {
+        p.block(&mut tl).unwrap();
+        // connect の完了（カーネルの待ち行列への積み込み）を待ってから、すぐ解除する。
+        let mut queued = connect(p.listen_port());
+        p.release_block(&mut tl).unwrap();
+        assert_eq!(
+            roundtrip(&mut queued, b"q"),
+            Outcome::Disconnected,
+            "conn started during block must not reach upstream"
+        );
+    }
+    assert_eq!(p.accepted_count(), 0);
+    let mut after = connect(p.listen_port());
+    assert_eq!(roundtrip(&mut after, b"r"), Outcome::Echoed(b"r".to_vec()));
 }
 
 #[test]
