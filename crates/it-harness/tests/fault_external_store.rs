@@ -194,8 +194,8 @@ fn assert_cut_while_blocked(port: u16, what: &str) {
 
 /// ORST-17: `block()` の後に転送器が accept した接続は、上流へ届かずに切られる。解除後の新しい接続は届く。
 /// 遮断と解除を繰り返し、遮断中の接続が一度も上流へ届かないこと（`accepted_count == 0`）を見る。
-/// 解除の瞬間にカーネルの待ち行列に残っていた接続は契約の外（#5983）。この試験は遮断中に接続を張り、
-/// 切断を観測してから解除するので、その窓に当たらない。
+/// 解除の瞬間に待ち行列に残っていた接続の扱い（解除の排出で切る）は `fault_db` の試験で固定する（#5983）。
+/// この試験は遮断中に接続を張り、切断を観測してから解除する形。
 #[test]
 fn conn_accepted_during_block_is_cut_and_later_conn_reaches_upstream() {
     let up = echo_upstream();
@@ -316,6 +316,7 @@ fn debug_and_display_do_not_leak_port() {
         ExternalStoreFaultError::StartFailed,
         ExternalStoreFaultError::AlreadyActive,
         ExternalStoreFaultError::NotActive,
+        ExternalStoreFaultError::DrainFailed,
         ExternalStoreFaultError::Internal,
         ExternalStoreFaultError::Record(FaultRecordError::EventsInBaseline),
     ] {

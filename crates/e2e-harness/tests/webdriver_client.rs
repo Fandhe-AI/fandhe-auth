@@ -391,3 +391,33 @@ fn malformed_header_lines_are_rejected() {
         h.join().unwrap();
     }
 }
+
+#[test]
+fn numeric_authenticator_id_is_used_in_the_credentials_path() {
+    let (port, h, rx) = fake_driver_seq(vec![
+        http("200 OK", r#"{"value":{"sessionId":"sid-1"}}"#),
+        http("200 OK", r#"{"value":42}"#),
+        http("200 OK", r#"{"value":[]}"#),
+    ]);
+    let (sess, _) = client(port).new_session(&caps()).unwrap();
+    let aid = sess.add_virtual_authenticator(&opts()).unwrap();
+    assert!(sess.credentials(&aid).unwrap().is_empty());
+    let reqs: Vec<String> = rx.iter().take(3).collect();
+    assert!(
+        reqs[2].starts_with("GET /session/sid-1/webauthn/authenticator/42/credentials HTTP/1.1")
+    );
+    h.join().unwrap();
+}
+
+#[test]
+fn negative_or_fractional_authenticator_id_is_rejected() {
+    for body in [r#"{"value":-1}"#, r#"{"value":1.5}"#] {
+        let (port, h, _) = fake_driver_seq(vec![
+            http("200 OK", r#"{"value":{"sessionId":"sid-1"}}"#),
+            http("200 OK", body),
+        ]);
+        let (sess, _) = client(port).new_session(&caps()).unwrap();
+        assert!(sess.add_virtual_authenticator(&opts()).is_err(), "{body}");
+        h.join().unwrap();
+    }
+}
