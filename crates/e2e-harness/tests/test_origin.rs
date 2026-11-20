@@ -43,3 +43,21 @@ fn origin_is_localhost_with_port() {
     let o = TestOrigin::start();
     assert_eq!(o.origin(), format!("http://localhost:{}", o.port()));
 }
+
+#[test]
+fn stalled_connections_are_cut_by_deadline_and_server_recovers() {
+    // 前提: ヘッダーを途中までしか送らない接続を上限より多く開いたまま保つ。
+    // 期待: 絶対期限で切られ、期限後は正常な要求に応える（接続数・処理時間が無制限ではない）。
+    let o = TestOrigin::start();
+    let stalled: Vec<TcpStream> = (0..20)
+        .map(|_| {
+            let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, o.port())).unwrap();
+            s.write_all(b"GET / HTTP/1.1\r\n").unwrap();
+            s
+        })
+        .collect();
+    std::thread::sleep(support::CONNECTION_DEADLINE + std::time::Duration::from_millis(700));
+    let r = get(o.port(), &format!("localhost:{}", o.port()), "GET", "/");
+    assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+    drop(stalled);
+}

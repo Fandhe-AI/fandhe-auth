@@ -76,6 +76,22 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 - geckodriver の Virtual Authenticator の安定性は `02-poc-plan.md` の確認状況を 3/6 の懸念として引く。
 - ドライバの起動は引数を配列で渡しシェルを通さない。通信はループバックのドライバと試験用 origin だけにする（A03・A10）。
 
+### 起動・停止の契約（2/6）
+
+- 待ち受けポートは `--port=0` で子に確保させ、子の出力（`started successfully on port N`）から受け取る。空きポートを
+  先に取って手放す方式は、別のドライバと取り違える恐れがあるため採らない（A10）。
+- 起動待ちの期限は probe・待機を含めた全体の絶対期限で、期限後の ready は受理しない。命令の期限も書き込み・読み取りを
+  通した全体の絶対期限で、時間切れの値が大きすぎて期限を作れない場合は誤りにする（panic しない）。
+- 子は新しいプロセスグループで起動し、停止・失敗・`Drop` で、セッションの削除（最善）→ グループへ SIGTERM →
+  グループへ SIGKILL → wait の順に chromedriver と配下の Chrome を後片付けする。セッション ID が無い失敗でも同じ。
+- ブラウザの `navigate` は `ChromeDriverConfig::with_allowed_origin` で起動前に登録した試験用 origin
+  （`http://localhost:<port>`・`http://127.0.0.1:<port>`）の配下だけを許し、未登録なら全拒否（A10）。
+- WebDriver のクライアントは crate 内に閉じる。メソッドは列挙型、path は許可文字のみ（A03）。応答のステータス行・
+  ヘッダーの構文違反、Content-Length の重複・不正・本文との不一致、chunked は拒否する。credential は
+  `rpId`・`isResidentCredential` だけを外へ出し、`privateKey` を含む生の応答を公開しない（SECR-10・SECR-11・SECR-23）。
+- 登録の失敗は `RegistrationErrorKind`（既知の `DOMException.name` の列挙と `Other`）で返し、応答由来の文字列を出さない（SECR-23）。
+- 試験用 origin のサーバーは同時接続数と 1 接続の処理時間に上限を置く（A03・A10）。
+
 ## 段ごとの担当
 
 | 段 | 内容 |

@@ -26,13 +26,13 @@ pub mod harness;
 pub mod registration;
 pub mod scope;
 pub mod virtual_authenticator;
-pub mod webdriver;
+pub(crate) mod webdriver;
 
 pub use browser::{AuthenticatorKind, Browser, Evidence};
 pub use chrome::{ChromeDriverComponent, ChromeDriverConfig, ChromeHandle};
 pub use component::{E2eComponent, E2eComponentKind};
 pub use harness::{E2eConfig, E2eError, E2eErrorKind, E2eHarness, RunningE2e};
-pub use registration::{RegistrationOutcome, register_once};
+pub use registration::{RegistrationErrorKind, RegistrationOutcome, register_once};
 pub use scope::PasskeyOperation;
 pub use virtual_authenticator::{Protocol, Transport, VirtualAuthenticatorOptions};
-pub use webdriver::{AuthenticatorId, CredentialSummary, WebDriverClient, WebDriverSession};
+pub use webdriver::{AuthenticatorId, CredentialSummary};

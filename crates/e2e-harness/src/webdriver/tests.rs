@@ -1,6 +1,8 @@
-//! WebDriver クライアントと chromedriver 構成要素の試験。偽のドライバ（loopback の定型応答）に対して流す。
+//! WebDriver クライアントの試験（crate 内。クライアントは外へ公開しない）。偽のドライバ（loopback の定型応答）に対して流す。
 //!
 //! 偽のドライバは通信の形を確かめるためのもので、E2E の合格に数えない（ACPT-7）。
+
+#![allow(clippy::unwrap_used)]
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
@@ -8,11 +10,10 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use fandhe_auth_e2e_harness::chrome::new_session_request;
-use fandhe_auth_e2e_harness::{
-    AuthenticatorId, ChromeDriverComponent, ChromeDriverConfig, E2eComponent, E2eErrorKind,
-    Protocol, Transport, VirtualAuthenticatorOptions, WebDriverClient,
-};
+use super::{Method, WebDriverClient};
+use crate::chrome::new_session_request;
+use crate::harness::E2eErrorKind;
+use crate::virtual_authenticator::{Protocol, Transport, VirtualAuthenticatorOptions};
 
 /// 1 接続だけ受け、受けた要求（先頭行と本文）を返し、`response` をそのまま書く。
 fn fake_driver(response: Vec<u8>) -> (u16, JoinHandle<()>, mpsc::Receiver<String>) {
@@ -75,7 +76,9 @@ fn huge_content_length_is_rejected_without_panic() {
         )
         .into_bytes();
         let (port, h, _rx) = fake_driver(resp);
-        let err = client(port).request("GET", "/status", None).unwrap_err();
+        let err = client(port)
+            .request(Method::Get, "/status", None)
+            .unwrap_err();
         assert_eq!(err.kind(), E2eErrorKind::CommandFailed);
         h.join().unwrap();
     }
@@ -84,7 +87,7 @@ fn huge_content_length_is_rejected_without_panic() {
 #[test]
 fn request_returns_value_on_success() {
     let (port, h, rx) = fake_driver(http("200 OK", r#"{"value":{"ready":true}}"#));
-    let v = client(port).request("GET", "/status", None).unwrap();
+    let v = client(port).request(Method::Get, "/status", None).unwrap();
     assert_eq!(v["ready"], true);
     let req = rx.recv().unwrap();
     assert!(req.starts_with("GET /status HTTP/1.1"));
@@ -98,7 +101,7 @@ fn webdriver_error_response_is_command_failed() {
         "404 Not Found",
         r#"{"value":{"error":"no such window","message":"x"}}"#,
     ));
-    let e = client(port).request("GET", "/x", None).unwrap_err();
+    let e = client(port).request(Method::Get, "/x", None).unwrap_err();
     assert_eq!(e.kind(), E2eErrorKind::CommandFailed);
     h.join().unwrap();
 }
@@ -106,7 +109,7 @@ fn webdriver_error_response_is_command_failed() {
 #[test]
 fn error_value_with_2xx_status_is_command_failed() {
     let (port, h, _) = fake_driver(http("200 OK", r#"{"value":{"error":"e"}}"#));
-    assert!(client(port).request("GET", "/x", None).is_err());
+    assert!(client(port).request(Method::Get, "/x", None).is_err());
     h.join().unwrap();
 }
 
@@ -114,7 +117,7 @@ fn error_value_with_2xx_status_is_command_failed() {
 fn chunked_response_is_rejected() {
     let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\n{}\r\n0\r\n\r\n".to_vec();
     let (port, h, _) = fake_driver(raw);
-    assert!(client(port).request("GET", "/x", None).is_err());
+    assert!(client(port).request(Method::Get, "/x", None).is_err());
     h.join().unwrap();
 }
 
@@ -122,14 +125,14 @@ fn chunked_response_is_rejected() {
 fn oversize_response_is_rejected() {
     let big = "a".repeat(1024 * 1024 + 10);
     let (port, h, _) = fake_driver(http("200 OK", &format!(r#"{{"value":"{big}"}}"#)));
-    assert!(client(port).request("GET", "/x", None).is_err());
+    assert!(client(port).request(Method::Get, "/x", None).is_err());
     let _ = h.join();
 }
 
 #[test]
 fn broken_json_is_rejected() {
     let (port, h, _) = fake_driver(http("200 OK", "{not json"));
-    assert!(client(port).request("GET", "/x", None).is_err());
+    assert!(client(port).request(Method::Get, "/x", None).is_err());
     h.join().unwrap();
 }
 
@@ -140,21 +143,13 @@ fn error_display_has_no_url_port_or_path() {
         r#"{"value":{"error":"e"}}"#,
     ));
     let e = client(port)
-        .request("GET", "/secret-path", None)
+        .request(Method::Get, "/secret-path", None)
         .unwrap_err();
     let shown = format!("{e} {e:?}");
     assert!(!shown.contains(&port.to_string()));
     assert!(!shown.contains("secret-path"));
     assert!(!shown.contains("127.0.0.1"));
     h.join().unwrap();
-}
-
-#[test]
-fn new_session_request_has_only_headless_flag() {
-    // DPOL-30: 検証を外す意味の flag を足さない。
-    let v = new_session_request();
-    let args = &v["capabilities"]["alwaysMatch"]["goog:chromeOptions"]["args"];
-    assert_eq!(args, &serde_json::json!(["--headless=new"]));
 }
 
 #[test]
@@ -215,42 +210,77 @@ fn opts() -> VirtualAuthenticatorOptions {
     }
 }
 
+fn assert_rejected(raw: &[u8]) {
+    let (port, h, _) = fake_driver(raw.to_vec());
+    let r = client(port).request(Method::Get, "/x", None);
+    assert_eq!(r.unwrap_err().kind(), E2eErrorKind::CommandFailed);
+    let _ = h.join();
+}
+
 #[test]
-fn ids_with_path_characters_are_rejected() {
-    for bad in ["", "a/b", "a b", "../x", "a?b", "a\r\nb"] {
-        assert!(AuthenticatorId::new(bad).is_err(), "{bad:?}");
+fn ambiguous_or_malformed_framing_is_rejected() {
+    // 重複・不正な Content-Length、HTTP バージョン・ステータスの構文違反、ヘッダーの構文違反、本文の長さの不一致。
+    let b = r#"{"value":{}}"#;
+    let n = b.len();
+    let ok = |h: &str| format!("HTTP/1.1 200 OK\r\n{h}\r\n\r\n{b}").into_bytes();
+    assert_rejected(&ok(&format!("Content-Length: {n}\r\nContent-Length: {n}")));
+    assert_rejected(&ok(&format!(
+        "Content-Length: {n}\r\ncontent-length: {}",
+        n + 1
+    )));
+    assert_rejected(&ok(&format!("Content-Length: +{n}")));
+    assert_rejected(&ok("Content-Length: "));
+    assert_rejected(&ok(&format!("Content-Length: {n}\r\nbad header line")));
+    assert_rejected(&ok(&format!("Content-Length: {n}\r\n folded: x")));
+    assert_rejected(format!("HTTP/9.9 200 OK\r\nContent-Length: {n}\r\n\r\n{b}").as_bytes());
+    assert_rejected(format!("HTTP/1.1 2000 OK\r\nContent-Length: {n}\r\n\r\n{b}").as_bytes());
+    assert_rejected(format!("garbage\r\nContent-Length: {n}\r\n\r\n{b}").as_bytes());
+    // 宣言より長い本文。
+    assert_rejected(&ok(&format!("Content-Length: {}", n - 1)));
+}
+
+#[test]
+fn request_rejects_unsafe_paths_before_connecting() {
+    // 接続先が無くても検証で落ちる（送信前に拒否）。
+    let c = WebDriverClient::new(1, Duration::from_secs(1));
+    for bad in [
+        "x",
+        "/a b",
+        "/a\r\nHost: x",
+        "/a?b",
+        "/a#b",
+        "/../x",
+        "/a.b",
+        "",
+    ] {
+        let e = c.request(Method::Get, bad, None).unwrap_err();
+        assert_eq!(e.kind(), E2eErrorKind::CommandFailed, "{bad:?}");
     }
-    assert!(AuthenticatorId::new("ok-1").is_ok());
 }
 
 #[test]
-fn start_with_missing_driver_program_fails_and_leaves_nothing() {
-    let handle;
-    let mut c = {
-        let c = ChromeDriverComponent::new(ChromeDriverConfig::new("/nonexistent/e2e-driver"));
-        handle = c.handle();
-        c
-    };
-    let e = c.start().unwrap_err();
-    assert_eq!(e.kind(), E2eErrorKind::StartFailed);
-    assert!(!handle.is_running());
-    assert!(c.stop().is_ok());
+fn huge_timeout_does_not_panic() {
+    // Instant への加算が溢れる値は panic せず誤りにする。
+    let c = WebDriverClient::new(1, Duration::MAX);
+    assert!(c.request(Method::Get, "/status", None).is_err());
 }
 
 #[test]
-fn handle_is_not_running_before_start() {
-    let c = ChromeDriverComponent::new(ChromeDriverConfig::new("x"));
-    let h = c.handle();
-    assert_eq!(
-        h.navigate("http://localhost/").unwrap_err().kind(),
-        E2eErrorKind::NotRunning
-    );
-    assert_eq!(
-        h.browser_version().unwrap_err().kind(),
-        E2eErrorKind::NotRunning
-    );
-    assert_eq!(
-        h.add_virtual_authenticator(&opts()).unwrap_err().kind(),
-        E2eErrorKind::NotRunning
-    );
+fn credentials_returns_only_summary_fields() {
+    // privateKey を含む応答から要約の欄だけを返す。
+    let (port, h, _) = fake_driver_seq(vec![
+        http(
+            "200 OK",
+            r#"{"value":{"sessionId":"s1","capabilities":{}}}"#,
+        ),
+        http(
+            "200 OK",
+            r#"{"value":[{"rpId":"localhost","isResidentCredential":true,"privateKey":"PK"}]}"#,
+        ),
+    ]);
+    let (sess, _) = client(port).new_session(&new_session_request()).unwrap();
+    let aid = super::AuthenticatorId::new("a-1").unwrap();
+    let creds = sess.credentials(&aid).unwrap();
+    assert!(!format!("{creds:?}").contains("PK"));
+    h.join().unwrap();
 }

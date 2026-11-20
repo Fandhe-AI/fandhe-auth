@@ -6,6 +6,7 @@
 //!
 //! 安全: 実行するスクリプトは定数で、外部入力を連結しない（A03）。challenge・user.id はブラウザの
 //! `crypto.getRandomValues` で作る。credential の生の値・公開鍵・attestation の中身は返さない（SECR-11）。
+//! 失敗時の `DOMException.name` は既知の名前を列挙型に写し、未知の値は固定の分類にする（応答由来の文字列を出さない。SECR-23）。
 
 use serde_json::{Value, json};
 
@@ -49,6 +50,42 @@ const expectedOrigin = arguments[1];
 })();
 "#;
 
+/// `create()` の失敗の分類。ページが返した名前のうち既知のものだけを写し、それ以外は [`Self::Other`]（SECR-23）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationErrorKind {
+    /// `NotAllowedError`。
+    NotAllowed,
+    /// `InvalidStateError`。
+    InvalidState,
+    /// `NotSupportedError`。
+    NotSupported,
+    /// `SecurityError`。
+    Security,
+    /// `AbortError`。
+    Abort,
+    /// `ConstraintError`。
+    Constraint,
+    /// `TypeError`。
+    Type,
+    /// 上のどれでもない（値は保持しない）。
+    Other,
+}
+
+impl RegistrationErrorKind {
+    fn from_name(name: &str) -> Self {
+        match name {
+            "NotAllowedError" => Self::NotAllowed,
+            "InvalidStateError" => Self::InvalidState,
+            "NotSupportedError" => Self::NotSupported,
+            "SecurityError" => Self::Security,
+            "AbortError" => Self::Abort,
+            "ConstraintError" => Self::Constraint,
+            "TypeError" => Self::Type,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// 登録 1 件の結果。真偽と長さだけで、credential の値を持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationOutcome {
@@ -58,7 +95,7 @@ pub struct RegistrationOutcome {
     client_data_type_ok: bool,
     origin_ok: bool,
     challenge_ok: bool,
-    error_name: Option<String>,
+    error: Option<RegistrationErrorKind>,
 }
 
 impl RegistrationOutcome {
@@ -72,9 +109,9 @@ impl RegistrationOutcome {
             && self.challenge_ok
     }
 
-    /// `create()` が失敗したときの `DOMException.name`。
-    pub fn error_name(&self) -> Option<&str> {
-        self.error_name.as_deref()
+    /// `create()` が失敗したときの分類。
+    pub fn error(&self) -> Option<RegistrationErrorKind> {
+        self.error
     }
 
     /// 証拠の種類。常に〔仮想〕で、実機・Safari に数えない（ACPT-7・ACPT-8）。
@@ -92,7 +129,7 @@ impl RegistrationOutcome {
                 client_data_type_ok: b("clientDataTypeOk")?,
                 origin_ok: b("originOk")?,
                 challenge_ok: b("challengeOk")?,
-                error_name: None,
+                error: None,
             })
         } else {
             Some(Self {
@@ -102,7 +139,9 @@ impl RegistrationOutcome {
                 client_data_type_ok: false,
                 origin_ok: false,
                 challenge_ok: false,
-                error_name: Some(v.get("errorName")?.as_str()?.chars().take(64).collect()),
+                error: Some(RegistrationErrorKind::from_name(
+                    v.get("errorName")?.as_str()?,
+                )),
             })
         }
     }
@@ -119,4 +158,25 @@ pub fn register_once(
         E2eErrorKind::CommandFailed,
         E2eComponentKind::BrowserDriver,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_error_name_becomes_other_and_is_not_echoed() {
+        let v = json!({ "ok": false, "errorName": "secret-like-value-xyz" });
+        let o = RegistrationOutcome::from_value(&v).unwrap();
+        assert_eq!(o.error(), Some(RegistrationErrorKind::Other));
+        assert!(!format!("{o:?}").contains("secret-like-value-xyz"));
+        assert!(!o.succeeded());
+    }
+
+    #[test]
+    fn known_error_name_is_mapped() {
+        let v = json!({ "ok": false, "errorName": "NotAllowedError" });
+        let o = RegistrationOutcome::from_value(&v).unwrap();
+        assert_eq!(o.error(), Some(RegistrationErrorKind::NotAllowed));
+    }
 }

@@ -17,7 +17,11 @@ use support::TestOrigin;
 #[ignore = "chromedriver と Chrome が要る。make e2e-chrome で流す"]
 fn registers_one_passkey_with_chrome_virtual_authenticator() {
     let origin = TestOrigin::start();
-    let chrome = ChromeDriverComponent::new(ChromeDriverConfig::new("chromedriver"));
+    let chrome = ChromeDriverComponent::new(
+        ChromeDriverConfig::new("chromedriver")
+            .with_allowed_origin(&origin.origin())
+            .expect("origin"),
+    );
     let handle = chrome.handle();
     let running = E2eHarness::start(
         E2eConfig::new(PasskeyOperation::Registration, Browser::Chrome).with(Box::new(chrome)),
@@ -42,7 +46,7 @@ fn registers_one_passkey_with_chrome_virtual_authenticator() {
         .expect("timeout");
 
     let outcome = register_once(&handle, &origin.origin(), "localhost").expect("register");
-    assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
+    assert!(outcome.succeeded(), "error={:?}", outcome.error());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
 
