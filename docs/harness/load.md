@@ -319,9 +319,9 @@ judgment:
   `MachineProbe`・`StdMachineProbe`、`ComponentConditions`（`new` が重複と stub の印の食い違いを誤りにする）、`ConditionComponent`、`ConditionError`。
   `Display` は形式の 5 の行（`condition_machine` 6 行・`condition_component` 4 行・stub があるときだけ `note:`・`condition_loop`）を出す。
 - 取得元: `cpu_count` は `available_parallelism`（使える並列数。物理 CPU 数ではない）、`memory_mib` は Linux の `/proc/meminfo` の `MemTotal`
-  （固定パス・64 KiB の上限・整数だけ。コンテナではホストの総量）、`arch`・`os_family` は `std::env::consts`、`build_profile` は `debug_assertions` の近似。
+  （固定パス・64 KiB の上限・整数だけ。コンテナではホストの総量）、`arch`・`os_family` は `std::env::consts`、`build_profile` は確かめる手段が無いため常に `unknown`（`debug_assertions` はプロファイルで上書きされ誤記録になる。確かな値は `new` で明示）。
   `virtualization` は判別の方法が未決のため常に `unknown`。
-- 取れない値・規則に合わない文字列は `unknown`。明示で渡す `MachineCondition::new` は規則外を誤りにする。ホスト名・機材の名前・パスは取得も記録もしない。
+- 取れない（`None`）値は `unknown`。`arch`・`os_family` は固定の許可語彙だけを受け、語彙の外の値は `detect_with`・`detect`・`new` のどれでも `InvalidMachineValue` の誤りで返す（`unknown` に置き換えない）。ホスト名・機材の名前・パスは取得も記録もしない。
 - 条件は記録の単位で 1 つ持ち、`TargetRun`・`LoadRun` には入れない（8/10 の段階を変える実行で重複しないため）。構成は呼び出し元が起動したものを明示で渡し、渡さない種類は `not_started`。
 - 7 の見本との差: `condition_loop` は 5/10 の閉ループの仮置きで `closed` を出す（見本は `undecided`）。
 - 範囲外: `fandhe-auth-load-record/1` のファイル全体の出力、`stage` 行（並行数は 8/10 とファイル出力の段）、仮想化の判別。

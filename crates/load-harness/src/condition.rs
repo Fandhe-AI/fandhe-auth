@@ -8,7 +8,8 @@
 //!
 //! 取得: 機材は [`MachineProbe`] から取る。[`StdMachineProbe`] は std と Linux の `/proc/meminfo`（固定パス・
 //! 上限付き・整数 1 つだけ取り出す）だけを読む。ホスト名・機材の名前・利用者名・パス・アドレスは取得も記録もしない
-//! （SECR-11・SECR-23・SECR-26、04-behavior/README.md の (d)）。取れない値・規則に合わない値は `unknown` にする。
+//! （SECR-11・SECR-23・SECR-26、04-behavior/README.md の (d)）。`arch`・`os_family` は固定の許可語彙だけを受け、
+//! 語彙の外の値（識別情報・制御文字入りを含む）は記録を作らずエラーで返す。取れない（`None`）値だけが `unknown` になる。
 //! 構成は呼び出し元が「起動したもの」を明示で渡す。既定値は置かない。
 //!
 //! 範囲外: 記録のファイル全体の出力・`stage` 行（並行数は 8/10 とファイル出力の段）・仮想化の判別。合否は付けない（`ACPT-7`）。
@@ -17,7 +18,6 @@
 use std::fmt;
 
 use crate::generate::LoopModel;
-use crate::meter::validate_name;
 
 /// 出力する各行の末尾の固定部分（区分と出典。形式の 2 に従う）。
 const TAIL: &str = "class=test_condition refs=harness_config";
@@ -29,7 +29,7 @@ pub enum ConditionError {
     DuplicateComponent,
     /// 構成要素の stub の印が、その種類の stub かどうかと食い違う（A-2026-10-28-9）。
     StubMismatch,
-    /// 明示で渡した機材の文字列が規則（ASCII の `[a-z0-9_]`・1〜64 文字）を満たさない。
+    /// 機材の文字列（`arch`・`os_family`）が許可語彙の外。値は載せない。
     InvalidMachineValue,
 }
 
@@ -83,7 +83,7 @@ impl BuildProfile {
     }
 }
 
-/// 機材の生の値の取得元。環境から入る値なので、規則の検査は [`MachineCondition::detect_with`] が行う。
+/// 機材の生の値の取得元。環境から入る値なので、許可語彙の検査は [`MachineCondition::detect_with`] が行う。
 /// 試験では偽の実装を渡して決定的にする。
 pub trait MachineProbe {
     fn cpu_count(&self) -> Option<u64>;
@@ -100,7 +100,8 @@ pub trait MachineProbe {
 /// - `memory_mib`: Linux だけ `/proc/meminfo` の `MemTotal`。コンテナでは cgroup の上限ではなくホストの総量が出る。
 /// - `arch`・`os_family`: `std::env::consts` の `ARCH`・`OS`。
 /// - `virtualization`: 判別の方法が未決のため常に `Unknown`。
-/// - `build_profile`: `debug_assertions` による近似。プロファイルが上書きすれば誤って出る。
+/// - `build_profile`: 実行時にプロファイルを確かめる手段が無い（`debug_assertions` はプロファイルの設定で上書きされ誤記録になる）ため
+///   常に `Unknown`。確かな値は呼び出し元が [`MachineCondition::new`] で明示する。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StdMachineProbe;
 
@@ -128,11 +129,7 @@ impl MachineProbe for StdMachineProbe {
     }
 
     fn build_profile(&self) -> BuildProfile {
-        if cfg!(debug_assertions) {
-            BuildProfile::Debug
-        } else {
-            BuildProfile::Release
-        }
+        BuildProfile::Unknown
     }
 }
 
@@ -173,38 +170,98 @@ pub(crate) fn parse_mem_total_mib(text: &str) -> Option<u64> {
 pub struct MachineCondition {
     cpu_count: Option<u64>,
     memory_mib: Option<u64>,
-    arch: Option<String>,
-    os_family: Option<String>,
+    arch: Option<&'static str>,
+    os_family: Option<&'static str>,
     virtualization: Virtualization,
     build_profile: BuildProfile,
 }
 
-fn checked(s: Option<String>) -> Option<String> {
-    s.filter(|v| validate_name(v).is_ok())
+/// `std::env::consts::ARCH` の語彙（仮置き。人が確認する）。
+const ARCH_VOCAB: &[&str] = &[
+    "x86",
+    "x86_64",
+    "arm",
+    "aarch64",
+    "loongarch64",
+    "m68k",
+    "csky",
+    "mips",
+    "mips64",
+    "powerpc",
+    "powerpc64",
+    "riscv32",
+    "riscv64",
+    "s390x",
+    "sparc",
+    "sparc64",
+    "hexagon",
+    "wasm32",
+    "wasm64",
+];
+
+/// `std::env::consts::OS` の語彙（仮置き。人が確認する）。
+const OS_VOCAB: &[&str] = &[
+    "linux",
+    "macos",
+    "windows",
+    "freebsd",
+    "netbsd",
+    "openbsd",
+    "dragonfly",
+    "solaris",
+    "illumos",
+    "android",
+    "ios",
+    "fuchsia",
+    "redox",
+    "haiku",
+    "wasi",
+];
+
+/// 許可語彙の中の値だけを通す。外れは値を載せずに誤りにする（取れない `None` とは区別する）。
+fn in_vocab(
+    v: Option<String>,
+    vocab: &'static [&'static str],
+) -> Result<Option<&'static str>, ConditionError> {
+    match v {
+        None => Ok(None),
+        Some(s) => vocab
+            .iter()
+            .find(|w| **w == s)
+            .map(|w| Some(*w))
+            .ok_or(ConditionError::InvalidMachineValue),
+    }
 }
 
 impl MachineCondition {
-    /// 取得元から作る。環境から入る値なので誤りにせず、規則に合わない文字列は `unknown` に落とす。
-    pub fn detect_with(probe: &dyn MachineProbe) -> Self {
-        Self {
+    /// 取得元から作る。取れない（`None`）値は `unknown`。値が返ったのに許可語彙の外なら、`unknown` に
+    /// 置き換えず誤りにする（制御文字・識別情報を含む値を記録に入れず、取得不能とも混同しない）。
+    ///
+    /// # Errors
+    /// `arch`・`os_family` が許可語彙の外のとき [`ConditionError::InvalidMachineValue`]。
+    pub fn detect_with(probe: &dyn MachineProbe) -> Result<Self, ConditionError> {
+        Ok(Self {
             cpu_count: probe.cpu_count(),
             memory_mib: probe.memory_mib(),
-            arch: checked(probe.arch()),
-            os_family: checked(probe.os_family()),
+            arch: in_vocab(probe.arch(), ARCH_VOCAB)?,
+            os_family: in_vocab(probe.os_family(), OS_VOCAB)?,
             virtualization: probe.virtualization(),
             build_profile: probe.build_profile(),
-        }
+        })
     }
 
     /// 実機の std の取得元で作る。
-    pub fn detect() -> Self {
+    ///
+    /// # Errors
+    /// [`MachineCondition::detect_with`] と同じ。
+    pub fn detect() -> Result<Self, ConditionError> {
         Self::detect_with(&StdMachineProbe)
     }
 
-    /// 呼び出し元が明示で値を渡す入口。規則外の文字列は fail-closed で拒否する。
+    /// 呼び出し元が明示で値を渡す入口。許可語彙の外の文字列は fail-closed で拒否する。
     ///
     /// # Errors
-    /// `arch`・`os_family` が規則を満たさないとき [`ConditionError::InvalidMachineValue`]。
+    /// `arch`・`os_family` が許可語彙の外のとき [`ConditionError::InvalidMachineValue`]。
     pub fn new(
         cpu_count: Option<u64>,
         memory_mib: Option<u64>,
@@ -213,14 +270,11 @@ impl MachineCondition {
         virtualization: Virtualization,
         build_profile: BuildProfile,
     ) -> Result<Self, ConditionError> {
-        for s in [&arch, &os_family].into_iter().flatten() {
-            validate_name(s).map_err(|_| ConditionError::InvalidMachineValue)?;
-        }
         Ok(Self {
             cpu_count,
             memory_mib,
-            arch,
-            os_family,
+            arch: in_vocab(arch, ARCH_VOCAB)?,
+            os_family: in_vocab(os_family, OS_VOCAB)?,
             virtualization,
             build_profile,
         })
@@ -231,8 +285,8 @@ fn num(v: Option<u64>) -> String {
     v.map_or_else(|| "unknown".to_owned(), |n| n.to_string())
 }
 
-fn text(v: &Option<String>) -> &str {
-    v.as_deref().unwrap_or("unknown")
+fn text(v: Option<&'static str>) -> &'static str {
+    v.unwrap_or("unknown")
 }
 
 impl fmt::Display for MachineCondition {
@@ -240,8 +294,8 @@ impl fmt::Display for MachineCondition {
         let rows: [(&str, String); 6] = [
             ("cpu_count", num(self.cpu_count)),
             ("memory_mib", num(self.memory_mib)),
-            ("arch", text(&self.arch).to_owned()),
-            ("os_family", text(&self.os_family).to_owned()),
+            ("arch", text(self.arch).to_owned()),
+            ("os_family", text(self.os_family).to_owned()),
             ("virtualization", self.virtualization.as_str().to_owned()),
             ("build_profile", self.build_profile.as_str().to_owned()),
         ];
@@ -375,8 +429,18 @@ impl MeasurementConditions {
     }
 
     /// 機材を自動で取得して作る。測定の条件が人の手入力なしで記録に入る入口。
-    pub fn detect(components: ComponentConditions, loop_model: LoopModel) -> Self {
-        Self::new(MachineCondition::detect(), components, loop_model)
+    ///
+    /// # Errors
+    /// [`MachineCondition::detect`] と同じ。
+    pub fn detect(
+        components: ComponentConditions,
+        loop_model: LoopModel,
+    ) -> Result<Self, ConditionError> {
+        Ok(Self::new(
+            MachineCondition::detect()?,
+            components,
+            loop_model,
+        ))
     }
 }
 

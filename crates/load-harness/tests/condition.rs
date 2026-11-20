@@ -48,7 +48,7 @@ impl MachineProbe for FakeProbe {
 
 fn conds(started: &[(ConditionComponent, bool)]) -> MeasurementConditions {
     MeasurementConditions::new(
-        MachineCondition::detect_with(&FakeProbe::unknown()),
+        MachineCondition::detect_with(&FakeProbe::unknown()).unwrap(),
         ComponentConditions::new(started).unwrap(),
         LoopModel::Closed,
     )
@@ -132,7 +132,7 @@ fn components_reject_duplicate_and_stub_mismatch() {
 }
 
 #[test]
-fn probe_values_outside_rule_become_unknown_without_leaking() {
+fn probe_values_outside_vocab_are_errors_without_leaking() {
     for bad in [
         CANARY.to_owned(),
         "Upper".to_owned(),
@@ -140,24 +140,32 @@ fn probe_values_outside_rule_become_unknown_without_leaking() {
         "a".repeat(65),
         String::new(),
         "sep\u{2028}x".to_owned(),
+        "myhost01".to_owned(),
     ] {
-        let m = MachineCondition::detect_with(&FakeProbe {
-            arch: Some(bad.clone()),
-            os: Some(bad),
-        });
-        let out = m.to_string();
-        assert!(out.contains(&format!("condition_machine: arch unknown {TAIL}\n")));
-        assert!(out.contains(&format!("condition_machine: os_family unknown {TAIL}\n")));
-        assert!(!out.contains("canary") && !format!("{m:?}").contains("canary"));
-        assert_eq!(out.lines().count(), 6);
+        for (arch, os) in [(Some(bad.clone()), None), (None, Some(bad.clone()))] {
+            let e = MachineCondition::detect_with(&FakeProbe { arch, os }).unwrap_err();
+            assert_eq!(e, ConditionError::InvalidMachineValue);
+            assert!(!format!("{e} {e:?}").contains("canary"));
+        }
     }
     let ok = MachineCondition::detect_with(&FakeProbe {
         arch: Some("x86_64".to_owned()),
         os: Some("linux".to_owned()),
     })
+    .unwrap()
     .to_string();
     assert!(ok.contains("arch x86_64 "));
     assert!(ok.contains("os_family linux "));
+    // 取得不能（None）は unknown。
+    let none = MachineCondition::detect_with(&FakeProbe::unknown())
+        .unwrap()
+        .to_string();
+    assert!(none.contains(&format!("condition_machine: arch unknown {TAIL}\n")));
+}
+
+#[test]
+fn std_probe_build_profile_is_unknown() {
+    assert_eq!(StdMachineProbe.build_profile(), BuildProfile::Unknown);
 }
 
 #[test]
@@ -166,6 +174,15 @@ fn explicit_machine_rejects_invalid_strings() {
         Some(4),
         Some(8),
         Some(CANARY.to_owned()),
+        None,
+        Virtualization::None,
+        BuildProfile::Release,
+    );
+    assert_eq!(r.unwrap_err(), ConditionError::InvalidMachineValue);
+    let r = MachineCondition::new(
+        None,
+        None,
+        Some("line\nbreak".to_owned()),
         None,
         Virtualization::None,
         BuildProfile::Release,
@@ -191,6 +208,7 @@ fn explicit_machine_rejects_invalid_strings() {
 fn real_probe_smoke_checks_shape_only() {
     let out =
         MeasurementConditions::detect(ComponentConditions::new(&[]).unwrap(), LoopModel::Closed)
+            .unwrap()
             .to_string();
     let machine: Vec<&str> = out
         .lines()
@@ -206,5 +224,5 @@ fn real_probe_smoke_checks_shape_only() {
         assert!(ok, "unexpected value shape");
     }
     // 取得元は std のものを直接も使える。
-    let _ = MachineCondition::detect_with(&StdMachineProbe);
+    MachineCondition::detect_with(&StdMachineProbe).unwrap();
 }

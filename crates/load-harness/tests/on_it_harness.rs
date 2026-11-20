@@ -164,7 +164,8 @@ fn conditions_from_running_harness_composition() {
     let conditions = MeasurementConditions::detect(
         ComponentConditions::new(&started).unwrap(),
         LoopModel::Closed,
-    );
+    )
+    .unwrap();
     let out = conditions.to_string();
     let tail = "class=test_condition refs=harness_config";
     assert!(out.contains(&format!(
