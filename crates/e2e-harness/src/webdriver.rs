@@ -9,7 +9,7 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -19,6 +19,14 @@ use crate::virtual_authenticator::VirtualAuthenticatorOptions;
 
 /// 応答の大きさの上限。ハーネスの安全上の上限で、要件の値ではない。
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// 期限までの残り時間。尽きていたら誤り（0 は socket の timeout に渡せないため）。
+fn remaining(deadline: Instant) -> Result<Duration, E2eError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(failed)
+}
 
 fn failed() -> E2eError {
     E2eError::new(E2eErrorKind::CommandFailed, E2eComponentKind::BrowserDriver)
@@ -64,7 +72,7 @@ pub struct WebDriverClient {
 }
 
 impl WebDriverClient {
-    /// loopback の `port` へ向ける。`timeout` は接続・読み書きのそれぞれに掛ける。
+    /// loopback の `port` へ向ける。`timeout` は 1 命令（接続・書き込み・応答の読み取りの全体）の期限に使う。
     pub fn new(port: u16, timeout: Duration) -> Self {
         Self { port, timeout }
     }
@@ -81,12 +89,12 @@ impl WebDriverClient {
             None => Vec::new(),
         };
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
-        let mut stream = TcpStream::connect_timeout(&addr, self.timeout).map_err(|_| failed())?;
+        // 命令全体の期限。少量ずつ返すドライバでも `timeout` を超えて続けない。
+        let deadline = Instant::now() + self.timeout;
+        let mut stream =
+            TcpStream::connect_timeout(&addr, remaining(deadline)?).map_err(|_| failed())?;
         stream
-            .set_read_timeout(Some(self.timeout))
-            .map_err(|_| failed())?;
-        stream
-            .set_write_timeout(Some(self.timeout))
+            .set_write_timeout(Some(remaining(deadline)?))
             .map_err(|_| failed())?;
         let head = format!(
             "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -95,7 +103,7 @@ impl WebDriverClient {
         );
         stream.write_all(head.as_bytes()).map_err(|_| failed())?;
         stream.write_all(&payload).map_err(|_| failed())?;
-        parse_response(&mut stream)
+        parse_response(&mut stream, deadline)
     }
 
     /// `GET /status` の `ready` が真か。
@@ -132,7 +140,7 @@ impl WebDriverClient {
 }
 
 /// 応答を読んで `value` を返す。Content-Length が分かればその分で止め、無ければ EOF まで読む。
-fn parse_response(stream: &mut TcpStream) -> Result<Value, E2eError> {
+fn parse_response(stream: &mut TcpStream, deadline: Instant) -> Result<Value, E2eError> {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut header_end: Option<usize> = None;
@@ -143,6 +151,10 @@ fn parse_response(stream: &mut TcpStream) -> Result<Value, E2eError> {
         {
             break;
         }
+        // read ごとに残り時間を設定し、命令全体を期限で打ち切る。
+        stream
+            .set_read_timeout(Some(remaining(deadline)?))
+            .map_err(|_| failed())?;
         let n = stream.read(&mut chunk).map_err(|_| failed())?;
         if n == 0 {
             break;
