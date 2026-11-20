@@ -33,9 +33,10 @@ implement-review・implement-review-pr・create-pr 等）。サブエージェ�
 | --- | --- | --- |
 | 全般（文書・ルール・scripts を含む） | `make check` | editorconfig-checker + shellcheck（CI の `check` ジョブと同一） |
 | `scripts/hooks/`・`lefthook.yml` | `make test-hooks` | フックスクリプト自体の回帰テスト（CI の `test-hooks` ジョブと同一） |
-| Rust のソース・`Cargo.toml` | `make lint` | `cargo fmt --check`・clippy `-D warnings`・crate 間の依存の向き（CI の `lint` ジョブと同一。TASK-6） |
+| Rust のソース・`Cargo.toml` | `make lint` | `cargo fmt --check`・clippy `-D warnings`・crate 間の依存の向き・vendored の検査（CI の `lint` ジョブと同一。TASK-6） |
 | Rust のソース・crate の構成 | `make build`・`make test` | `cargo build`・`cargo test`（`--workspace --locked`。CI の `build-test` ジョブと同一。TASK-6。名前は暫定） |
 | crate 間の依存 | `make crate-deps` | 許可表との照合（`scripts/check-crate-deps.sh`） |
+| `openssl-sys` の `vendored` | `make no-vendored` | `cargo tree -e features` の 0 件の検査（`make lint` にも入る。DPOL-13・TASK-667。名前は暫定） |
 | `lefthook.yml`・`scripts/hooks/` の時間予算 | `time lefthook run pre-commit --all-files` | `./git-hooks.md` の時間予算の確認 |
 | 秘密情報の検査規則（`scripts/hooks/secret-scan.sh`） | `make secret-scan` と `make test-hooks` | 追跡ファイル全体で合計 0 件（終了コード 0）。規則の追加は `test-hooks.sh` にも足す |
 | `Makefile`・`scripts/*.sh` | `make help` と `scripts/help.sh` の一致 | `./makefile.md` の手順 5 |
