@@ -71,12 +71,16 @@ fn secr23_secret_debug_field_has_no_value() {
     let probe = make_probe();
     let s = SecretString::new(&probe);
     let out = capture(|| log_secret_debug_field(&s));
-    // 欄名と値の組み合わせで確かめる（メッセージや別の欄の印で通らないようにする）。
-    let expected = "token=SecretString(<redacted>)";
-    let present = out.contains(expected);
+    // 対象のイベントの行を取り出し、欄の値の全体を末尾から照合する（部分一致にしない）。
+    // 後ろに別の文字が付く場合も不一致にする。
+    let expected = " token=SecretString(<redacted>)";
+    let matched = out
+        .lines()
+        .find(|l| l.contains("secret field emitted"))
+        .is_some_and(|l| l.trim_end().ends_with(expected));
     assert!(
-        present,
-        "masked field `token` present: {present} (output len={})",
+        matched,
+        "masked field `token` matches exactly: {matched} (output len={})",
         out.len()
     );
     let leaked = out.contains(&probe);
@@ -96,23 +100,21 @@ fn secr23_derived_debug_holder_has_no_value() {
     let maybe = Some(SecretString::new(&probe));
     let list = vec![SecretString::new(&probe), SecretString::new(&probe)];
     let out = capture(|| log_container_debug_fields(&s, &maybe, &list));
-    // 欄ごとにマスク済みの値が出ていることを確かめる（1 つの欄だけで通らないようにする）。
-    let expected_fields = [
-        ("pair", "pair=(\"label\", SecretString(<redacted>))"),
-        ("maybe", "maybe=Some(SecretString(<redacted>))"),
-        (
-            "list",
-            "list=[SecretString(<redacted>), SecretString(<redacted>)]",
-        ),
-    ];
-    for (name, expected) in expected_fields {
-        let present = out.contains(expected);
-        assert!(
-            present,
-            "masked field `{name}` present: {present} (output len={})",
-            out.len()
-        );
-    }
+    // 対象のイベントの行を取り出し、3 つの欄の並び全体を末尾から照合する（部分一致にしない）。
+    let expected = concat!(
+        " pair=(\"label\", SecretString(<redacted>))",
+        " maybe=Some(SecretString(<redacted>))",
+        " list=[SecretString(<redacted>), SecretString(<redacted>)]",
+    );
+    let matched = out
+        .lines()
+        .find(|l| l.contains("container fields emitted"))
+        .is_some_and(|l| l.trim_end().ends_with(expected));
+    assert!(
+        matched,
+        "masked fields `pair`/`maybe`/`list` match exactly: {matched} (output len={})",
+        out.len()
+    );
     let leaked = out.contains(&probe);
     assert!(
         !leaked,

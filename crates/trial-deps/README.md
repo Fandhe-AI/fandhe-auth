@@ -62,10 +62,19 @@ nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly �
 - `tracing`: default は `std`・`attributes`。`attributes` は proc-macro の `tracing-attributes` を引く。`#[instrument]` を本体が使うかが論点になる。
   ほかに `max_level_*`・`release_max_level_*` がある。
 - `tracing` の default の `attributes` は、`tracing-attributes`（proc-macro）を経由して `syn` 2.0.119 を normal で引く。
-  `cargo tree --locked -p fandhe-auth-trial-deps -e normal,build --target all -i` で確かめた事実は次のとおり。
-  - この crate の normal・build の木には `syn` 2.0.119 だけが入る（`tracing-attributes` 経由）。`syn` 3.0.10 は入らない（出力は `nothing to print`）。
-  - `-e normal,build,dev` に替えると、この crate の木には `syn` 2.0.119 と `syn` 3.0.10 の両方が入る。`syn` 3 は、この crate の dev 依存（構文の走査用）である。
-  - workspace 全体の normal・build では、`syn` 3.0.10 は `serde_derive` を経由して `hub-stub` と `console-stub` に入っている。この crate の変更によるものではない。
+  repo のルートで、次のコマンドで確かめた事実は次のとおり（`-i` の引数は版つきの `syn@2.0.119`・`syn@3.0.10`）。
+
+  ```bash
+  cargo tree --locked -p fandhe-auth-trial-deps -e normal,build --target all -i syn@2.0.119
+  cargo tree --locked -p fandhe-auth-trial-deps -e normal,build --target all -i syn@3.0.10
+  cargo tree --locked -p fandhe-auth-trial-deps -e normal,build,dev --target all -i syn@2.0.119
+  cargo tree --locked -p fandhe-auth-trial-deps -e normal,build,dev --target all -i syn@3.0.10
+  cargo tree --locked --workspace -e normal,build --target all -i syn@3.0.10
+  ```
+
+  - この crate の normal・build の木には `syn` 2.0.119 だけが入る（`tracing-attributes` 経由）。`syn` 3.0.10 は入らない（`-e normal,build` の 2 本目の出力は `nothing to print`）。
+  - `-e normal,build,dev` に替えると（3・4 本目）、この crate の木には `syn` 2.0.119（`tracing-attributes` 経由）と `syn` 3.0.10（`[dev-dependencies]` の直接依存）の両方が入る。`syn` 3 は、この crate の dev 依存（構文の走査用）である。
+  - workspace 全体の normal・build では（5 本目）、`syn` 3.0.10 は `serde_derive` を経由して `hub-stub` と `console-stub` に入っている。この crate の変更によるものではない。
   - 並ぶかどうかの判断はここでは書かない。本体の木に `syn` が何を引くかは、feature の組の選びと併せて人が決める。
 - `metrics`: `[features]` が無い。既定の feature が無いので、`default-features = false` を指定しても差は出ない。
 - `tracing-subscriber`: default は `smallvec`・`fmt`・`ansi`・`tracing-log`・`std`。
@@ -83,6 +92,7 @@ nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly �
   - enum の variant の欄。`struct` の項目だけを辿る。
   - `Option<String>` などで包んだ形。型の経路の末尾の識別子だけを見る。
   - `Vec<u8>` と `[u8; N]`。
+  - 括弧で囲んだ型（`(String)`）。型の経路の末尾の識別子だけを見るので、括弧（`Type::Paren`）の中は辿らない。
   - ファイルとインラインのモジュールの項目だけを辿るので、関数の本体などのブロックの中の `struct` は見ない（`collect` が辿るのは `Item::Struct` と、本文のあるインラインの `mod` だけ）。
   - 型名の側が秘密値らしいもの（例: 欄名が `value` で型が `SecretToken`）。見るのは欄名だけである。
   - 上の tuple struct・enum・`Option<String>`・`Vec<u8>`・`[u8; N]`・型名の 5 つは、scratch の写しで試験を足し、拾われないことを確かめた（拾われた件数 0）。この試験は repo に入れていない。

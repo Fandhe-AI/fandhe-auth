@@ -67,10 +67,11 @@ fn is_secret_like(name: &str) -> bool {
 
 /// 型が生の `String` かを、型の経路の末尾の識別子だけで判定する。
 ///
-/// 型を解決しない、構文の上だけの判定である。このため次の 2 つの制約がある。
+/// 型を解決しない、構文の上だけの判定である。このため次の 3 つの制約がある。
 /// - 誤検出: 独自型の `custom::String` も末尾が `String` なので拾う。
 /// - 見逃し: 標準の `String` を別名（`type S = String;`、`use std::string::String as S;`）
 ///   で参照する欄は拾わない。
+/// - 見逃し: 括弧で囲んだ型（`Type::Paren`。`(String)`）は辿らない。
 ///
 /// この結果の解釈と扱いは TASK-514 で決める（SECR-21）。
 fn is_raw_string(ty: &Type) -> bool {
@@ -161,5 +162,13 @@ mod tests {
             "pub struct C { pub api_token: Alias }",
         );
         assert_eq!(found(src), vec![pair("A", "password")]);
+    }
+
+    /// 観察用（TASK-514 で扱いを決める）: 括弧で囲んだ型 `(String)` は `Type::Paren` になり、
+    /// 拾われない（見逃し）。合否の判定ではない（SECR-21）。
+    #[test]
+    fn observation_parenthesized_string_is_not_seen() {
+        let src = "pub struct P { pub password: (String) }";
+        assert_eq!(found(src), Vec::<(String, String)>::new());
     }
 }
