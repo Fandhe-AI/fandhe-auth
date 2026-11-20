@@ -81,6 +81,18 @@ WebAuthn の secure context と RP ID は PoC-2 の結果を ID で引き、試�
 chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless=new` だけで、`--disable-*`・`--no-sandbox` は足さない。
 前提は unix（Linux・macOS 等）。非 unix では登録試験が 0 件になり、入口のスクリプトが失敗にする。
 
+### Firefox（3/6）
+
+- 入口は暫定の `make e2e-firefox`（`scripts/e2e-firefox.sh`。`#[ignore]` の `firefox_registration` を流す。CI 外）。geckodriver が無ければ失敗する。
+- 起動・停止は Chrome と共通の `driver_process` に切り出した（振る舞いは 2/6 のまま）。geckodriver は `--port <n>` で起動する。
+- セッションの要求は引数 `-headless` と pref 2 つだけ。Firefox の既定の設定では仮想 authenticator の作成が `ConstraintError` になるため
+  softtoken を有効・usbtoken を無効にする（PoC-3 の値で要件の値ではない。人の確認待ち）。検証を外す意味の引数・pref は足さない（DPOL-30）。
+- 要素の識別（`LGUI-35` → `ASCR-65`）: ハーネスが引く要素は 0 件。登録は `navigator.credentials.create()` をスクリプトで呼ぶだけで、
+  試験用ページはスクリプトを持たず、WebDriver クライアントに要素を探す命令が無い。規則の値はここに写さない。
+  将来要素を引く段を足すときは `LGUI-35`（→ Hub `ASCR-65`）を ID で引いて従い、本番の画面に試験用の要素を持ち込まない。
+- 受け入れた制限（Chrome と同じ）: 強制終了で geckodriver の一時プロファイルが残り得る。送信先は flag で制限しない。
+- 2 台の authenticator を同時に有効にすると Firefox が拒否することがある（PoC-3）ため、1 台だけを使う。
+
 ### 起動・停止の契約（2/6）
 
 - chromedriver は新しいプロセスグループ（グループ ID = 子の PID）で起動する。
@@ -124,7 +136,14 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 - std の自前の WebDriver クライアント（外部の WebDriver クライアント crate・非同期ランタイムを足さない判断。`dependency-policy.md`）
 - 試験用ページと origin の置き場（上の (a)〜(c)。2/6 は (b) を暫定採用）
 - 仮想 authenticator の options の値（2/6 の値は PoC の値）
-- make ターゲット名 `e2e-chrome`
+- make ターゲット名 `e2e-chrome`・`e2e-firefox`
+- 3/6: Firefox の pref 2 つ（`security.webauth.webauthn_enable_softtoken`=true・`..._usbtoken`=false。PoC-3 の値で要件の値ではない）と、
+  引数を `-headless` だけにしたこと
+- 3/6: 起動・停止の共通部の切り出しの形（`DriverHandle` と別名 `ChromeHandle`・`FirefoxHandle`、共通の設定型 `DriverConfig`）
+- 3/6: 受け入れ条件 3（要素の識別が `LGUI-35` → `ASCR-65` に従う）を「ハーネスが引く要素は 0 件」で満たすとする解釈
+- 3/6: geckodriver・Firefox のある環境での `make e2e-firefox` の実行は未検証（作業環境に無かった）。初回の実行で、
+  `POST /webauthn/authenticator` の応答の形・`Content-Length` の有無・Firefox が geckodriver と同じプロセスグループに入るか・
+  `credentials` の欄が揃うかを確かめる。違いが出たら検査を緩めずに人へ確かめる
 - Chrome の起動 flag は `--headless=new` だけ（`DPOL-30` の走査語に掛かる flag は足していない）
 - it-harness・最小の組込み先への辺（足す段で許可表を人に確かめる）
 

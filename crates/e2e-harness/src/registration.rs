@@ -10,8 +10,8 @@
 use serde_json::{Value, json};
 
 use crate::browser::{AuthenticatorKind, Evidence};
-use crate::chrome::ChromeHandle;
 use crate::component::E2eComponentKind;
+use crate::driver_process::DriverHandle;
 use crate::harness::{E2eError, E2eErrorKind};
 
 /// 登録のスクリプト。options は PKEY-4 の実測の形（UV required・attestation none・ES256/RS256）に合わせるが、
@@ -162,7 +162,7 @@ impl RegistrationOutcome {
 
 /// 登録を 1 回通す。呼ぶ前に `origin` へ移動済みで、仮想 authenticator を足してあること。
 pub fn register_once(
-    handle: &ChromeHandle,
+    handle: &DriverHandle,
     origin: &str,
     rp_id: &str,
 ) -> Result<RegistrationOutcome, E2eError> {

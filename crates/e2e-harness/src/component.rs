@@ -9,7 +9,7 @@ use crate::harness::E2eError;
 pub enum E2eComponentKind {
     /// RP 側（options を出し応答を検証する側）。実体は `TASK-716` と PKEY の実装タスクの完成後に置く。
     RelyingParty,
-    /// ブラウザのドライバ（chromedriver・geckodriver）。実体は 2/6・3/6 で置く。
+    /// ブラウザのドライバ（chromedriver・geckodriver）。実体は置き済み（2/6・3/6）。
     BrowserDriver,
 }
 
@@ -31,7 +31,8 @@ impl E2eComponentKind {
 
 /// 構成要素の起動・停止の契約。誤りに秘密値・URL・パスを載せない（SECR-11・SECR-23）。
 ///
-/// TODO(TASK-11): BrowserDriver の実体は 2/6（Chrome）・3/6（Firefox）で置く。
+/// BrowserDriver の実体は Chrome・Firefox とも置き済み（[`crate::chrome`]・[`crate::firefox`]）。
+///
 /// TODO(TASK-716): RelyingParty の実体は最小の組込み先の完成後に置く。
 pub trait E2eComponent {
     /// 種類。

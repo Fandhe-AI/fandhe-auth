@@ -144,6 +144,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
 | `make it-db` | `scripts/it-db.sh` | ハーネスの DB 結合試験（Docker 必須・`#[ignore]` の試験を流す。CI では流さない。名前は暫定） |
 | `make e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネスの Chrome の E2E（chromedriver 必須・`#[ignore]` の試験を流す。結果は〔仮想〕。CI では流さない。名前は暫定） |
+| `make e2e-firefox` | `scripts/e2e-firefox.sh` | ハーネスの Firefox の E2E（geckodriver 必須・`#[ignore]` の試験を流す。結果は〔仮想〕。CI では流さない。名前は暫定） |
 | `make pg-check` | `scripts/dev-pg-check.sh` | 開発・検証用 PostgreSQL の起動の確かめ（起動中のインスタンスが対象。起動・停止はしない。CI では流さない。名前は暫定） |
 | `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。`.env` 系の名前の検査は全パスに掛かり、`.agents/skills/**`・`.claude/skills/**`・`*.lock` の除外は本文の走査にだけ効く。CI への組み込みは 2 段目の PR〔#51〕で行う予定。名前は暫定） |
 | `make scan-canary` | `scripts/secret-scan-canary.sh` | `make secret-scan` の陰性対照（ダミーで検出器が 1 を返し、`--summary` の集計行が期待と完全に一致し、ダミー値が出力に無いことを確かめる。何も変更しない。名前は暫定） |
