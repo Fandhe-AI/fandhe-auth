@@ -277,6 +277,10 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
 
 - 検出器は PR では base のコミットを `trusted/` へ取得した版だけを使い、PR の head（`target/`）は走査対象のデータとして渡す
   （`scripts/secret-scan-ci.sh <target>`）。push（main）では同じコミットを両方に取得する。PR 側の検出器を呼ばない
+- 走査対象（`target/`）は `actions/checkout` で取らず、ジョブの `run:` で `git init`・`git fetch --depth=1`（sha は 40 桁の小文字 16 進数を検証）・
+  `git update-ref HEAD` により、作業ツリーを展開せずオブジェクトだけを取る。checkout が出す `HEAD is now at <PR のコミット件名>` や
+  展開するファイルのパスが、公開ログへ PR 由来の未加工の文字列を出すため（SECR-23）。git の出力は捨て、失敗は固定の文言で exit 2。
+  この取得処理は `scripts/` に置かない（PR の CI では `trusted/` が base の版で、新しいスクリプトが無いため）。`trusted/` の取得は checkout のままでよい（出るのは base の件名だけ）
 - 「PR が書き換えられない版」になるのは base が `main` の PR だけ。base が `main` 以外（stacked PR 等）の PR では、
   `trusted/` はその base ブランチ先端の検出器になる（取得元を `main` に固定はしていない）
 - 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる

@@ -674,6 +674,37 @@ rc=0
 (cd "${rel_cwd}" && TMPDIR=reltmp LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh") > "${work_dir}/out" 2>&1 || rc=$?
 expect_rc "scan-canary: a relative TMPDIR is resolved to an absolute path" 0 "${rc}"
 
+# 絶対パスへの解決（cd）が失敗しても、mktemp が作った一時領域を残さない（EXIT トラップが消せること）
+cd_tmp_fail_env="${work_dir}/cd-tmp-fail.sh"
+cat > "${cd_tmp_fail_env}" <<'EOF'
+cd() {
+  case "${1:-}" in
+    */secret-scan-ci.* | */scan-canary.*) return 1 ;;
+  esac
+  builtin cd "$@"
+}
+EOF
+leak_tmp="${work_dir}/leak-tmp"
+rm -rf "${leak_tmp}"
+mkdir -p "${leak_tmp}"
+rc=0
+TMPDIR="${leak_tmp}" BASH_ENV="${cd_tmp_fail_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && [ -z "$(ls -A "${leak_tmp}")" ]; then
+  pass "secret-scan-ci: a failure to resolve the temporary directory leaves no directory behind"
+else
+  fail "secret-scan-ci: a failure to resolve the temporary directory leaves no directory behind" "exit ${rc}" "left: $(ls -A "${leak_tmp}")" "output: $(cat "${work_dir}/out")"
+fi
+rm -rf "${leak_tmp}"
+mkdir -p "${leak_tmp}"
+rc=0
+TMPDIR="${leak_tmp}" BASH_ENV="${cd_tmp_fail_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && [ -z "$(ls -A "${leak_tmp}")" ]; then
+  pass "scan-canary: a failure to resolve the temporary directory leaves no directory behind"
+else
+  fail "scan-canary: a failure to resolve the temporary directory leaves no directory behind" "exit ${rc}" "left: $(ls -A "${leak_tmp}")" "output: $(cat "${work_dir}/out")"
+fi
+rm -rf "${leak_tmp}"
+
 # 検出器が 0 を返しても、走査完了の集計行（検出 0 件）がちょうど 1 行で、ほかの許可行が無いことを合格の条件にする。
 # 検出器を差し替えた複製（scripts/ だけ）で、出力と終了状態を固定の検出器から返す。
 stub_root="${work_dir}/stub-root"

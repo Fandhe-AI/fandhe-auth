@@ -109,19 +109,21 @@ if ! work_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan-ci.XXXXXX" 2> /dev/null)
 fi
 trap 'rm -rf "${work_dir}"' EXIT
 # 相対の TMPDIR でも、git は `-C` や cd で作業ディレクトリが変わる。一時領域は作った直後に絶対パスへ解決してから使う。
-if ! work_dir="$(cd "${work_dir}" 2> /dev/null && pwd -P && printf x)"; then
+# work_dir は解決と検証が成功するまで mktemp の生のパスのままにする（EXIT トラップが作ったディレクトリを確実に消せるように）。
+if ! resolved_dir="$(cd "${work_dir}" 2> /dev/null && pwd -P && printf x)"; then
   echo "secret-scan-ci: cannot resolve the temporary directory" >&2
   exit 2
 fi
-work_dir="${work_dir%x}"
-work_dir="${work_dir%$'\n'}"
-case "${work_dir}" in
+resolved_dir="${resolved_dir%x}"
+resolved_dir="${resolved_dir%$'\n'}"
+case "${resolved_dir}" in
   /*) ;;
   *)
     echo "secret-scan-ci: cannot resolve the temporary directory" >&2
     exit 2
     ;;
 esac
+work_dir="${resolved_dir}"
 # 検出器の mktemp なども絶対パスの一時領域を使うよう、TMPDIR も解決済みの値に置き換える。
 export TMPDIR="${work_dir}"
 out="${work_dir}/out"

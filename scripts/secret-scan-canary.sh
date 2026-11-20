@@ -57,13 +57,15 @@ g() {
 # 一時領域は cd の前に作り、作った直後に絶対パスへ解決する（相対の TMPDIR が cd で別の場所を指さないように）。
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/scan-canary.XXXXXX" 2> /dev/null)" || die "mktemp failed"
 trap 'rm -rf "${work_dir}"' EXIT
-work_dir="$(cd "${work_dir}" 2> /dev/null && pwd -P && printf x)" || die "cannot resolve the temporary directory"
-work_dir="${work_dir%x}"
-work_dir="${work_dir%$'\n'}"
-case "${work_dir}" in
+# work_dir は解決と検証が成功するまで mktemp の生のパスのままにする（EXIT トラップが作ったディレクトリを確実に消せるように）。
+resolved_dir="$(cd "${work_dir}" 2> /dev/null && pwd -P && printf x)" || die "cannot resolve the temporary directory"
+resolved_dir="${resolved_dir%x}"
+resolved_dir="${resolved_dir%$'\n'}"
+case "${resolved_dir}" in
   /*) ;;
   *) die "cannot resolve the temporary directory" ;;
 esac
+work_dir="${resolved_dir}"
 # 検出器の mktemp なども絶対パスの一時領域を使うよう、TMPDIR も解決済みの値に置き換える。
 export TMPDIR="${work_dir}"
 
