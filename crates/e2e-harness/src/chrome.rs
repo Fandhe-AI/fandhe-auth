@@ -228,9 +228,14 @@ impl ChromeDriverComponent {
                     }
                 }
                 Some(Ok(Some(_))) => {
-                    // try_wait が回収済み。PID が再利用され得るので、teardown がグループへ送らないよう手放す
-                    // （`POST /session` の前で、配下の Chrome は居ない）。
+                    // 親が先に終了しても、配下（子孫）が同じグループに残り得る。回収の直後にグループへ送って止める
+                    // （グループの ID は、メンバーが残る間は再利用されない。残っていなければ ESRCH で成功）。
+                    // 回収済みの PID は teardown から再度送らないよう手放す。送信の失敗は握りつぶさず、起動の失敗に含める。
+                    let pgid = self.child.as_ref().map(Child::id);
                     self.child = None;
+                    if let Some(pgid) = pgid {
+                        let _ = kill_group(pgid);
+                    }
                     return Err(fail());
                 }
                 _ => return Err(fail()),

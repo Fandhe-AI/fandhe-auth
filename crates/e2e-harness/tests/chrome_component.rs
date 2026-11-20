@@ -131,3 +131,41 @@ fn failed_start_kills_the_whole_process_group() {
     assert!(c.stop().is_ok());
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn parent_exit_before_ready_still_kills_descendants() {
+    // 前提: 配下に孫プロセスを残して、ready を返す前に親（偽のドライバ）が終了する。
+    // 操作: start する。期待: StartFailed で、孫もグループごと止まる。
+    let dir = temp_dir("parent-exit");
+    let pid_file = dir.join("grandchild.pid");
+    let script = dir.join("fake-driver");
+    fs::write(
+        &script,
+        "#!/bin/sh\nsleep 30 &\necho $! > \"$(dirname \"$0\")/grandchild.pid\"\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut c = ChromeDriverComponent::new(
+        ChromeDriverConfig::new(&script).with_ready_timeout(Duration::from_secs(3)),
+    );
+    // 書いた直後の実行ファイルは、他の試験スレッドの fork と競合して spawn が失敗する（ETXTBSY）ことがある。
+    // そのときはスクリプトが走っていない（pid ファイルが無い）ので、試験の対象外として数回やり直す。
+    for _ in 0..5 {
+        let e = c.start().unwrap_err();
+        assert_eq!(e.kind(), E2eErrorKind::StartFailed);
+        if pid_file.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let grandchild = fs::read_to_string(&pid_file).unwrap();
+    let grandchild = grandchild.trim();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while alive(grandchild) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(grandchild), "grandchild survived");
+    let _ = fs::remove_dir_all(&dir);
+}
