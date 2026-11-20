@@ -74,6 +74,7 @@ repo に `deny.toml` は作らない。作成は `TASK-668` の担当で、例�
 4. 先にその設定で `cargo deny fetch` を 1 回流し、取得の直後に次の 2 つを控える（`DPOL-33`）。commit の日付は取得日ではないので、取得日時は別に取る。
 
     ```bash
+    DENY_CONFIG=/path/to/deny.toml  # 手順 1・2 で作った写しのパスに替える
     cargo deny fetch --config "$DENY_CONFIG" db
     date -u +%Y-%m-%dT%H:%M:%SZ
     ADVISORY_DB_DIR="$(ls -d ~/.cargo/advisory-dbs/advisory-db-* | head -1)"
@@ -132,65 +133,76 @@ fuzz 側は別 workspace なので、ルートの `Cargo.lock` の監査では�
 
 K11 の閾値は spec に無く未定である。値の記入と判定は人が行う（`ACPT-7`）。ここは手順と空欄の表だけを置く。
 
-1. repo の外に一時ディレクトリを作る。ルートの `Cargo.toml` は触らない。
-2. 組ごとに、最小の `Cargo.toml` を 1 つ作る。依存は測る crate 1 つだけにし、版は `=x.y.z` で固定して、feature の組を指定する。
-    edition と resolver はルートの `Cargo.toml` に合わせる（edition は `[workspace.package]` の `2024`、resolver は `[workspace]` の `"3"`。どちらも暫定で、ルートが変われば合わせ直す）。
-    測定用の manifest は単独の package なので、`resolver` は `[package]` の `resolver = "3"` で明記する。
+測定は、repo の外の一時ディレクトリに作る単独の package で行う。ルートの `Cargo.toml` は触らない。
+次のブロックは、新しい bash にそのまま貼って最後まで流れる。先頭の変数だけを組ごとに替える。
 
-    ```toml
-    [package]
-    name = "probe-k11"
-    version = "0.0.0"
-    edition = "2024"
-    resolver = "3"
+- `CRATE`・`VERSION`・`DEFAULT_FEATURES`・`FEATURES`: 測る crate、版（`=VERSION` で固定する）、既定の feature を使うか、足す feature（引用符付きのカンマ区切り。例: `'"std","attributes"'`）。
+- `KIND`: 実際の利用が `normal` か `dev` か。dev の道具（`tracing-subscriber`・`proptest`・`syn`）も、測定用の manifest では `[dependencies]` に置く。
+  こうすると、全組を同じ `normal,build` の値で測れる。dev であること（本番の木に入らない）は K7 として別に扱い、数には含めない。`KIND` は記録の表示にだけ使う。
+- `TARGET`: 全組で同じにする。例は `x86_64-unknown-linux-gnu`。`all` も選べる。どちらを使ったかを記録する。
+  `all` のとき、MSRV は `--filter-platform` を省いて全ターゲットの依存から引く（`all` は `--filter-platform` の値として全ターゲットを意味しない）。
+- edition と resolver はルートの `Cargo.toml` に合わせる（edition は `[workspace.package]` の `2024`、resolver は `[workspace]` の `"3"`。どちらも暫定で、ルートが変われば合わせ直す）。
+  測定用の manifest は単独の package なので、`resolver` は `[package]` に書く。
+- 比べる組は、同じ日に同じ環境（同じ toolchain・同じ `TARGET`・同じ registry の状態）でまとめて測る。
+  各組の `Cargo.lock` を保存し、共通する推移依存の解決版が組の間でそろっているかを照合する。そろっていなければ測り直す。
 
-    [dependencies]
-    tracing = { version = "=x.y.z", default-features = false, features = ["std"] }
-    ```
+```bash
+set -euo pipefail
+PROBE_NAME=probe-k11
+CRATE=tracing
+VERSION=0.1.44
+DEFAULT_FEATURES=true
+FEATURES=''
+KIND=normal
+TARGET=x86_64-unknown-linux-gnu
 
-    dev の道具（`tracing-subscriber`・`proptest`・`syn`）も、測定用の manifest では `[dependencies]` に置く。
-    こうすると、その crate を使ったときの推移依存を、全組で同じ `normal,build` の値として測れる。
-    実際の利用が dev であること（本番の木に入らない）は、K7 として別に扱い、この数には含めない。
-3. 比べる組は、同じ日に同じ環境（同じ toolchain・同じ `--target`・同じ registry の状態）でまとめて測る。
-    各組の測定用の `Cargo.lock` を保存し、共通する推移依存の解決版が組の間でそろっているかを照合する。
-    そろっていない依存は、版の違いが数の差に混ざるので、そろえて測り直す。保存先は未定で、人が決める。
-4. 次の手順で数える。`-e normal,build` を起点にし、`--target` を明示する。測定用のルートのパッケージ（手順 2 で作ったもの。`PROBE_NAME` に入れる名前）と、
-    測る crate 自身（`CRATE` に入れる名前）は推移依存ではないので、数から除く。`cargo tree` が失敗したら集計に進まないよう、2 段に分ける。
+WORK="$(mktemp -d)"
+mkdir -p "$WORK/src" "$WORK/record"
+cd "$WORK"
+cat > Cargo.toml <<EOF
+[package]
+name = "$PROBE_NAME"
+version = "0.0.0"
+edition = "2024"
+resolver = "3"
 
-    ```bash
-    set -euo pipefail
-    TARGET=x86_64-unknown-linux-gnu
-    cargo tree -e normal,build --target "$TARGET" --prefix none --format '{p}' > tree.txt
-    sed 's/ (\*)$//' tree.txt | sort -u > uniq.txt
-    { grep -v -e "^$PROBE_NAME " -e "^$CRATE " uniq.txt || true; } | wc -l
-    ```
+[dependencies]
+$CRATE = { version = "=$VERSION", default-features = $DEFAULT_FEATURES, features = [$FEATURES] }
+EOF
+: > src/lib.rs
+cargo generate-lockfile
 
-    `cargo tree` が失敗すると（存在しない feature の指定など）、`cargo tree` の行で止まり、後の集計は流れない。
-    `grep -v` は全行が除かれると終了コード 1 を返すので、`|| true` で数 0 を許す。
-    `cargo tree` は 2 回目以降に出る依存の行に ` (*)` を付ける。`sort -u` は行全体で比べるので、印を `sed` で除いてから重複を除く。
-    除かないと、複数の経路で届く依存を 2 回数える。`tracing` と `tracing-subscriber` を両方 normal に置いた一時の crate で流したところ、
-    印を除かない場合は 21、除いた場合は 18 で、`--no-dedupe` で数えた 18 と一致した。
+# 推移依存の数。cargo tree が失敗したら、ここで止まる。
+cargo tree -e normal,build --target "$TARGET" --prefix none --format '{p}' > tree.txt
+sed 's/ (\*)$//' tree.txt | sort -u > uniq.txt
+DEPS="$({ grep -v -e "^$PROBE_NAME " -e "^$CRATE " uniq.txt || true; } | wc -l | tr -d ' ')"
 
-    `--target` は `x86_64-unknown-linux-gnu` に固定する（全組で同じにする）。`--target all` にする場合は、全組をそれに替え、どちらを使ったかを記録する。
-    表の「推移依存の数」の列は、全行この `normal,build` の値である。
+# MSRV。TARGET が all のときは --filter-platform を省く。
+if [ "$TARGET" = all ]; then
+  cargo metadata --locked --format-version 1 > meta.json
+else
+  cargo metadata --locked --format-version 1 --filter-platform "$TARGET" > meta.json
+fi
+jq -r '[.resolve.nodes[].id] as $ids | .packages[] | select(.id as $i | $ids | index($i)) | "\(.name) \(.version) \(.rust_version // "未宣言")"' meta.json > msrv.txt
 
-    組ごとに次を記録する。別の日・別のホストの結果と比べるための記録で、値の判定は人が行う。
-    - 測った crate の版（`=x.y.z`）と feature の組
-    - `--target` の値
-    - 測った日と `rustc -V` の出力
-    - 測定用の `Cargo.lock`（または `tree.txt`）の保存先。保存先は未定で、人が決める
-5. MSRV は、手順 4 で選んだ `--target` の依存グラフに入るパッケージだけから、`rust_version` を `cargo metadata` で引く。
-    `--filter-platform` で絞り、`resolve.nodes` に出るパッケージの id で `packages` を引く。宣言の無い依存は `未宣言` と出る。
+# 記録。保存先は未定なので、控えを record/ に集めて場所を表示する。
+cp Cargo.lock tree.txt msrv.txt record/
+{ date -u +%Y-%m-%dT%H:%M:%SZ; rustc -V; } > record/env.txt
+echo "crate=$CRATE version=$VERSION kind=$KIND target=$TARGET deps=$DEPS"
+echo "record: $WORK/record"
+```
 
-    ```bash
-    cargo metadata --locked --format-version 1 --filter-platform "$TARGET" \
-      | jq -r '[.resolve.nodes[].id] as $ids | .packages[] | select(.id as $i | $ids | index($i)) | "\(.name) \(.version) \(.rust_version // "未宣言")"'
-    ```
+`cargo tree` は 2 回目以降に出る依存の行に ` (*)` を付ける。`sort -u` は行全体で比べるので、印を `sed` で除いてから重複を除く。
+除かないと、複数の経路で届く依存を 2 回数える。`tracing` と `tracing-subscriber` を両方 normal に置いた一時の crate で流したところ、
+印を除かない場合は 21、除いた場合は 18 で、`--no-dedupe` で数えた 18 と一致した。
+`grep -v` は全行が除かれると終了コード 1 を返すので、`|| true` で数 0 を許す。`cargo tree` や `cargo metadata` が失敗すると、`set -e` でその行で止まる。
 
-    `packages` 単独には他のターゲットだけの依存も入る（この workspace で 101 件のところ、`x86_64-unknown-linux-gnu` で絞ると 85 件）。
-    `未宣言` の依存は、MSRV の toolchain（1.100）でビルドして確かめる。構成の MSRV は、各依存の宣言の最大値を人が読み取る。
-    表の「MSRV」の列には、対象の `--target` を添えて記入する。
-6. ライセンスは `cargo deny list` の結果を使う。
+- 推移依存の数は、測定用のルートのパッケージと測る crate 自身を除いた件数である。
+- 組ごとに、測った crate の版と feature の組・`TARGET`・測った日・`rustc -V` の出力・`Cargo.lock`（または `tree.txt`）を記録する。保存先は未定で、人が決める。
+- MSRV は、`msrv.txt` の `未宣言` の依存を MSRV の toolchain（1.100）でビルドして確かめる。構成の MSRV は、各依存の宣言の最大値を人が読み取る。
+  `packages` 単独には他のターゲットだけの依存も入る。この workspace で `cargo metadata` の `packages` が 101 件のところ、`x86_64-unknown-linux-gnu` で絞ると 85 件になる。
+  表の「MSRV」の列には、対象の `TARGET` を添えて記入する。
+- ライセンスは `cargo deny list` の結果を使う。
 
 組の候補（各 crate の `[features]` を読んだ事実による）:
 
