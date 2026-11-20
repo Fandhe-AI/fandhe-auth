@@ -232,7 +232,7 @@ judgment:
 ## 計測の部品（3/10）
 
 `TASK-12` の 3/10（#114）。時間を測り、標本と件数を集める部品を `crates/load-harness`（`fandhe-auth-load-harness`。仮称）に置いた。
-依存は 0（std だけ）。試験専用で、どの crate からも依存しない（`LIB-2`・`LIB-4`）。
+通常の依存は 0（std だけ）。試験（dev）の依存は 5/10 の節に書く。試験専用で、どの crate からも依存されない（`LIB-2`・`LIB-4`）。
 
 - 時計: trait `MonotonicClock` が原点からの経過を整数ナノ秒（`u64`）で返す。本番は `StdMonotonicClock`（`Instant`）。試験は偽の時計を手で進める。
 - 名前: `IntervalName`・`FailureKind` は ASCII の `[a-z0-9_]`・1〜64 文字を作る時点で検査する（上の「差し込み対策」）。
@@ -268,6 +268,22 @@ judgment:
 - 区間の宣言を呼び出し元から受ける API の形（`RunSamples` を変えないため）。
 - 記録の出力を担当する段が 5/10〜10/10 の題から見当たらない。担当の段を人が決める。
 
+## 負荷の生成（5/10）
+
+`TASK-12` の 5/10（#116）。`crates/load-harness` の `generate` に、呼び出し元が指定した並行数のワーカーで対象を繰り返し呼ぶ部品を置いた。
+名前・語・値はすべて仮置きで、人が確認する。対象の経路を呼ぶ部分（6/10）・機材と構成の取得（7/10）・段階を変える実行（8/10）は含まない。
+合否は付けない（`ACPT-7`）。
+
+- API: `LoadConfig::new(concurrency, trials_planned, warmup)`（既定値なし。並行数は 1〜1024）、`run_closed_loop(meter, &config, target)`、結果 `LoadRun`、誤り `LoadError`（6 種）。
+- 閉ループを仮置きで採る（`LoopModel::Closed`。記録の `condition_loop` の材料は `closed`）。各ワーカーは 1 度に 1 試行だけ持つ。
+- 暖機の段（`warmup > 0` のときだけ）を回してから本計測の段を回す。2 つの段は重ならない。暖機の試行は結果にかかわらず `Excluded` で締める。
+  暖機の試行も通し番号を消費するため、本計測の標本の番号は `warmup + 1` から始まる。
+- 本計測で対象が `Excluded` を返したら `InvalidOutcome`（除外は生成器だけが付ける）。
+- 停止の規則: 誤りが出たら停止の印を立てて新しい試行を止め、立てたワーカーを join してから最初の誤りを返す。panic の中身・`io::Error` の文言は載せない。
+- 不変条件: 実測の最大同時実行数 <= 設定の並行数（2/10 の 4 の候補を閉ループで採る）、`executed == trials_planned`、`excluded == warmup`（違えば `CountMismatch`）。
+- ハーネスの上で動くこと: 試験（dev）だけ `it-harness`・`hub-stub` に依存する（`tests/on_it_harness.rs`。Docker・ネットワークなし）。許可表の行は人の確認待ち。
+- 記録の出力（`fandhe-auth-load-record/1`）を担当する段は未決のまま持ち越す。
+
 ## 未決・人の確認待ち
 
 - 文書名・節立て
@@ -275,7 +291,9 @@ judgment:
 - 「最悪の回」の読み（標本の最大か、繰り返しの中の最悪の 1 回か）と、比べる指標の既定
 - 失敗・時間切れを時間の分布から分ける扱い
 - 区分の追加分（試験の条件・測定値・未決・他所有者の値）
-- 閉ループか開ループか（5/10）
+- 閉ループか開ループか（5/10）: 閉ループ（固定数のワーカー）を仮置きで採った。開ループは作っていない。人が確認する
+- 5/10 の仮置き: 並行数の上限 1024、暖機の段と本計測の段を分けること、本計測での `Excluded` の拒否、API の名前（`generate`・`run_closed_loop`・`LoadConfig`・`LoadRun`・`LoadError`）
+- 許可表の行: `fandhe-auth-load-harness` → `fandhe-auth-it-harness`・`fandhe-auth-hub-stub` の試験（dev）の辺（5/10）
 - 記録への偽の行の差し込みへの対策（下の「結果の記録の形式」の 6 で扱った。内容は人が確認する）
 - 結果の記録の形式の型と出力の実装の置き場。3/10（#114）で別の crate `crates/load-harness`（仮称）に計測の部品を置いた。
   `it-harness` の crate doc が `TASK-12` を別のハーネスとしているため、`it-harness` の module にはしない。crate の追加・名前・許可表の行は人が決める

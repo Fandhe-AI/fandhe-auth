@@ -408,10 +408,10 @@ impl Trial<'_> {
     /// 結果の種類を付けて締める。誤りのときその試行は `unfinished` の失敗として数える。
     ///
     /// # Errors
-    /// 開いたままの区間、成功なのに測っていない区間は [`MeterError::IncompleteIntervals`]。
+    /// 開いたままの区間（時間切れ・除外は破棄して許す）、成功なのに測っていない区間は [`MeterError::IncompleteIntervals`]。
     pub fn finish(mut self, outcome: Outcome) -> Result<(), MeterError> {
-        // 時間切れは計測の途中でも締められる。開いた区間は破棄し、件数だけを数える。
-        if !matches!(outcome, Outcome::Timeout) {
+        // 時間切れ・除外（暖機）は計測の途中でも締められる。開いた区間は破棄し、件数だけを数える。
+        if !matches!(outcome, Outcome::Timeout | Outcome::Excluded) {
             if self.slots.values().any(|s| s.ns.is_none()) {
                 return Err(MeterError::IncompleteIntervals);
             }
