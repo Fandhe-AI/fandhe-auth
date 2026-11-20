@@ -147,6 +147,8 @@ pub struct DbFaultProxy {
     listen_port: u16,
     accept: Option<JoinHandle<()>>,
     block_active: bool,
+    /// 遮断を記録するときの種類。`DbBlock` か `ExternalStoreBlock` だけ（4/8 が後者で包む）。
+    block_kind: FaultKind,
     delay_active: Option<FaultKind>,
 }
 
@@ -163,16 +165,36 @@ impl fmt::Debug for DbFaultProxy {
 impl DbFaultProxy {
     /// 上流を `127.0.0.1:<port>` に固定して始める（試験用の入口）。
     pub fn start_to_port(port: u16) -> Result<Self, DbFaultError> {
-        Self::start(Upstream::Port(port))
+        Self::start(Upstream::Port(port), FaultKind::DbBlock)
+    }
+
+    /// 遮断の記録の種類を指定して始める（`external_store` の包みが使う内部の口）。
+    pub(super) fn start_to_port_as(port: u16, block_kind: FaultKind) -> Result<Self, DbFaultError> {
+        Self::start(Upstream::Port(port), block_kind)
+    }
+
+    /// [`Self::start_to_port_as`] の `EndpointHandle` 版。
+    pub(super) fn start_for_as(
+        handle: EndpointHandle,
+        block_kind: FaultKind,
+    ) -> Result<Self, DbFaultError> {
+        Self::start(Upstream::Endpoint(handle), block_kind)
     }
 
     /// [`crate::database::Database`] の接続情報のハンドルに向けて始める。Database の起動前に作れる。
     /// 接続のたびにポートを読み、値が無ければその接続を閉じる。
     pub fn start_for(handle: EndpointHandle) -> Result<Self, DbFaultError> {
-        Self::start(Upstream::Endpoint(handle))
+        Self::start(Upstream::Endpoint(handle), FaultKind::DbBlock)
     }
 
-    fn start(upstream: Upstream) -> Result<Self, DbFaultError> {
+    fn start(upstream: Upstream, block_kind: FaultKind) -> Result<Self, DbFaultError> {
+        // 遮断として記録できる種類だけ受ける（fail-closed）。
+        if !matches!(
+            block_kind,
+            FaultKind::DbBlock | FaultKind::ExternalStoreBlock
+        ) {
+            return Err(DbFaultError::StartFailed);
+        }
         let listener =
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|_| DbFaultError::StartFailed)?;
         listener
@@ -208,6 +230,7 @@ impl DbFaultProxy {
             listen_port,
             accept: Some(accept),
             block_active: false,
+            block_kind,
             delay_active: None,
         })
     }
@@ -246,7 +269,7 @@ impl DbFaultProxy {
             return Err(DbFaultError::AlreadyActive);
         }
         timeline
-            .record_now(FaultKind::DbBlock, FaultPhase::Applied)
+            .record_now(self.block_kind, FaultPhase::Applied)
             .map_err(DbFaultError::Record)?;
         self.shared.blocked.store(true, Ordering::SeqCst);
         self.shared.block_gen.fetch_add(1, Ordering::SeqCst);
@@ -261,7 +284,7 @@ impl DbFaultProxy {
             return Err(DbFaultError::NotActive);
         }
         timeline
-            .record_now(FaultKind::DbBlock, FaultPhase::Released)
+            .record_now(self.block_kind, FaultPhase::Released)
             .map_err(DbFaultError::Record)?;
         self.shared.blocked.store(false, Ordering::SeqCst);
         self.block_active = false;

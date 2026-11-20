@@ -57,6 +57,18 @@ PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を�
 - 誤りと `Debug` に pid・コマンド・`io::Error` の文言を載せない（SECR-11・SECR-23）。
 - 試験: `make test`（`tests/fault_instance.rs`）。`SignalUnavailable` の経路は未検証。
 
+## DB の外の保存先の遮断（4/8）
+
+`crates/it-harness/src/fault/external_store.rs` の `ExternalStoreFaultProxy`（仮称）。
+
+- 入口: `start_to_port`・`start_for`・`block`・`release_block`・`stop`・`listen_port`・`proxied_endpoint`。遅延は出さない。
+- 遮断は TCP の経路の遮断。2/8 の転送器（`DbFaultProxy`）を `external_store_block` の種類で包む。開いている接続を切り、
+  新しい接続を直ちに閉じる。解除しても切れた接続は戻らない。
+- 記録は `applied`・`released` の `external_store_block target=external_store`。基準線では記録が拒否し、注入もしない。
+- 誤りと `Debug` にポート・アドレスを載せない（SECR-11・SECR-23）。
+- 根拠: ORST-17・ORST-2。保存先の実体は未決（Hub `ASTORE-38`）。Host への結線は `TODO(TASK-716)`。
+- 試験: `cargo test -p fandhe-auth-it-harness --test fault_external_store`（`make test` に含む）。
+
 ## 記録の形式（`fandhe-auth-it-fault-record/1`）
 
 `RunRecord`（`fandhe-auth-it-run-record/1`）とは別のファイル。`run_started_at` で結ぶ。UTF-8・LF・1 行 1 項目の `key: value`。
@@ -89,7 +101,7 @@ note: ...
 - 記録を `RunRecord` と別のファイルにし、`run_started_at` で結ぶこと
 - 時計のずれの対象（instance の時計か DB のホストの時計か）。6/8 で決める
 - インスタンスの停止を in-process の Host（TASK-716 待ち）にどう当てるか（3/8 はプロセスの子だけ）
-- DB の外の保存先の実体（ORST-2 の持ち越し）。4/8 で扱う
+- DB の外の保存先の実体（ORST-2・Hub `ASTORE-38` の決定待ち）。4/8 では仮に TCP の経路の遮断にした。人の確認待ち
 - console stub の注入（TASK-8）を TASK-13 の一覧に入れるか（spec の列挙には無い）
 - 記録のファイルを秘密値の走査の対象に入れること（`secret-values.md`）。本段は canary の試験で代える。出力先は追跡ツリーの外（`target/`）
 - DB の遮断の形を「直ちに閉じる」にしたこと。「受けて黙る（blackhole）」を入れるか（2/8）
@@ -101,3 +113,7 @@ note: ...
 - 終了の観察の時刻を記録に入れるか（形式の版上げが要る）（3/8）
 - 再起動を `Released` にしないこと（3/8）
 - Unix 以外を対象外にすること、終了を見る刻み 10 ms の値（3/8）
+- 保存先の遮断を TCP の形にし、PoC-10 のディレクトリの権限を外す形を入れなかったこと（入れるなら記録の形式の版上げとあわせて決める）（4/8）
+- 遮断の形を 2/8 と同じ「直ちに閉じる」にしたこと。blackhole を入れるか（4/8）
+- 転送器のスレッドの名前が `it-db-fault-*` のままであること（4/8）
+- 世代の保存先（設定ストア・秘密の保管庫）と台帳の保存先を 1 つの種類で表すこと（4/8）

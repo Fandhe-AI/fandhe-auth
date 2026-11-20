@@ -17,7 +17,7 @@
 //! 5/6 で実行の記録（版・構成・日時。[`record`]）を置いた。
 //! 6/6 で使い方（`docs/harness/integration.md` の「使い方」）と、手順どおりのサンプル（`tests/sample.rs`）を置いた。
 //!
-//! TASK-13 の 1/8 で障害注入の種類と記録の形式（[`fault`]）を置き、2/8 で DB の遮断と遅延（[`fault::db`]）を、3/8 でインスタンスの停止（`fault::instance`。Unix 限定）を置いた。
+//! TASK-13 の 1/8 で障害注入の種類と記録の形式（[`fault`]）を置き、2/8 で DB の遮断と遅延（[`fault::db`]）を、3/8 でインスタンスの停止（`fault::instance`。Unix 限定）を、4/8 で DB の外の保存先の遮断（`fault::external_store`）を置いた。
 //!
 //! 構成の下書きは `docs/harness/integration.md`。
 
