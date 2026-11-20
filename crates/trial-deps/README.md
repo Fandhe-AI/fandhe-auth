@@ -50,12 +50,13 @@ nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly �
 - 正式な手順と `deny.toml` は `TASK-668` が作る。repo に `deny.toml` は置かない。
 - 試しの実行の手順と結果は、PR #5980 の本文に記録した。
 - 合否は PR の head で、全検査が成功することで決める（`DPOL-34`）。結果の判定と例外の追加は人が決める（`DPOL-35`）。
+- `fuzz/` は別 workspace（ルートの `exclude`）で、独自の `Cargo.lock` を持つ。このため、ルートの `cargo deny`・`cargo audit` は `libfuzzer-sys` とその推移依存を見ない。合否には、ルートと fuzz 側の両方の結果を含める（`DPOL-33`・`DPOL-34`）。fuzz 側の対象は、manifest が `fuzz/Cargo.toml`、lockfile が `fuzz/Cargo.lock` である。fuzz 側を含めた監査の正式な手順は `TASK-668`（#321）で決める。
 
 ## K11 と feature の選び
 
 - K11 の測り方・ターゲット・閾値は未定で、人が決める（`D-2026-11-20-7`）。この README には測定の手順も、値を入れる表も置かない。
 - 測定手順の下書きは PR 本文で渡す。
-- 口の feature の選び（`tracing`・`metrics`・dev の道具）は未定で、K11 を人が決めた後に確定する。いまの feature はすべて default のままの暫定である（上の「位置づけ」）。
+- 口の feature の選び（`tracing`・`metrics`・dev の道具）は未定で、K11 を人が決めた後に確定する。いまの feature は、`syn` を除いて default のままの暫定である（`syn` は `default-features = false` + `full`・`parsing`。上の「位置づけ」）。
 
 ## 確かめた事実
 
