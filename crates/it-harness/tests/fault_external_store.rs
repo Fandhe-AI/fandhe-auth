@@ -187,6 +187,26 @@ fn block_cuts_open_and_refuses_new_then_release_recovers() {
     assert!(!text.contains("db_block"));
 }
 
+/// 遮断中に accept 側で閉じられた接続は、解除の後も転送されない（引き渡し後の世代照合の回帰）。
+#[test]
+fn conn_accepted_while_blocked_is_not_forwarded_after_release() {
+    let up = echo_upstream();
+    let mut p = ExternalStoreFaultProxy::start_to_port(up.port()).unwrap();
+    let mut tl = timeline();
+    p.block(&mut tl).unwrap();
+    let mut during = connect(p.listen_port());
+    // accept 側が遮断中に閉じたことを見てから解除する。
+    assert!(wait_until(|| p.refused_count() >= 1));
+    p.release_block(&mut tl).unwrap();
+    assert_eq!(
+        roundtrip(&mut during, b"x"),
+        Outcome::Disconnected,
+        "conn accepted while blocked stays closed after release"
+    );
+    assert_eq!(p.accepted_count(), 0);
+    let _ = finish(tl);
+}
+
 #[test]
 fn baseline_timeline_rejects_injection_and_does_not_inject() {
     let up = echo_upstream();

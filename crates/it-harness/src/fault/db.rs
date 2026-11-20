@@ -18,9 +18,9 @@
 //! - 環境変数・設定ファイル・feature で注入を切り替える経路を作らない（DPOL-30〜32）。
 //! - 遮断は既存の接続を切り、新しい接続を直ちに閉じる。解除しても切れた接続は戻らないので、client は
 //!   解除の後につなぎ直す。遅延は応答（上流から client）の向きの塊ごとに足す。
-//! - 接続の確立（上流への connect。上限 5 秒）は accept のスレッドで同期に行う。上流は `127.0.0.1` で
-//!   通常は即座に結果が出るが、固まると後続の accept がその間止まる（試験専用の制約として受け入れる）。
-//! - 刻みの値（accept 5 ms・待ちの刻み 10 ms・上流への接続の上限 5 秒・遅延の上限）は開発の値で要件の値ではない
+//! - 接続の確立（上流への connect。上限 5 秒）は接続ごとのワーカーで行う。確立待ちは同時 64 件までで、
+//!   超えた接続は直ちに閉じる。遮断中に受けた接続は accept 側で直ちに閉じる。
+//! - 刻みの値（accept 5 ms・待ちの刻み 10 ms・上流への接続の上限 5 秒・確立待ちの上限 64・遅延の上限）は開発の値で要件の値ではない
 //!   （THRT-29）。
 //!
 //! 名前・形・遮断の形（直ちに閉じる。受けて黙る形は入れていない）は仮置きで、人が確認する。
@@ -42,6 +42,8 @@ const ACCEPT_TICK: Duration = Duration::from_millis(5);
 const WAIT_TICK: Duration = Duration::from_millis(10);
 /// 上流への接続の上限（開発の値）。
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// 上流への接続の確立待ちのワーカー数の上限（開発の値）。超えた接続は直ちに閉じる（fail-closed）。
+const MAX_PENDING_CONNS: usize = 64;
 /// 遅延の上限（開発の値。試験が固まるほどの遅延を拒否する）。
 const MAX_DELAY_MS: u64 = 600_000;
 
@@ -102,6 +104,8 @@ struct Shared {
     block_gen: AtomicU64,
     accepted: AtomicU64,
     refused: AtomicU64,
+    /// 上流への接続の確立待ちのワーカー数（上限は `MAX_PENDING_CONNS`）。
+    pending: AtomicUsize,
     /// 両側を切るための複製（接続 ID と組）。両方向の転送が終わった接続の分は外す。
     conns: Mutex<Vec<(u64, TcpStream)>>,
     next_conn_id: AtomicU64,
@@ -212,6 +216,7 @@ impl DbFaultProxy {
             block_gen: AtomicU64::new(0),
             accepted: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            pending: AtomicUsize::new(0),
             conns: Mutex::new(Vec::new()),
             next_conn_id: AtomicU64::new(0),
             workers: Mutex::new(Vec::new()),
@@ -375,6 +380,15 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, upstream: &Upstream
     }
 }
 
+/// 確立待ちの枠。drop で返す（早期 return・スレッドの生成失敗でも漏らさない）。
+struct PendingSlot(Arc<Shared>);
+
+impl Drop for PendingSlot {
+    fn drop(&mut self) {
+        self.0.pending.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 fn refuse(client: &TcpStream, shared: &Shared) {
     shared.refused.fetch_add(1, Ordering::SeqCst);
     let _ = client.shutdown(Shutdown::Both);
@@ -385,10 +399,21 @@ fn refuse(client: &TcpStream, shared: &Shared) {
 fn spawn_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
     // 遮断の世代を accept の時点で控える。処理の開始前や確立中に遮断が入って解除されても、世代の差で見つける。
     let block_gen = shared.block_gen.load(Ordering::SeqCst);
+    // 遮断中（blocked は世代の加算より前に立つ）に受けた接続は、ワーカーに渡さず accept 側で閉じる。
+    // 解除後にワーカーが動いても、遮断中の接続が上流へ転送されない。
+    if shared.halted() {
+        return refuse(&client, shared);
+    }
+    // 確立待ちのワーカー数に上限を置く。上限に達したら新しい接続を直ちに閉じる。
+    if shared.pending.fetch_add(1, Ordering::SeqCst) >= MAX_PENDING_CONNS {
+        shared.pending.fetch_sub(1, Ordering::SeqCst);
+        return refuse(&client, shared);
+    }
+    let slot = PendingSlot(Arc::clone(shared));
     let (s, u) = (Arc::clone(shared), upstream.clone());
     let spawned = thread::Builder::new()
         .name("it-db-fault-conn".into())
-        .spawn(move || handle_conn(client, &s, &u, block_gen));
+        .spawn(move || handle_conn(client, &s, &u, block_gen, slot));
     match spawned {
         Ok(h) => {
             let mut g = shared
@@ -405,7 +430,13 @@ fn spawn_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream) {
     }
 }
 
-fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream, block_gen: u64) {
+fn handle_conn(
+    client: TcpStream,
+    shared: &Arc<Shared>,
+    upstream: &Upstream,
+    block_gen: u64,
+    slot: PendingSlot,
+) {
     // 受けた接続は blocking に戻す（listener の非 blocking を引き継ぐ環境がある）。
     if client.set_nonblocking(false).is_err() || shared.halted() {
         return refuse(&client, shared);
@@ -424,7 +455,10 @@ fn handle_conn(client: TcpStream, shared: &Arc<Shared>, upstream: &Upstream, blo
         .unwrap_or_else(PoisonError::into_inner)
         .push((id, c_kill));
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let Ok(up) = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT) else {
+    let connected = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT);
+    // 確立が済んだので枠を返す。
+    drop(slot);
+    let Ok(up) = connected else {
         shared.sever_conn(id);
         return refuse(&client, shared);
     };
