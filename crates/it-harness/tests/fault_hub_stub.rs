@@ -119,9 +119,13 @@ fn timeline() -> FaultTimeline {
     FaultTimeline::start(Instant::now(), t0()).unwrap()
 }
 
-fn finish(tl: FaultTimeline) -> FaultRecord {
-    tl.finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
+fn finish<W: fandhe_auth_hub_stub::fault::Wait>(
+    inj: HubStubFaultInjector<W>,
+    tl: FaultTimeline,
+) -> FaultRecord {
+    inj.finish(tl, UtcTimestamp::from_unix_seconds(1_700_000_060))
         .unwrap()
+        .0
 }
 
 type Waits = Rc<RefCell<Vec<Duration>>>;
@@ -374,7 +378,7 @@ fn baseline_rejects_apply_and_injects_nothing() {
     assert_eq!(inj.serve_jwks(&mut jwks, NOW).unwrap().status, 200);
     assert_eq!(injected_flags(inj.call_log()), [false]);
     assert!(waits.borrow().is_empty());
-    let text = finish(tl).to_string();
+    let text = finish(inj, tl).to_string();
     assert!(text.contains("run_mode: baseline"));
     assert!(text.contains("injection_count: 0"));
 }
@@ -406,9 +410,9 @@ fn invalid_params_are_rejected_without_recording() {
     }
     assert_eq!(inj.active_count(), 0);
     assert_eq!(
-        tl.finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
+        inj.finish(tl, UtcTimestamp::from_unix_seconds(1_700_000_060))
             .unwrap_err(),
-        FaultRecordError::NoInjectionInFaultRun
+        HubStubFaultError::Record(FaultRecordError::NoInjectionInFaultRun)
     );
 }
 
@@ -432,7 +436,7 @@ fn state_errors_do_not_record() {
         HubStubFaultError::NotActive
     );
     inj.release(&mut tl, k).unwrap();
-    assert_eq!(finish(tl).events().len(), 2);
+    assert_eq!(finish(inj, tl).events().len(), 2);
 }
 
 #[test]
@@ -446,13 +450,13 @@ fn record_lines_and_no_token_leak() {
     inj.apply(&mut tl, kl).unwrap();
     let c = canary();
     let _ = inj.receive_logout(&mut lo, &c, NOW);
-    let text = finish(tl).to_string();
+    assert!(!format!("{inj:?}").contains(&c));
+    assert!(!format!("{:?}", inj.call_log()).contains(&c));
+    let text = finish(inj, tl).to_string();
     assert!(text.contains("hub_stub_refusal target=hub_stub"));
     assert!(text.contains("port=jwks refusal=status_503"));
     assert!(text.contains("A-2026-10-28-9"));
     assert!(!text.contains(&c));
-    assert!(!format!("{inj:?}").contains(&c));
-    assert!(!format!("{:?}", inj.call_log()).contains(&c));
     for e in [
         HubStubFaultError::InvalidParam,
         HubStubFaultError::AlreadyActive,
@@ -564,4 +568,37 @@ fn second_injector_on_the_same_run_is_rejected() {
     );
     let other = timeline();
     assert!(HubStubFaultInjector::new(|_: Duration| {}, &other).is_ok());
+}
+
+/// 注入器に結んだ実行は、直接の確定・Hub stub 事象の直接記録を拒否する。
+#[test]
+fn bound_timeline_rejects_direct_finish_and_direct_hub_stub_events() {
+    let mut tl = timeline();
+    let (_inj, _) = injector(&tl);
+    let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503));
+    assert_eq!(
+        tl.record_now(k, fandhe_auth_it_harness::fault::FaultPhase::Applied)
+            .unwrap_err(),
+        FaultRecordError::HubStubEventOutsideInjector
+    );
+    assert_eq!(
+        tl.finish(UtcTimestamp::from_unix_seconds(1_700_000_060))
+            .unwrap_err(),
+        FaultRecordError::InjectorBound
+    );
+}
+
+/// 結ぶ前に直接積んだ Hub stub 事象があると注入器を結べない。
+#[test]
+fn injector_cannot_bind_after_direct_hub_stub_event() {
+    let mut tl = timeline();
+    let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503));
+    tl.record_now(k, fandhe_auth_it_harness::fault::FaultPhase::Applied)
+        .unwrap();
+    assert!(matches!(
+        HubStubFaultInjector::new(|_d: Duration| {}, &tl),
+        Err(HubStubFaultError::Record(
+            FaultRecordError::HubStubEventsBeforeBind
+        ))
+    ));
 }

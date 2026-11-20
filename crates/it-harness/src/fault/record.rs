@@ -7,7 +7,7 @@
 //! - 時刻はハーネスのプロセスの基準の時計で押す。試験対象に注入した、ずれた時計や stub の引数の `now` は使わない
 //!   （時計のずれを注入しても記録の時刻はずれない。AVLB-31）。壁時計 `at`（秒）と、実行開始からの単調時計の
 //!   経過 `offset_ms` を持つ。hub-stub の `InjectionLog.at`（試験の論理時刻）は
-//!   ここへ入れず、`HubStubFaultInjector::call_log` で別に読む（対応は順序だけ。形式の版は変えない）。
+//!   ここへ入れず、`HubStubFaultInjector::call_log` で別に読む（対応は順序だけ。事象行の `log_pos` は形式の版 `/2` で足した）。
 //! - 基準線でも同じキーを出す。節を省くと「記録しなかった」と見分けられないため（TASK-10 の `not_started` と同じ）。
 //! - 基準線に事象を積むのも、Fault の実行で 0 件のまま記録を作るのも誤り（fail-closed）。
 //! - 記録は enum・数値・静的な名前だけで組む。ホスト名・ポート・パス・接続情報・実行時の文字列を持たない
@@ -57,6 +57,12 @@ pub enum FaultRecordError {
     LogPosNotAllowed,
     /// 呼び出しの位置（`log_pos`）が前の件より小さい。
     LogPosWentBackwards,
+    /// 注入器を結んだ実行に、注入器を介さず Hub の stub の事象を積もうとした。
+    HubStubEventOutsideInjector,
+    /// 注入器を結んだ実行の記録を、注入器を介さず確定しようとした。
+    InjectorBound,
+    /// Hub の stub の事象を注入器の外で積んだ実行には、注入器を結べない。
+    HubStubEventsBeforeBind,
     /// ファイルの書き込みに失敗した。
     WriteFailed,
 }
@@ -73,6 +79,9 @@ impl fmt::Display for FaultRecordError {
             Self::OffsetWentBackwards => "offset went backwards",
             Self::LogPosNotAllowed => "log position not allowed for this target",
             Self::LogPosWentBackwards => "log position went backwards",
+            Self::HubStubEventOutsideInjector => "hub stub event must go through the injector",
+            Self::InjectorBound => "timeline is bound to an injector; finish through it",
+            Self::HubStubEventsBeforeBind => "hub stub events recorded before binding",
             Self::WriteFailed => "write failed",
         };
         write!(f, "fault record error: {s}")
@@ -143,8 +152,16 @@ impl FaultTimeline {
     }
 
     /// 注入器をこの実行へ結ぶ。すでに結んでいれば `false`（1 つの実行に注入器は 1 つ。呼び出しの位置の照合のため）。
-    pub(crate) fn bind_injector(&self) -> bool {
-        !self.injector_bound.swap(true, Ordering::SeqCst)
+    /// 結ぶ前に注入器の外で積まれた Hub の stub の事象があれば `HubStubEventsBeforeBind`（`log_pos` の無い事象と注入状態が食い違うため）。
+    pub(crate) fn bind_injector(&self) -> Result<bool, FaultRecordError> {
+        if self
+            .events
+            .iter()
+            .any(|e| e.kind.target() == FaultTarget::HubStub)
+        {
+            return Err(FaultRecordError::HubStubEventsBeforeBind);
+        }
+        Ok(!self.injector_bound.swap(true, Ordering::SeqCst))
     }
 
     /// ハーネスの時計で現在の時刻を押して積む。
@@ -153,6 +170,7 @@ impl FaultTimeline {
         kind: FaultKind,
         phase: FaultPhase,
     ) -> Result<(), FaultRecordError> {
+        self.reject_hub_stub_when_bound(kind)?;
         self.record_now_with_log_pos(kind, phase, None)
     }
 
@@ -170,6 +188,14 @@ impl FaultTimeline {
         self.push(kind, phase, at, ms, log_pos)
     }
 
+    /// 注入器を結んだ実行の Hub の stub の事象は注入器の入口（`log_pos` 付き）だけが積む。
+    fn reject_hub_stub_when_bound(&self, kind: FaultKind) -> Result<(), FaultRecordError> {
+        if self.injector_bound.load(Ordering::SeqCst) && kind.target() == FaultTarget::HubStub {
+            return Err(FaultRecordError::HubStubEventOutsideInjector);
+        }
+        Ok(())
+    }
+
     /// 時刻を引数で渡して積む（試験用の決定的な入口）。
     ///
     /// # Errors
@@ -182,6 +208,7 @@ impl FaultTimeline {
         at: UtcTimestamp,
         offset_ms: u64,
     ) -> Result<(), FaultRecordError> {
+        self.reject_hub_stub_when_bound(kind)?;
         self.push(kind, phase, at, offset_ms, None)
     }
 
@@ -245,7 +272,21 @@ impl FaultTimeline {
 
     /// 記録を作る。Fault の実行で 0 件なら誤り（何も注入していない故障の試験を作らない）。
     /// 解除しなかった `Applied` は `unreleased_count` に数える（黙って省かない）。
+    ///
+    /// # Errors
+    /// 注入器を結んだ実行は `InjectorBound`（注入器が有効なまま残らないよう、`HubStubFaultInjector::finish` だけが確定する）。
     pub fn finish(self, recorded_at: UtcTimestamp) -> Result<FaultRecord, FaultRecordError> {
+        if self.injector_bound.load(Ordering::SeqCst) {
+            return Err(FaultRecordError::InjectorBound);
+        }
+        self.finish_bound(recorded_at)
+    }
+
+    /// 注入器と一緒に確定する入口（注入器の内部だけ）。
+    pub(crate) fn finish_bound(
+        self,
+        recorded_at: UtcTimestamp,
+    ) -> Result<FaultRecord, FaultRecordError> {
         if self.mode == RunMode::Fault && self.events.is_empty() {
             return Err(FaultRecordError::NoInjectionInFaultRun);
         }
@@ -410,7 +451,7 @@ mod tests {
     #[test]
     fn injector_binds_once() {
         let t = tl();
-        assert!(t.bind_injector());
-        assert!(!t.bind_injector());
+        assert!(t.bind_injector().unwrap());
+        assert!(!t.bind_injector().unwrap());
     }
 }

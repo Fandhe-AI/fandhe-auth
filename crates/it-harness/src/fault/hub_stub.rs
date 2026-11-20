@@ -168,7 +168,10 @@ impl<W: Wait> HubStubFaultInjector<W> {
     /// 1 つの実行に結べる注入器は 1 つだけ。事象の呼び出し位置（`log_pos`）は注入器ごとの呼び出しの記録の件数なので、
     /// 複数あると順序の照合が崩れる。2 つ目は `AlreadyBound`。
     pub fn new(wait: W, timeline: &FaultTimeline) -> Result<Self, HubStubFaultError> {
-        if !timeline.bind_injector() {
+        if !timeline
+            .bind_injector()
+            .map_err(HubStubFaultError::Record)?
+        {
             return Err(HubStubFaultError::AlreadyBound);
         }
         Ok(Self {
@@ -262,7 +265,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
     ) -> Result<(FaultRecord, InjectionLog), HubStubFaultError> {
         self.check_run(&timeline)?;
         let record = timeline
-            .finish(recorded_at)
+            .finish_bound(recorded_at)
             .map_err(HubStubFaultError::Record)?;
         Ok((record, self.inner.log().clone()))
     }
