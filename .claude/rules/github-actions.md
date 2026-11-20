@@ -38,7 +38,7 @@ TASK-680 が結線するときの契約は次のとおり。値は spec の ID �
 
 1. ジョブ ID `deps-audit` を変えず、`ci-complete` の `needs` から外さない。`if:` による skip・`continue-on-error`・`paths` フィルタを付けない（DPOL-34）。
 2. 処理は TASK-679 の監査の実行スクリプト（`scripts/`）と make ターゲット（名前は未定）を呼ぶ。`ci.yml` に検査のロジックを書かない。
-3. advisory DB は実行の前に 1 回だけ取得し、以後の全ての実行に `--disable-fetch`（cargo deny）・`--no-fetch`（cargo audit）と `--locked` を付け、`Cargo.lock` が書き換わっていないことを確かめる。使った DB の commit と取得日を記録する（DPOL-33・TASK-679）。
+3. advisory DB は実行の前に 1 回だけ取得し、以後の全ての実行に取得なしの指定（cargo deny は `--disable-fetch`、cargo audit は `--no-fetch`）を付ける。`Cargo.lock` を書き換えない確かめは、cargo deny は `--locked`、cargo-audit 0.22.2 は `--locked` を受け付けないため `--file Cargo.lock` で既存の lock を入力にして、どちらも実行後に `Cargo.lock` に変更が無いことを確かめる（コマンド例は `./dependency-policy.md`）。使った DB の commit と取得日を記録する（DPOL-33・TASK-679）。
 4. 設定は `deny.toml` の厳格版（TASK-668）だけを使う。例外（`ignore`・`skip`・許可の追加）を足すかは人が決め、足すときは理由・期限・範囲を同じ場所に書く（DPOL-20・DPOL-35）。
 5. 4 検査と cargo-audit の 5 つがすべて成功したときだけ緑にする（DPOL-34）。結線したらジョブ名から「frame」を外す（必須チェックは `ci-complete` だけなので影響しない）。
 6. 同じ入口を定期の実行（#54・TASK-681）からも呼べる形に保つ（DPOL-35）。
