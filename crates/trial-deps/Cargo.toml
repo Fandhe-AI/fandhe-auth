@@ -1,0 +1,26 @@
+[package]
+name = "fandhe-auth-trial-deps"
+description = "依存の試し実装（試験専用。TASK-4 (6/6)。名前・置き場は仮称）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# 陽性対照を持つ試験専用の crate なので、ルートの暫定の値に依らせず明示で公開しない。
+publish = false
+
+[lints]
+workspace = true
+
+# feature は必要最小に絞る（利用者の方針 2026-11-20）。この組は D-2026-11-20-14 の (4)(b)(c) で決まった（試し実装の時点の組。K11 は同 (4)(d)）。
+# 版は D-2026-11-20-8〜10 の選定による。
+[dependencies]
+fandhe-auth-secret = { path = "../secret" }
+# マクロだけを使う。attributes（tracing-attributes → syn 2.x）は外す。
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+metrics = "0.24.6"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+# syn は parse_file（full）と Type/Item の読み取り（parsing）だけ使う。visit・printing は不要（D-2026-11-20-14 の (4)(c)）。
+syn = { version = "3.0.10", default-features = false, features = ["full", "parsing"] }

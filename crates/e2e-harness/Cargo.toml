@@ -1,0 +1,21 @@
+[package]
+name = "fandhe-auth-e2e-harness"
+description = "passkey の E2E ハーネスの枠（試験専用。仮想 authenticator の結果は実機の結果ではない）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# 試験専用・仮称（人が確定する）。どの crate からも依存しない。workspace 内の依存は secret だけ
+# （セッション ID を秘密値の型で持つ。SECR-30・SECR-31。`e2e-harness → secret` の辺は利用者の承認、2026-11-20）。
+# 外部依存は serde_json だけ。2026-11-20 の利用者の決定（試験専用の crate に限り直接依存として採用）による。
+# Cargo.lock に既存で package は増えない（hub-stub・console-stub と同じ宣言）。版の固定方針と deny.toml は TASK-668。
+# WebDriver のクライアントは std の自前（loopback 限定・同期）。HTTP クライアント・非同期ランタイムは足さない。
+# it-harness・minimal-host（TASK-716）への辺が要るときは、辺を足す段で scripts/check-crate-deps.sh の許可表を人に確かめる。
+[dependencies]
+fandhe-auth-secret = { path = "../secret" }
+serde_json = "1"

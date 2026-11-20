@@ -3,7 +3,11 @@
 #
 # 呼び出し:
 #   secret-scan.sh            staged 差分の追加行を走査する（lefthook pre-commit から呼ばれる）
-#   secret-scan.sh --tracked  追跡済みファイル全体を走査する（`make secret-scan`。CI への組み込みは別 Issue）
+#   secret-scan.sh --tracked  追跡済みファイル全体を走査する（`make secret-scan`）
+#   secret-scan.sh --tracked --summary
+#                             上記と同じ走査で、出力から該当ファイル名を除く（規則 ID・件数だけ。公開ログ用。
+#                             パスに値が含まれ得る・改行を含むパスが出力行を偽装し得るため。SECR-23）。
+#                             CI は scripts/secret-scan-ci.sh 経由でこの形だけを使う
 #   それ以外の引数は usage を出して終了コード 2。検査を外す引数・環境変数・除外リストは置かない。
 #
 # 規則表（規則 ID は暫定。確定は人が行う）:
@@ -22,8 +26,13 @@
 # 一致した行・値・値の一部・長さは出さない。0 件なら終了コード 0、1 件以上なら 1。
 #
 # 走査範囲: 追加行のみ（削除行は漏洩済み値の除去コミットを妨げないため対象外）。
-# .agents/skills/・.claude/skills/・*.lock は対象外（skills-lock.json 管理の外部取得物・ハッシュ列）。
-# 範囲外で検出力が無いもの: コミット履歴・submodule の中・バイナリ・規則に無い形（長い 16 進や base64 の塊単体）。
+# 本文は `git diff --text` で受けるため、.gitattributes の binary・-diff 属性や NUL を含むファイルも走査する。
+# NUL は取り除いた版と空白へ置き換えた版の両方で照合する。照合できるのは上の規則表の形式（行内の文字列）だけで、
+# 圧縮・エンコード（base64 等）・複数行に分割された値・規則に無い形の値は検出できない。
+# .agents/skills/・.claude/skills/・*.lock は本文の走査（規則 assignment 等）の対象外（skills-lock.json 管理の外部取得物・ハッシュ列）。
+# ただし env-file の名前の検査は除外より前に全パスへ掛かる（除外は本文の走査にだけ効く。fail-closed）。
+# 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
+# 本文のバイト列は照合するが、圧縮・エンコードの展開と、複数行に分かれた値の復元はしない。
 # 保守的なヒューリスティックであり網羅的なスキャナの代替ではない。AAUD-30 の実行時の登録簿による走査とも別物。
 #
 # 誤検知時はダミー値・環境変数参照へ書き換える。`--no-verify` によるバイパスは行わない。
@@ -37,15 +46,42 @@ set -euo pipefail
 # bash は LC_ALL への代入時に setlocale し直すため、以降の照合すべてに効く。
 export LC_ALL=C
 
+# fd 4: 元の標準エラー。固定の文言（診断・集計）はすべてここへ出す。--summary では fd 2 を捨てるため、
+# 以降の文言は `>&4` で出す（シェル・外部コマンドの生の診断は fd 2 に残り、--summary では出ない）。
+exec 4>&2
+
+# 想定外の失敗（set -e 相当）は検出（1）と取り違えないよう、すべて検査不能（2）として止める（fail-closed）。
+set -E
+trap 'echo "secret-scan: internal error; aborting" >&4; exit 2' ERR
+
+# 置換参照（refs/replace/）でオブジェクトの中身が差し替わると、検査対象と実際の内容が食い違う。無効にする。
+export GIT_NO_REPLACE_OBJECTS=1
+# git の呼び出しは、設定で外部プログラムを起動し得る経路（hooks・fsmonitor）を無効にして通す。
+g() {
+  git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
+
 mode=staged
-case "$#:${1:-}" in
-  0:) ;;
-  1:--tracked) mode=tracked ;;
+summary=0
+case "$#:${1:-}:${2:-}" in
+  0::) ;;
+  1:--tracked:) mode=tracked ;;
+  2:--tracked:--summary)
+    mode=tracked
+    summary=1
+    ;;
   *)
-    echo "usage: secret-scan.sh [--tracked]" >&2
+    echo "usage: secret-scan.sh [--tracked [--summary]]" >&4
     exit 2
     ;;
 esac
+
+# --summary（公開ログ用）では、シェル自身と外部コマンド（git・cd・mktemp 等）の診断を含む標準エラー全体を
+# /dev/null へ向ける（診断はパス・値を含み得る。SECR-23）。固定の文言だけを、退避した元の標準エラー（fd 4）へ出す。
+# 失敗は終了状態で検知し、固定の文言と終了コードで伝える。通常モードは受け継いだ標準エラーをそのまま使う。
+if [ "${summary}" -eq 1 ]; then
+  exec 2> /dev/null
+fi
 
 # 行に対する規則（bash 3.2 互換のため添字配列を並べる）。nocase_from 以降は大文字小文字を区別しない。
 rule_ids=(vendor-token private-key jwt jwk-private credential-url assignment)
@@ -81,7 +117,7 @@ classify_line() {
       hit="${i}"
       break
     elif [ "${rc}" -gt 1 ]; then
-      echo "secret-scan: regex evaluation failed (rc=${rc}); aborting" >&2
+      echo "secret-scan: regex evaluation failed (rc=${rc}); aborting" >&4
       exit 2
     fi
   done
@@ -94,7 +130,7 @@ classify_line() {
 q='"' at='@' dash='-----' hi=$'\xe9'
 jwk_d="Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij"
 selftest_fail() {
-  echo "secret-scan: self-test failed (regex engine / locale mismatch?); aborting" >&2
+  echo "secret-scan: self-test failed (regex engine / locale mismatch?); aborting" >&4
   exit 2
 }
 # expect_rule <規則 ID> <行>: その規則に分類されること
@@ -125,18 +161,33 @@ expect_none "+password = ${q}short${q}"
 
 # サブディレクトリから直接実行しても走査範囲が狭まらないよう、リポジトリルートで実行する。
 # rev-parse の失敗を `cd "$(...)"` に埋めると cd "" になり失敗が隠れるため、先に代入で受ける。
-if ! repo_root="$(git rev-parse --show-toplevel)" || [ -z "${repo_root}" ]; then
-  echo "secret-scan: not inside a git work tree; aborting" >&2
+# `$(...)` は末尾の改行を落とすため、番兵（x）を付けて受けてから外す（改行で終わるパスも保つ）。
+if ! repo_root="$(g rev-parse --show-toplevel && printf x)"; then
+  echo "secret-scan: not inside a git work tree; aborting" >&4
   exit 2
 fi
-cd "${repo_root}"
+repo_root="${repo_root%x}"
+repo_root="${repo_root%$'\n'}"
+if [ -z "${repo_root}" ]; then
+  echo "secret-scan: not inside a git work tree; aborting" >&4
+  exit 2
+fi
+if ! cd "${repo_root}"; then
+  echo "secret-scan: cannot enter the repository root; aborting" >&4
+  exit 2
+fi
 
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")"
+if ! tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")" || [ -z "${tmp_dir}" ]; then
+  echo "secret-scan: mktemp failed; aborting" >&4
+  exit 2
+fi
 trap 'rm -rf "${tmp_dir}"' EXIT
 
 # 利用者の git 設定で出力形式が変わると追加行・ファイル名を取りこぼすため固定する。
 #   --no-color: color.diff / color.ui = always で行頭に色コードが付き `+` 行を検出できなくなる
 #   --no-ext-diff / --no-textconv: diff.external・textconv ドライバが本文を差し替える
+#   --text: .gitattributes の binary・-diff 属性で本文が検査から外れるのを防ぐ（PR 内の属性変更で
+#     検査を回避させない。SECR-23）。NUL を含むファイルも本文を走査する（fail-closed）
 #   --no-renames: リネームを削除 + 追加として扱い、移動先の全行を走査する（除外パスからの移動も含む）
 #   --src-prefix / --dst-prefix: diff.noprefix・diff.mnemonicPrefix でヘッダが `+++ b/` 以外になる
 # --tracked では空の tree と index の差分を取る。追跡ファイルの全行が追加行になるため、
@@ -145,17 +196,17 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 # 空になりうる配列を使わず mode で分岐し、tracked のときだけ empty_tree を渡す。
 empty_tree=""
 if [ "${mode}" = tracked ]; then
-  if ! empty_tree="$(git hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
-    echo "secret-scan: failed to resolve the empty tree; aborting" >&2
+  if ! empty_tree="$(g hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
+    echo "secret-scan: failed to resolve the empty tree; aborting" >&4
     exit 2
   fi
 fi
 scan_diff() {
   if [ "${mode}" = tracked ]; then
-    git diff --cached --no-color --no-ext-diff --no-textconv --no-renames \
+    g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
       --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@"
   else
-    git diff --cached --no-color --no-ext-diff --no-textconv --no-renames \
+    g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
       --src-prefix=a/ --dst-prefix=b/ "$@"
   fi
 }
@@ -181,7 +232,7 @@ add_flagged() {
 # 1. .env 系ファイル。-z で受け、非 ASCII を含むパスが core.quotePath で引用符付き・
 #    8 進エスケープになり末尾一致しなくなるのを防ぐ。
 if ! scan_diff --name-only -z --diff-filter=ACMR > "${tmp_dir}/names"; then
-  echo "secret-scan: failed to list files; aborting" >&2
+  echo "secret-scan: failed to list files; aborting" >&4
   exit 2
 fi
 
@@ -197,12 +248,12 @@ done < "${tmp_dir}/names"
 
 # 取り違えで「対象なし」を合格にしないため、追跡ファイルがあるのに対象が 0 件なら止める。
 if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
-  if ! git ls-files -z > "${tmp_dir}/ls"; then
-    echo "secret-scan: failed to list tracked files; aborting" >&2
+  if ! g ls-files -z > "${tmp_dir}/ls"; then
+    echo "secret-scan: failed to list tracked files; aborting" >&4
     exit 2
   fi
   if [ -s "${tmp_dir}/ls" ]; then
-    echo "secret-scan: tracked files exist but none were selected for scanning; aborting" >&2
+    echo "secret-scan: tracked files exist but none were selected for scanning; aborting" >&4
     exit 2
   fi
 fi
@@ -211,51 +262,92 @@ fi
 if ! scan_diff -U0 --diff-filter=ACMR -- . \
   ':(exclude).agents/skills/**' ':(exclude).claude/skills/**' ':(exclude)*.lock' \
   > "${tmp_dir}/diff"; then
-  echo "secret-scan: failed to read diff; aborting" >&2
+  echo "secret-scan: failed to read diff; aborting" >&4
   exit 2
 fi
 
-# `+++ b/<path>` のファイルヘッダは `diff --git` から最初の `@@` までの間でだけ解釈する。
+# bash の read は NUL を保持できず（実装により NUL 以降を切る・NUL だけを捨てる）、NUL を含む行で
+# 後ろの秘密値や NUL で分割された語を見落とし得る（fail-open）。走査の前に NUL を取り除いた版と
+# 空白へ置き換えた版を作り、NUL を含む場合は両方を走査する（行番号は同じ。同じ行は二重に数えない）。
+if ! tr -d '\000' < "${tmp_dir}/diff" > "${tmp_dir}/diff.del"; then
+  echo "secret-scan: failed to normalize diff; aborting" >&4
+  exit 2
+fi
+if ! tr '\000' ' ' < "${tmp_dir}/diff" > "${tmp_dir}/diff.sp"; then
+  echo "secret-scan: failed to normalize diff; aborting" >&4
+  exit 2
+fi
+
+# scan_pass <file>: `+++ b/<path>` のファイルヘッダは `diff --git` から最初の `@@` までの間でだけ解釈する。
 # hunk 内の追加行の本文が `++ b/...`・`++...` で始まると diff 上は `+++...` になるため、
 # 行頭だけで判定するとヘッダと誤認して走査から漏れる。ヘッダ区間以外の `+` 行はすべて走査する。
-in_header=0
-current_file=""
-while IFS= read -r line || [ -n "${line}" ]; do
-  case "${line}" in
-    'diff --git '*)
-      in_header=1
-      current_file=""
-      continue
-      ;;
-    '@@'*)
-      in_header=0
-      continue
-      ;;
-  esac
-  if [ "${in_header}" -eq 1 ]; then
+# 再走査が要る（NUL がある）ときだけ、1 回目に検出した行番号を seen に記録する（bash 3.2 の添字配列）。
+seen=()
+record_seen=0
+scan_pass() {
+  local in_header=0 current_file="" line lineno=0
+  while IFS= read -r line || [ -n "${line}" ]; do
+    lineno=$((lineno + 1))
     case "${line}" in
-      '+++ "b/'*)
-        # 制御文字等を含むパスは git が二重引用符で囲む（表示用に外すのみ）
-        current_file="${line#+++ \"b/}"
-        current_file="${current_file%\"}"
+      'diff --git '*)
+        in_header=1
+        current_file=""
+        continue
         ;;
-      '+++ b/'*)
-        # 空白を含むパスには git が末尾にタブを付ける
-        current_file="${line#+++ b/}"
-        current_file="${current_file%$'\t'}"
+      '@@'*)
+        in_header=0
+        continue
         ;;
     esac
-    continue
-  fi
-  case "${line}" in
-    '+'*)
-      if classify_line "${line}"; then
-        rule_hits[hit]=$((rule_hits[hit] + 1))
-        add_flagged "${current_file:-(unknown)}"
-      fi
-      ;;
-  esac
-done < "${tmp_dir}/diff"
+    if [ "${in_header}" -eq 1 ]; then
+      case "${line}" in
+        '+++ "b/'*)
+          # 制御文字等を含むパスは git が二重引用符で囲む（表示用に外すのみ）
+          current_file="${line#+++ \"b/}"
+          current_file="${current_file%\"}"
+          ;;
+        '+++ b/'*)
+          # 空白を含むパスには git が末尾にタブを付ける
+          current_file="${line#+++ b/}"
+          current_file="${current_file%$'\t'}"
+          ;;
+      esac
+      continue
+    fi
+    case "${line}" in
+      '+'*)
+        if [ -n "${seen[lineno]:-}" ]; then
+          continue
+        fi
+        if classify_line "${line}"; then
+          if [ "${record_seen}" -eq 1 ]; then
+            seen[lineno]=1
+          fi
+          rule_hits[hit]=$((rule_hits[hit] + 1))
+          add_flagged "${current_file:-(unknown)}"
+        fi
+        ;;
+    esac
+  done < "$1"
+}
+# cmp の終了状態は 0 = 同じ（NUL なし）/ 1 = 違う（NUL あり）/ 2 以上 = エラー。後者は検査不能として止める。
+cmp_rc=0
+cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del" || cmp_rc=$?
+case "${cmp_rc}" in
+  0)
+    scan_pass "${tmp_dir}/diff.del"
+    ;;
+  1)
+    record_seen=1
+    scan_pass "${tmp_dir}/diff.del"
+    record_seen=0
+    scan_pass "${tmp_dir}/diff.sp"
+    ;;
+  *)
+    echo "secret-scan: failed to compare normalized diff (cmp exit ${cmp_rc}); aborting" >&4
+    exit 2
+    ;;
+esac
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
 total="${env_hits}"
@@ -265,21 +357,23 @@ done
 
 if [ "${total}" -gt 0 ]; then
   if [ "${mode}" = tracked ]; then
-    echo "secret-scan: findings in tracked files" >&2
+    echo "secret-scan: findings in tracked files" >&4
   else
-    echo "commit blocked: staged changes look like they contain a secret" >&2
+    echo "commit blocked: staged changes look like they contain a secret" >&4
   fi
   if [ "${env_hits}" -gt 0 ]; then
-    echo "secret-scan: env-file: ${env_hits} file(s)" >&2
+    echo "secret-scan: env-file: ${env_hits} file(s)" >&4
   fi
   for ((i = 0; i < rule_count; i++)); do
     if [ "${rule_hits[i]}" -gt 0 ]; then
-      echo "secret-scan: ${rule_ids[i]}: ${rule_hits[i]} line(s)" >&2
+      echo "secret-scan: ${rule_ids[i]}: ${rule_hits[i]} line(s)" >&4
     fi
   done
-  echo "secret-scan: total: ${total} finding(s) in ${flagged_count} file(s)" >&2
-  printf '%s' "${flagged_files}" >&2
-  echo "replace values with a placeholder / env var reference, or unstage the file (\`git restore --staged <file>\`)." >&2
+  echo "secret-scan: total: ${total} finding(s) in ${flagged_count} file(s)" >&4
+  if [ "${summary}" -eq 0 ]; then
+    printf '%s' "${flagged_files}" >&4
+  fi
+  echo "replace values with a placeholder / env var reference, or unstage the file (\`git restore --staged <file>\`)." >&4
   exit 1
 fi
 

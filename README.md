@@ -40,7 +40,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `Cargo.toml`・`Cargo.lock`・`crates/` | Cargo の workspace（virtual workspace）と段階 1 の crate 雛形（`crates/<名前>`、crate 名は `fandhe-auth-<名前>`）。members は明示列挙する（後述の「ビルド」） |
 | `Makefile` | `scripts/` を呼ぶだけの薄い入口（`make help` で一覧） |
 | `rustfmt.toml` | rustfmt の設定（edition のみ。値は 2024。`D-2026-11-20-12`） |
-| `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check` / `lint` / `check-crate-deps` / `dev-pg-check`）。Make なしでも直接実行できる |
+| `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check` / `lint` / `check-crate-deps` / `check-openssl-vendored` / `dev-pg-check` / `it-db` / `it-db-ci` / `e2e-chrome`）。Make なしでも直接実行できる |
 | `scripts/hooks/` | lefthook から呼ばれる Git hooks の実体 |
 | `dev/postgres/` | 開発・検証用 PostgreSQL の Docker 構成（`TASK-5`）。契約テストを流す参照実装向けで、本番では Docker を必須にしない。手順は [dev/postgres/README.md](./dev/postgres/README.md) |
 | `lefthook.yml` | Git hooks 定義（pre-commit / commit-msg） |
@@ -67,7 +67,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | [ShellCheck](https://www.shellcheck.net/) | シェルスクリプトの lint | ✓ |
 | Rust toolchain（cargo・rustfmt・clippy） | `make fmt`・`make lint`（stable の 1.100 以上が要る。`D-2026-11-20-12`） | ✓ |
 | [direnv](https://direnv.net/) | `.env` の自動読み込み | 任意 |
-| Docker・Docker Compose v2 以降・openssl | 開発・検証用 PostgreSQL と `make pg-check`（[dev/postgres/README.md](./dev/postgres/README.md)） | 任意 |
+| Docker・Docker Compose v2 以降・openssl | 開発・検証用 PostgreSQL 、`make pg-check`・`make it-db`（[dev/postgres/README.md](./dev/postgres/README.md)） | 任意 |
 
 macOS（Homebrew）の例:
 
@@ -96,8 +96,8 @@ worktree はそれぞれ別の `target/` を持つため、不要になった wo
 
 前提は Rust toolchain（cargo・rustfmt・clippy）です。MSRV は 1.100、edition は 2024 と決まっています（`D-2026-11-20-12`）。そのため stable の 1.100 以上が要ります。ルートの `Cargo.toml` の `rust-version` で 1.100 を指定し、CI も 1.100 で検査します。
 
-workspace の members は 9 crate で、ルートの `Cargo.toml` に明示して並べています（glob にしません）。
-段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）に、次の 4 つを足しています。
+workspace の members は 11 crate で、ルートの `Cargo.toml` に明示して並べています（glob にしません）。
+段階 1 の 5 crate（`core`・`secret`・`db-tests`・`client`・`plugin-oidc`）に、次の 6 つを足しています。
 段階 2 の `frontend`・`webauthn-wasm` と、Hub が担当する crate（`server`・`db-pg`・`db-fandhe`・`db-migrate`）は
 置きません（`LIB-14`・`LIB-15`）。
 
@@ -107,6 +107,8 @@ workspace の members は 9 crate で、ルートの `Cargo.toml` に明示し�
   名前と置き場は仮称・暫定で、人が確定します。
 - `console-stub`（console の検証用 stub。`TASK-8`）: 試験専用で、扱いは `hub-stub` と同じです。
 - `it-harness`（結合試験のハーネスの枠。`TASK-10`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/integration.md` です。
+- `e2e-harness`（passkey の E2E のハーネスの枠。`TASK-11`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/e2e.md` です。
+- `load-harness`（計測・負荷のハーネスの計測・集計・負荷の生成・対象の呼び出しの部品。`TASK-12`）: 試験専用で、どの crate からも依存されません。試験（dev）だけ `it-harness`・`hub-stub` に依存します。構成は `docs/harness/load.md` です。
 
 手順は次の順です。直接実行する場合のコマンドも併記します。
 
@@ -115,7 +117,7 @@ workspace の members は 9 crate で、ルートの `Cargo.toml` に明示し�
 | 1 | `make build` | `cargo build --workspace --locked` | workspace 全体をビルドする |
 | 2 | `make test` | `cargo test --workspace --locked` | 試験を流す（現時点で試験は 0 件） |
 | 3 | `make fmt` | `cargo fmt --all` | 整形を適用する（ソースを書き換える） |
-| 4 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査・clippy `-D warnings`・crate 間の依存の向き |
+| 4 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査・clippy `-D warnings`・crate 間の依存の向き・vendored の検査 |
 | 5 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きだけを許可表と照合する |
 
 約束:
@@ -138,10 +140,16 @@ workspace の members は 9 crate で、ルートの `Cargo.toml` に明示し�
 | `make setup` | `scripts/setup.sh` | Git hooks 有効化と `.env` 雛形の配置 |
 | `make check` | `scripts/check.sh` | editorconfig-checker + shellcheck（ソースは変更しない） |
 | `make fmt` | `cargo fmt --all` | rustfmt で整形を適用する（ソースを書き換える） |
-| `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査（CI の `lint` ジョブと同じ契約） |
+| `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査 + vendored の検査（CI の `lint` ジョブと同じ契約） |
 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
+| `make no-vendored` | `scripts/check-openssl-vendored.sh` | `openssl-sys` の `vendored` feature が 0 件かを `cargo tree -e features` で検査する。合否は試験専用メンバーを除いた本番対象メンバーの normal・build 依存に限る。feature は既定 + 環境変数 `PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り。無ければ空）で、全 feature と試験専用メンバーを含む走査は参考の警告、dev 依存は対象外。メンバーが本番・試験専用のどちらの表にも無ければ検査不能（2）。違反（1）と検査不能（2）を終了コードで分けられるのはスクリプトを直接実行したときだけで、`make` 経由では GNU Make が中のコマンドの 1 も 2 に変える（陰性対照つき。DPOL-13・TASK-667。名前は暫定） |
+| `make it-db` | `scripts/it-db.sh` | ハーネスの DB 結合試験（Docker 必須・`#[ignore]` の試験を流す。CI では流さない。名前は暫定） |
+| `make it-db-ci` | `scripts/it-db-ci.sh` | CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験 `db_job_frame` だけを流す。0 件は失敗。名前は暫定） |
+| `make e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネスの Chrome の E2E（chromedriver 必須・`#[ignore]` の試験を流す。結果は〔仮想〕。CI では流さない。名前は暫定） |
+| `make e2e-firefox` | `scripts/e2e-firefox.sh` | ハーネスの Firefox の E2E（geckodriver と Firefox 本体が必須。仮想 authenticator の WebDriver エンドポイントが使える組み合わせであること〔記録のある組み合わせは Firefox 156〜158 + geckodriver 0.37.1。2 つの pref は `moz:firefoxOptions.prefs` で渡す。この repo では未実行〕・`#[ignore]` の試験を流す。結果は〔仮想〕。CI では流さない。名前は暫定） |
 | `make pg-check` | `scripts/dev-pg-check.sh` | 開発・検証用 PostgreSQL の起動の確かめ（起動中のインスタンスが対象。起動・停止はしない。CI では流さない。名前は暫定） |
-| `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。CI への組み込みは別 Issue。名前は暫定） |
+| `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。`.env` 系の名前の検査は全パスに掛かり、`.agents/skills/**`・`.claude/skills/**`・`*.lock` の除外は本文の走査にだけ効く。CI では `secret scan (tracked files)` ジョブが `scripts/secret-scan-ci.sh` 経由で呼ぶ〔#51〕。名前は暫定） |
+| `make scan-canary` | `scripts/secret-scan-canary.sh` | `make secret-scan` の陰性対照（ダミーで検出器が 1 を返し、`--summary` の集計行が期待と完全に一致し、ダミー値が出力に無いことを確かめる。何も変更しない。名前は暫定） |
 | `make test-hooks` | `scripts/hooks/test-hooks.sh` | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
 
 ## 開発・検証用 DB
@@ -175,7 +183,7 @@ Linux・macOS（標準の bash 3.2 を含む）について実行します。`sc
 
 | ワークフロー | 内容 |
 |---|---|
-| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`build-test`: `make build` と `make test`（Rust の workspace のビルドと試験。ubuntu-latest）。`lint`: `make lint`（rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査。ubuntu-latest）。`ci-complete`: 全ジョブ結果の集約 |
+| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`build-test`: `make build` と `make test`（Rust の workspace のビルドと試験。ubuntu-latest）。`lint`: `make lint`（rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向き + vendored の検査。ubuntu-latest）。`it-db-ci`: `make it-db-ci`（DB を使う結合試験の枠。Docker はハーネスが起動する。ubuntu-latest）。`ci-complete`: 全ジョブ結果の集約 |
 | `ai-review.yml` | Fandhe-AI/actions の ai-review（codex）による PR 自動レビュー。Actions variable `CODEX_HOME_DIR` が未設定の間は skip される |
 | `update-external.yml` | エージェントスキル（`skills-lock.json`）と submodule（`.gitmodules`）の日次自動追従 PR。secrets は org の `SUBMODULE_PAT` を使う（`SKILLS_PAT` 未登録時は共通側が `SUBMODULE_PAT` へフォールバック）。作成する PR には `dependencies` / `automated` ラベルが付く |
 

@@ -24,6 +24,14 @@ description: >
 - 対象の型の一覧（SECR-10・SECR-29）を保つ。CI の構文木の走査で秘密値らしい欄を持つ型を見つけ、その型が一覧に無い、または欄が
   専用の秘密値の型でなければ CI を失敗させる（SECR-21。検討中。道具は `syn` を使う自前の検査〔`D-2026-11-20-10`。置き場は未定〕）。走査は人のコードレビューの確認項目で補う（SECR-21）。
 - 型を足す変更で、一覧と試験の片方だけを更新したものも CI を失敗させる（SECR-32。検討中）。
+- 一覧の暫定の記録（一覧の置き場と形は未定で、TASK-512 で作る。作るまでは型を足す変更がここへ 1 行足す）:
+  - `fandhe-auth-e2e-harness` の `SessionId`（`crates/e2e-harness/src/webdriver.rs`。非公開。`SecretString` を持つ）と、それを持つ `WebDriverSession`（SECR-10・SECR-29。試験専用の入れ物）
+- 例外: 試し実装の crate（`fandhe-auth-trial-deps`。試験専用で消す前提）の中の次の型は、その crate を消すまで一覧（SECR-10・SECR-29）の対象外
+  （SECR-29 の 2026-11-20 追記・`D-2026-11-20-14` の (4)(e)）。対象の型の範囲は (4)(e) を超えず、他の crate の型には広げない。どれも秘密値の型を包まない間に限る。
+  - `crates/trial-deps/tests/prop_debug.rs` の `Input`: `Debug` が固定の文字列を返す間（手書きの実装）
+  - `crates/trial-deps/tests/secr23_tracing.rs` の `Capture`・`CaptureWriter`・`CapturedEvent`・`FieldVisitor`・`EventSink`（`SECR-23` の試験の捕獲の型 5 つ）: `Debug` を実装しない間
+  外すのは型の一覧だけである。SECR-21 の走査が例外の型を見つけたときの判定は、未定（TASK-514 で人に確かめる。`D-2026-11-20-14` の (4)(e)）。
+  扱いが決まるまで、走査と失敗の条件（上の SECR-21・SECR-32 の箇条）を緩めない。例外の型を走査から外さない。
 
 ## 出力（Debug・Display・Serialize）
 

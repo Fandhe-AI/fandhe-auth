@@ -1,0 +1,359 @@
+# 計測・負荷のハーネス: 指標と値の区別の下書き
+
+`TASK-12`（計測・負荷のハーネス。MS-1）の 1/10（#112）の下書き。ここでは指標の定義と、値の区別の規則だけを置く。
+仕様は spec の `TASK-12` で引く（本文は写さない）。この文書は下書きで、文書名・節立て・語・規則は仮置き、人が確定する。
+記録は事実の出力であり、合否の判定でも spec の「確定」でもない（`ACPT-7`）。
+欄名・キー名・ファイル形式は 2/10（下の「結果の記録の形式」）で定めた。機材と構成の自動での取得は 7/10 で扱い、同じ文書に節を足す。
+
+## 目的と範囲
+
+本体の処理の時間・件数を測り、負荷をかけて記録するハーネス。ハーネスは合格の値を持たず、合否を付けない。
+
+含めないもの:
+
+- 障害注入（`TASK-13`）
+- 負荷の見積もり（`TASK-15`）・合格の値の導出（`TASK-21`。`AUDP-29`、`D-2026-10-17-36`）
+- 結合試験の起動の枠（`TASK-10`。`./integration.md`）
+
+## 指標の定義
+
+### 標本・区間・時計・単位
+
+- 標本は 1 回の試行（1 要求・1 操作）の所要時間。
+- 区間（始点と終点）には名前を付け、指標ごとに区間の名前を併記する。クライアント側の応答の時間とハンドラの中の時間は別の区間にする（PoC-12 の記録の分け方を ID で引く。数値は写さない）。
+- 時間の差は単調な時計（`std::time::Instant`）で測る。壁時計は差に使わず、実行の開始・終了の時刻（UTC・RFC 3339）だけに使う。
+- 内部の単位は整数のナノ秒。表示の単位は下の「結果の記録の形式」で定める。単位は値と必ず組で書く。
+
+### p95・p99
+
+- 最近順位法（nearest-rank）を使う。昇順に並べた n 個の標本 x(1)…x(n) について、k = ⌈p/100 × n⌉（1 ≤ k ≤ n）とし、pXX = x(k)。補間しない。
+- n = 0 のときは値を出さない（「なし」。0 と書かない）。
+- n が小さいと pXX が最大と同じになる。百分位の値には必ず n を併記する。
+- 既知の入力の例（4/10 の試験の期待に使う）: 1〜100 の 100 個 → p95 = 95・p99 = 99・最大 = 100。1〜10 の 10 個 → p95 = 10・p99 = 10。
+- 比べる参考として p50 と最大も同じ方法で出す（書き手の読み）。
+
+### 最悪の回
+
+spec に定義は無く、`TASK-12` の 1 行にだけ出る。次の 2 つの語に分けて定義する。
+
+- 最大: 1 回の実行の中の全標本の最大値。その試行の通し番号を併記する。
+- 最悪の回: 同じ条件で繰り返した実行（「回」）のうち、比べる指標が最も悪い 1 回。その回の通し番号と各指標を記録する。比べる指標の既定は仮置きで p99。繰り返しが 1 回のときは、その回が最悪の回になる。
+
+`TASK-12` の「最悪の回」がどちらを指すかは未決（下記）。確定まで両方を記録する。
+
+### 件数
+
+次を別々に数える。
+
+- 予定の試行数
+- 実行した試行数
+- 成功
+- 失敗（種類ごと）
+- 時間切れ
+- 除外（暖機など）
+
+不変条件: 実行 = 成功 + 失敗 + 時間切れ。除外は実行の外に別に数え、黙って落とさない。
+時間の分布は成功の試行だけで集計する（仮置き）。失敗の時間は別の分布にし、時間切れは値を持たないので件数だけで数える。
+
+### 並行数
+
+- 設定の並行数: 同時に処理中にしてよい試行の上限（閉ループのワーカーの数）。
+- 実測の最大同時実行数: 実行中に観測した、同時に処理中の試行の最大。
+- 上の 2 つは別の値で、両方を記録する。1 秒あたりの送出の件数（開ループの率。`TASK-15` の見積もりの単位）とは別の語。閉ループか開ループかは 5/10 で決める。
+- 段階ごとに並行数を変える場合（8/10）は、段階ごとに設定の並行数を持つ。
+
+## 値の区別
+
+spec の用例は ID で引き、数値は写さない。
+
+### 要件の値
+
+`04-behavior/` の項目や決定（`D-…`）で要件として決まった値。性能の目標値は持ち越しで今は無い（`04-behavior/README.md`、`TASK-15`・`TASK-21`、`AUDP-29`）。このため現時点の記録では、要件の値の欄は「未決」になる。
+
+### 初期値
+
+決定で決まったが、初期値と明示され、見直しの予定がある値（用例: `AVLB-1`・`ACPT-13`・`D-2026-10-17-62` の (1)）。
+
+### PoC のパラメータ
+
+PoC・QP で試験の条件として置いた値。要件の値としては検討中のまま（`04-behavior/README.md` の ID 規約 (a)）。
+
+### 上の 3 つに当たらない値（書き手の読み。仮置き）
+
+- 試験の条件: ハーネスの実行の設定（並行数・回数・試行数・暖機の件数）。件数は試験の入力の大きさで、要件の値ではない。
+- 測定値: 測った結果。
+- 未決: 出典が無い値。
+- 他所有者の値（Hub 等）: 写さず、出典 ID だけを持つ（`D-2026-10-15-21`）。
+
+### 規則
+
+1. 記録に載せる値は、すべて区分と出典（ID）を持つ。
+2. 区分は呼び出し元が明示で渡す。既定値を置かず、ハーネスが推測しない。
+3. 要件の値・初期値は出典 ID が必須。無ければ「未決」にする。
+4. 測定値を要件の値・初期値に上げない。区分を変えるのは人である（`ACPT-7`。`THRT-29` の「測って決める」の扱い）。
+5. PoC の数値を既定値・比べる値として置かない。
+6. 判定の欄は空けておき、人が記入する。
+
+区分の欄名・表し方は下の「結果の記録の形式」の 2 で定める。
+
+## 測定の条件
+
+機材・構成・並行数は記録の別の欄にする。具体の欄は下の「結果の記録の形式」の 5 で定め、自動での取得は 7/10 で扱う（下の「機材と構成の記録（7/10）」）。
+機材の名前・ホスト名・内部のアドレス・ホームのパスは書かない。機材は種類・CPU の数・メモリ量などの抽象的な属性で表す（`SECR-11`・`SECR-23`、04-behavior/README.md の (d)）。
+
+## 結果の記録の形式
+
+`TASK-12` の 2/10（#113）。この節は形式の定義だけで、型・出力の実装はまだ無い（後段。下の「未決・人の確認待ち」）。
+形式の識別子・キー名・トークン・文言はすべて仮置きで、人が確認する。記録は事実の出力で、合否の判定でも spec の「確定」でもない（`ACPT-7`）。
+
+### 1. 形式の基本
+
+- 形式の識別子は `fandhe-auth-load-record/1`。形式を変えたら末尾の版を上げる（`fandhe-auth-it-run-record/1`・`fandhe-auth-it-fault-record/1` と同じ流儀）。
+- UTF-8・LF・1 行 1 項目の `key: value`。キーは ASCII 固定で、値の中のトークンは半角空白 1 つで区切る。
+- 時刻は UTC・RFC 3339（秒）。実行の記録（`./integration.md` の「実行の記録の形式」）とは、この記録の `run_record_file`（実行の記録のファイル名。`it-run-<起動時刻の秒>-<pid>-<通し番号>.txt` の形で、pid と通し番号を含み同じ秒に起動した複数のハーネスも区別できる）で一意に結ぶ。`run_started_at`（`started_at` と同じ値）は補助で、秒精度のため単独では結ばない。
+- 出力先は呼び出し元が渡し、追跡ツリーの外に置く（試験では `CARGO_TARGET_TMPDIR`）。既存のファイルは上書きしない。
+  ファイル名の形は `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。
+
+### 2. 区分（値の区別）の表し方
+
+区分は値を持つ各行に `class=<トークン>` と `refs=<…>` で明示する。キーから暗黙に決めない（「値の区別」の規則 1）。
+適用除外は値を持たないメタデータの行だけ（`format:`・`run_record_file:`・`run_started_at:`・`recorded_at:`・`note:`・`judgment:`）。下の 3〜5 の各行の形式は、すべて `class=`・`refs=` を含む。
+
+| トークン | 区分 |
+| --- | --- |
+| `requirement` | 要件の値 |
+| `initial` | 初期値 |
+| `poc_parameter` | PoC のパラメータ |
+| `test_condition` | 試験の条件 |
+| `measured` | 測定値 |
+| `undecided` | 未決 |
+| `external` | 他所有者の値 |
+
+出典は `refs=<ID>[,<ID>…]` で書き、無いときは `refs=none` と書く。区分ごとの規則:
+
+- `requirement`・`initial`・`poc_parameter`: 出典が必須。出典の無い `requirement`・`initial` は記録を作る時点で誤り（fail-closed）にし、黙って `undecided` に落とさない。呼び出し元が `undecided` を明示で渡す。
+- `undecided`: 値を持たない（`value=none`）。出典は任意。
+- `external`: 値を常に持たない（`value=none`）。出典は必須（`D-2026-10-15-21`。他所有者の値を写さない）。
+- `test_condition`・`measured`: 出典は固定の印（`refs=harness_config`・`refs=measured`）。
+
+区分に既定値は無く、ハーネスが推測しない。測定値を要件の値・初期値に上げる経路を作らない。PoC の数値を既定値・比べる値として置かない（「値の区別」の規則 2・4・5）。
+
+比べる値の行は `value: <名前> class=<区分> value=<整数|none> unit=<単位> refs=<…>` の形にする。
+性能の目標値は持ち越し（`AUDP-29`、`TASK-15`・`TASK-21`）のため、p99 の目標の行は現時点で `class=undecided value=none` になる。
+
+判定の行 `judgment:` は常に出し、値は常に空にする。人が記入する欄で、ハーネスは書かない（規則 6）。
+
+### 3. 単位と指標
+
+- 時間は整数のナノ秒で、単位はキーに入れる（`p95_ns` 等）。小数・単位の換算はしない。人向けの表示の単位は 10/10 の手順書で扱う。
+- 単位のトークンは `ns`・`count`・`per_s`。値は整数だけにする。
+- 指標の行:
+  `metric: <段階>.<回> interval=<区間名> class=measured n=<n> p50_ns=<v|none> p95_ns=<v|none> p99_ns=<v|none> max_ns=<v|none> max_trial=<通し番号|none> refs=measured`
+  - 百分位の値には必ず `n` と区間名が並ぶ。`n=0` のときは百分位・最大・`max_trial` をすべて `none` にする（0 と書かない）。
+  - 不変条件: `p50 <= p95 <= p99 <= max`、`n <= success`。`metric` の分布は成功の試行だけで作る（成功のみの集計の規則は `metric` に限る）。
+  - 失敗の時間の分布は同じ形の `failure_metric:` 行（`class=measured`・`refs=measured` を持つ）で別に出し、標本は失敗の試行だけで作る。不変条件は `n <= failure`（`n <= success` は適用しない）。時間切れは件数だけで数える。
+- 最悪の回の行: `worst_run: <段階> by=<比べる指標> interval=<区間名> run=<回の通し番号|none> class=measured refs=measured`
+  - 比べる指標は呼び出し元が明示する（既定の仮置きは `p99_ns`）。同じ値が並んだときは通し番号の小さい回を採る。どの回も `n=0` のときは `run=none`。
+  - 「最大」（`metric` 行の `max_ns`・`max_trial`）と「最悪の回」の両方を出す。
+
+### 4. 段階・回・区間の配置
+
+- `stage: <段階の通し番号> class=test_condition refs=harness_config concurrency_configured=<n> repetitions=<r> trials_planned=<k> warmup=<w>`
+- `run: <段階>.<回> class=measured refs=measured concurrency_observed_max=<n> executed=<e> success=<s> failure=<f> timeout=<t> excluded=<x>`
+- `failure_kind: <段階>.<回> class=measured refs=measured kind=<種類名> count=<c>`
+- 件数の不変条件: `executed = success + failure + timeout`、`failure = Σ failure_kind の count`。除外は `executed` の外に別に数える。
+- 設定の並行数（`stage` 行）と実測の最大同時実行数（`run` 行）は別の欄にする。閉ループのときは `concurrency_observed_max <= concurrency_configured` を不変条件の候補とする（5/10 の決定に依る）。
+- 段階が 1 つでも `stage: 1 …` を出す。段階を変える実行（8/10）は同じ行の並びを繰り返す。
+
+### 5. 測定の条件（機材・構成・並行数）
+
+- 機材は抽象的な属性だけで、`condition_machine: <属性> <値|unknown> class=test_condition refs=harness_config` の形にする。属性は 6 つで、すべて常に出し、取れないものは `unknown` と明示する。
+  - `cpu_count`・`memory_mib`・`arch`・`os_family`
+  - `virtualization`（`none`・`vm`・`container`・`unknown`）
+  - `build_profile`（`debug`・`release`・`unknown`）
+- 自動での取得は 7/10 で、この段は欄だけを定める。
+- ホスト名・機材の名前・内部のアドレス・ホームのパス・利用者名の欄は作らない（`SECR-11`・`SECR-23`、04-behavior/README.md の (d)）。
+- 構成は `condition_component: <種類> started real|started stub|not_started class=test_condition refs=harness_config` の形にし、語彙と 4 種は実行の記録の `component` 行と同じにする。
+  stub を含むときは、stub の合格を実物の合格に数えない旨の `note:` を出す（`A-2026-10-28-9`・`ACPT-7`）。
+- `condition_loop: closed|open|undecided class=test_condition refs=harness_config`（5/10 が決めるまでは `undecided` を許す）。並行数は 4 の `stage` 行に書く。
+- 版の情報（revision・rustc の版）は実行の記録側にあり、`run_record_file` で結ぶ。この記録には重複して持たない。
+
+### 6. 差し込み対策（出してはいけないものと守り方）
+
+- 許可する文字と語彙はフィールドの種類ごとに分ける。
+  - 名前（区間名・値の名前・キー）: ASCII の `[a-z0-9_]`・1〜64 文字。
+  - 構成要素名（`condition_component` の種類名）: 実行の記録の `component` 行と同じ固定語彙（`Database`・`Host`・`HubStub`・`ConsoleStub`）だけ。大文字を含み、上の名前の規則は適用しない。
+  - 固定列挙値（`unknown`・`none`・`vm`・`release`・`closed`・`open`・`undecided`・`started`・`not_started`・`real`・`stub` 等）: フィールドごとに定めた語彙の完全一致だけ。語彙外は誤りにする。
+  - 数値フィールド（`value=`・`*_ns`・`n=` 等）: 整数だけ。値を持たないときの `none` と、未取得の `unknown` は、定めたフィールドにだけ許す。
+  - 利用者指定の名前: 作らない（自由文の欄を作らない）。必要になったら 1 つずつ人が語彙と文字を決める。
+  - `run_record_file`: `it-run-<秒>-<pid>-<通し番号>.txt` の形（ASCII の英数字・`-`・`.` だけ・1〜64 文字）。
+- 出典の ID は ASCII の英数字・`-`・`_`だけ・1〜64 文字。1 行に並べる数の上限を置く（仮置きで 8）。
+- 自由文の欄を作らない（値はすべて上のフィールド別の規則で検証する）。
+- 改行・制御文字・行区切り（U+2028・U+2029）を含む入力は、記録を作る時点で誤りにする（fail-closed）。黙って省かない。
+- 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない。誤りの文言は英語（`D-2026-11-20-13`）。
+- 設定の値・接続情報・ポート・パス・ホスト名・パスワードは記録に入れない（`SECR-11`・`SECR-23`・`SECR-26`）。環境変数・設定ファイルは読まない（`DPOL-32`）。
+- 後段の試験では、目印（canary）の文字列が記録と `Debug` に出ないことを確かめる。
+
+### 7. 見本の記録
+
+1/10 の既知の入力（1〜100 の 100 個を ns として扱う）の合成の値だけを使う。時刻は epoch 付近の合成の値で、PoC の数値・要件の値は置かない。
+
+```text
+format: fandhe-auth-load-record/1
+run_record_file: it-run-0-1-1.txt
+run_started_at: 1970-01-01T00:00:00Z
+recorded_at: 1970-01-01T00:01:00Z
+condition_machine: cpu_count unknown class=test_condition refs=harness_config
+condition_machine: memory_mib unknown class=test_condition refs=harness_config
+condition_machine: arch unknown class=test_condition refs=harness_config
+condition_machine: os_family unknown class=test_condition refs=harness_config
+condition_machine: virtualization unknown class=test_condition refs=harness_config
+condition_machine: build_profile unknown class=test_condition refs=harness_config
+condition_component: Database not_started class=test_condition refs=harness_config
+condition_component: Host not_started class=test_condition refs=harness_config
+condition_component: HubStub started stub class=test_condition refs=harness_config
+condition_component: ConsoleStub not_started class=test_condition refs=harness_config
+note: stub results are not counted as real results
+condition_loop: undecided class=test_condition refs=harness_config
+stage: 1 class=test_condition refs=harness_config concurrency_configured=1 repetitions=1 trials_planned=100 warmup=0
+run: 1.1 class=measured refs=measured concurrency_observed_max=1 executed=100 success=100 failure=0 timeout=0 excluded=0
+metric: 1.1 interval=client_response class=measured n=100 p50_ns=50 p95_ns=95 p99_ns=99 max_ns=100 max_trial=100 refs=measured
+worst_run: 1 by=p99_ns interval=client_response run=1 class=measured refs=measured
+value: p99_target class=undecided value=none unit=ns refs=none
+judgment:
+```
+
+`condition_component` の種類名は実行の記録の `component` 行と同じ語彙（`Database`・`Host`・`HubStub`・`ConsoleStub`）で、見本の起動状態は合成の値である。
+
+### 8. 1/10 の記述との関係
+
+この節で、1/10 が 2/10 に回した欄名・キー名・ファイル形式・表示の単位・区分の表し方・機材と構成の欄・差し込み対策を定めた。
+
+## 計測の部品（3/10）
+
+`TASK-12` の 3/10（#114）。時間を測り、標本と件数を集める部品を `crates/load-harness`（`fandhe-auth-load-harness`。仮称）に置いた。
+通常の依存は 0（std だけ）。試験（dev）の依存は 5/10 の節に書く。試験専用で、どの crate からも依存されない（`LIB-2`・`LIB-4`）。
+
+- 時計: trait `MonotonicClock` が原点からの経過を整数ナノ秒（`u64`）で返す。本番は `StdMonotonicClock`（`Instant`）。試験は偽の時計を手で進める。
+- 名前: `IntervalName`・`FailureKind` は ASCII の `[a-z0-9_]`・1〜64 文字を作る時点で検査する（上の「差し込み対策」）。
+- `RunMeter`（1 回の「回」）: 区間名を宣言して作る（0 件・重複・宣言外は誤り）。`begin_trial` が通し番号（1 始まり）を振り、同時実行の数とその最大を更新する。
+- `Trial`: `start`・`end`・`measure` で区間を測る。終点が始点より前・二重の開始・始めていない区間の終了は誤り（黙って 0 にしない）。
+  `finish(Outcome)` で `Success`・`Failure(種類)`・`Timeout`・`Excluded` のいずれかで締める。
+- 取り出し: `snapshot`・`finish` が `RunSamples` を返す。区間ごとの成功の標本・失敗の標本（通し番号つきのナノ秒）、件数、失敗の種類ごとの件数、実測の最大同時実行数を持つ。
+  試行が残っていれば誤り。`executed = success + failure + timeout`・`failure = Σ 種類ごとの件数` を検査してから返す。
+- 4/10 に渡すもの: `RunSamples`。百分位・最悪の回の計算と `fandhe-auth-load-record/1` の出力は 4/10 以降。この段では合否を付けず、値の区分も持たない（記録の出力の段で付ける）。
+
+仮置き（人の確認待ち）:
+
+- 締めずに捨てた試行（開いた区間を残した締めの失敗を含む）は、失敗の種類 `unfinished` として数える。不変条件を崩さず、黙って落とさないため。
+- 失敗の試行の時間は成功とは別の標本として持つ。時間切れは件数だけ、除外は件数だけで標本を持たない。
+- 実測の最大同時実行数は、開いている試行の数の最大。閉ループ・開ループのどちらにも依らない（5/10 の決定を縛らない）。
+- 成功で締めるには、宣言した区間をすべて測り終えている必要がある。
+
+## 集計の処理（4/10）
+
+`TASK-12` の 4/10（#115）。`RunSamples` から百分位などを作る純粋な処理を `crates/load-harness` の `aggregate` に置いた。依存は 0。時計・ファイル・環境変数を読まない。
+
+- `summarize_interval`: 区間の標本から `n`・p50・p95・p99・最大・`max_trial` を作る。最近順位法で、k = ⌈p·n/100⌉ を整数演算（`u128`）で求める。入力の並びに依らない。`n = 0` のときはすべて「なし」。
+- `summarize_run`: 宣言した区間を呼び出し元から受け、成功の分布と失敗の分布を別々に作る。標本の無い区間は `n = 0` の行にする。宣言が 0 件・重複は `InvalidIntervals`、宣言外の区間は `UndeclaredInterval`。
+  件数と実測の最大同時実行数はそのまま写す。
+- 不変条件（満たさなければ `InvariantViolated`）: `executed = success + failure + timeout`、`failure = Σ 種類ごとの件数`、各区間の標本数 ≤ 成功（失敗）の件数、p50 ≤ p95 ≤ p99 ≤ 最大。溢れは `CounterOverflow`。
+- `worst_run`: 比べる指標（`MetricKey`。既定なし）と区間を明示して、成功の分布が最も悪い回の通し番号（1 始まり）を返す。標本の無い回は候補にしない。全回が標本無しなら `None`、回が空なら `NoRuns`。
+- 範囲外: `fandhe-auth-load-record/1` の出力・`class=` の付与、合否（`ACPT-7`）、段階・回を回す処理（8/10）。
+
+仮置き（人の確認待ち）:
+
+- `max_trial` が同値のときは通し番号の最も小さい標本。最悪の回の同値の規則と向きを揃えた。
+- 最悪の回は成功の分布だけで比べる。全回が `n = 0` のときは `None`、回が空のときは誤りにする。
+- 区間の宣言を呼び出し元から受ける API の形（`RunSamples` を変えないため）。
+- 記録の出力を担当する段が 5/10〜10/10 の題から見当たらない。担当の段を人が決める。
+
+## 負荷の生成（5/10）
+
+`TASK-12` の 5/10（#116）。`crates/load-harness` の `generate` に、呼び出し元が指定した並行数のワーカーで対象を繰り返し呼ぶ部品を置いた。
+名前・語・値はすべて仮置きで、人が確認する。対象の経路を呼ぶ部分（6/10）・機材と構成の取得（7/10）・段階を変える実行（8/10）は含まない。
+合否は付けない（`ACPT-7`）。
+
+- API: `LoadConfig::new(concurrency, trials_planned, warmup)`（既定値なし。並行数は 1〜1024）、`run_closed_loop(meter, &config, target)`、結果 `LoadRun`、誤り `LoadError`（6 種）。
+- 閉ループを仮置きで採る（`LoopModel::Closed`。記録の `condition_loop` の材料は `closed`）。各ワーカーは 1 度に 1 試行だけ持つ。
+- 暖機の段（`warmup > 0` のときだけ）を回してから本計測の段を回す。2 つの段は重ならない。暖機の試行は結果にかかわらず `Excluded` で締める。
+  暖機の試行も通し番号を消費するため、本計測の標本の番号は `warmup + 1` から始まる。
+- 本計測で対象が `Excluded` を返したら `InvalidOutcome`（除外は生成器だけが付ける）。
+- 停止の規則: 誤りの記録と停止は枠の取得と同じロックで 1 つの代入として確定する（#5984）。記録の後に新しく取得できる枠は 0 件（保証は枠の取得だけ）。記録より前に取得済みの枠の試行は止めない。記録時点で未完了の試行は各ワーカー最大 1 件（設定の並行数が上限）。対象の閉包の panic はワーカー内の `catch_unwind` が捕捉してその場で記録する。join で初めて記録されるのは、ワーカー内で捕捉されずにスレッドを終了させた panic（対象の閉包の外）だけで、検出・記録までに他のワーカーが新しく取得して進める件数の累計は上限を保証しない。立てたワーカーを join してから最初の誤りを返す。panic の中身・`io::Error` の文言は載せない。
+- 不変条件: 実測の最大同時実行数 <= 設定の並行数（2/10 の 4 の候補を閉ループで採る）、`executed == trials_planned`、`excluded == warmup`（違えば `CountMismatch`）。
+- ハーネスの上で動くこと: 試験（dev）だけ `it-harness`・`hub-stub` に依存する（`tests/on_it_harness.rs`。Docker・ネットワークなし）。許可表の行は人の確認待ち。
+- 記録の出力（`fandhe-auth-load-record/1`）を担当する段は未決のまま持ち越す。
+
+## 負荷の対象の呼び出し（6/10）
+
+`TASK-12` の 6/10（#117）。`crates/load-harness` の `target` に、対象の経路を名前・区間と組で呼び、結果を記録の構造体に残す部品を置いた。
+名前・語・値はすべて仮置きで、人が確認する。機材と構成の取得（7/10）・段階を変える実行（8/10）は含まない。合否は付けない（`ACPT-7`）。
+
+- API: `TargetName::new`（規則は区間名と同じ）、`TargetSpec::new(name, interval)`、`run_target(clock, &spec, &config, call)`、結果 `TargetRun`（経路・区間・`LoadRun`・`RunSummary`）、誤り `TargetError`（`Load`・`Aggregate`・`Meter`）。
+- 呼び出しの結果 `CallResult` から `Outcome` への写し（固定。1 か所）:
+
+  | `CallResult` | `Outcome` |
+  | --- | --- |
+  | `Ok` | `Success` |
+  | `Rejected` | `Failure(rejected)` |
+  | `Unavailable` | `Failure(unavailable)` |
+  | `TimedOut` | `Timeout` |
+
+  対象から `Excluded` を返す道は作らない（除外は生成器だけが付ける）。
+- 対象の中の計測の誤りは、最初の誤りを残し、戻ったら `TargetError::Meter`（元の種類を保つ）で返す。panic・`unwrap` は使わない。
+  - 試行の始めに誤りの記録を見た試行は、対象を呼ばずに `Excluded` を返す。記録より前にこの確認を通った試行（並行数が 2 以上のとき）は、記録の後に対象を呼び得る。
+  - 停止は生成器の fail-closed に依る。暖機の段は結果を問わず除外で締めるため止まらず、残りの暖機は対象を呼ばずに回って本計測の段へ進む。
+    本計測の段では `Excluded` が生成器の `InvalidOutcome` で拒否されて新しい試行が止まる。拒否された試行は締められず `unfinished` に数えられ、ワーカーごとに 1 件起こり得る。
+  - 生成器は誤りの記録と停止を枠の取得と同じロックで確定する（#5984。順序は `run_closed_loop` の doc）。
+- 結果の記録: `TargetRun` に残すところまで。試行番号と時間の標本が残るのは成功と失敗（種類を問わない）だけで、失敗の種類の内訳・時間切れ・暖機の除外は件数だけが残り、個々の試行には対応付けられない。`fandhe-auth-load-record/1` のファイルへの出力は未提供で、担当の段は未決。
+- 対象は stub だけ（`TODO(TASK-716)`。実物の経路は最小の組込み先の完成後）。stub の合格を実物の合格に数えない（`A-2026-10-28-9`・`ACPT-7`）。
+  `tests/on_it_harness.rs` で it-harness の上の Hub の stub の JWKS の配信を呼ぶ。stub は Mutex でワーカーを直列化するため、測った時間に意味は無く、試験は件数だけを見る。
+- 依存の辺は変えない（通常の依存は 0。試験の依存は 5/10 のまま）。
+
+## 機材と構成の記録（7/10）
+
+`TASK-12` の 7/10（#118）。`crates/load-harness` の `condition` に、測定の条件を記録の行に出す部品を置いた。
+名前・語・値はすべて仮置きで、人が確認する。合否は付けない（`ACPT-7`）。
+
+- 自動で取得するのは機材の属性（6 属性）だけ。構成と負荷の型は取得せず、呼び出し元が渡す入力である。
+  - 構成: 起動した構成要素の（種類, stub の印）の組を `ComponentConditions::new` に渡す。組は呼び出し元が it-harness の起動済みの構成
+    （`RunningHarness::composition_record()` の各 entry の種類と stub の印）から写して作る。写しは自動ではない。
+    渡さなかった種類は `not_started` で出る（起動していないのか渡し忘れかは出力から区別できない）。
+  - 負荷の型: 呼び出し元が `LoopModel` を渡す（`MeasurementConditions::detect(components, loop_model)`）。
+
+- API: `MeasurementConditions`（機材・構成・負荷の型。`detect` が機材を自動で取得）、`MachineCondition`（`detect_with`・`detect`・`new`）、
+  `MachineProbe`・`StdMachineProbe`、`ComponentConditions`（`new` が重複と stub の印の食い違いを誤りにする）、`ConditionComponent`、`ConditionError`。
+  `Display` は形式の 5 の行（`condition_machine` 6 行・`condition_component` 4 行・stub があるときだけ `note:`・`condition_loop`）を出す。
+- 取得元: `cpu_count` は `available_parallelism`（使える並列数。物理 CPU 数ではない）、`memory_mib` は Linux の `/proc/meminfo` の `MemTotal`
+  （固定パス・64 KiB の上限・整数だけ。上限で途切れたときは改行まで読めた行だけを解析する。コンテナではホストの総量）、`arch`・`os_family` は `std::env::consts`（std が特定できない `unknown` は取得不能の `None` にして `unknown` と出す。`arch` の許可語彙は `arm64ec`〔Windows ARM64EC〕を含む）、`build_profile` は確かめる手段が無いため常に `unknown`（`debug_assertions` はプロファイルで上書きされ誤記録になる。確かな値は `new` で明示）。
+  `virtualization` は判別の方法が未決のため常に `unknown`。
+- 取れない（`None`）値は `unknown`。`arch`・`os_family` は固定の許可語彙だけを受け、語彙の外の値は `detect_with`・`detect`・`new` のどれでも `InvalidMachineValue` の誤りで返す（`unknown` に置き換えない）。ホスト名・機材の名前・パスは取得も記録もしない。
+- 条件は記録の単位で 1 つ持ち、`TargetRun`・`LoadRun` には入れない（8/10 の段階を変える実行で重複しないため）。構成は呼び出し元が起動したものを明示で渡し、渡さない種類は `not_started`。
+- 7 の見本との差: `condition_loop` は 5/10 の閉ループの仮置きで `closed` を出す（見本は `undecided`）。
+- 範囲外: `fandhe-auth-load-record/1` のファイル全体の出力、`stage` 行（並行数は 8/10 とファイル出力の段）、仮想化の判別。
+  Host の実体は `TODO(TASK-716)` まで起動しない。依存の辺は変えない（通常の依存は 0）。
+
+## 未決・人の確認待ち
+
+- 文書名・節立て
+- 百分位の方法（最近順位法・補間なし）
+- 「最悪の回」の読み（標本の最大か、繰り返しの中の最悪の 1 回か）と、比べる指標の既定
+- 失敗・時間切れを時間の分布から分ける扱い
+- 区分の追加分（試験の条件・測定値・未決・他所有者の値）
+- 閉ループか開ループか（5/10）: 閉ループ（固定数のワーカー）を仮置きで採った。開ループは作っていない。人が確認する
+- 5/10 の仮置き: 並行数の上限 1024、暖機の段と本計測の段を分けること、本計測での `Excluded` の拒否、停止の順序（記録より前に枠を取り終えた試行は走り切る。#5984）、API の名前（`generate`・`run_closed_loop`・`LoadConfig`・`LoadRun`・`LoadError`）
+- 許可表の行: `fandhe-auth-load-harness` → `fandhe-auth-it-harness`・`fandhe-auth-hub-stub` の試験（dev）の辺（5/10）
+- 記録への偽の行の差し込みへの対策（下の「結果の記録の形式」の 6 で扱った。内容は人が確認する）
+- 結果の記録の形式の型と出力の実装の置き場。3/10（#114）で別の crate `crates/load-harness`（仮称）に計測の部品を置いた。
+  `it-harness` の crate doc が `TASK-12` を別のハーネスとしているため、`it-harness` の module にはしない。crate の追加・名前・許可表の行は人が決める
+- 記録の形式の識別子・キー名・トークン・ファイル名の形（すべて仮置き）
+- 出典の無い `requirement`・`initial` を誤りにする扱い（`undecided` に落とさない）
+- `test_condition`・`measured` の出典を固定の印で表すこと
+- 失敗の時間の分布（`failure_metric`）の扱いと、同じ値が並んだときの最悪の回の選び方
+- 閉ループのときの並行数の不変条件（5/10 の決定に依る）
+- 版の情報を実行の記録側に寄せ、`run_record_file` で結ぶこと
+- 6/10 の仮置き: `CallResult` の 4 種、失敗の種類名 `rejected`・`unavailable`、`TargetName` の規則、API の名前（`target`・`run_target`・`TargetSpec`・`TargetRun`・`TargetError`）
+- 7/10 の仮置き: `os_family` に `consts::OS` を採ること、`cpu_count` を使える並列数とすること、`memory_mib` を `/proc/meminfo` の総量とすること、
+  `virtualization` を常に `unknown` とし判別の方法を未決とすること、`build_profile` を標準の取得元では常に `unknown` とし、確かな値は呼び出し元が明示すること、
+  自動取得した値の区分を `test_condition`・`refs=harness_config` とすること、「記録」の読み（ファイル出力を含まない）、API の名前（`condition` 以下）
+- 「結果が記録される」の読み: `TargetRun` の構造体まで。ファイルへの出力を担当する段は未決（人が決める。受け入れ条件を満たしたかの判定も人）

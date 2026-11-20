@@ -19,12 +19,22 @@ cat <<'EOF'
   check       scripts/check.sh               editorconfig-checker + shellcheck（ソースは変更しない）
   test-hooks  scripts/hooks/test-hooks.sh    フックスクリプト自体の回帰テスト（bash + git のみ）
   secret-scan scripts/hooks/secret-scan.sh --tracked   追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定）
+  scan-canary scripts/secret-scan-canary.sh   secret-scan の陰性対照（ダミーで検出器が 1 を返し、集計行が期待と完全に一致し、ダミー値が出ないことを確かめる。何も変更しない）
   build       cargo build --workspace --locked   workspace 全体をビルドする（--locked。--all-features は使わない）
   test        cargo test --workspace --locked    workspace 全体の試験を流す
   fmt         cargo fmt --all                rustfmt で整形を適用する（ソースを書き換える）
-  lint        scripts/lint.sh                rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向き
+  lint        scripts/lint.sh                rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向き + vendored 検査
   crate-deps  scripts/check-crate-deps.sh    crate 間の依存の向きの検査（許可表との照合）
+  no-vendored scripts/check-openssl-vendored.sh openssl-sys の vendored の検査（合否は本番メンバーの normal・build 依存で、既定 feature と PROD_FEATURES で明示した feature だけ。全 feature の走査は参考（警告）。検査のみ）
   pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
+  it-db       scripts/it-db.sh               ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）
+  it-db-ci    scripts/it-db-ci.sh            CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験だけを流す。0 件は失敗）
+  e2e-chrome  scripts/e2e-chrome.sh          ハーネスの Chrome の E2E（chromedriver 必須・#[ignore] の試験を流す。CI 外）
+  e2e-firefox scripts/e2e-firefox.sh         ハーネスの Firefox の E2E（geckodriver・Firefox 必須（記録のある組み合わせは Firefox 156〜158 + geckodriver 0.37.1。詳細は scripts/e2e-firefox.sh）・#[ignore] の試験を流す。CI 外）
+
+CI 向けに直接実行するコマンド:
+
+  scripts/secret-scan-ci.sh [PATH]      CI 向けの入口（PATH は走査対象のリポジトリのルート）。HEAD の tree から作った一時 index を --summary（件数のみ公開）で走査し、続けて陰性対照を実行。作業中の index は読まない。終了コード 0 = 検出なし / 1 = 検出、または陰性対照の失敗（検出器の異常）/ 2 = 検査不能
 
 Git hooks（lefthook.yml から呼ばれる。直接実行も可）:
 

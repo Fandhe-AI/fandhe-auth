@@ -44,7 +44,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 | 対象 | 規則 | 根拠 |
 | --- | --- | --- |
 | `rsa`（RUSTSEC-2023-0071） | 本番の依存（RP 向けの `fandhe-auth-client` を含む）に 0 件 | DPOL-18・DPOL-21 |
-| `openssl` | 直接の宣言 0 件。逆依存の根は `webauthn-rs` 系だけ。`vendored` 不可。配備物は配備先の OpenSSL に動的にリンクする（版の記録 DPOL-12 は → Hub `AOPS-2`） | DPOL-10・DPOL-11・DPOL-13 |
+| `openssl` | 直接の宣言 0 件。逆依存の根は `webauthn-rs` 系だけ。`vendored` 不可。配備物は配備先の OpenSSL に動的にリンクする（版の記録 DPOL-12 は → Hub `AOPS-2`） | DPOL-10・DPOL-11・DPOL-13（`vendored` は `scripts/check-openssl-vendored.sh`〔`make lint`・`make no-vendored`〕で機械的に検査する。合否の対象は試験専用メンバーを除いた本番メンバーの normal・build 依存で、既定 feature と `PROD_FEATURES` で明示した feature だけ。全 feature を有効にする走査は警告だけの参考） |
 | `native-tls` | 使わない。外向き通信の TLS は OS の信頼ストアに頼らない（DPOL-46。実クライアントの選定は Hub の `ARUN-14`） | DPOL-46 |
 | `web-sys` | サーバー側のビルドに 0 件。引いてよいのは `fandhe-auth-webauthn-wasm`（段階 2）だけ。サーバーのビルドの確認は Hub のビルドにも課される（→ Hub `ARUN-16`） | DPOL-40・`D-2026-10-17-35` の (2) |
 
@@ -113,15 +113,21 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
   監査は `-e dev` を足して別に見る。
 - `--all-features` は DPOL-31 の変異スイッチなど試験用の feature も有効にし、本番のビルドの木と変わるので使わない。
   feature を明示しないと既定の feature だけを見る。
+- 本番のビルドで有効にする非既定 feature を足す変更では、同じ変更で `PROD_FEATURES` も更新する。更新しないと、その feature が引く経路（例: `openssl-sys/vendored`）が合否の検査（`make no-vendored`・DPOL-13）から外れる。
+  `scripts/check-openssl-vendored.sh` は環境変数 `PROD_FEATURES` を同じ形式で受け、合否の走査に含める。
 - `web-sys` の確認は、`fandhe-auth-webauthn-wasm` を `--exclude` で除いた workspace 全体に `--target all` を付けて行う（crate ごとの `-p` は使わない）。`--exclude` の crate が workspace に無い間（段階 2 の前）は `--exclude` を外して流す。Hub の本番のバイナリでの確認は Hub が持つ（`ARUN-16`）。
-- TASK-4 の選定基準は K1〜K12（`D-2026-11-20-7`）。K7: 試験の道具は dev 依存か別の workspace に置き、本番の依存の木に入れない。K11（推移依存の少なさ・保守）の測り方と閾値は **未定**。
-- 選定の結果（`D-2026-11-20-6`〜`10`）。版は spec の記録時点のもので、版の固定の手順は未定:
+- TASK-4 の選定基準は K1〜K12（`D-2026-11-20-7`）。K7: 試験の道具は dev 依存か別の workspace に置き、本番の依存の木に入れない。K11（推移依存の少なさ・保守）は、数の閾値を置かず、次の 4 つで見る（利用者の決定。`D-2026-11-20-14` の (4)(d)）:
+  最新の安定版・既知の advisory 0 件・feature は必要最小・依存の `rust-version` が MSRV 以下（MSRV は `D-2026-11-20-12`）。新しい crate を足すときも同じ 4 つで確かめる。
+- 選定の結果（`D-2026-11-20-6`〜`10`・`14`）。版は spec の記録時点のもので、版の固定の手順は spec に記録が無く未定:
+  - 版と feature の選び方（`D-2026-11-20-14` の (4)(a)(b)(c)）: 版は、可能な限り安全な最新の安定版（pre-release を除く）。最新の安定版が依存の `rust-version` で MSRV（`D-2026-11-20-12`）を超える、または既知の advisory があるときは、条件を満たす旧版を勝手に選ばず、その crate を上げずに利用者へ確かめる（この場合の扱いは `D-2026-11-20-14` に定めが無く未定。決める人は利用者）。feature は `default-features = false` から要るものだけを足す。
+    口は `tracing` が `std` だけ・`metrics` が既定。試験の道具は `tracing-subscriber` が `fmt` だけ・`proptest` が `std` だけ（`fork`・`timeout` を外す）・`syn` が `full`・`parsing` だけ・`libfuzzer-sys` が既定
+    試験の道具の feature は試し実装（`crates/trial-deps`）で選んだ組で、`log` の記録は `fmt` だけでは捕獲に届かない。`TASK-518` で `log` を捕まえるために要る feature（例: `tracing-subscriber` の `tracing-log`。または試験専用の別の捕獲の経路）は、(4)(a) の「要るものだけを足す」として足してよい。足すときは K11 の 4 つで確かめる。`tracing-log` を採る場合、feature を足すだけでは `log` から `tracing` への転送は始まらない（試し実装の捕獲は `with_default` の局所の subscriber）。試験の中で転送を初期化し、`log` を経由した陽性対照が捕獲先に届くことを確かめる（SECR-23・AAUD-30・AAUD-31。経路ごとの陽性対照は `./coding-rust.md` の TASK-518 の箇条）
   - ログの出す口 `tracing`・計測の出す口 `metrics`（本体の依存）。`tracing-subscriber` は dev-dependencies だけ（`D-2026-11-20-8`）
   - property test は `proptest`、fuzz は `cargo-fuzz`（`libfuzzer-sys` を使う）。いずれも本番の依存の木に入れない（K7）。
     fuzz の nightly は日付で固定せず最新を追う。実行の記録に nightly の版を残すかは **未定**（`D-2026-11-20-9`）
   - `SECR-21` の構文木の走査は `syn` を使う自前の検査（`D-2026-11-20-10`）。置き場は spec に記録が無く **未定**。
     マクロ呼び出しの中の型を見落とすかは `TASK-514` の試し実装で確かめる（main の読み）
-  - 最小の試し実装（TASK-4 の成果物）は未実施。足す前に利用者へ確かめる
+  - 最小の試し実装（TASK-4 の成果物）は実装 repo に入った（`crates/trial-deps`。`D-2026-11-20-14` の (1)）。引き継ぎ先の TASK は spec の `TASK-4` の追記で引く
   上の対象以外の依存は選定の記録に無いので、足す前に利用者へ確かめる。メール送信と外向き HTTP クライアントは選定の対象から外れた。本体は口と契約テストだけを持ち、具象は組込み先が選ぶ（`D-2026-11-20-4`・`HOST-7`・`AMTH-14`・`AAUD-40`・`DPOL-46`）ので、本体の依存に足さない。
 
 ## 関連 rule

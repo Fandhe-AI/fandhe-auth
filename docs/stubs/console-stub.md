@@ -16,7 +16,7 @@
   （`TASK-30`・`THRT-29`）。
 - 本番で console の `aud` を登録しない方針は変えない（`OCL-58`）。
 - `TASK-8` の 2026-11-05 追記で決まった 2 項目（`D-2026-11-05-2`・`D-2026-11-05-5`）も、実物の console との接続は未検証である。
-- 試験専用で、本体・Plugin など他の crate から依存しない（`LIB-2`・`LIB-4`。`scripts/check-crate-deps.sh`）。
+- 試験専用で、本体・Plugin から依存しない。試験専用の it-harness だけが依存する（`TASK-10` (4/6)。`LIB-2`・`LIB-4`。`scripts/check-crate-deps.sh`。許可表の行は人の確認待ち）。
 - spec の本文は写さない。ID で引く。この repo は public である。
 - 実物への差し替え先の TASK は §5 に書く。
 
@@ -27,7 +27,7 @@
 | 実行モデル | sans-IO・同期。HTTP・TLS・ネットワーク・環境変数・ファイルを持たない（`DPOL-32`） | 実物は通信を伴う。通信の失敗・遅延・再接続の挙動は stub に無い |
 | 時刻 | 引数 `now`（UNIX 秒）で受け、時計を読まない。記録にも時刻を持たない | 実物は時計を読む。時刻の境界は stub で確かめられない |
 | URL・ホスト | 文字列で受けるだけで、参照も取得もしない | 実物は名前解決・接続・証明書の検証を行う |
-| 相手側の口 | 試験が実装する trait（`DeliveryPorts`・`CredentialPorts`）と、introspection の送る口のクロージャ | `fandhe-auth` の実物の口ではない。実物の口との結線は後続のタスクの担当 |
+| 相手側の口 | 試験が実装する trait（`DeliveryPorts`・`CredentialPorts`）と、introspection の送る口のクロージャ | `fandhe-auth` の実物の口ではない。実物の口との結線は後続のタスクの担当。ハーネス `crates/it-harness` からは in-process の構成要素として組み込む（`TASK-10` (4/6)。実物の口との結線ではない） |
 | 設定 | 既定値を持たない。値の範囲を検査しない | 実物の値は console 側の文書が正。stub の値を本番の値として扱わない |
 | 秘密値 | 鍵・proof を持たない。token は借りて渡すだけで保持しない（`SECR-23`〜`SECR-27`） | 実物は鍵を持ち、署名・DPoP の proof を生成する |
 | 判定の主体 | 受理・拒否の規則をコードに固定する | 実物の console の規則と一致する保証は無い |

@@ -20,7 +20,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 
 | ファイル | ジョブ（check 名） | トリガー | runs-on |
 | --- | --- | --- | --- |
-| `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
+| `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
 
@@ -101,7 +101,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
 2. 追加したジョブを `ci-complete` の `needs` に必ず加える（漏れると未検査のままマージ可能になる）。条件付きで skip
     するジョブは、許容する条件を `ci-complete` の jq 式に明示する
 3. 処理は `make <target>` / `scripts/*.sh` を呼ぶ。CI 側に複数行のロジックを書かない
-    （ツール導入のように CI 固有のステップは例外）
+    （ツール導入のように CI 固有のステップは例外。secret-scan ジョブの走査対象の取得も例外で、理由は「秘密情報の検査ジョブ」の節を参照）
 4. lefthook と同じ検査を同じ範囲で重複させない。役割分担は `.claude/rules/git-hooks.md`（重い・網羅的な検査は CI が正）
 5. 不要な `needs` で直列化しない。独立したジョブは並列に走らせ、クリティカルパス（最長ジョブ）を短くする
     - 逆に、セットアップ（checkout・ツール導入・キャッシュ復元）が実処理より長いほど細かく分けない
@@ -272,3 +272,19 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
 
 この時点で push は `main` のみ・concurrency 設定済み・ジョブは並列で、ワークフローの統合や削除の余地は無かった。
 変更点は `main` への push で `cancel-in-progress` を無効化したことのみ。
+
+## 秘密情報の検査ジョブ（`secret scan (tracked files)`）
+
+- 検出器は、PR では保護された `main` の先端（`refs/heads/main`。PR の base ブランチではない）を `trusted/` へ取得した版だけを使い、
+  PR の head（`target/`）は走査対象のデータとして渡す（`scripts/secret-scan-ci.sh <target>`）。push（main）では `github.sha` を両方に取得する。
+  PR 側の検出器を呼ばない。stacked PR のように base が `main` 以外でも、未承認の base ブランチの検出器を使わない
+- `trusted/`・`target/` とも `actions/checkout` で取らず、ジョブの `run:` で取得する。checkout が出す `HEAD is now at <コミット件名>` や
+  展開するファイルのパスが、公開ログへ PR 由来の未加工の文字列を出すため（SECR-23。push では `github.sha` の件名も同様）。
+  git の出力は捨て、失敗は固定の文言で exit 2。ref は `refs/heads/main` か 40 桁の小文字 16 進数だけを通し、値は `env` 経由で渡す。
+  取得したコミットの sha だけを `trusted detector: <sha>` の書式でログに出す
+  - `trusted/`: `git init`・`git fetch --depth=1`・`git checkout -q --detach FETCH_HEAD`（検出器を実行するので作業ツリーを展開する）
+  - `target/`: `git init`・`git fetch --depth=1`・`git update-ref HEAD`（作業ツリーを展開せずオブジェクトだけを取る）
+  - 取得処理は `scripts/` に置かない（取得の前に `trusted/` が無く、PR の CI では main の版に新しいスクリプトが無いため）
+- 取得は匿名で `GITHUB_TOKEN` を使わないため、ジョブの権限は `permissions: {}` にする
+- 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
+- 既知の限界: pull_request の workflow 定義自体は PR が書き換えられる（#5985 で追跡。人の担当）

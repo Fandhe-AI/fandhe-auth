@@ -10,13 +10,36 @@ set -euo pipefail
 
 # 本ファイルの親ディレクトリ（= リポジトリルート）を cwd に依存せず解決する。
 # `scripts/check.sh` を直接叩いても `make check` 経由でも同じ対象を扱うための前提。
+# 末尾の改行で終わるパスも保つため、`$(...)` が末尾の改行を落とす点を番兵（x）で避ける。
+# 出力は改行を足さないパスそのもので、受け取る側も番兵を付けて受けてから外す（下の ROOT_DIR）。
 repo_root() {
-  local lib_dir
-  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  (cd "${lib_dir}/.." && pwd)
+  local lib_dir root src src_dir
+  # 組み込みだけでパスを解決する（依存の確認より前に外部コマンド dirname を呼ばない）。
+  src="${BASH_SOURCE[0]}"
+  case "${src}" in
+    */*) src_dir="${src%/*}" ;;
+    *) src_dir="." ;;
+  esac
+  [ -n "${src_dir}" ] || src_dir="/"
+  lib_dir="$(cd -- "${src_dir}" && pwd)" || return 1
+  root="$(cd "${lib_dir}/.." && pwd && printf x)" || return 1
+  root="${root%x}"
+  root="${root%$'\n'}"
+  [ -n "${root}" ] || return 1
+  printf '%s' "${root}"
 }
 
-ROOT_DIR="$(repo_root)"
+# 解決の失敗・空の結果は、空の ROOT_DIR のまま先へ進めず終了コード 2（検査不能・環境の誤り）で止める。
+# `&&` の左では errexit が効かないため、代入の終了状態を明示して確かめる。
+if ! ROOT_DIR="$(repo_root && printf x)"; then
+  echo "error: cannot resolve the repository root" >&2
+  exit 2
+fi
+ROOT_DIR="${ROOT_DIR%x}"
+if [ -z "${ROOT_DIR}" ]; then
+  echo "error: cannot resolve the repository root" >&2
+  exit 2
+fi
 # shellcheck disable=SC2034 # source した側のスクリプトで参照する
 readonly ROOT_DIR
 
@@ -43,4 +66,28 @@ reject_args() {
 
 log() {
   echo "[$(basename "$0")] $*" >&2
+}
+
+# run_e2e_registration <script-name> <driver-cmd> <test-target>: ドライバ付きの E2E（#[ignore]）の登録試験を流す共通処理。
+# 呼び出し元: scripts/e2e-chrome.sh・scripts/e2e-firefox.sh（コマンド契約の一元化。makefile.md）。
+# 試験の対象は cfg(unix) 限定のため、uname ではなく実行した試験の件数で確かめる。
+# 登録試験が 0 件のまま成功しない（DPOL-30〜32）。
+run_e2e_registration() {
+  local script_name="$1" driver="$2" target="$3" out
+  require_cmd cargo
+  require_cmd "${driver}"
+  require_cmd mktemp
+  require_cmd tee
+  require_cmd grep
+  cd "${ROOT_DIR}"
+  out="$(mktemp)"
+  # trap 本文にパスを埋め込まない（TMPDIR 由来の文字がシェルコードとして解釈されるのを避ける）。
+  # 固定の本文から、スクリプト全体で生きるグローバル変数を引用付きで渡す。
+  E2E_REG_OUT="${out}"
+  trap 'rm -f -- "${E2E_REG_OUT:-}"' EXIT
+  cargo test -p fandhe-auth-e2e-harness --locked --test "${target}" -- --ignored 2>&1 | tee "${out}"
+  if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' "${out}"; then
+    echo "${script_name}: no registration test ran (non-unix target or runner?); failing instead of passing with 0 tests" >&2
+    return 1
+  fi
 }

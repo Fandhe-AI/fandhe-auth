@@ -4,8 +4,10 @@
 //! 環境変数・ファイルは読まない（接続情報の受け方は 2/6 で決める。DPOL-32）。
 
 use std::fmt;
+use std::time::SystemTime;
 
 use crate::component::{Component, ComponentKind};
+use crate::record::{RecordError, RunRecord, UtcTimestamp, VersionInfo};
 
 /// 誤りの種類。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +72,38 @@ impl HarnessConfig {
     }
 }
 
+/// 構成の記録の 1 項目。種類と、stub（実物ではない）かの印だけを持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositionEntry {
+    pub kind: ComponentKind,
+    /// stub なら `true`。stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）。
+    pub stub: bool,
+}
+
+/// 起動した構成の記録（起動順）。設定の値・接続情報・鍵を載せない（SECR-11・SECR-23）。
+/// 版・日時・ファイルへの出力は [`crate::record::RunRecord`]（5/6。#94）が持つ。文言は仮置きで人が確認する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositionRecord {
+    pub entries: Vec<CompositionEntry>,
+}
+
+impl fmt::Display for CompositionRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "結合試験の構成（stub の合格を実物の合格に数えない。A-2026-10-28-9・ACPT-7）"
+        )?;
+        for e in &self.entries {
+            if e.stub {
+                writeln!(f, "{:?}: stub（実物ではない）", e.kind)?;
+            } else {
+                writeln!(f, "{:?}: 構成要素", e.kind)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 起動の入口。
 pub struct Harness;
 
@@ -87,6 +121,7 @@ impl Harness {
         let mut running = RunningHarness {
             components: Vec::new(),
             stopped: false,
+            started_at: SystemTime::now(),
         };
         for mut c in components {
             if let Err(e) = c.start() {
@@ -104,12 +139,38 @@ impl Harness {
 pub struct RunningHarness {
     components: Vec<Box<dyn Component>>,
     stopped: bool,
+    /// 起動の開始時刻（実行の記録の `started_at`）。
+    started_at: SystemTime,
 }
 
 impl RunningHarness {
     /// 起動している構成要素の種類（起動順）。
     pub fn kinds(&self) -> Vec<ComponentKind> {
         self.components.iter().map(|c| c.kind()).collect()
+    }
+
+    /// 起動した構成の記録（起動順）。stub は `stub == true` の印で残る（A-2026-10-28-9・ACPT-7）。
+    pub fn composition_record(&self) -> CompositionRecord {
+        CompositionRecord {
+            entries: self
+                .components
+                .iter()
+                .map(|c| CompositionEntry {
+                    kind: c.kind(),
+                    stub: c.kind().is_stub(),
+                })
+                .collect(),
+        }
+    }
+
+    /// 実行の記録（版・構成・日時）を作る。stub の記録は `RunRecord::with_*` で取り込む（5/6）。
+    pub fn run_record(&self, version: VersionInfo) -> Result<RunRecord, RecordError> {
+        Ok(RunRecord::new(
+            UtcTimestamp::from_system_time(self.started_at)?,
+            UtcTimestamp::from_system_time(SystemTime::now())?,
+            version,
+            self.composition_record(),
+        ))
     }
 
     /// 逆順に停止する。最初の失敗を返しつつ、残りも停止を試みる。
