@@ -11,15 +11,16 @@ publish = false
 [lints]
 workspace = true
 
-# feature は syn を除き default のまま。暫定で、K11 の記入後に人が確定する（D-2026-11-20-7）。
+# feature は必要最小に絞る（利用者の方針 2026-11-20）。暫定で、K11 の記入後に人が確定する（D-2026-11-20-7）。
 # 版は D-2026-11-20-8〜10 の選定による。
 [dependencies]
 fandhe-auth-secret = { path = "../secret" }
-tracing = "0.1.44"
+# マクロだけを使う。attributes（tracing-attributes → syn 2.x）は外す。
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 metrics = "0.24.6"
 
 [dev-dependencies]
-tracing-subscriber = "0.3.23"
-proptest = "1.12.0"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # syn は parse_file（full）と Type/Item の読み取り（parsing）だけ使う。visit・printing は不要。暫定。
 syn = { version = "3.0.10", default-features = false, features = ["full", "parsing"] }
