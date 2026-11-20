@@ -3,7 +3,7 @@
 //! 役割: DB の遮断と遅延・インスタンスの停止・DB の外の保存先の遮断・Hub の stub の遅れと拒否・時計のずれ
 //! の種類を 1 か所で数え、種類ごとの対象とパラメータの形を決める。呼び出し元は結合試験（試験ビルド）と、
 //! 後続の段（2/8〜7/8）の注入の実装。注入の仕組み自体はここに無い（各段が `fault/` にファイルを足す）。
-//! 記録の形式は [`record`]。2/8 で DB の遮断と遅延の注入（[`db`]）を、3/8 でインスタンスの停止の注入（`instance`。Unix 限定）を、4/8 で DB の外の保存先の遮断の注入（[`external_store`]）を置いた。
+//! 記録の形式は [`record`]。2/8 で DB の遮断と遅延の注入（[`db`]）を、3/8 でインスタンスの停止の注入（`instance`。Unix 限定）を、4/8 で DB の外の保存先の遮断の注入（[`external_store`]）を、5/8 で Hub の stub の遅れと拒否の注入（[`hub_stub`]）を置いた。
 //!
 //! 設計上の約束:
 //! - 種類は網羅の `match` で名前と対象を引く。種類を足して書き忘れるとコンパイルできない。
@@ -20,12 +20,14 @@ use std::time::Duration;
 
 pub mod db;
 pub mod external_store;
+pub mod hub_stub;
 #[cfg(unix)]
 pub mod instance;
 pub mod record;
 
 pub use db::{DbFaultError, DbFaultProxy};
 pub use external_store::{ExternalStoreFaultError, ExternalStoreFaultProxy};
+pub use hub_stub::{HubStubFaultError, HubStubFaultInjector};
 #[cfg(unix)]
 pub use instance::{InstanceExit, InstanceFaultError, InstanceFaultHandle};
 pub use record::{
@@ -115,7 +117,7 @@ impl FaultCategory {
     }
 }
 
-/// Hub の stub の注入点（`fandhe-auth-hub-stub` の 4 つの口に対応させる。結線は 5/8）。
+/// Hub の stub の注入点（`fandhe-auth-hub-stub` の 4 つの口に対応させる。結線は [`hub_stub`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubStubPort {
     Presentation,
@@ -136,7 +138,7 @@ impl HubStubPort {
     }
 }
 
-/// Hub の stub の拒否の形（hub-stub の `Refusal`・`JwksRefusal` への変換は 5/8 で書く）。
+/// Hub の stub の拒否の形（hub-stub の `Refusal`・`JwksRefusal` への変換は [`hub_stub`]。`MalformedBody` は JWKS の口だけ）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubStubRefusalKind {
     Unreachable,
@@ -230,6 +232,11 @@ impl FaultKind {
                 refusal: HubStubRefusalKind::Status(s),
                 ..
             } => (100..=599).contains(&s),
+            // hub-stub の `Refusal` で表せないので、JWKS 以外の口は受けない。
+            Self::HubStubRefusal {
+                port,
+                refusal: HubStubRefusalKind::MalformedBody,
+            } => port == HubStubPort::Jwks,
             _ => true,
         };
         if ok { Ok(()) } else { Err(InvalidFaultParam) }
@@ -310,5 +317,20 @@ mod tests {
         );
         assert!(FaultKind::db_delay(Duration::from_millis(5)).is_ok());
         assert!(FaultKind::clock_skew(-1).is_ok());
+    }
+
+    #[test]
+    fn malformed_body_only_on_jwks() {
+        for p in [
+            HubStubPort::Heartbeat,
+            HubStubPort::Presentation,
+            HubStubPort::Logout,
+        ] {
+            assert!(FaultKind::hub_stub_refusal(p, HubStubRefusalKind::MalformedBody).is_err());
+        }
+        assert!(
+            FaultKind::hub_stub_refusal(HubStubPort::Jwks, HubStubRefusalKind::MalformedBody)
+                .is_ok()
+        );
     }
 }

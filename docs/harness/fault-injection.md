@@ -18,8 +18,8 @@ TASK-13 の設計の下書き。名前・形式の識別子・キー名・文言
 | InstanceSigterm | `instance_sigterm` | instance | なし | 3/8 |
 | InstanceSigkill | `instance_sigkill` | instance | なし | 3/8 |
 | ExternalStoreBlock | `external_store_block` | external_store | なし | 4/8 |
-| HubStubDelay | `hub_stub_delay` | hub_stub | `port`・`delay_ms` | 5/8 |
-| HubStubRefusal | `hub_stub_refusal` | hub_stub | `port`・`refusal` | 5/8 |
+| HubStubDelay | `hub_stub_delay` | hub_stub | `port`・`delay_ms` | 5/8（済） |
+| HubStubRefusal | `hub_stub_refusal` | hub_stub | `port`・`refusal` | 5/8（済） |
 | ClockSkew | `clock_skew` | instance（仮） | `skew_ms` | 6/8 |
 
 根拠: AVLB-31（時計のずれ）・AVLB-33（`SIGTERM`・`SIGKILL`）・ORST-17（DB の外の保存先）。
@@ -88,6 +88,28 @@ PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を�
 - 根拠: ORST-17・ORST-2。保存先の実体は未決（Hub `ASTORE-38`）。Host への結線は `TODO(TASK-716)`。
 - 試験: `cargo test -p fandhe-auth-it-harness --test fault_external_store`（`make test` に含む）。
 
+## Hub の stub の遅れと拒否（5/8）
+
+`crates/it-harness/src/fault/hub_stub.rs` の `HubStubFaultInjector`（仮称）。hub-stub の `HubFaultInjector`（TASK-7 #66）を
+`FaultTimeline` と結ぶ。判定・内側を呼ばない約束（jti を既受信にしない・最終受信時刻を進めない・JWKS のキャッシュを変えない）は
+hub-stub の実装をそのまま使い、作り直さない。
+
+- 入口: `new(wait)`・`apply`・`release`・`present`・`receive_logout`・`receive_heartbeat`・`serve_jwks`・`call_log`・`active_count`。
+  受け口は呼び出しごとに借りる（`HubStubSession` に足さない）。種類は `hub_stub_delay`・`hub_stub_refusal`。
+- 「TASK-7 の設定の仕組み」は `HubFaultConfig`・`FaultRule`・`CallWindow` と `set_faults` と読む。`HubStubConfig` には欄を足さない。
+- 開始は `CallWindow { first: 1, last: None }`（以降すべて）の規則を入れた設定の差し替え、解除はその規則を除いた設定の差し替え。
+- 同じ口の遅れと拒否（各最大 1 件）は 1 つの規則に合成する。hub-stub は最初に当たった 1 件だけを使うため、分けると片方が落ちる。
+- 記録（`Applied`・`Released`）が先、設定の差し替えが後。基準線・記録の拒否では状態を変えない（fail-closed）。
+- 解除は開始と同じ種類・値でだけ受ける。二重の開始は `AlreadyActive`、無い解除は `NotActive`。
+- `MalformedBody` は JWKS の口だけ。`FaultKind::validate` が他の口を拒否する（1/8 の挙動を狭めた）。
+- 遅れは `Wait` のフックへ渡すだけ。眠る実装は出さない。
+- hub-stub の呼び出しの記録（`at` は試験の論理時刻）は `FaultRecord` に入れず、`call_log()` で読む。対応は順序だけ。記録の形式の版は変えない。
+- 対象外の口: `AuthPort`・`ChangeFeedPort`・`AuthJwksPort`（hub-stub の設計で対象外）。
+- 誤りと `Debug` に token・値を載せない（SECR-11・SECR-23〜27）。stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）。
+- 根拠: TASK-13・AVLB-18・AVLB-22・RVPG-28・OCL-36・Hub AUTHC-21。Host への結線は `TODO(TASK-716)`。
+- 記録の例: `injection: 1 applied hub_stub_refusal target=hub_stub at=... offset_ms=... port=jwks refusal=status_503`。
+- 試験: `cargo test -p fandhe-auth-it-harness --test fault_hub_stub`（`make test` に含む）。
+
 ## 記録の形式（`fandhe-auth-it-fault-record/1`）
 
 `RunRecord`（`fandhe-auth-it-run-record/1`）とは別のファイル。`run_started_at` で結ぶ。UTF-8・LF・1 行 1 項目の `key: value`。
@@ -111,7 +133,7 @@ note: ...
 ## 時計
 
 時刻はハーネスのプロセスの基準の時計で押す（壁時計 `at`〔秒〕と、実行開始からの単調時計の `offset_ms`）。
-試験対象に注入したずれた時計や stub の引数の `now` は使わない。hub-stub の `InjectionLog.at` との対応づけは 5/8 で決める。
+試験対象に注入したずれた時計や stub の引数の `now` は使わない。hub-stub の `InjectionLog.at` は記録に入れず、`call_log()` で別に読む（5/8。順序で対応）。
 
 ## 未決・人の確認待ち
 
@@ -122,6 +144,8 @@ note: ...
 - インスタンスの停止を in-process の Host（TASK-716 待ち）にどう当てるか（3/8 はプロセスの子だけ）
 - DB の外の保存先の実体（ORST-2・Hub `ASTORE-38` の決定待ち）。4/8 では仮に TCP の経路の遮断にした。人の確認待ち
 - console stub の注入（TASK-8）を TASK-13 の一覧に入れるか（spec の列挙には無い）
+- Hub の stub の注入（5/8）: 窓を「以降すべて」に限ったこと・同じ口の遅れと拒否の合成・`validate` を狭めたこと（`MalformedBody` は JWKS だけ）・
+  眠る `Wait` を出さないこと（出すなら上限の決定が要る）・stub の呼び出しの記録を記録の形式に入れないこと（入れるなら版を上げる）・型名と文言
 - 記録のファイルを秘密値の走査の対象に入れること（`secret-values.md`）。本段は canary の試験で代える。出力先は追跡ツリーの外（`target/`）
 - DB の遮断の形を「直ちに閉じる」にしたこと。「受けて黙る（blackhole）」を入れるか（2/8）
 - 遅延を応答の向きの塊ごとに足す形（2/8）
