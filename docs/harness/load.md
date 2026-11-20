@@ -348,6 +348,6 @@ judgment:
 - 版の情報を実行の記録側に寄せ、`run_record_file` で結ぶこと
 - 6/10 の仮置き: `CallResult` の 4 種、失敗の種類名 `rejected`・`unavailable`、`TargetName` の規則、API の名前（`target`・`run_target`・`TargetSpec`・`TargetRun`・`TargetError`）
 - 7/10 の仮置き: `os_family` に `consts::OS` を採ること、`cpu_count` を使える並列数とすること、`memory_mib` を `/proc/meminfo` の総量とすること、
-  `virtualization` を常に `unknown` とし判別の方法を未決とすること、`build_profile` を `debug_assertions` で近似すること、
+  `virtualization` を常に `unknown` とし判別の方法を未決とすること、`build_profile` を標準の取得元では常に `unknown` とし、確かな値は呼び出し元が明示すること、
   自動取得した値の区分を `test_condition`・`refs=harness_config` とすること、「記録」の読み（ファイル出力を含まない）、API の名前（`condition` 以下）
 - 「結果が記録される」の読み: `TargetRun` の構造体まで。ファイルへの出力を担当する段は未決（人が決める。受け入れ条件を満たしたかの判定も人）

@@ -188,10 +188,19 @@ fn explicit_machine_rejects_invalid_strings() {
         BuildProfile::Release,
     );
     assert_eq!(r.unwrap_err(), ConditionError::InvalidMachineValue);
+    let r = MachineCondition::new(
+        None,
+        None,
+        Some("arm64".to_owned()),
+        None,
+        Virtualization::None,
+        BuildProfile::Release,
+    );
+    assert_eq!(r.unwrap_err(), ConditionError::InvalidMachineValue);
     let ok = MachineCondition::new(
         Some(4),
         Some(8),
-        Some("arm64".to_owned()),
+        Some("aarch64".to_owned()),
         Some("linux".to_owned()),
         Virtualization::Vm,
         BuildProfile::Release,
