@@ -3,7 +3,6 @@
 # ローカル（`make check`）・Git hooks（lefthook.yml）・CI が同じコマンド契約を共有する。
 # CI 側で独自のチェックを定義せず、scripts/ の実体を呼ぶ（make スキルの「入口は複数でも
 # 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブで流す（TASK-6）。
-# 秘密情報の検査は secret-scan ジョブで流す（TASK-6）。
 # 言語固有のジョブを足すときは、必ず ci-complete の needs にも追加すること。
 # ジョブ・発火条件の追加・変更時は .claude/rules/github-actions.md に従う。
 #
@@ -174,73 +173,6 @@ jobs:
       - name: make lint
         run: make lint
 
-  # 秘密情報の混入検査（TASK-6）。PR のマージ結果の追跡ファイルを走査し、1 件以上で失敗する（SECR-23）。
-  # 走査しない範囲は検出器の定義（scripts/hooks/secret-scan.sh の除外）に固定された次の 3 つだけで、
-  # CI 側で足し引きしない: .agents/skills/**・.claude/skills/**（skills-lock.json 管理の外部取得物）・*.lock（ハッシュ列）。
-  # 続けて陰性対照（scan-canary）で、実行時に組み立てた既知のダミーだけの一時 index に検出器が 1 を返すことを
-  # 確かめる（検出器が常に合格する状態を見逃さない。リポジトリの内容に依存しない）。ダミーは commit しない。
-  # 実処理は scripts/secret-scan-ci.sh に置く（ローカルからも呼べる。出力の絞り込み・終了コードの伝播もそこ）。
-  # 判定コードは信頼済みリビジョン（PR の base）から取り、PR のマージ結果は走査対象のデータとしてだけ渡す
-  # （PR 自身が検出器・カナリアを書き換えて合格させる経路を作らない）。base にまだ CI 入口・陰性対照が無いとき（導入 PR 自身）
-  # に限り PR 側の版を使う。導入後は base に必ず在るため、PR が削除・改変しても base の版が判定する。
-  # 走査対象は作業ツリーへ展開せず object と index だけにし、checkout の診断に PR 由来のパスを出さない（SECR-23）。
-  # 入口 2 点の片方だけ・入口のみで検出器本体が無い状態は fail-closed で失敗させる（検出器の削除を合格にしない）。
-  # 限界: pull_request で動く本ファイル自体は PR の変更を含む。ワークフロー自体の改変の防止は
-  # ruleset（必須ワークフロー・CODEOWNERS による本ファイルの保護）で行う。リポジトリ設定は人が決める。
-  # 公開ログには規則 ID・件数だけを出し、検出ファイルのパスは出さない（--summary。パスに値が含まれ得る）。
-  # 範囲外: コミット履歴・submodule の中。検出時は .claude/rules/security.md の重大度「高」に従う。
-  secret-scan:
-    name: "make secret-scan + make scan-canary"
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      # 走査対象は作業ツリーへ展開せず、object と index だけを作る（checkout の診断に PR 由来のパスが出ない。SECR-23）。
-      # 検出器は index と空 tree の差分で読むため、作業ツリーは要らない。失敗時は固定文だけを出す。
-      - name: Fetch PR merge result into an index (scan target; no working tree)
-        run: |
-          set -euo pipefail
-          git init -q target
-          if ! git -C target fetch -q --no-tags --depth=1 "https://github.com/${GITHUB_REPOSITORY}" "${GITHUB_SHA}" 2>/dev/null \
-            || ! git -C target read-tree FETCH_HEAD 2>/dev/null; then
-            echo "::error::failed to load the scan target (details withheld)"
-            exit 2
-          fi
-
-      - name: Checkout (trusted base; detector)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
-          path: trusted
-          persist-credentials: false
-
-      - name: secret-scan (scan the PR merge result with the trusted detector)
-        run: |
-          set -euo pipefail
-          # 判定コードは base の版。base に検出器の入口（CI 入口・陰性対照）がまだ無い導入 PR に限り、
-          # PR 側の版を使う（検出器本体 secret-scan.sh は base に在っても旧版で --summary を持たないため PR 側を使う）。
-          # 入口 2 点のうち片方だけ在る・入口は在るのに検出器本体が無い状態は fail-closed。
-          entry=0
-          for f in scripts/secret-scan-ci.sh scripts/secret-scan-canary.sh; do
-            if [ -f "trusted/${f}" ]; then entry=$((entry + 1)); fi
-          done
-          if [ "${entry}" -eq 2 ] && [ -f trusted/scripts/hooks/secret-scan.sh ]; then
-            trusted/scripts/secret-scan-ci.sh "${GITHUB_WORKSPACE}/target"
-          elif [ "${entry}" -eq 0 ]; then
-            echo "::warning::trusted base has no secret-scan entry points; using the PR version (bootstrap only)"
-            # PR 側の版は作業ツリーへ展開しない: 必要な 3 点だけを object から取り出す
-            boot="${RUNNER_TEMP}/boot"
-            mkdir -p "${boot}/scripts/hooks"
-            git init -q "${boot}"
-            for f in scripts/lib.sh scripts/secret-scan-ci.sh scripts/secret-scan-canary.sh scripts/hooks/secret-scan.sh; do
-              git -C target cat-file blob "FETCH_HEAD:${f}" > "${boot}/${f}" 2>/dev/null || { echo "::error::PR lacks the detector files; failing closed"; exit 1; }
-              chmod +x "${boot}/${f}"
-            done
-            "${boot}/scripts/secret-scan-ci.sh" "${GITHUB_WORKSPACE}/target"
-          else
-            echo "::error::trusted base has an incomplete secret detector set; failing closed"
-            exit 1
-          fi
-
   # squash merge では PR タイトルがそのままコミット件名になるため、commit-msg フックと
   # 同じスクリプトで Conventional Commits 形式を検証する（フックの CI 側の対）。
   # PR タイトルは任意文字列のため、${{ }} を run へ直接展開せず env 経由でファイルへ書き出す
@@ -280,7 +212,6 @@ jobs:
       - test-hooks
       - build-test
       - lint
-      - secret-scan
       - pr-title
     steps:
       - name: 全ジョブ結果の検証

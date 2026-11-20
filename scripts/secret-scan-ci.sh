@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 秘密情報検査の CI 向け入口（TASK-6。CI の secret-scan ジョブが呼ぶ。ローカルからも同じ形で呼べる）。
+# 秘密情報検査の CI 向け入口（TASK-6。2 段目で CI の secret-scan ジョブから呼ぶ予定〔#51〕。ローカルからも同じ形で呼べる）。
 #   scripts/secret-scan-ci.sh [<走査対象のリポジトリのパス>]   既定は本スクリプトのあるリポジトリ
 # 検出器・陰性対照は本スクリプトと同じリポジトリ（CI では PR が書き換えられない base の版）のものを使い、
 # 走査対象はデータとして渡す。公開ログには規則 ID・件数・固定の診断文だけを出す。
@@ -21,7 +21,13 @@ if [ ! -d "${target}" ]; then
   echo "secret-scan-ci: target is not a directory" >&2
   exit 2
 fi
-target="$(cd "${target}" && pwd)"
+target="$(cd "${target}" && pwd -P)"
+# 親のリポジトリを誤って走査しないよう、対象がリポジトリのルートそのものであることを確かめる（fail-closed）。
+top="$(git -C "${target}" rev-parse --show-toplevel 2>/dev/null)" || top=""
+if [ -z "${top}" ] || [ "$(cd "${top}" && pwd -P)" != "${target}" ]; then
+  echo "secret-scan-ci: target is not the root of a git repository" >&2
+  exit 2
+fi
 
 out="$(mktemp "${TMPDIR:-/tmp}/secret-scan-ci.XXXXXX")" || {
   echo "secret-scan-ci: mktemp failed" >&2
