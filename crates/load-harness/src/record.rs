@@ -3,7 +3,8 @@
 //!
 //! 役割: `docs/harness/load.md` の 1・2・6・7 の形式で、メタデータの行・機材と構成（`condition`）・段階（`stage`）・
 //! 比べる値（`value:`）・空の `judgment:` を 1 つのファイルにする。呼び出し元は試験ビルドだけ。
-//! 呼び出し先は `condition`・`stage` の `Display` と std だけ（通常の依存は 0。it-harness に依存できないため、
+//! 呼び出し先は `condition`・`stage` の `Display`、段階の実行（[`RunSession::run`] の中の `stage::run_stages`。
+//! 時計・対象の型は `meter`・`target`）と std だけ（通常の依存は 0。it-harness に依存できないため、
 //! RFC 3339 の整形は it-harness の `UtcTimestamp` と同じ civil 変換をここに重複して持つ）。
 //!
 //! 安全: 記録に入る文字列は作る時点で文字種・長さ・語彙を検査し、自由文の欄を作らない。違反は誤りにする
@@ -662,7 +663,8 @@ impl RunSession {
     }
 
     /// `exercised`（閉包 `call` が呼ぶ構成要素。呼ぶ前に申告する）を検査してから、[`run_stages`] で段階を回し、
-    /// 結果をこの文脈に結び付けた [`RunEvidence`] を返す。文脈は消費する（同じ文脈から 2 つ目の記録を作らない）。
+    /// 結果をこの文脈に結び付けた [`RunEvidence`] を返す。文脈の値は消費し、1 つの値で段階を回すのは 1 回だけ
+    /// （同じ実行の記録の名前で別の文脈を作ること・作った [`RunEvidence`] の複製は止めない）。
     ///
     /// # Errors
     /// `exercised` が空、または測定の条件で起動していない要素を含むとき [`LoadRecordError::InvalidRunEvidence`]

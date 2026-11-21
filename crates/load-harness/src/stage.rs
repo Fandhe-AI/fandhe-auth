@@ -4,7 +4,8 @@
 //! 各回は [`crate::target::run_target`] で回し、段階の全回が終わったら [`crate::aggregate::worst_run`] で段階の最悪の回を求める。
 //! [`StagedRun`] の `Display` は `docs/harness/load.md` の 3・4 の `stage`・`run`・`failure_kind`・`metric`・`failure_metric`・
 //! `worst_run` の行を段階ごとに出す。
-//! 呼び出し元: 結合試験のハーネスの上で構成要素へ負荷をかける試験（試験ビルド）だけ。
+//! 呼び出し元: 結合試験のハーネスの上で構成要素へ負荷をかける試験（試験ビルド）と、記録の元を作る
+//! [`crate::record::RunSession::run`]（9/10）。
 //! 呼び出し先: 対象の呼び出し（`target`）と集計（`aggregate`）だけ。時計は回ごとに作る関数で受け、
 //! 環境変数・設定ファイル・壁時計を読まない（DPOL-32）。
 //!
