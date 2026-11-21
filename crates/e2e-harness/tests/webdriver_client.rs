@@ -168,7 +168,7 @@ fn session_commands_send_the_five_keys_and_parse_credentials() {
         ),
     ]);
     let (sess, ver) = client(port).new_session(&caps(), "chrome").unwrap();
-    assert_eq!(ver, BrowserVersion::Known { major: 1 });
+    assert_eq!(ver.to_string(), "1");
     let aid = sess.add_virtual_authenticator(&opts()).unwrap();
     let creds = sess.credentials(&aid).unwrap();
     assert_eq!(creds.len(), 1);

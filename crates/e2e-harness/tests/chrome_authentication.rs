@@ -32,16 +32,16 @@ fn authenticates_after_registration_with_chrome_virtual_authenticator() {
     sink.record(
         PasskeyOperation::Authentication,
         RunResult::from_authentication(&result),
-    );
+    )
+    .expect("record");
     let outcome = result.expect("authenticate");
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
 
     assert_one_localhost_credential(&handle, &aid);
-    sink.finish();
-
     running.stop().expect("stop");
+    sink.finish().expect("record");
 }
 
 #[test]
@@ -63,7 +63,8 @@ fn authentication_fails_when_user_verification_fails_with_chrome() {
     sink.record(
         PasskeyOperation::Authentication,
         RunResult::from_authentication(&control_result),
-    );
+    )
+    .expect("record");
     let control = control_result.expect("control");
     assert!(control.succeeded(), "error_name={:?}", control.error_name());
     // 登録の後に UV を失敗にする。判定は authenticator 側で完結し、ネットワークに出ない。
@@ -72,13 +73,13 @@ fn authentication_fails_when_user_verification_fails_with_chrome() {
     sink.record(
         PasskeyOperation::Authentication,
         RunResult::from_authentication(&result),
-    );
+    )
+    .expect("record");
     let outcome = result.expect("authenticate");
     assert!(!outcome.succeeded());
     // HarnessTimeout とは別の名前で、対照が成功した同一条件から UV だけを変えた後の結果としてだけ読み、原因の判別とは読まない。
     assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
     assert_one_localhost_credential(&handle, &aid);
-    sink.finish();
-
     running.stop().expect("stop");
+    sink.finish().expect("record");
 }

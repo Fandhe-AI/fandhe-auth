@@ -5,12 +5,13 @@
 //! 結果は〔仮想〕で、実機・Safari に数えない（ACPT-7・ACPT-8）。
 #![allow(dead_code)]
 
+use std::io::Write;
 use std::time::Duration;
 
 use fandhe_auth_e2e_harness::{
     AuthenticatorId, AuthenticatorKind, Browser, BrowserVersion, CredentialRef, DriverHandle,
-    E2eRunRecord, PasskeyOperation, Protocol, RunResult, Transport, VirtualAuthenticatorOptions,
-    register_once,
+    E2eRunRecord, PasskeyOperation, Protocol, RecordError, RunResult, Transport,
+    VirtualAuthenticatorOptions, register_once,
 };
 
 use super::TestOrigin;
@@ -44,7 +45,8 @@ pub fn register(
     sink.record(
         PasskeyOperation::Registration,
         RunResult::from_registration(&result),
-    );
+    )
+    .expect("record");
     let outcome = result.expect("register");
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
@@ -63,10 +65,12 @@ pub fn assert_one_localhost_credential(handle: &DriverHandle, aid: &Authenticato
     assert!(creds[0].rp_id == "localhost", "credential rp_id mismatch");
 }
 
-/// 1 つのブラウザのセッションの実行の記録を持ち、`Drop`（panic の巻き戻りを含む）で本文を標準出力へ出し、
-/// `target/` の下のファイルに新規で書く。`Drop` の中では panic しない。パスは出さない（SECR-23）。
+/// 1 つのブラウザのセッションの実行の記録を持つ。正常終了の経路では [`RecordSink::finish`] が本文の標準出力とファイルへの
+/// 新規書き込みを明示的に行い、誤りを返す。到達しなかった場合（panic の巻き戻りを含む）は `Drop` が同じ出力を試みる。
+/// `Drop` の中では panic せず、片方の出力が失敗してももう片方を試す。パスは出さない（SECR-23）。
 pub struct RecordSink {
     record: E2eRunRecord,
+    emitted: bool,
 }
 
 impl RecordSink {
@@ -80,24 +84,39 @@ impl RecordSink {
                 AuthenticatorKind::WebDriverVirtual,
                 target,
             ),
+            emitted: false,
         }
     }
 
-    /// 実行 1 件を記録する（検査の前に呼び、失敗した実行も回数に残す）。
-    pub fn record(&mut self, op: PasskeyOperation, result: RunResult) {
-        let _ = self.record.record(op, result);
+    /// 実行 1 件を記録する（検査の前に呼び、失敗した実行も回数に残す）。上限超過は誤りで返す。
+    pub fn record(&mut self, op: PasskeyOperation, result: RunResult) -> Result<(), RecordError> {
+        self.record.record(op, result)
     }
 
-    /// 試験が最後まで到達したことを記す。
-    pub fn finish(&mut self) {
+    /// 試験が最後まで到達した（停止まで成功した）ことを記し、本文とファイルを出す。パスを含まない誤りを返す。
+    pub fn finish(mut self) -> Result<(), RecordError> {
         self.record.mark_completed();
+        self.emitted = true;
+        self.emit()
+    }
+
+    fn emit(&self) -> Result<(), RecordError> {
+        // println! は失敗で panic するため、値で受ける書き込みを使う。
+        let printed = {
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "{}", self.record)
+        };
+        let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("e2e-records");
+        let written = self.record.write_new(&dir);
+        printed.map_err(|_| RecordError::WriteFailed)?;
+        written.map(|_| ())
     }
 }
 
 impl Drop for RecordSink {
     fn drop(&mut self) {
-        println!("{}", self.record);
-        let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("e2e-records");
-        let _ = self.record.write_new(&dir);
+        if !self.emitted {
+            let _ = self.emit();
+        }
     }
 }

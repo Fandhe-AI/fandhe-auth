@@ -34,6 +34,7 @@ pub const MAX_RUNS: usize = 10_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserVersion {
     /// 主番号（1 以上 9999 以下）。
+    #[non_exhaustive]
     Known {
         /// 主番号。
         major: u16,
@@ -47,7 +48,8 @@ impl BrowserVersion {
     /// セッション ID が手元にあるここで検査する。
     ///
     /// 次のどれかなら `Unknown`: 空・32 バイト超・`[0-9a-z.]` 以外を含む・先頭が「1〜4 桁の数字 + `.`」でない・
-    /// 主番号が 0・全体または主番号の文字列がセッション ID と等しい。
+    /// 主番号が 0・全体・主番号の文字列・表示する正規形のどれかがセッション ID と等しい。
+    /// `Known` はこの関数だけが作る（variant は `non_exhaustive` で、crate の外から範囲外の値を作れない）。
     pub(crate) fn from_driver(raw: &str, session_id: &str) -> Self {
         if raw.is_empty()
             || raw.len() > 32
@@ -67,7 +69,8 @@ impl BrowserVersion {
             return Self::Unknown;
         }
         match head.parse::<u16>() {
-            Ok(major) if major > 0 => Self::Known { major },
+            // SECR-23: 先頭のゼロが落ちた表示用の正規形もセッション ID と照合する。
+            Ok(major) if major > 0 && major.to_string() != session_id => Self::Known { major },
             _ => Self::Unknown,
         }
     }
@@ -235,13 +238,25 @@ impl E2eRunRecord {
             SEQ.fetch_add(1, Ordering::Relaxed)
         );
         let path = dir.join(name);
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|_| RecordError::WriteFailed)?;
-        f.write_all(self.to_string().as_bytes())
-            .map_err(|_| RecordError::WriteFailed)?;
+        // 書き込み中の不完全なファイルが集計対象（`e2e-run-*.txt`）に残らないよう、別名で書いてから上書きなしで公開する。
+        let partial = dir.join(format!(
+            ".{}.partial",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("e2e-run")
+        ));
+        let written = (|| -> std::io::Result<()> {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&partial)?;
+            f.write_all(self.to_string().as_bytes())?;
+            f.sync_all()?;
+            // hard_link は既存の最終ファイルがあれば失敗する（上書きしない）。
+            fs::hard_link(&partial, &path)
+        })();
+        let _ = fs::remove_file(&partial);
+        written.map_err(|_| RecordError::WriteFailed)?;
         Ok(path)
     }
 }
@@ -337,6 +352,10 @@ mod tests {
         assert_eq!(v("1234567890", "1234567890"), BrowserVersion::Unknown);
         assert_eq!(v("1234.5", "1234"), BrowserVersion::Unknown);
         assert_eq!(v("1234.5", "1234.5"), BrowserVersion::Unknown);
+        // 先頭のゼロが落ちる正規形（"0012" -> 12）がセッション ID と一致する場合も Unknown。
+        assert_eq!(v("0012.5", "12"), BrowserVersion::Unknown);
+        assert_eq!(v("0012.5", "0012"), BrowserVersion::Unknown);
+        assert_eq!(v("0012.5", "s"), k(12));
     }
 
     #[test]

@@ -49,7 +49,8 @@ fn registers_one_passkey_with_chrome_virtual_authenticator() {
     sink.record(
         PasskeyOperation::Registration,
         RunResult::from_registration(&result),
-    );
+    )
+    .expect("record");
     let outcome = result.expect("register");
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
@@ -58,7 +59,6 @@ fn registers_one_passkey_with_chrome_virtual_authenticator() {
     let creds = handle.credentials(&aid).expect("credentials");
     assert_eq!(creds.len(), 1);
     assert_eq!(creds[0].rp_id, "localhost");
-    sink.finish();
-
     running.stop().expect("stop");
+    sink.finish().expect("record");
 }
