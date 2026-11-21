@@ -19,10 +19,18 @@
 # 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。
 # B は依存の列挙にだけ使い、ビルド・clippy には使わない（DPOL-31。check-crate-deps.sh と同じ扱い）。
 # 本番の範囲は normal・build（dev は見ない）。`cargo tree -i` は一致が無いと非 0 のため使わない。
-# 実行のたびに自己試験（陰性対照 F1〜F9）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陰性対照 F1〜F12）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は件数と規則名だけ。cargo tree の生の出力には絶対パスが入るため出さない。
 # 限界: dev の依存・別 workspace の crates/trial-deps/fuzz・Hub の最終バイナリは対象外。
-# TODO(TASK-667): 動的リンクと版の記録の対応（#318 の 2/4）を足す
+#
+# 動的リンクと版の記録の対応（TASK-667 (2/4)・DPOL-13）:
+#   R4: 静的リンクを強いる設定が無いこと（合否）。openssl-sys の build script は環境変数 OPENSSL_STATIC と <TARGET>_OPENSSL_STATIC を見て、
+#       `0` 以外なら静的にリンクする。`vendored` でなくても配備先の OpenSSL へ動的にリンクしない道になるため、検査の環境変数と
+#       repo の `.cargo/config.toml`・`.cargo/config` の `OPENSSL_STATIC` を値によらず違反にする（安全側）。名前と値は出さず件数だけ出す。
+#   報告: 本番の依存の木の openssl-sys の件数を出す（参考。合否に入れない）。1 件以上なら配備先の OpenSSL へ動的にリンクし、
+#       版の記録は Hub の `AOPS-2`（本体は記録を持たない。D-2026-10-30-1）。0 件なら本体から `AOPS-2` に載せるものは無い。
+#   限界: 親ディレクトリ・CARGO_HOME の cargo 設定と --config の指定は呼び出し側の環境のため見ない。配備先に静的ライブラリしか無い場合と
+#       最終バイナリのリンクの実機での確認（ldd 等）は Hub の担当（`AOPS-2`）。
 #
 # 終了コード: 0 合格 / 1 違反または自己試験の異常 / 2 検査不能（fail-closed）。
 set -euo pipefail
@@ -33,7 +41,7 @@ source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 # 使う外部コマンドは作業ディレクトリの作成前にすべて確かめる（EXIT トラップの rm の不足で 127 にしない）。
-for c in cargo mktemp mkdir rm grep dirname basename; do
+for c in cargo mktemp mkdir rm grep dirname basename sort; do
   require_cmd "${c}" || exit 2
 done
 
@@ -164,6 +172,38 @@ count_rule() {
   echo "${n}"
 }
 
+# count_static_env: 名前が OPENSSL_STATIC か _OPENSSL_STATIC で終わる環境変数のうち、値が `0` 以外（空を含む）の数を返す（R4）。
+# 名前も値も出さない。値は比較にだけ使い、eval やコマンドの引数に展開しない。
+count_static_env() {
+  local name n=0
+  while IFS= read -r name; do
+    case "${name}" in
+      OPENSSL_STATIC | *_OPENSSL_STATIC) [ "${!name}" != "0" ] && n=$((n + 1)) ;;
+    esac
+  done < <(compgen -e)
+  echo "${n}"
+}
+
+# count_static_config <root>: <root>/.cargo/config.toml・config の `OPENSSL_STATIC` を含む行数を返す（R4。値が 0 でも数える＝安全側）。
+# 読めないファイルは検査不能（2）。
+count_static_config() {
+  local f n=0 c
+  for f in "$1/.cargo/config.toml" "$1/.cargo/config"; do
+    [ -e "${f}" ] || continue
+    [ -r "${f}" ] || return 2
+    c="$(grep -c 'OPENSSL_STATIC' "${f}" 2>/dev/null || true)"
+    n=$((n + c))
+  done
+  echo "${n}"
+}
+
+# count_openssl_sys <tree>: 木に出る openssl-sys の package の数（feature 行ごとの重複は除く）。参考の報告用。
+count_openssl_sys() {
+  local lines
+  lines="$(printf '%s\n' "$1" | grep -E '^openssl-sys v' | sort -u || true)"
+  if [ -z "${lines}" ]; then echo 0; else printf '%s\n' "${lines}" | grep -c .; fi
+}
+
 # mkpkg <dir> <name> <Cargo.toml の追加本文>: path 依存の偽 crate を作る。[workspace] は repo の workspace に取り込まれないため。
 # 書き込みの失敗（ENOSPC 等）は検査不能（2）。set -e の 1 では「違反」と区別できないため明示する。
 mkpkg() {
@@ -278,7 +318,52 @@ selftest() {
     exit 1
   fi
 
-  log "selftest ok (F1-F9)"
+  # F10: 静的リンクの環境変数（R4）。外側の環境に左右されないよう、サブシェルで該当の変数を消してから試す。
+  local ev cnt nm
+  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:eq0' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0'; do
+    cnt="$(
+      while IFS= read -r nm; do
+        case "${nm}" in OPENSSL_STATIC | *_OPENSSL_STATIC) unset "${nm}" ;; esac
+      done < <(compgen -e)
+      export "${ev%%:*}"
+      count_static_env
+    )" || exit 2
+    if { [ "${ev##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${ev##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
+      log "FAIL selftest F10: static env check wrong (case ${ev##*:})"
+      exit 1
+    fi
+  done
+
+  # F11: repo の .cargo/config の OPENSSL_STATIC（R4）
+  local cfg
+  if ! mkdir -p "${f}/c1/.cargo" "${f}/c2/.cargo" "${f}/c3/.cargo" "${f}/c4" 2>/dev/null ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c1/.cargo/config.toml" ||
+    ! printf '[env]\nOPENSSL_STATIC = { value = "1", force = true }\n' 2>/dev/null >"${f}/c2/.cargo/config.toml" ||
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c3/.cargo/config.toml"; then
+    log "error: cannot write fixture (f11); cannot inspect"
+    exit 2
+  fi
+  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0; do
+    cnt="$(count_static_config "${f}/${cfg%%:*}")" || exit 2
+    if { [ "${cfg##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${cfg##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
+      log "FAIL selftest F11: static config check wrong (${cfg%%:*})"
+      exit 1
+    fi
+  done
+
+  # F12: openssl-sys の件数の報告。F3（vendored なしの openssl）は 1 以上、F4（依存なし）は 0
+  t="$(run_tree "${f}/f3" offline)" || exit 2
+  if [ "$(count_openssl_sys "${t}")" -lt 1 ]; then
+    log "FAIL selftest F12: openssl-sys not counted"
+    exit 1
+  fi
+  t="$(run_tree "${f}/f4" offline)" || exit 2
+  if [ "$(count_openssl_sys "${t}")" -ne 0 ]; then
+    log "FAIL selftest F12: openssl-sys false count"
+    exit 1
+  fi
+
+  log "selftest ok (F1-F12)"
 }
 
 selftest
@@ -295,6 +380,25 @@ done
 if [ "${total}" -ne 0 ]; then
   log "FAIL: vendored openssl detected in dependency resolution (DPOL-13)"
   exit 1
+fi
+
+# R4: 静的リンクを強いる設定（検査の環境変数と repo の .cargo/config*）。
+s_env="$(count_static_env)" || exit 2
+s_cfg="$(count_static_config "${ROOT_DIR}")" || {
+  log "error: cannot read .cargo config; cannot inspect"
+  exit 2
+}
+log "scan A R4: $((s_env + s_cfg))"
+if [ $((s_env + s_cfg)) -ne 0 ]; then
+  log "FAIL: static OpenSSL link forced (DPOL-13)"
+  exit 1
+fi
+# 版の記録との対応（参考。合否に入れない）。crate の版は OpenSSL の版ではないため出さない。
+sys_n="$(count_openssl_sys "${tree}")"
+if [ "${sys_n}" -ge 1 ]; then
+  log "info: openssl-sys in production tree: ${sys_n} (links host OpenSSL dynamically; version record is Hub AOPS-2)"
+else
+  log "info: openssl-sys in production tree: 0 (no OpenSSL linked by production members; nothing to record in Hub AOPS-2)"
 fi
 
 # scan_info <ラベル> <追加引数...>: 参考の走査。失敗しても終了コードに影響させず警告だけ出す（A の合否を上書きしない）。
