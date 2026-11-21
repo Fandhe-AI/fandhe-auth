@@ -317,14 +317,8 @@ where
     C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
     F: Fn() -> CallResult + Sync,
 {
-    // 語彙外の区間名の拒否は hook を操作しない。アンワインド中の呼び出しでも InvalidPlan を返せるようにする。
-    // 時計を作る関数の破棄の panic は捕捉だけする（hook 未登録なら文言は既存の hook に出る）。
-    if !plan.allowed_intervals.contains(spec.interval()) {
-        let _ = quiet_catch(move || drop(new_clock));
-        return Err(StageError::InvalidPlan);
-    }
-    // 所有する値の Drop の panic 文言を出さないため hook を入れる（SECR-23）。
-    // アンワインド中は `take_hook` が panic するので入れない（`install_quiet_hook` が判定する）。
+    // 不正な計画の拒否（InvalidPlan）でも生成関数の破棄の文言を出さないため、早期リターンより前に hook を入れる（SECR-23）。
+    // アンワインド中は `take_hook` が panic するので入れない（`install_quiet_hook` が判定し、InvalidPlan は返せる）。
     install_quiet_hook();
     let result = run_stages_inner(&mut new_clock, spec, plan, &call);
     // 時計を作る関数（クロージャ）の破棄も抑止と捕捉の内側で行う。所有する値の Drop が panic しても文言を hook に渡さない。
