@@ -269,7 +269,7 @@ check_bad_lock "skills-lock.json with an unexpected top-level key is rejected" '
 
 # ---------------------------------------------------------------- shellcheck-staged.sh（pre-commit の shellcheck の並列実行）
 # 本物の shellcheck には頼らず（macOS の CI にあるとは限らない）、PATH 先頭に置いた偽物で呼び方と集約を確かめる。
-# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。名前に bad を含むファイルは 3 行を出して 1 で終わり、slow を含むものは遅れて終わる。
+# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。名前に bad を含むファイルは 3 行を出して 1 で終わり、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とす。
 sc_shim_dir="${work_dir}/sc-shim"
 mkdir -p "${sc_shim_dir}"
 cat > "${sc_shim_dir}/shellcheck" <<'EOF'
@@ -278,6 +278,7 @@ printf '%s\n' "$*" >> "${SC_LOG}"
 for arg in "$@"; do
   case "${arg}" in
     *slow*) sleep 0.3 ;;
+    *die*) kill -9 "${PPID}" ;;
   esac
   case "${arg}" in
     *bad*)
@@ -348,6 +349,14 @@ if [ "${sc_rc}" -eq 0 ] && [ "$(sort "${sc_log}")" = "$(printf '%s\n' '-- a.sh' 
   pass "shellcheck-staged: duplicate arguments are checked once"
 else
   fail "shellcheck-staged: duplicate arguments are checked once" "exit ${sc_rc}, calls: $(cat "${sc_log}")"
+fi
+
+# 検査が結果を書く前に落ちたとき（子の bash が kill される）は、成功にせず 1 で止まり、ファイル名つきの診断を出す
+sc_run a.sh die.sh c.sh
+if [ "${sc_rc}" -eq 1 ] && grep -qF "no valid result for die.sh" "${work_dir}/out" && ! grep -qF "no valid result for a.sh" "${work_dir}/out"; then
+  pass "shellcheck-staged: a check that dies before writing its result exits 1 and names the file"
+else
+  fail "shellcheck-staged: a check that dies before writing its result exits 1 and names the file" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 # 件数が並列数の上限を超えても、全件が 1 回ずつ検査される

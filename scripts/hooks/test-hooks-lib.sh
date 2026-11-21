@@ -7,14 +7,14 @@
 # 各 part は別の bash として起動され、状態（変数・関数・cwd）は part の間で引き継がない。
 # 計数は finish が TEST_HOOKS_COUNTS_FILE へ書き、入口（test-hooks.sh）が合算する。
 #
-# 変数・関数は source した側の part が参照するため、本ファイル単独では未使用に見える。
-# shellcheck disable=SC2034,SC2329 # part から参照する変数・関数（本ファイルだけを検査すると未使用になる）
+# 変数・関数は source した側の part が参照するため、単独で未使用に見える定義には、宣言ごとに理由付きの disable を置く。
 set -euo pipefail
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib.sh
 source "${HOOKS_DIR}/../lib.sh"
 
 SECRET_SCAN="${HOOKS_DIR}/secret-scan.sh"
+# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 COMMIT_MSG_CHECK="${HOOKS_DIR}/commit-msg-check.sh"
 HOOK_BASH="${BASH}"
 
@@ -46,6 +46,7 @@ trap 'chmod -R u+rwx "${work_dir}" 2> /dev/null; rm -rf "${work_dir}"' EXIT
 # lefthook 経由で起動された場合に備え、親リポジトリを指す環境変数も外す。
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 real_home="${HOME}"
 export HOME="${work_dir}/home"
 export GIT_CONFIG_GLOBAL=/dev/null
@@ -138,13 +139,25 @@ at='@'
 dash='-----'
 token="gh""p_$(printf 'A1b2C3d4E5f6G7h8I9j0K1l2')"
 password_value="Hunter2Hunter2Hunter2"
+# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 password_line="password = ${q}${password_value}${q}"
+# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 dsn_line="db: postgres://app:s3cr3tpass${at}db.internal:5432/app"
+# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 key_line="${dash}BEGIN OPENSSH PRIVATE"" KEY${dash}"
 # 出力に値そのものが含まれていないことを確認する対象
 leak_needles="${token}
 ${password_value}
 s3cr3tpass"
+
+# 規則表（TASK-6）の例示値。すべての part の check_scan が、これらも出力に漏れていないことを確かめる（実行時に組み立てる）
+jwt_value="eyJ""hbGciOiJFUzI1NiJ9.eyJ""zdWIiOiJ1c2VyMSJ9.abcdefghij"
+jwk_value="Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij"
+recovery_value="Abcd1234-Efgh5678-Ijkl9012"
+leak_needles="${leak_needles}
+${jwt_value}
+${jwk_value}
+${recovery_value}"
 
 last_out=""
 passed=0
@@ -251,8 +264,10 @@ lock_ok='{
   }
 }'
 make_detector ok "${lock_ok}"
+# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 det_ok="${det_bin}"
 make_detector nolock
+# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 det_nolock="${det_bin}"
 
 
@@ -267,6 +282,7 @@ same_checkout_repo() {
   git add -A
   git commit -q -m "chore: add detector"
 }
+# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 same_bin="scripts/hooks/secret-scan.sh"
 
 # ---- 複数の part が使う helper（元は各節の中にあった。part の間で関数を引き継がないため、ここに置く）
@@ -328,6 +344,7 @@ expect_rc() {
 }
 
 # secret-scan-ci.sh（CI 向けの入口）
+# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 CI_ENTRY="${HOOKS_DIR}/../secret-scan-ci.sh"
 
 # print_header: 検査対象の bash とロケールを 1 行で出す（part 1 だけが呼ぶ）。

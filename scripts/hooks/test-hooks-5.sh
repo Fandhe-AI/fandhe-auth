@@ -7,14 +7,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-lib.sh"
 
 # ---- 規則表（TASK-6）: 規則ごとの検出・件数の出力
-jwt_value="eyJ""hbGciOiJFUzI1NiJ9.eyJ""zdWIiOiJ1c2VyMSJ9.abcdefghij"
-jwk_value="Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij""Abcdefghij"
-recovery_value="Abcd1234-Efgh5678-Ijkl9012"
 enc_key_line="${dash}BEGIN ENCRYPTED PRIVATE"" KEY${dash}"
-leak_needles="${leak_needles}
-${jwt_value}
-${jwk_value}
-${recovery_value}"
 
 new_repo; stage a.txt "x = ${jwt_value}"
 check_scan "jwt shape" 1 a.txt

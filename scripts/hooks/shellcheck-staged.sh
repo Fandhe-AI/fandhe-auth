@@ -79,7 +79,11 @@ done | sort -rn -k1,1 -k2,2n > "${tmp_dir}/order"
 while read -r _size idx; do
   printf '%s\0%s\0' "${idx}" "${files[idx]}"
 done < "${tmp_dir}/order" \
-  | xargs -0 -n 2 -P "${max_jobs}" bash -c '
+  | xargs -0 -x -n 2 -P "${max_jobs}" bash -c '
+    # 番号は数字だけを受ける（違えば何も書かずに終わり、結果は下で失敗になる）
+    case "$1" in
+      "" | *[!0-9]*) exit 0 ;;
+    esac
     if shellcheck -- "$2" > "$0/$1.out" 2>&1; then
       rc=0
     else
@@ -95,8 +99,16 @@ while [ "${i}" -lt "${total}" ]; do
     cat "${tmp_dir}/${i}.out"
   fi
   # rc ファイルが無い・0 でないものは失敗にする（途中で落ちた検査を成功にしない）
-  if [ ! -s "${tmp_dir}/${i}.rc" ] || [ "$(cat "${tmp_dir}/${i}.rc")" != "0" ]; then
+  rc_text=""
+  if [ -s "${tmp_dir}/${i}.rc" ]; then
+    rc_text="$(cat "${tmp_dir}/${i}.rc")"
+  fi
+  if [ "${rc_text}" != "0" ]; then
     status=1
+    # 検査の指摘は上で出した。ここは .rc が無い・数字でないとき（検査が途中で落ちた）の診断で、ファイル名を出す
+    case "${rc_text}" in
+      '' | *[!0-9]*) echo "shellcheck-staged: no valid result for ${files[i]} (the check did not finish)" >&2 ;;
+    esac
   fi
   i=$((i + 1))
 done

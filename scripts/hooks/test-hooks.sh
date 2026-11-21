@@ -34,6 +34,26 @@ reject_args "$(basename "$0")" "$@"
 
 parts="1 2 3 4 5 6 7"
 
+# parts が実在する part のファイル（test-hooks-<数字>.sh）と一致しなければ失敗にする（足した part の起動漏れ・消した part の素通りを防ぐ）
+part_files=0
+for part_file in "${HOOKS_DIR}"/test-hooks-[0-9]*.sh; do
+  if [ -e "${part_file}" ]; then
+    part_files=$((part_files + 1))
+  fi
+done
+parts_listed=0
+for part in ${parts}; do
+  parts_listed=$((parts_listed + 1))
+  if [ ! -e "${HOOKS_DIR}/test-hooks-${part}.sh" ]; then
+    echo "test-hooks: part ${part} listed in parts does not exist" >&2
+    exit 1
+  fi
+done
+if [ "${parts_listed}" -ne "${part_files}" ]; then
+  echo "test-hooks: parts lists ${parts_listed} part(s) but ${part_files} test-hooks-<N>.sh file(s) exist" >&2
+  exit 1
+fi
+
 counts_dir="$(mktemp -d "${TMPDIR:-/tmp}/test-hooks-counts.XXXXXX")"
 trap 'rm -rf "${counts_dir}"' EXIT
 # part が計数を追記する先。計数を書かずに終わった part（途中で止まった・早期に 0 で抜けた）は失敗として扱う。
@@ -41,6 +61,7 @@ export TEST_HOOKS_COUNTS_FILE="${counts_dir}/counts"
 : > "${TEST_HOOKS_COUNTS_FILE}"
 
 crashed=0
+exit_mismatch=0
 for part in ${parts}; do
   before="$(wc -l < "${TEST_HOOKS_COUNTS_FILE}")"
   part_rc=0
@@ -53,6 +74,14 @@ for part in ${parts}; do
   if [ "${after}" -ne $((before + 1)) ]; then
     echo "not ok - test-hooks: part ${part} ended without reporting its counts (exit ${part_rc})"
     crashed=$((crashed + 1))
+  elif [ "${part_rc}" -ne 0 ]; then
+    # 計数のあとに非 0 で終わった part。失敗を報告した part（finish が 1 で終わる）は計数に入っているので足さず、
+    # 失敗 0 を報告したのに非 0 で終わったときだけ、計数と終了コードの不一致を 1 件の失敗として足す。
+    last_counts="$(tail -n 1 "${TEST_HOOKS_COUNTS_FILE}")"
+    if [ "${last_counts##* }" = "0" ]; then
+      echo "not ok - test-hooks: part ${part} exited ${part_rc} after reporting no failures"
+      exit_mismatch=$((exit_mismatch + 1))
+    fi
   fi
 done
 
@@ -63,8 +92,8 @@ while read -r part_passed part_failed; do
   failed=$((failed + part_failed))
 done < "${TEST_HOOKS_COUNTS_FILE}"
 
-# 計数を報告せずに終わった part は 1 件の失敗として足す（not ok の行は上で出した）
-failed=$((failed + crashed))
+# 計数を報告せずに終わった part・計数のあとに非 0 で終わった part は、それぞれ 1 件の失敗として足す（not ok の行は上で出した）
+failed=$((failed + crashed + exit_mismatch))
 
 echo "# passed: ${passed}, failed: ${failed}"
 if [ "${failed}" -ne 0 ]; then
