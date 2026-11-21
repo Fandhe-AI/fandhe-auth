@@ -103,7 +103,7 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 
 ## 結果の記録の形式
 
-`TASK-12` の 2/10（#113）。この節は形式の定義だけで、型・出力の実装はまだ無い（後段。下の「未決・人の確認待ち」）。
+`TASK-12` の 2/10（#113）。この節は形式の定義で、記録のファイル全体の出力は 9/10 で置いた（下の「記録の出力と試し実行（9/10）」。記録時点の文は残し、追記で示す）。
 形式の識別子・キー名・トークン・文言はすべて仮置きで、人が確認する。記録は事実の出力で、合否の判定でも spec の「確定」でもない（`ACPT-7`）。
 
 ### 1. 形式の基本
@@ -360,6 +360,27 @@ judgment:
 - 範囲外: `format:`・`run_record_file:`・`judgment:` などファイル全体の出力と書き出し（担当の段は未決）、開ループ、合否、実物の経路（`TODO(TASK-716)`）。
   機材と構成（7/10）は記録の単位で 1 つ持ち、`StagedRun` には入れない。依存の辺は変えない（通常の依存は 0）。
 
+## 記録の出力と試し実行（9/10）
+
+`TASK-12` の 9/10（#120）。`crates/load-harness` の `record` に、`fandhe-auth-load-record/1` のファイル全体を組んで新規ファイルへ書き出す部品を置いた。
+名前・語・上限はすべて仮置きで、人が確認する。合否は付けない（`ACPT-7`）。
+
+- API: `LoadRecord::new`（実行の記録のファイル名・起動時刻・記録時刻・機材と構成・段階の結果・比べる値を受ける）、`LoadRecord::write_new(dir)`、
+  `ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`LoadRecordError`。
+- 行の順: `format:` → `run_record_file:` → `run_started_at:` → `recorded_at:` → 条件 → 段階 → `value:` → `judgment:`（形式の 7 の見本どおり）。`judgment:` は常に空で、ハーネスは書かない。
+- 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial`・`poc_parameter` は出典と整数の値が必須、`undecided` は値なし、`external` は値なし・出典必須、
+  `test_condition`・`measured` は整数の値が必須で出典を受けず、行には固定の印（`harness_config`・`measured`）を出す。出典は 1 行 8 件まで・重複は誤り。
+  測定値・既定値を要件の値へ上げる経路は作らない。
+- 書き出し: `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。無ければ `dir` を作り、`create_new` で上書きしない。乱数・環境変数・設定ファイルを使わない。
+- 時刻の RFC 3339 の整形は、通常の依存を 0 に保つため it-harness の `UtcTimestamp` と同じ変換を `record` に重複して持つ。
+- 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない。`Debug` は中身を出さない固定文字列にした（`SECR-23`・`SECR-26`）。
+- 試し実行（`tests/trial_run.rs`。Docker・ネットワークなし。`make test` で流れる）: it-harness の上で Hub の stub に 2 段階（並行数 1・2）の負荷をかけ、
+  実行の記録（`it-run-…`）と負荷の記録を同じ出力先へ書く。見た点は、記録のファイルが出ること・名前の形・`run_record_file` と `run_started_at` が実行の記録と結ばれること・
+  行の数と件数・全試行数に一致する stub 側の呼び出し・`class=requirement`/`initial`/`poc_parameter` が 1 行も無いこと・値の行が `undecided` の 1 行だけであること・
+  メタデータ以外の全行が `class=` と `refs=` を持つこと・設定の目印と出力先のパスが出ないこと・再度の書き出しが別名の新しいファイルになること。時間の値は判定しない。
+  stub の合格を実物の合格に数えない（`A-2026-10-28-9`）。
+- 範囲外: 開ループ、実物の経路（`TODO(TASK-716)`）、仮想化の判別、人向けの表示の単位と手順書（10/10）、合否の値の導出（`TASK-21`・`AUDP-29`）。
+
 ## 未決・人の確認待ち
 
 - 文書名・節立て
@@ -386,3 +407,7 @@ judgment:
 - 「結果が記録される」の読み: `TargetRun` の構造体まで。ファイルへの出力を担当する段は未決（人が決める。受け入れ条件を満たしたかの判定も人）
 - 8/10 の仮置き: `StageLimits` の項目と区間名の語彙を呼び出し元の設定で受けること、誤りのときに終わった段階を捨てること、行を出す順、API の名前（`stage`・`run_stages`・`StagePlan`・`StageConfig`・`StageResult`・`StagedRun`・`StageError`）
 - 「段階ごとに記録される」の読み: 構造体と行の `Display` まで。ファイルへの出力を担当する段は未決のまま（人が決める。受け入れ条件を満たしたかの判定も人）
+- 9/10 の仮置き: 記録のファイル全体の出力を 9/10 に置いたこと、`requirement`・`initial`・`poc_parameter` で値を必須にしたこと、`test_condition`・`measured` に出典を受けないこと、
+  値の行の上限（64）と出典の上限（8）、`load-run-…` の名前を `run_started_at` の秒で作ること、時刻の整形を it-harness と別に持つこと、
+  API の名前（`record`・`LoadRecord`・`ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`LoadRecordError`）
+- 「小さな試し実行が終わり記録が出る」の読み: `make test` の中の試験でファイルが出ること（人が確認する。受け入れ条件を満たしたかの判定も人）

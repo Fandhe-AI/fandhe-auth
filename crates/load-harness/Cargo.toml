@@ -1,6 +1,6 @@
 [package]
 name = "fandhe-auth-load-harness"
-description = "計測・負荷のハーネスの計測の部品（試験専用。測定値は要件の値でも合否の判定でもない）"
+description = "計測・負荷のハーネスの部品と記録の出力（試験専用。測定値は要件の値でも合否の判定でもない）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

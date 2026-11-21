@@ -1,0 +1,243 @@
+//! 記録のファイル全体の単体試験（TASK-12 9/10）。偽の値・合成の時刻（epoch 付近）だけを使い、
+//! PoC の数値・要件の値を置かない（ACPT-7）。
+
+use fandhe_auth_load_harness::{
+    CallResult, ComparisonValue, ComponentConditions, IntervalName, LOAD_RECORD_FORMAT, LoadConfig,
+    LoadRecord, LoadRecordError, LoopModel, MeasurementConditions, MetricKey, RefId, RunRecordFile,
+    StageConfig, StageLimits, StagePlan, StagedRun, StdMonotonicClock, TargetName, TargetSpec,
+    ValueClass, ValueName, ValueUnit, run_stages,
+};
+
+fn refs(ids: &[&str]) -> Vec<RefId> {
+    ids.iter().map(|s| RefId::new(s).unwrap()).collect()
+}
+
+fn val(
+    name: &str,
+    class: ValueClass,
+    v: Option<u64>,
+    ids: &[&str],
+) -> Result<ComparisonValue, LoadRecordError> {
+    ComparisonValue::new(
+        ValueName::new(name).unwrap(),
+        class,
+        v,
+        ValueUnit::Ns,
+        refs(ids),
+    )
+}
+
+fn invalid(r: Result<ComparisonValue, LoadRecordError>) -> bool {
+    matches!(r, Err(LoadRecordError::InvalidValue { .. }))
+}
+
+#[test]
+fn class_rules_fail_closed() {
+    use ValueClass::*;
+    for c in [Requirement, Initial, PocParameter] {
+        assert!(invalid(val("v", c, Some(1), &[])));
+        assert!(invalid(val("v", c, None, &["X-1"])));
+        assert!(val("v", c, Some(1), &["X-1"]).is_ok());
+    }
+    assert!(val("v", Undecided, None, &[]).is_ok());
+    assert!(val("v", Undecided, None, &["X-1"]).is_ok());
+    assert!(invalid(val("v", Undecided, Some(1), &[])));
+    assert!(invalid(val("v", External, None, &[])));
+    assert!(invalid(val("v", External, Some(1), &["X-1"])));
+    assert!(val("v", External, None, &["X-1"]).is_ok());
+    for c in [TestCondition, Measured] {
+        assert!(invalid(val("v", c, None, &[])));
+        assert!(invalid(val("v", c, Some(1), &["X-1"])));
+        assert!(val("v", c, Some(1), &[]).is_ok());
+    }
+}
+
+#[test]
+fn refs_limits() {
+    let nine: Vec<String> = (0..9).map(|i| format!("R-{i}")).collect();
+    let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+    assert_eq!(
+        val("v", ValueClass::Initial, Some(1), &nine).unwrap_err(),
+        LoadRecordError::TooManyRefs
+    );
+    assert!(val("v", ValueClass::Initial, Some(1), &nine[..8]).is_ok());
+    assert_eq!(
+        val("v", ValueClass::Initial, Some(1), &["A", "A"]).unwrap_err(),
+        LoadRecordError::InvalidRef
+    );
+}
+
+#[test]
+fn input_validation() {
+    for bad in ["", "A", "a-b", "a\nb", "a\u{2028}b", "a b", &"a".repeat(65)] {
+        assert_eq!(
+            ValueName::new(bad).unwrap_err(),
+            LoadRecordError::InvalidName
+        );
+    }
+    for bad in [
+        "",
+        "a\nb",
+        "a\u{2028}b",
+        "a\u{2029}b",
+        "a,b",
+        "a b",
+        "a\0b",
+        &"a".repeat(65),
+    ] {
+        assert_eq!(RefId::new(bad).unwrap_err(), LoadRecordError::InvalidRef);
+    }
+    assert!(RunRecordFile::new("it-run-0-1-2.txt").is_ok());
+    for bad in [
+        "",
+        "../it-run-0-1-2.txt",
+        "it-run-0-1-2.txt\n",
+        "x-run-0-1-2.txt",
+        "it-run-0-1.txt",
+        "it-run-a-1-2.txt",
+        "it-run-0-1-2.log",
+        "it-run-0-1-2-3.txt",
+        "dir/it-run-0-1-2.txt",
+    ] {
+        assert_eq!(
+            RunRecordFile::new(bad).unwrap_err(),
+            LoadRecordError::InvalidRunRecordFile
+        );
+    }
+}
+
+#[test]
+fn value_line_shapes() {
+    let l = |v: ComparisonValue| v.to_string();
+    assert_eq!(
+        l(val("p99_target", ValueClass::Undecided, None, &[]).unwrap()),
+        "value: p99_target class=undecided value=none unit=ns refs=none"
+    );
+    assert_eq!(
+        l(val("c", ValueClass::TestCondition, Some(3), &[]).unwrap()),
+        "value: c class=test_condition value=3 unit=ns refs=harness_config"
+    );
+    assert_eq!(
+        l(val("m", ValueClass::Measured, Some(7), &[]).unwrap()),
+        "value: m class=measured value=7 unit=ns refs=measured"
+    );
+    assert_eq!(
+        l(val("e", ValueClass::External, None, &["A", "B"]).unwrap()),
+        "value: e class=external value=none unit=ns refs=A,B"
+    );
+}
+
+fn staged() -> StagedRun {
+    let spec = TargetSpec::new(
+        TargetName::new("route_a").unwrap(),
+        IntervalName::new("op").unwrap(),
+    );
+    let plan = StagePlan::new(
+        vec![StageConfig::new(LoadConfig::new(1, 3, 0).unwrap(), 1).unwrap()],
+        MetricKey::P99Ns,
+        StageLimits::new(4, 4, 100, 100).unwrap(),
+        vec![IntervalName::new("op").unwrap()],
+    )
+    .unwrap();
+    run_stages(
+        || Box::new(StdMonotonicClock::new()),
+        &spec,
+        &plan,
+        || CallResult::Ok,
+    )
+    .unwrap()
+}
+
+fn conditions() -> MeasurementConditions {
+    MeasurementConditions::detect(ComponentConditions::new(&[]).unwrap(), LoopModel::Closed)
+        .unwrap()
+}
+
+fn file() -> RunRecordFile {
+    RunRecordFile::new("it-run-0-1-1.txt").unwrap()
+}
+
+fn build(s: u64, r: u64, values: Vec<ComparisonValue>) -> Result<LoadRecord, LoadRecordError> {
+    LoadRecord::new(&file(), s, r, &conditions(), &staged(), values)
+}
+
+#[test]
+fn record_layout_order_and_timestamps() {
+    let v = val("p99_target", ValueClass::Undecided, None, &["AUDP-29"]).unwrap();
+    let rec = build(0, 60, vec![v]).unwrap();
+    let text = rec.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], format!("format: {LOAD_RECORD_FORMAT}"));
+    assert_eq!(lines[1], "run_record_file: it-run-0-1-1.txt");
+    assert_eq!(lines[2], "run_started_at: 1970-01-01T00:00:00Z");
+    assert_eq!(lines[3], "recorded_at: 1970-01-01T00:01:00Z");
+    assert!(lines[4].starts_with("condition_machine: cpu_count"));
+    let pos = |p: &str| lines.iter().position(|l| l.starts_with(p)).unwrap();
+    assert!(pos("condition_loop:") < pos("stage:"));
+    assert!(pos("stage:") < pos("run:"));
+    assert!(pos("worst_run:") < pos("value:"));
+    assert_eq!(
+        lines[lines.len() - 2],
+        "value: p99_target class=undecided value=none unit=ns refs=AUDP-29"
+    );
+    assert_eq!(lines[lines.len() - 1], "judgment:");
+    assert!(text.ends_with("judgment:\n"));
+}
+
+#[test]
+fn rfc3339_known_values() {
+    // 2000-02-29T12:34:56Z = 951827696（閏年）。2024-12-31T23:59:59Z = 1735689599。
+    let t = build(951_827_696, 1_735_689_599, vec![])
+        .unwrap()
+        .to_string();
+    assert!(t.contains("run_started_at: 2000-02-29T12:34:56Z\n"));
+    assert!(t.contains("recorded_at: 2024-12-31T23:59:59Z\n"));
+}
+
+#[test]
+fn clock_order() {
+    assert_eq!(
+        build(10, 9, vec![]).unwrap_err(),
+        LoadRecordError::ClockOrder
+    );
+    assert!(build(10, 10, vec![]).is_ok());
+}
+
+#[test]
+fn value_row_limits_and_duplicates() {
+    let many: Vec<ComparisonValue> = (0..65)
+        .map(|i| val(&format!("v{i}"), ValueClass::Undecided, None, &[]).unwrap())
+        .collect();
+    assert_eq!(
+        build(0, 0, many).unwrap_err(),
+        LoadRecordError::TooManyValues
+    );
+    let dup = vec![
+        val("v", ValueClass::Undecided, None, &[]).unwrap(),
+        val("v", ValueClass::Measured, Some(1), &[]).unwrap(),
+    ];
+    assert_eq!(
+        build(0, 0, dup).unwrap_err(),
+        LoadRecordError::DuplicateValue
+    );
+}
+
+#[test]
+fn debug_and_errors_do_not_leak() {
+    let secret = "canary_name_zz";
+    let v = val(secret, ValueClass::Initial, Some(424_242), &["CANARY-REF"]).unwrap();
+    let dbg = format!(
+        "{v:?} {:?} {:?}",
+        ValueName::new(secret).unwrap(),
+        refs(&["CANARY-REF"])
+    );
+    let rec = build(0, 1, vec![v]).unwrap();
+    let dbg = format!("{dbg} {rec:?} {:?}", file());
+    for bad in [secret, "CANARY-REF", "424242", "it-run-0-1-1"] {
+        assert!(!dbg.contains(bad));
+    }
+    let e = RunRecordFile::new("bad\nlines").unwrap_err().to_string();
+    assert!(!e.contains("bad"));
+    let e = RefId::new("x\ny").unwrap_err().to_string();
+    assert!(!e.contains('x'));
+}

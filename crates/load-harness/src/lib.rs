@@ -7,7 +7,10 @@
 //! [`condition`]（7/10）は測定の条件（機材・構成・負荷の型）を記録の行に出す。
 //! [`stage`]（8/10）は並行数を段階的に変えて回し、結果を段階ごとに分けて記録の行（`stage`・`run`・`worst_run` 等）に出す。
 //!
-//! 範囲外: 記録のファイル全体の出力（担当の段は未決）、障害注入（`TASK-13`）、負荷の見積もり（`TASK-15`）、
+//! [`record`]（9/10）は記録のファイル全体（`format:`・`run_record_file:`・`value:`・`judgment:` を含む）を組んで新規ファイルへ書き出す
+//! （仮置き。人が確認する）。
+//!
+//! 範囲外: 障害注入（`TASK-13`）、負荷の見積もり（`TASK-15`）、
 //! 合格の値の導出（`TASK-21`・`AUDP-29`）、結合試験（`TASK-10`）。合否は付けない（`ACPT-7`）。
 //!
 //! 依存の向き: どの crate もこの crate に依存しない（LIB-2・LIB-4）。段階 1 のリリースのメンバーではない
@@ -24,6 +27,7 @@ pub mod aggregate;
 pub mod condition;
 pub mod generate;
 pub mod meter;
+pub mod record;
 pub mod stage;
 pub mod target;
 
@@ -42,6 +46,11 @@ pub use generate::{LoadConfig, LoadError, LoadRun, LoopModel, MAX_CONCURRENCY, r
 pub use meter::{
     FailureKind, IntervalName, MeterError, MonotonicClock, Outcome, RunMeter, RunSamples, Sample,
     StdMonotonicClock, Trial,
+};
+
+pub use record::{
+    ComparisonValue, LOAD_RECORD_FORMAT, LoadRecord, LoadRecordError, RefId, RunRecordFile,
+    ValueClass, ValueName, ValueUnit,
 };
 
 pub use stage::{
