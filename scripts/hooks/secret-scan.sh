@@ -1009,7 +1009,18 @@ if [ "${head_resolved}" -eq 1 ]; then
 fi
 
 # 走査中に元の index の内容が変わっていたら、固定した複写に基づく結果は実際の内容と食い違う。合格を返さず検査不能（2）にする。
-if ! GIT_INDEX_FILE="${orig_index}" index_listing "${tmp_dir}/index-listing-after" 2> /dev/null; then
+# 終了時も元の index を固定時と同じ方法で 1 回だけ複写し、2 つの一覧（ls-files -s と intent-to-add の印）を同じ複写から取る。
+# 元の index を一覧ごとに開くと、2 つの呼び出しの間の更新で 2 つの一覧が別の版を見て、どちらの版とも違う組で一致し得る（#6011）。
+# git は index を lock ファイルの rename で置き換えるため、cp は 1 つの版を読む。元の index が無いときは存在しない複写のパスを
+# 指し（空として扱う）、固定時にあった index が消えていれば一覧が違って 2 になる。複写の失敗は 2。
+after_index="${tmp_dir}/index-after"
+if [ -e "${orig_index}" ]; then
+  if ! cp -- "${orig_index}" "${after_index}" 2> /dev/null; then
+    echo "secret-scan: cannot snapshot the index; aborting" >&4
+    exit 2
+  fi
+fi
+if ! GIT_INDEX_FILE="${after_index}" index_listing "${tmp_dir}/index-listing-after" 2> /dev/null; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
 fi

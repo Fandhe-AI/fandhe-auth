@@ -77,6 +77,10 @@ cat > "${shim_dir}/git" <<'EOF'
 if [ -n "${LOG_GIT_FILE:-}" ]; then
   printf '%s\n' "$*" >> "${LOG_GIT_FILE}"
 fi
+# LOG_GIT_INDEX があれば、呼び出しが読む index（GIT_INDEX_FILE。未設定は -）と引数をタブ区切りで記録する
+if [ -n "${LOG_GIT_INDEX:-}" ]; then
+  printf '%s\t%s\n' "${GIT_INDEX_FILE:--}" "$*" >> "${LOG_GIT_INDEX}"
+fi
 # MOVE_HEAD_ON_ARG を含む呼び出しの前に一度だけ、HEAD の指す参照を MOVE_HEAD_TO へ動かす（走査中の HEAD の変化の再現用）
 if [ -n "${MOVE_HEAD_ON_ARG:-}" ] && [ ! -e "${MOVE_HEAD_FLAG:-/nonexistent}" ]; then
   for arg in "$@"; do
@@ -1046,6 +1050,38 @@ run_index_mutation "a file staged during the scan is a scan failure (2)" other.t
 new_repo; stage src/app.txt "hello"; : > .env; git add -N .env
 check_scan "an intent-to-add .env is not part of the commit" 0
 run_index_mutation "an intent-to-add file really staged during the scan is a scan failure (2)" .env
+# 走査後の比較は、元の index を 1 回だけ複写し、ls-files -s と intent-to-add の印の 2 つの一覧を同じ複写から取る（#6011）。
+# 元の index を別々に開くと、2 つの呼び出しの間の更新で一覧が別の版を見る。本文の diff（-U0）より後の 2 つの呼び出しが、
+# 同じ index のファイルを読み、それが元の index でも固定時の複写（本文の diff が読むもの）でもないことを確かめる
+new_repo; stage src/app.txt "hello"
+: > "${work_dir}/gitindex"
+LOG_GIT_INDEX="${work_dir}/gitindex" PATH="${shim_dir}:${PATH}" check_scan "the post-scan index comparison runs on a fresh copy" 0
+orig_idx="$(git rev-parse --path-format=absolute --git-path index)"
+body_idx=""
+after_ls=""
+after_ita=""
+seen_body=0
+while IFS=$'\t' read -r idx args; do
+  if [ "${seen_body}" -eq 0 ]; then
+    case " ${args} " in
+      *" -U0 "*)
+        seen_body=1
+        body_idx="${idx}"
+        ;;
+    esac
+    continue
+  fi
+  case " ${args} " in
+    *" ls-files -s -z "*) after_ls="${after_ls}${idx}"$'\n' ;;
+    *" --ita-invisible-in-index "*) after_ita="${after_ita}${idx}"$'\n' ;;
+  esac
+done < "${work_dir}/gitindex"
+if [ -n "${body_idx}" ] && [ "${after_ls}" = "${after_ita}" ] && [ "$(printf '%s' "${after_ls}" | wc -l | tr -d ' ')" = 1 ] \
+  && [ "${after_ls}" != "${orig_idx}"$'\n' ] && [ "${after_ls}" != "${body_idx}"$'\n' ] && [ "${after_ls}" != "-"$'\n' ]; then
+  pass "secret-scan: both post-scan listings read the same fresh copy of the index"
+else
+  fail "secret-scan: both post-scan listings read the same fresh copy of the index" "git calls: $(cat "${work_dir}/gitindex")"
+fi
 
 # 一覧の大きさの上限（作業ツリー側・HEAD 側・境界）。上限は検出器の lock_max_bytes（暫定 64 KiB）
 lock_max="$(sed -n 's/^lock_max_bytes=\([0-9][0-9]*\)$/\1/p' "${SECRET_SCAN}")"
