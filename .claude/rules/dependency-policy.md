@@ -88,7 +88,8 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（合否と、例外を足したならその理由）を PR 本文に書く。
 
 次のブロックは、先頭の `PROD_FEATURES=… SERVER_FEATURES=… bash -s <<'EOF'` から末尾の `EOF` までを、そのままコピーして実行する（zsh から流してもよい。中身は bash で動く）。
-先頭の 2 変数は子シェルへ渡す値で、自分の変更に合わせて右辺を書き換える。本番の feature が無いときは、空にせず `PROD_FEATURES=none SERVER_FEATURES=none` と明示の語で渡す
+先頭の 2 変数は子シェルへ渡す値で、例の右辺は `"${PROD_FEATURES:-}"` のとおり呼び出し元の値を引き継ぎ、未設定なら空のままにする（呼び出し元で設定済みの値を上書きしない）。
+空のまま流すと固定の文言で止まるので、自分の変更に合わせて右辺を実際の feature 一覧に書き換える（または呼び出し元で設定しておく）。本番の feature が無いときは、空にせず `PROD_FEATURES=none SERVER_FEATURES=none` と明示の語で渡す
 （空文字・未設定は止める。`none` は「無い」という主張なので、`Cargo.toml` の feature と照らして選ぶ）。中で `none` は空に読み替える。
 子シェルは外の変数を引き継がないので、既定の空に落とすと、本番の feature でだけ入る `rsa`・`reqwest` 等を見ないまま合格しうる。そのため既定は置かない。
 上の 2 変数のほかに手で書き換える値は無い（取得先の置き場は `mktemp -d` で毎回新しく作り、終了時に消す）。
@@ -99,7 +100,7 @@ licenses・bans・sources は、`deny.toml`（TASK-668）ができるまで、�
 PR 本文には結果の行（ok・FAIL・ERROR と crate 名、commit・取得日時・feature の値）だけを書き、cargo の誤り・warning の行（絶対パスを含む）は写さない。
 
 ```bash
-PROD_FEATURES=none SERVER_FEATURES=none bash -s <<'EOF'
+PROD_FEATURES="${PROD_FEATURES:-}" SERVER_FEATURES="${SERVER_FEATURES:-}" bash -s <<'EOF'
 # 取得と監査を分ける。取得の段では監査を流さない（`cargo audit` を --no-fetch なしで流すと取得と監査が同時に走り、
 # 記録した DB の版と監査に使った版がずれうる）。
 # 失敗は後続へ素通りさせない。取得・commit の読み取り・日時の記録のどれが失敗しても、その場で止めて監査へ進まない。
@@ -176,23 +177,38 @@ fi
 printf 'PROD_FEATURES=%s\nSERVER_FEATURES=%s\n' "${PROD_FEATURES:-none}" "${SERVER_FEATURES:-none}"
 echo "advisories (root + fuzz): passed. provisional: NOT the DPOL-34 4-check pass; licenses/bans/sources need deny.toml (TASK-668)"
 
-# 以下の cargo tree -i は「一致なし」で非 0 を返すのが合格のため、終了コードではなく出力で分類し、全項目を流した後に合否を返す。
-# 分類: 出力に「did not match any packages」→ 一致なし（合格）／終了コード 0 → 一致あり（不合格）／それ以外の失敗 → 実行の誤り（feature 名の誤り等。不合格）
+# 以下の cargo tree -i は、終了コードだけでは合否を決められない（-e の絞り込み後に逆依存が空でも 0 で終わり得る。一致なしは非 0）。
+# stdout（木）と stderr（診断）を分けて受け、次の 3 つに分類する。全項目を流した後に合否を返す。
+#   終了 0 かつ stdout に木の行あり → present（対象範囲に禁止依存がある。不合格）
+#   終了 0 かつ stdout が空 → absent（対象なし。合格）
+#   非 0 かつ stderr に「did not match any packages」→ absent（対象なし。合格）
+#   それ以外の非 0 → error（実行の誤り。feature 名の誤り等。不合格）
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する。--all-features は使わない
 # SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形）
 set +e
 TREE_BAD=0
-check_absent() {   # 引数: 表示名、cargo tree のコマンド
-  local name="$1" out rc
-  shift
-  out="$("$@" 2>&1 </dev/null)"; rc=$?
+TREE_STATE=""; TREE_OUT=""; TREE_ERR=""
+run_tree() {   # 引数: cargo tree のコマンド。結果を TREE_STATE・TREE_OUT・TREE_ERR に入れる
+  local rc
+  TREE_OUT="$("$@" 2>"$WORK/tree.err" </dev/null)"; rc=$?
+  TREE_ERR="$(cat "$WORK/tree.err")"
   if [ "$rc" -eq 0 ]; then
-    echo "FAIL: $name matched (a forbidden dependency is present):"; echo "$out"; TREE_BAD=1
-  elif grep -q 'did not match any packages' <<<"$out"; then   # パイプにしない（pipefail の下の SIGPIPE で誤分類しない）
-    echo "ok: $name no match"
+    if [ -n "${TREE_OUT//[[:space:]]/}" ]; then TREE_STATE=present; else TREE_STATE=absent; fi
+  elif grep -q 'did not match any packages' <<<"$TREE_ERR"; then   # パイプにしない（pipefail の下の SIGPIPE で誤分類しない）
+    TREE_STATE=absent
   else
-    echo "ERROR: cargo tree for $name failed (execution error, not a verdict; fix the command):"; echo "$out"; TREE_BAD=1
+    TREE_STATE=error
   fi
+}
+check_absent() {   # 引数: 表示名、cargo tree のコマンド
+  local name="$1"
+  shift
+  run_tree "$@"
+  case "$TREE_STATE" in
+    absent)  echo "ok: $name no match" ;;
+    present) echo "FAIL: $name matched (a forbidden dependency is present):"; echo "$TREE_OUT"; TREE_BAD=1 ;;
+    *)       echo "ERROR: cargo tree for $name failed (execution error, not a verdict; fix the command):"; echo "$TREE_ERR"; TREE_BAD=1 ;;
+  esac
 }
 TREE_ARGS=(tree --locked --workspace -e normal,build --target all)
 check_absent rsa        cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i rsa
@@ -200,9 +216,15 @@ check_absent native-tls cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i n
 # web-sys は fandhe-auth-webauthn-wasm を除く（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
 check_absent web-sys    cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys
 check_absent reqwest    cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i reqwest   # HOST-7・HOST-9。名前は reqwest だけ（上の「feature」の限界）
-# openssl は人が逆依存の根を見る項目。出力だけ出し、合否に含めない（根が webauthn-rs 系だけなら可。DPOL-10・DPOL-11）
-echo "--- openssl (human review of reverse-dependency roots; not part of the verdict)"
-cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i openssl </dev/null 2>&1
+# openssl は人が逆依存の根を見る項目。木は出すが、有無は合否に含めない（根が webauthn-rs 系だけなら可。DPOL-10・DPOL-11）。
+# 実行の誤りは別で、不合格にする（木が取れていない状態を「対象なし」と読ませない）
+echo "--- openssl (human review of reverse-dependency roots; presence is not part of the verdict)"
+run_tree cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i openssl
+case "$TREE_STATE" in
+  present) echo "$TREE_OUT" ;;
+  absent)  echo "openssl: no match" ;;
+  *)       echo "ERROR: cargo tree for openssl failed (execution error, not a verdict; fix the command):"; echo "$TREE_ERR"; TREE_BAD=1 ;;
+esac
 if [ "$TREE_BAD" -ne 0 ]; then echo "cargo tree: FAILED (match or execution error above)"; exit 1; fi
 echo "cargo tree: rsa, native-tls, web-sys, reqwest: no match. openssl: human review"
 exit 0
@@ -212,7 +234,8 @@ EOF
 - 暫定の設定で流すのは `advisories` だけなので、手順の最後の合格の印は「DPOL-34 の合格」ではない。PR 本文には、印の文言のまま「暫定。4 検査の合格ではない」と書き、licenses・bans・sources の人の照合の結果を別に書く。
 
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
-  0 にならない（cargo 1.100.0 で 101 を確認）。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
+  0 にならない（cargo 1.100.0 で 101 を確認）。一方、`-e` の絞り込み後に逆依存が空でも 0 で終わり得るので、手順は stdout と stderr を分けて受け、
+  終了 0 のときは stdout の木の行の有無で判定する。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、stderr の文言で「対象なし」と実行の誤りを分ける。
 - `-e normal` だけでは build-dependencies が抜けるので `-e normal,build` で見る。dev-dependencies は除く。試験だけで使う依存の
   監査は `-e dev` を足して別に見る。
 - `--all-features` は DPOL-31 の変異スイッチなど試験用の feature も有効にし、本番のビルドの木と変わるので使わない。
