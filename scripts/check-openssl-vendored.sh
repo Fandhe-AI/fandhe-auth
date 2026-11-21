@@ -47,7 +47,7 @@ source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 # 使う外部コマンドは作業ディレクトリの作成前にすべて確かめる（EXIT トラップの rm の不足で 127 にしない）。
-for c in cargo mktemp mkdir rm grep dirname basename python3 ln env; do
+for c in cargo mktemp mkdir rm grep dirname basename python3 ln env chmod; do
   require_cmd "${c}" || exit 2
 done
 # TOML は構造として読む（引用キーの Unicode エスケープを文字列検索では見落とすため）。tomllib（3.11 以上）が無ければ検査不能（2）。
@@ -183,18 +183,25 @@ count_rule() {
   echo "${n}"
 }
 
-# count_static_env: 名前が OPENSSL_STATIC か _OPENSSL_STATIC で終わる環境変数の数を値によらず返す（R4。pkg-config crate は存在だけで静的を選ぶため `0` も数える）。
-# 名前も値も出さない。値は読まず、eval やコマンドの引数にも展開しない。
+# count_static_env [前置コマンド...]: 環境変数のうち、名前が次の 4 つの形のものの数を返す（R4）。
+#   OPENSSL_STATIC・PKG_CONFIG_ALL_STATIC、<TARGET>_OPENSSL_STATIC・<TARGET>_PKG_CONFIG_ALL_STATIC（末尾一致）
+# pkg-config crate は存在だけで静的を選ぶため、値が `0` でも数える。名前も値も出さない。値は判定に使わず、eval やコマンドの引数にも展開しない。
+# <TARGET> はハイフンを含み得る（上流の openssl-sys はハイフンを `_` に替えた名前を読むため、ここでは上流の版が変わっても漏らさないよう、
+# 安全側に多めに数える）。bash の変数名にならない名前も見落とさないよう、compgen ではなく python の os.environ で列挙する。
+# 前置コマンドは試験用（env -i で子の環境を作る）。bash を経ず python3 を直接起動するので、bash 3.2 等の環境変数の扱いに依らない。
+# 出力が数字でなければ検査不能（2）。python が 0 で何も出さない場合を 0 件として扱わない（fail-closed）。
 count_static_env() {
-  # bash の変数名にならない名前（ターゲット接頭辞のハイフン等）も見落とさないよう、compgen ではなく python の os.environ で列挙する。
-  python3 -I -c '
+  local c
+  c="$("$@" python3 -I -c '
 import os
 n = 0
 for k in os.environ:
-    if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith("_OPENSSL_STATIC") or k.endswith("_PKG_CONFIG_ALL_STATIC"):
+    if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")):
         n += 1
 print(n)
-' 2>/dev/null || return 2
+' 2>/dev/null)" || return 2
+  case "${c}" in '' | *[!0-9]*) return 2 ;; esac
+  echo "${c}"
 }
 
 # count_static_config <root>: <root>/.cargo/config.toml・config の `[env]` のキーのうち OPENSSL_STATIC か _OPENSSL_STATIC で終わるものの数を返す
@@ -365,11 +372,29 @@ selftest() {
 
   # F10: 静的リンクの環境変数（R4）。env -i で外側の環境を消し、試験の変数だけを渡した子プロセスで数える。
   # ハイフンを含む名前（bash の変数名にならない）も数えることを確かめる。
-  local ev cnt
+  local ev cnt rc
   for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'PKG_CONFIG_ALL_STATIC=1:ge1' 'x86_64-unknown-linux-gnu_OPENSSL_STATIC=1:ge1' 'aarch64-linux-android_PKG_CONFIG_ALL_STATIC=1:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0' 'NOT-OPENSSL_STATIC_X=1:eq0'; do
-    cnt="$(env -i "PATH=${PATH}" "${ev%:*}" "${BASH}" -c "$(declare -f count_static_env); count_static_env")" || exit 2
+    cnt="$(count_static_env env -i "PATH=${PATH}" "${ev%:*}")" || exit 2
+    case "${cnt}" in '' | *[!0-9]*) log "error: selftest F10: non-numeric count; cannot inspect"; exit 2 ;; esac
     if { [ "${ev##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${ev##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
       log "FAIL selftest F10: static env check wrong (case ${ev##*:})"
+      exit 1
+    fi
+  done
+
+  # F10b: python3 が 0 で終わって何も出さない・数字以外を出すときは検査不能（2）。0 件として扱わない（fail-closed）
+  local fk
+  for fk in empty junk; do
+    if ! mkdir -p "${f}/fakepy-${fk}" 2>/dev/null ||
+      ! { [ "${fk}" = empty ] && printf '#!/bin/sh\nexit 0\n' || printf '#!/bin/sh\necho x1\nexit 0\n'; } 2>/dev/null >"${f}/fakepy-${fk}/python3" ||
+      ! chmod +x "${f}/fakepy-${fk}/python3" 2>/dev/null; then
+      log "error: cannot write fixture (f10b); cannot inspect"
+      exit 2
+    fi
+    rc=0
+    count_static_env env -i "PATH=${f}/fakepy-${fk}" >/dev/null 2>&1 || rc=$?
+    if [ "${rc}" -ne 2 ]; then
+      log "FAIL selftest F10b: fake python output (${fk}) not treated as cannot-inspect"
       exit 1
     fi
   done
