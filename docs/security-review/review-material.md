@@ -37,10 +37,10 @@
 
 ## レビューの準備と読む順
 
-1. spec を固定の commit で取得する。
+1. spec を固定の commit で取得する。この repo の `docs/spec`（submodule）が指す commit は、固定の commit と違うことがある（2026-11-21 の時点で、固定は `4987777`、submodule は `5207d5e`）。固定の commit の原文は、[`.claude/rules/spec-reference.md`](../../.claude/rules/spec-reference.md) の手順で取得した後に `git -C docs/spec show 4987777:<ファイルのパス>` で開く（submodule の作業ツリーは変えない）。
 2. QP-1 の README が引く、実行前に固定した記録の 3 節（T 表の判定の定義）と 5 節（重大度と「未対応」の数え方）で語の定義を確かめる。記録の所在は QP-1 の README から辿る。
 3. 下の「行ごとの表」に沿って、QP-1 の README、PoC の README、`04-behavior/` の順に読む。PoC-N のディレクトリは `docs/spec/03-poc/` の一覧から番号で引く（ディレクトリ名は写さない）。
-4. 対応 ID のステータス（確定／検討中）と、移管の有無を原文で確かめ直す。[scope-ids.md](scope-ids.md) の値は commit 時点の写しである。差分の記録は [gap-check.md](gap-check.md) の点検 C にある。
+4. 対応 ID のステータス（確定／検討中）と、移管の有無を原文で確かめ直す。C-3 では、固定の commit `4987777` と、レビューの日に submodule が指す commit を比べ、比べた 2 つの commit を記録票に書く（点検 C が比べたのは `1df12ad` と `4987777` で、C-3 の比べ直しの代わりにはならない）。[scope-ids.md](scope-ids.md) の値は commit 時点の写しである。差分の記録は [gap-check.md](gap-check.md) の点検 C にある。
 
 QP-1 の README は `docs/spec/03-poc/` の一覧から QP-1 で引く（ディレクトリ名は写さない。以下「QP-1」）。
 T 表は 1.2 節、重大は 4.1 節、中は 4.2 節、RFC 9700 の照合は 2 節にある。
@@ -70,8 +70,8 @@ T 表は 1.2 節、重大は 4.1 節、中は 4.2 節、RFC 9700 の照合は 2 
 | T-6 | 原文指定 | PoC-2 手順 4・5、PoC-3 手順 5、PoC-9 手順 6・7 | `api-device-grant.md`（`DGRT-29` は Hub へ移管。末尾の表で確かめる） | C-1〜C-3、C-5。対応 ID の `DGRT-29` は Hub `ASCR-84` へ移管し、この repo のレビューの範囲外（`D-2026-11-21-20` の (4)(b)）。本体側では、C-1（QP-1 の該当行と PoC の README の照合）、C-3（`DGRT-29` が固定の commit と現在の spec の両方で移管のままか）、移管先が移管表と合うことの確認、C-5 を行う。C-2（残りの各項目がどの ID で受けられているか）は、本体の ID で受けるか残りとして記録するかを人が確かめる。固定した commit の本体の spec に `DGRT-29` の行が無く、照らす行が無いと読める（書き手の読み。人が C-2 で確かめる）。Hub `ASCR-84` での受けの確認は Hub の受け先へ渡す（`D-2026-11-21-22` の (4)(c)）。対応 ID が全て Hub へ移管した行で、判定の書き方は未決（利用者が決める。`D-2026-11-21-20` の (5)(a)） |
 | T-7 | 候補 | PoC-8 手順 4・5・9、PoC-10 手順 4 | `api-session.md`・`lifecycle.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
 | T-10 | 原文指定 | PoC-3 手順 7、PoC-12 手順 5、PoC-4 手順 4、PoC-6 の足した機能 4 | `oidc-clients.md`（関連: `csrf-ssr.md`） | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる。Gate の例外が 1 パスだけである点は `.claude/rules/security.md` の CSRF の節と照らす |
-| T-13 | 候補 | PoC-5 手順 3・5、PoC-4 手順 5・9 | `agent-credential.md`・`oidc-clients.md`・`api-oidc-provider.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。トークン種別の区別は `token-signing.md` の `typ` の項と照らす |
-| T-16 | 原文指定 | PoC-9 手順 3・4・6 | `screen-device.md`・`ui-safety.md`（`DVUI-21` の本体側の移管先 `UISF-37`。`DVUI-20` は Hub へ移管） | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる。`UISF-37` は範囲に残す |
+| T-13 | 候補 | PoC-5 手順 3・5、PoC-4 手順 5・9 | `agent-credential.md`・`oidc-clients.md`・`api-oidc-provider.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。トークン種別の区別は `token-signing.md` の `typ` の項と照らす。`OCL-14` は `1df12ad` の後に本文が変わった（[gap-check.md](gap-check.md) の点検 C）。その追記を人が確かめる |
+| T-16 | 原文指定 | PoC-9 手順 3・4・6 | `screen-device.md`・`ui-safety.md`（`DVUI-21` の本体側の移管先 `UISF-37`。`DVUI-20` は Hub へ移管） | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる。`UISF-37` は範囲に残す。`ACPT-12` の 2026-11-21 の追記（T-16 の移管先の訂正。[gap-check.md](gap-check.md) の点検 C）を、`screen-device.md` の末尾の移管表と照らす |
 | T-17 | 候補 | PoC-9 手順 5・8・9、DPoP の検査 | `agent-credential.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
 | T-19 | 候補 | PoC-5 手順 2・6、PoC-10 手順 2・3・12、PoC-1 ADB-17・ADB-25 | `token-signing.md`・`ops-restore-runbook.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。`ORST-27` は Hub へ移管（この repo の範囲外） |
 | T-20 | 候補 | PoC-10 手順 4、PoC-1 ADB-18・ADB-19、PoC-8 の台帳 | `ops-restore-runbook.md`・`availability.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。R-2 と対応 ID は重ならないが、どちらも PoC-10 手順 4 を引くため、R-2 の観点と合わせて確かめる（対応 ID は行ごとに照らす）。`ORST-18` は Hub へ移管（この repo の範囲外） |
