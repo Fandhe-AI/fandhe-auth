@@ -20,7 +20,7 @@
 
 use std::fmt;
 
-use super::db::{DbFaultError, DbFaultProxy, UpstreamConnector};
+use super::db::{DbFaultError, DbFaultProxy, UpstreamStall};
 use super::{FaultKind, FaultRecordError, FaultTimeline};
 use crate::database::{DatabaseEndpoint, EndpointHandle};
 
@@ -88,18 +88,15 @@ impl ExternalStoreFaultProxy {
             .map_err(convert)
     }
 
-    /// 上流への接続の処理を差し替えて始める（試験用。接続中で止まる状態を同期で作る。ORST-17）。
-    pub fn start_to_port_with_connector(
+    /// 上流への接続の直前に停止点を置いて始める（試験用。接続中で止まる状態を同期で作る。ORST-17）。
+    /// 宛先（`127.0.0.1:<port>`）の決定と接続は転送器が行い、停止点は接続先も結果も変えない。
+    pub fn start_to_port_with_stall(
         port: u16,
-        connector: UpstreamConnector,
+        stall: UpstreamStall,
     ) -> Result<Self, ExternalStoreFaultError> {
-        DbFaultProxy::start_to_port_with_connector_as(
-            port,
-            FaultKind::ExternalStoreBlock,
-            connector,
-        )
-        .map(|inner| Self { inner })
-        .map_err(convert)
+        DbFaultProxy::start_to_port_with_stall_as(port, FaultKind::ExternalStoreBlock, stall)
+            .map(|inner| Self { inner })
+            .map_err(convert)
     }
 
     /// 接続情報のハンドルに向けて始める（別の `Database` を保存先に見立てる場合）。
@@ -125,7 +122,7 @@ impl ExternalStoreFaultProxy {
         self.inner.accepted_count()
     }
 
-    /// 上流への connect の試行を始めた回数（2/8 と同じ。停止点への到達を待つ試験用で、成否は表さない）。
+    /// 上流への connect の試行回数（診断用。接続処理の直前に加算するので到達の確認には使えず、成否も表さない）。
     pub fn upstream_attempt_count(&self) -> u64 {
         self.inner.upstream_attempt_count()
     }

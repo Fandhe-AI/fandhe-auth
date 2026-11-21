@@ -90,7 +90,9 @@ PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を�
 - 試験: `cargo test -p fandhe-auth-it-harness --test fault_external_store`（`make test` に含む）。
   - OS の条件（#6016）: `block_returns_promptly_while_accept_is_stalled_on_upstream` は、待ち行列のあふれで SYN を捨てる挙動に依る。
     `ignore` で外さず全 OS で同じ契約を検証し、土台が組めない環境では観測した誤りの種類つきで失敗させる（AUDB-6。macOS での確認は未検証）。
-    停止点への到達は `upstream_attempt_count`（上流への connect を始めた回数）で同期して待つ。
+    停止点は SYN の破棄ではなく、転送器が上流への接続の直前に置く同期点（`UpstreamStall`）で作る。試験は `wait_entered` で到達を待ってから `block()` を呼ぶ。
+    宛先の決定と接続は転送器が行い、停止点は接続先も結果も変えない。待ちは解放・停止・上限 5 秒で解ける。
+    `upstream_attempt_count` は接続処理の直前に加算する診断用の回数で、到達の確認には使わない。
     `release_returns_in_time_under_reconnect_storm` は macOS で最後の往復が切れることが報告されており調査中。期待は緩めず、
     失敗の文言に失敗した段階・誤りの種類・集計値の差を出す。集計値は転送器全体の合計で、最後の接続の失敗箇所を断定しない。
 

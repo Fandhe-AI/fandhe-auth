@@ -9,8 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fandhe_auth_it_harness::fault::{
-    DbFaultProxy, ExternalStoreFaultError, ExternalStoreFaultProxy, FaultRecordError,
-    UpstreamConnector,
+    DbFaultProxy, ExternalStoreFaultError, ExternalStoreFaultProxy, FaultRecordError, UpstreamStall,
 };
 use fandhe_auth_it_harness::record::UtcTimestamp;
 use fandhe_auth_it_harness::{EndpointHandle, FaultRecord, FaultTimeline};
@@ -388,55 +387,92 @@ fn start_for_with_empty_handle_closes_connections() {
     assert_eq!(roundtrip(&mut c, b"x"), Outcome::Disconnected);
 }
 
-/// 遮断中に始めた接続・遮断は、accept のスレッドが上流への接続で止まっていても待たされない。
+/// 遮断・解除は、accept のスレッドが上流への接続の直前で止まっていても待たされない。
 /// `Applied` の記録から実際の遮断までに、上流への接続の上限（5 秒）に及ぶずれを作らない（ORST-17）。
-/// 止まった接続は遮断で切れ、解放後に上流へ届かない。
+/// 止まった接続は、遮断が解除された後に上流への接続が成立しても中継されず、client のバイトは上流へ届かない
+/// （遮断の世代の検査。現在の遮断状態だけでは通らないよう、先に解除してから停止点を開ける）。
 ///
-/// 上流への接続の処理を注入し、処理に入ったことを通知してから `block()` が戻るまで完了させない（OS の待ち行列の挙動に
-/// 依らず、停止点を同期で作る。`block()` は必ず接続の処理の最中に呼ばれる）。
+/// 上流への接続の直前に停止点（転送器が持つ同期点）を置き、到達の通知を待ってから `block()` を呼ぶ
+/// （OS の待ち行列の挙動に依らず、停止点を同期で作る）。宛先の決定と接続は転送器が行う。
 #[test]
 fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
-    use std::sync::Mutex;
-    use std::sync::mpsc;
-
-    let up = echo_upstream();
-    let upstream_port = up.port();
-    let (entered_tx, entered_rx) = mpsc::channel::<()>();
-    let (gate_tx, gate_rx) = mpsc::channel::<()>();
-    let entered_tx = Mutex::new(entered_tx);
-    let gate_rx = Mutex::new(gate_rx);
-    let connector: UpstreamConnector = Arc::new(move |addr, timeout| {
-        let _ = entered_tx.lock().unwrap().send(());
-        // `block()` が戻るまで完了させない。解放されない場合は上限で打ち切って実際の接続へ進む（試験を固めない）。
-        let _ = gate_rx.lock().unwrap().recv_timeout(Duration::from_secs(5));
-        TcpStream::connect_timeout(&addr, timeout)
-    });
+    let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    up.set_nonblocking(true).unwrap();
+    let upstream_port = up.local_addr().unwrap().port();
+    let stall = UpstreamStall::new();
     let mut p =
-        ExternalStoreFaultProxy::start_to_port_with_connector(upstream_port, connector).unwrap();
+        ExternalStoreFaultProxy::start_to_port_with_stall(upstream_port, stall.clone()).unwrap();
     let mut tl = timeline();
     let mut stuck = connect(p.listen_port());
-    entered_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("accept thread never entered the upstream connect");
-    // 前提: 接続の処理の中で止まっており、拒否も転送も始まっていない。
+    // 遮断の前に送る。遮断が無ければ、上流へ中継される値。
+    stuck.write_all(b"s").unwrap();
+    assert!(
+        stall.wait_entered(Duration::from_secs(5)),
+        "accept thread never reached the upstream stall point"
+    );
+    // 前提: 停止点で止まっており、拒否も転送も始まっていない。
     assert_eq!(p.refused_count(), 0, "connect finished before the block");
     assert_eq!(p.accepted_count(), 0, "conn was relayed before the block");
     let started = Instant::now();
     p.block(&mut tl).unwrap();
-    let elapsed = started.elapsed();
-    // `block()` が戻ってから接続の処理を完了させる。
-    gate_tx.send(()).unwrap();
+    let blocked_in = started.elapsed();
+    // 世代の検査だけを対象にするため、現在の遮断状態を外してから停止点を開ける。
+    let started = Instant::now();
+    p.release_block(&mut tl).unwrap();
+    let released_in = started.elapsed();
+    stall.release();
     assert!(
-        elapsed < Duration::from_secs(1),
-        "block waited for the stalled accept: {elapsed:?}"
+        blocked_in < Duration::from_secs(1),
+        "block waited for the stalled accept: {blocked_in:?}"
     );
+    assert!(
+        released_in < Duration::from_secs(1),
+        "release waited for the stalled accept: {released_in:?}"
+    );
+    // 上流への接続が成立したこと（遮断前の接続の中継を拒む分岐に届いたこと）を確かめる。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut upstream_conn = loop {
+        match up.accept() {
+            Ok((c, _)) => break c,
+            Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("upstream connect never established: {:?}", e.kind()),
+        }
+    };
+    upstream_conn.set_nonblocking(false).unwrap();
+    upstream_conn
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    // 遮断前の接続のバイトは上流へ届かない（読めるのは EOF か切断だけ）。
+    let mut buf = [0u8; 1];
+    match upstream_conn.read(&mut buf) {
+        Ok(0) | Err(_) => {}
+        Ok(n) => panic!("bytes from the severed conn reached upstream: {n}"),
+    }
     assert_eq!(
-        roundtrip(&mut stuck, b"s"),
+        roundtrip(&mut stuck, b"t"),
         Outcome::Disconnected,
         "stalled conn is cut by the block"
     );
     assert!(wait_until(|| p.refused_count() >= 1));
-    assert_eq!(p.accepted_count(), 0, "stalled conn reached upstream");
+    assert_eq!(p.accepted_count(), 0, "stalled conn was relayed");
+}
+
+/// 停止点で止まったままでも `stop()` は戻る（停止の信号で停止点の待ちが解ける）。
+#[test]
+fn stop_returns_while_accept_is_held_at_stall_point() {
+    let up = echo_upstream();
+    let stall = UpstreamStall::new();
+    let p = ExternalStoreFaultProxy::start_to_port_with_stall(up.port(), stall.clone()).unwrap();
+    let _c = connect(p.listen_port());
+    assert!(stall.wait_entered(Duration::from_secs(5)));
+    let started = Instant::now();
+    p.stop();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "stop waited for the stall point"
+    );
 }
 
 /// 接続の試行が続いていても `block()` は期限の中で戻る（Cursor Bugbot の指摘の回帰防止。

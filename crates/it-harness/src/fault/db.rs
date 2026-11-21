@@ -45,7 +45,7 @@ use std::fmt;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -115,19 +115,105 @@ impl Upstream {
     }
 }
 
-/// 上流への接続の処理（試験の注入用）。既定は `TcpStream::connect_timeout`。
-/// 試験が「接続中で止まる」状態を同期で作るために差し替える（ORST-17）。宛先は常に `127.0.0.1`。
-pub type UpstreamConnector =
-    Arc<dyn Fn(SocketAddr, Duration) -> std::io::Result<TcpStream> + Send + Sync>;
+/// 上流への接続の直前に置く停止点（試験の注入用。ORST-17）。
+/// 試験が「接続中で止まる」状態を同期で作るための同期点だけを持つ。宛先の決定と実際の接続は転送器が行い、
+/// この値は接続先も接続の結果も決めない（ループバック・指定ポートの制約を外さない）。
+/// 待ちは解放・転送器の停止・上限（[`UpstreamStall::MAX_HOLD`]）のどれかで必ず解ける（`stop()`・`Drop` を固めない）。
+#[derive(Clone, Default)]
+pub struct UpstreamStall {
+    inner: Arc<StallInner>,
+}
 
-fn default_connector() -> UpstreamConnector {
-    Arc::new(|addr, timeout| TcpStream::connect_timeout(&addr, timeout))
+#[derive(Default)]
+struct StallInner {
+    state: Mutex<StallState>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct StallState {
+    entered: u64,
+    released: bool,
+}
+
+impl fmt::Debug for UpstreamStall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpstreamStall").finish_non_exhaustive()
+    }
+}
+
+impl UpstreamStall {
+    /// 停止点で待つ上限。解放されなくても転送器はこの時間で先へ進む。
+    pub const MAX_HOLD: Duration = Duration::from_secs(5);
+
+    /// 新しい停止点。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 転送器が停止点に入るのを待つ。入れば `true`、上限までに入らなければ `false`。
+    pub fn wait_entered(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut g = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        while g.entered == 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            g = self
+                .inner
+                .cv
+                .wait_timeout(g, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+
+    /// 停止点で待つ接続を先へ進める。以後に入る接続も待たない。
+    pub fn release(&self) {
+        let mut g = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        g.released = true;
+        self.inner.cv.notify_all();
+    }
+
+    /// 転送器の accept のスレッドが呼ぶ。解放・転送器の停止・上限のどれかで戻る。
+    fn hold(&self, stop: &AtomicBool) {
+        let deadline = Instant::now() + Self::MAX_HOLD;
+        let mut g = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        g.entered += 1;
+        self.inner.cv.notify_all();
+        while !g.released && !stop.load(Ordering::SeqCst) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            g = self
+                .inner
+                .cv
+                .wait_timeout(g, left.min(Duration::from_millis(20)))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
 }
 
 /// 転送のスレッドと注入の入口で共有する状態。
 struct Shared {
-    /// 上流への接続の処理。
-    connector: UpstreamConnector,
+    /// 上流への接続の直前の停止点（試験用。無ければ待たない）。
+    stall: Option<UpstreamStall>,
     stop: AtomicBool,
     blocked: AtomicBool,
     delay_ms: AtomicU64,
@@ -137,7 +223,7 @@ struct Shared {
     block_gen: AtomicU64,
     accepted: AtomicU64,
     refused: AtomicU64,
-    /// 上流への connect を始めた回数（試験の同期用。始めたことだけを示し、成否は `accepted`・`refused` で見る）。
+    /// 上流への connect を始めようとした回数（診断用。接続処理の直前に加算するので到達の確認には使わず、成否も表さない）。
     upstream_attempts: AtomicU64,
     /// 両側を切るための複製（接続 ID と組）。両方向の転送が終わった接続の分は外す。
     /// accept・遮断の状態の確認・ここへの登録は、このロックの下で一度に行う。`block` の状態変更と切断も
@@ -150,12 +236,12 @@ struct Shared {
 impl Shared {
     #[cfg(test)]
     fn new() -> Self {
-        Self::with_connector(default_connector())
+        Self::with_stall(None)
     }
 
-    fn with_connector(connector: UpstreamConnector) -> Self {
+    fn with_stall(stall: Option<UpstreamStall>) -> Self {
         Self {
-            connector,
+            stall,
             stop: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             delay_ms: AtomicU64::new(0),
@@ -261,22 +347,22 @@ impl DbFaultProxy {
     }
 
     fn start(upstream: Upstream, block_kind: FaultKind) -> Result<Self, DbFaultError> {
-        Self::start_with(upstream, block_kind, default_connector())
+        Self::start_with(upstream, block_kind, None)
     }
 
-    /// 上流への接続の処理を差し替えて、上流をポート直指定で始める（`external_store` の包みが使う内部の口）。
-    pub(super) fn start_to_port_with_connector_as(
+    /// 上流への接続の直前に停止点を置いて、上流をポート直指定で始める（`external_store` の包みが使う内部の口）。
+    pub(super) fn start_to_port_with_stall_as(
         port: u16,
         block_kind: FaultKind,
-        connector: UpstreamConnector,
+        stall: UpstreamStall,
     ) -> Result<Self, DbFaultError> {
-        Self::start_with(Upstream::Port(port), block_kind, connector)
+        Self::start_with(Upstream::Port(port), block_kind, Some(stall))
     }
 
     fn start_with(
         upstream: Upstream,
         block_kind: FaultKind,
-        connector: UpstreamConnector,
+        stall: Option<UpstreamStall>,
     ) -> Result<Self, DbFaultError> {
         // 遮断として記録できる種類だけ受ける（fail-closed）。
         if !matches!(
@@ -294,7 +380,7 @@ impl DbFaultProxy {
             .local_addr()
             .map_err(|_| DbFaultError::StartFailed)?
             .port();
-        let shared = Arc::new(Shared::with_connector(connector));
+        let shared = Arc::new(Shared::with_stall(stall));
         let listener = Arc::new(listener);
         let accept = {
             let shared = Arc::clone(&shared);
@@ -340,8 +426,8 @@ impl DbFaultProxy {
         self.shared.accepted.load(Ordering::SeqCst)
     }
 
-    /// 上流への connect の試行を始めた回数。試験が accept のスレッドの停止点（connect の中）への到達を待つための値で、
-    /// 成否は表さない。
+    /// 上流への connect の試行回数（診断用）。接続処理の直前に加算するので、停止点への到達の確認には使えない
+    /// （到達は [`UpstreamStall::wait_entered`] で待つ）。成否は表さない。
     pub fn upstream_attempt_count(&self) -> u64 {
         self.shared.upstream_attempts.load(Ordering::SeqCst)
     }
@@ -636,7 +722,10 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
     };
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
-    let Ok(up) = (shared.connector)(addr, UPSTREAM_CONNECT_TIMEOUT) else {
+    if let Some(stall) = &shared.stall {
+        stall.hold(&shared.stop);
+    }
+    let Ok(up) = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT) else {
         shared.sever_conn(id);
         refuse(&accepted.client, shared);
         return None;
