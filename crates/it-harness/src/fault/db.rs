@@ -117,7 +117,8 @@ impl Upstream {
 
 /// 上流への接続の直前に置く停止点（試験の注入用。ORST-17）。
 /// 試験が「接続中で止まる」状態を同期で作るための同期点だけを持つ。宛先の決定と実際の接続は転送器が行い、
-/// 転送器 1 つにつき 1 つ使う（複数の転送器へ複製して共有しない。`stopped_at` は転送器ごとの停止の時刻で、
+/// 転送器 1 つにつき 1 つ使う（複数の転送器へ複製して共有しない。共有すると、停止の時刻と停止フラグを同じロックの下で
+/// 公開した保証が成り立たない〔`note_stop` が公開するのは渡された 1 つのフラグだけ〕。`stopped_at` は転送器ごとの停止の時刻で、
 /// 再利用した場合は保持の開始より前の記録を無視して `Expired` と分類する）。
 ///
 /// この値は接続先も接続の結果も決めない（ループバック・指定ポートの制約を外さない）。
@@ -307,7 +308,8 @@ struct Shared {
     upstream_attempts: AtomicU64,
     /// 上流への connect が成功した回数（`connect_timeout` が `Ok` を返した時点で数える）。
     upstream_connected: AtomicU64,
-    /// 中継を始める段の世代の検査で外れ、遮断前の接続として拒否した回数。実際に拒否した箇所（`start_relay`）でだけ数える。
+    /// 中継を始める段で、遮断の世代の比較が外れて拒否した回数。実際に拒否した箇所（`start_relay`）でだけ数え、
+    /// 停止・現在の遮断だけによる拒否は数えない。
     generation_refused: AtomicU64,
     /// 両側を切るための複製（接続 ID と組）。両方向の転送が終わった接続の分は外す。
     /// accept・遮断の状態の確認・ここへの登録は、このロックの下で一度に行う。`block` の状態変更と切断も
@@ -520,12 +522,15 @@ impl DbFaultProxy {
 
     /// 上流への connect が成功した回数。接続の失敗・停止点での打ち切りは数えない。
     /// 成功した後に世代の不一致で拒否された接続も数える（受理済みの [`Self::accepted_count`] とは別）。
+    /// 転送器全体の数。接続を 1 本に限った試験でだけ、接続ごとの証拠になる。
     pub fn upstream_connected_count(&self) -> u64 {
         self.shared.upstream_connected.load(Ordering::SeqCst)
     }
 
-    /// 中継を始める段で遮断の世代が合わず、client のバイトを上流へ送らずに拒否した回数（ORST-17）。
-    /// 接続の失敗・ソケットの複製の失敗・遮断中の accept での拒否は数えない（それらは [`Self::refused_count`] にだけ出る）。
+    /// 中継を始める段で遮断の世代の比較が外れ、client のバイトを上流へ送らずに拒否した回数（ORST-17）。
+    /// 停止による拒否・接続の失敗・ソケットの複製の失敗・遮断中の accept での拒否は数えない
+    /// （それらは [`Self::refused_count`] にだけ出る）。
+    /// 転送器全体の数。接続を 1 本に限った試験でだけ、接続ごとの証拠になる。
     pub fn generation_refused_count(&self) -> u64 {
         self.shared.generation_refused.load(Ordering::SeqCst)
     }
@@ -660,7 +665,8 @@ impl DbFaultProxy {
     }
 
     fn shutdown_all(&mut self) {
-        // 停止の時刻を先に記録する（停止フラグを見た待ちが、時刻の無い停止を読まない）。
+        // 停止点があれば、停止の時刻の記録と停止フラグの公開を `note_stop` が同じロックの下で行う。
+        // 停止点が無くても、下の `store` が停止フラグを立てる。
         if let Some(stall) = &self.shared.stall {
             stall.note_stop(&self.shared.stop);
         }
@@ -879,19 +885,26 @@ fn start_relay(connected: Connected, shared: &Arc<Shared>) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push((id, u_kill));
-    if shared.halted() || shared.block_gen.load(Ordering::SeqCst) != block_gen {
+    let gen_mismatch = shared.block_gen.load(Ordering::SeqCst) != block_gen;
+    if shared.halted() || gen_mismatch {
         let _ = up.shutdown(Shutdown::Both);
         shared.sever_conn(id);
-        shared.generation_refused.fetch_add(1, Ordering::SeqCst);
+        // 世代の比較が外れたときだけ数える（停止・現在の遮断による拒否は数えない）。
+        if gen_mismatch {
+            shared.generation_refused.fetch_add(1, Ordering::SeqCst);
+        }
         return refuse(&client, shared);
     }
     // 両方向の転送が終わった側が複製を外す（半閉じの間は遮断で切れるよう残す）。
     let remaining = Arc::new(AtomicUsize::new(2));
     let (r1, r2) = (Arc::clone(&remaining), remaining);
     // 登録の間に遮断が入った場合に取りこぼさない。
-    if shared.halted() || shared.block_gen.load(Ordering::SeqCst) != block_gen {
+    let gen_mismatch = shared.block_gen.load(Ordering::SeqCst) != block_gen;
+    if shared.halted() || gen_mismatch {
         shared.sever_conn(id);
-        shared.generation_refused.fetch_add(1, Ordering::SeqCst);
+        if gen_mismatch {
+            shared.generation_refused.fetch_add(1, Ordering::SeqCst);
+        }
         return refuse(&client, shared);
     }
     let s1 = Arc::clone(shared);
@@ -1509,12 +1522,15 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let (s2, stop2) = (stall.clone(), Arc::clone(&stop));
             let reader = thread::spawn(move || {
-                loop {
+                // 期限切れは失敗（時刻が見えないまま 5 秒を過ぎたら false を返す）。
+                let limit = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < limit {
                     let g = s2.inner.state.lock().unwrap();
                     if g.stopped_at.is_some() {
                         return stop2.load(Ordering::SeqCst);
                     }
                 }
+                false
             });
             stall.note_stop(&stop);
             assert!(reader.join().unwrap(), "stop time visible before the flag");

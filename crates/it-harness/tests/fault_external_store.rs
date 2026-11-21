@@ -460,9 +460,9 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     );
     // macOS だけの緩和: `last_exit` は `hold()` の終わりに記録され、上流への connect と世代不一致での切断はその後に
     // 起きる。macOS（Darwin）は、握手済みで相手に閉じられた接続が待ち行列に残っていると accept が
-    // `ConnectionAborted`・`ConnectionReset` を返す。その場合も接続は成立しており、バイトは上流へ届き得ないので、
-    // 成立の証拠とする（成立の確認は上の専用の計数）。Linux ではこの分岐を作らず、accept の `Ok` と読み取りの確認を必須にする
-    // （確かめる範囲の狭い分岐で合格させない。AUDB-6）。
+    // `ConnectionAborted`・`ConnectionReset` を返す。この場合は上流の読み取りの確認ができないので、
+    // 接続の成立と世代による拒否は上の専用の計数だけで確かめる（バイトが届いていれば拒否の計数が 1 にならない）。
+    // Linux ではこの分岐を作らず、accept の `Ok` と読み取りの確認を必須にする（狭い確認で合格させない。AUDB-6）。
     let deadline = Instant::now() + Duration::from_secs(5);
     let upstream_conn = loop {
         match up.accept() {
@@ -483,26 +483,24 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
         }
     };
     if let Some(mut upstream_conn) = upstream_conn {
-        {
-            upstream_conn.set_nonblocking(false).unwrap();
-            upstream_conn
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            // 遮断前の接続のバイトは上流へ届かない（読めるのは EOF か切断だけ）。
-            let mut buf = [0u8; 1];
-            match upstream_conn.read(&mut buf) {
-                Ok(0) => {}
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        ErrorKind::ConnectionReset
-                            | ErrorKind::ConnectionAborted
-                            | ErrorKind::BrokenPipe
-                            | ErrorKind::UnexpectedEof
-                    ) => {}
-                Err(e) => panic!("unexpected upstream read error: {:?}", e.kind()),
-                Ok(n) => panic!("bytes from the severed conn reached upstream: {n}"),
-            }
+        upstream_conn.set_nonblocking(false).unwrap();
+        upstream_conn
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // 遮断前の接続のバイトは上流へ届かない（読めるのは EOF か切断だけ）。
+        let mut buf = [0u8; 1];
+        match upstream_conn.read(&mut buf) {
+            Ok(0) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::UnexpectedEof
+                ) => {}
+            Err(e) => panic!("unexpected upstream read error: {:?}", e.kind()),
+            Ok(n) => panic!("bytes from the severed conn reached upstream: {n}"),
         }
     }
     assert!(wait_until(|| p.refused_count() >= 1));
