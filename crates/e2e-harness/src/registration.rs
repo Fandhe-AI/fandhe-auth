@@ -24,6 +24,9 @@ const done = arguments[arguments.length - 1];
 const rpId = arguments[0];
 const expectedOrigin = arguments[1];
 (async () => {
+    // 'call' の間（呼び出しが返した Promise の待ち）だけ、例外をブラウザの拒否として name で返す。
+    // 呼び出し前・呼び出しの同期的な失敗（API の不在等）・呼び出し後の処理の例外は固定名 HarnessScript にする。
+    let phase = 'pre';
     try {
         // 登録の前に、今のページが試験用の origin であることを確かめる（別の origin で create() を呼ばない）。
         if (location.origin !== expectedOrigin) {
@@ -33,7 +36,7 @@ const expectedOrigin = arguments[1];
         const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
         const b64u = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         const challenge = rnd(32);
-        const cred = await navigator.credentials.create({ publicKey: {
+        const opts = { publicKey: {
             rp: { id: rpId, name: 'e2e' },
             user: { id: rnd(16), name: 'e2e-user', displayName: 'e2e-user' },
             challenge,
@@ -41,7 +44,13 @@ const expectedOrigin = arguments[1];
             authenticatorSelection: { residentKey: 'discouraged', userVerification: 'required' },
             attestation: 'none',
             timeout: 60000
-        }});
+        }};
+        // 同期的な呼び出しの失敗（navigator.credentials が無い等）はブラウザの拒否ではないため、Promise を得るまで phase を 'invoke' にする。
+        phase = 'invoke';
+        const pending = navigator.credentials.create(opts);
+        phase = 'call';
+        const cred = await pending;
+        phase = 'post';
         const cd = JSON.parse(new TextDecoder().decode(cred.response.clientDataJSON));
         done({
             ok: true,
@@ -54,7 +63,7 @@ const expectedOrigin = arguments[1];
             challengeOk: cd.challenge === b64u(challenge)
         });
     } catch (e) {
-        done({ ok: false, errorName: String((e && e.name) || 'Error') });
+        done({ ok: false, errorName: phase === 'call' ? String((e && e.name) || 'Error') : 'HarnessScript' });
     }
 })();
 "#;
@@ -167,6 +176,23 @@ mod tests {
         let shown = format!("{o:?} {:?}", o.error_name());
         assert!(!shown.contains("leaky-value-123"), "{shown}");
         assert_eq!(o.error_name(), Some(RegistrationErrorName::Other));
+    }
+
+    #[test]
+    fn script_marks_call_phase_only_after_synchronous_invocation() {
+        // 同期的な呼び出しの失敗（API の不在）をブラウザの拒否（rejected:Type 等）に数えない。
+        let invoke = REGISTER_SCRIPT.find("phase = 'invoke'").unwrap();
+        let call_fn = REGISTER_SCRIPT
+            .find("navigator.credentials.create(opts)")
+            .unwrap();
+        let call = REGISTER_SCRIPT.find("phase = 'call'").unwrap();
+        assert!(invoke < call_fn && call_fn < call);
+        assert_eq!(
+            REGISTER_SCRIPT
+                .matches("navigator.credentials.create(")
+                .count(),
+            1
+        );
     }
 
     #[test]

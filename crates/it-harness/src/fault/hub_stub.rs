@@ -50,8 +50,8 @@ use fandhe_auth_hub_stub::presentation::{
 use crate::record::UtcTimestamp;
 
 use super::{
-    FaultKind, FaultPhase, FaultRecord, FaultRecordError, FaultTarget, FaultTimeline, HubStubPort,
-    HubStubRefusalKind,
+    ClockSkewInjector, FaultKind, FaultPhase, FaultRecord, FaultRecordError, FaultTarget,
+    FaultTimeline, HubStubPort, HubStubRefusalKind,
 };
 
 /// 誤りの種類。値・token を載せない（SECR-11・SECR-23）。
@@ -333,6 +333,12 @@ impl<W: Wait> HubStubFaultInjector<W> {
         recorded_at: UtcTimestamp,
     ) -> Result<(FaultRecord, InjectionLog), Box<HubStubFinishFailure<W>>> {
         let checked = self.check_run(&timeline).and_then(|()| {
+            if timeline.is_clock_bound() {
+                // 時計の注入器を結んだ実行は共有のずれを戻せないので、`finish_with_clock` から確定する。
+                return Err(HubStubFaultError::Record(
+                    FaultRecordError::ClockInjectorBound,
+                ));
+            }
             timeline
                 .check_finishable()
                 .map_err(HubStubFaultError::Record)
@@ -344,6 +350,42 @@ impl<W: Wait> HubStubFaultInjector<W> {
                 timeline,
             }));
         }
+        let log = self.inner.log().clone();
+        Ok((timeline.into_record(recorded_at), log))
+    }
+
+    /// 時計の注入器も結んだ実行を終える。記録の確定と、時計の共有のずれの解除（解除の記録なし）を同時に行う（AVLB-31）。
+    /// 検査に失敗したときは、どちらの注入器の状態も変えず、記録も消費しない。
+    /// 時計の注入器を結んでいない実行（時計の注入器が未使用）でも使える。
+    ///
+    /// # Errors
+    /// `finish` と同じ。時計の注入器が別の実行に結ばれている、またはこの実行の時計の注入器が渡されていないときは失敗する。
+    pub fn finish_with_clock(
+        self,
+        clock: &mut ClockSkewInjector,
+        timeline: FaultTimeline,
+        recorded_at: UtcTimestamp,
+    ) -> Result<(FaultRecord, InjectionLog), Box<HubStubFinishFailure<W>>> {
+        let checked = self
+            .check_run(&timeline)
+            .and_then(|()| {
+                clock
+                    .check_finish(&timeline)
+                    .map_err(HubStubFaultError::Record)
+            })
+            .and_then(|()| {
+                timeline
+                    .check_finishable()
+                    .map_err(HubStubFaultError::Record)
+            });
+        if let Err(error) = checked {
+            return Err(Box::new(HubStubFinishFailure {
+                error,
+                injector: self,
+                timeline,
+            }));
+        }
+        clock.reset_after_finish();
         let log = self.inner.log().clone();
         Ok((timeline.into_record(recorded_at), log))
     }

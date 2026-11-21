@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::condition::{ComponentState, ConditionComponent, MeasurementConditions};
-use crate::meter::{MonotonicClock, StdMonotonicClock};
+use crate::meter::{MeterError, MonotonicClock, StdMonotonicClock};
 use crate::stage::{StageError, StagePlan, StagedRun, run_stages};
 use crate::target::{CallResult, TargetSpec};
 
@@ -728,7 +728,9 @@ impl RunSession {
         {
             return Err(LoadRecordError::InvalidRunEvidence);
         }
-        let new_clock = || -> Box<dyn MonotonicClock> { Box::new(StdMonotonicClock::new()) };
+        let new_clock = || -> Result<Box<dyn MonotonicClock>, MeterError> {
+            Ok(Box::new(StdMonotonicClock::new()))
+        };
         let staged = run_stages(new_clock, spec, plan, call).map_err(LoadRecordError::Stage)?;
         Ok(RunEvidence {
             run_record_file: self.run_record_file,
