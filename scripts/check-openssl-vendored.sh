@@ -47,7 +47,7 @@ source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 # 使う外部コマンドは作業ディレクトリの作成前にすべて確かめる（EXIT トラップの rm の不足で 127 にしない）。
-for c in cargo mktemp mkdir rm grep dirname basename python3; do
+for c in cargo mktemp mkdir rm grep dirname basename python3 ln env; do
   require_cmd "${c}" || exit 2
 done
 # TOML は構造として読む（引用キーの Unicode エスケープを文字列検索では見落とすため）。tomllib（3.11 以上）が無ければ検査不能（2）。
@@ -186,13 +186,15 @@ count_rule() {
 # count_static_env: 名前が OPENSSL_STATIC か _OPENSSL_STATIC で終わる環境変数の数を値によらず返す（R4。pkg-config crate は存在だけで静的を選ぶため `0` も数える）。
 # 名前も値も出さない。値は読まず、eval やコマンドの引数にも展開しない。
 count_static_env() {
-  local name n=0
-  while IFS= read -r name; do
-    case "${name}" in
-      OPENSSL_STATIC | *_OPENSSL_STATIC | PKG_CONFIG_ALL_STATIC | *_PKG_CONFIG_ALL_STATIC) n=$((n + 1)) ;;
-    esac
-  done < <(compgen -e)
-  echo "${n}"
+  # bash の変数名にならない名前（ターゲット接頭辞のハイフン等）も見落とさないよう、compgen ではなく python の os.environ で列挙する。
+  python3 -I -c '
+import os
+n = 0
+for k in os.environ:
+    if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith("_OPENSSL_STATIC") or k.endswith("_PKG_CONFIG_ALL_STATIC"):
+        n += 1
+print(n)
+' 2>/dev/null || return 2
 }
 
 # count_static_config <root>: <root>/.cargo/config.toml・config の `[env]` のキーのうち OPENSSL_STATIC か _OPENSSL_STATIC で終わるものの数を返す
@@ -361,16 +363,11 @@ selftest() {
     exit 1
   fi
 
-  # F10: 静的リンクの環境変数（R4）。外側の環境に左右されないよう、サブシェルで該当の変数を消してから試す。
-  local ev cnt nm
-  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'PKG_CONFIG_ALL_STATIC=1:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0'; do
-    cnt="$(
-      while IFS= read -r nm; do
-        case "${nm}" in OPENSSL_STATIC | *_OPENSSL_STATIC | PKG_CONFIG_ALL_STATIC | *_PKG_CONFIG_ALL_STATIC) unset "${nm}" ;; esac
-      done < <(compgen -e)
-      export "${ev%%:*}"
-      count_static_env
-    )" || exit 2
+  # F10: 静的リンクの環境変数（R4）。env -i で外側の環境を消し、試験の変数だけを渡した子プロセスで数える。
+  # ハイフンを含む名前（bash の変数名にならない）も数えることを確かめる。
+  local ev cnt
+  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'PKG_CONFIG_ALL_STATIC=1:ge1' 'x86_64-unknown-linux-gnu_OPENSSL_STATIC=1:ge1' 'aarch64-linux-android_PKG_CONFIG_ALL_STATIC=1:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0' 'NOT-OPENSSL_STATIC_X=1:eq0'; do
+    cnt="$(env -i "PATH=${PATH}" "${ev%:*}" "${BASH}" -c "$(declare -f count_static_env); count_static_env")" || exit 2
     if { [ "${ev##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${ev##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
       log "FAIL selftest F10: static env check wrong (case ${ev##*:})"
       exit 1
