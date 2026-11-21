@@ -128,6 +128,7 @@ impl Upstream {
 /// （[`UpstreamStall::exit_reason`]）を戻す。前の転送器の到達で、今回の `wait_entered` が即座に `true` にならない（ORST-17）。
 /// 解放済み（[`UpstreamStall::release`]）の停止点は転送器に渡せず、起動は `StartFailed` になる（fail-closed）。
 /// 古い解放の記録が新しい保持を `Released` と読ませないため、解放済みの値は再利用せず新しく作る。
+/// 解放済みの停止点を通り抜ける接続は、到達にも離れた理由にも数えない（ORST-17）。
 #[derive(Clone, Default)]
 pub struct UpstreamStall {
     inner: Arc<StallInner>,
@@ -184,6 +185,7 @@ impl UpstreamStall {
     }
 
     /// 転送器が停止点に入るのを待つ。入れば `true`、上限までに入らなければ `false`。
+    /// 解放済みの停止点を通り抜ける接続は到達に数えない（ORST-17）。
     /// `timeout` は 24 時間に丸める（巨大な値で `Instant` の加算がパニックしない）。
     pub fn wait_entered(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout.min(Duration::from_secs(86_400));
@@ -285,6 +287,11 @@ impl UpstreamStall {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        // 解除済みの停止点を通り抜けるだけの接続は、待っていない。到達にも離れた理由にも数えない
+        // （先の接続の `Expired` を、後から来た通り抜けが `Released` で上書きしない。ORST-17・AUDB-6）。
+        if g.released {
+            return;
+        }
         g.hold_started = Some(started);
         g.entered += 1;
         self.inner.cv.notify_all();
@@ -1670,6 +1677,21 @@ mod tests {
         stall.note_stop(&AtomicBool::new(false));
         stall.hold_for(&AtomicBool::new(false), Duration::from_millis(60));
         assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
+    }
+
+    /// 期限切れの後に `release()` し、次の接続が通り抜けても、先の `Expired` は `Released` に上書きされない
+    /// （ORST-17・AUDB-6。到達の数も通り抜けでは増えない）。
+    #[test]
+    fn pass_through_after_release_keeps_earlier_expired() {
+        let stall = UpstreamStall::new();
+        assert!(stall.rebind());
+        stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
+        assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
+        stall.release();
+        stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
+        assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
+        let entered = stall.inner.state.lock().unwrap().entered;
+        assert_eq!(entered, 1, "pass-through must not count as an arrival");
     }
 
     /// 渡した後でも、渡す前の別の転送器の停止だけが残る場合は `Expired`。
