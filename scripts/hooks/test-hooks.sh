@@ -51,7 +51,8 @@ if [ -z "${utf8_locale}" ]; then
 fi
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/test-hooks.XXXXXX")"
-trap 'rm -rf "${work_dir}"' EXIT
+# 権限を落とした試験用ディレクトリ（chmod 000）がシグナルで止まった後も残らないよう、消す前に権限を戻す。
+trap 'chmod -R u+rwx "${work_dir}" 2> /dev/null; rm -rf "${work_dir}"' EXIT
 
 # 開発者・CI ランナーの git 設定（署名・色・フック・テンプレート）から隔離する。
 # lefthook 経由で起動された場合に備え、親リポジトリを指す環境変数も外す。
@@ -73,6 +74,66 @@ mkdir -p "${shim_dir}"
 export REAL_GIT="${real_git}"
 cat > "${shim_dir}/git" <<'EOF'
 #!/bin/sh
+# LOG_GIT_FILE があれば、呼び出しの引数を 1 行ずつ記録する（HEAD の ID が同じ値で渡ることの確認用）
+if [ -n "${LOG_GIT_FILE:-}" ]; then
+  printf '%s\n' "$*" >> "${LOG_GIT_FILE}"
+fi
+# LOG_GIT_INDEX があれば、呼び出しが読む index（GIT_INDEX_FILE。未設定は -）と引数をタブ区切りで記録する
+if [ -n "${LOG_GIT_INDEX:-}" ]; then
+  printf '%s\t%s\n' "${GIT_INDEX_FILE:--}" "$*" >> "${LOG_GIT_INDEX}"
+fi
+# MOVE_HEAD_ON_ARG を含む呼び出しの前に一度だけ、HEAD の指す参照を MOVE_HEAD_TO へ動かす（走査中の HEAD の変化の再現用）
+if [ -n "${MOVE_HEAD_ON_ARG:-}" ] && [ ! -e "${MOVE_HEAD_FLAG:-/nonexistent}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "${MOVE_HEAD_ON_ARG}" ]; then
+      : > "${MOVE_HEAD_FLAG}"
+      "${REAL_GIT}" update-ref HEAD "${MOVE_HEAD_TO}"
+      break
+    fi
+  done
+fi
+# DELETE_INDEX_ON_ARG を含む呼び出しの前に一度だけ、DELETE_INDEX_PATH（元の index）を消す（走査中に index が消える場合の再現用）
+if [ -n "${DELETE_INDEX_ON_ARG:-}" ] && [ ! -e "${DELETE_INDEX_FLAG:-/nonexistent}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "${DELETE_INDEX_ON_ARG}" ]; then
+      : > "${DELETE_INDEX_FLAG}"
+      rm -f -- "${DELETE_INDEX_PATH}"
+      # DELETE_INDEX_MKFIFO があれば、消した後の同じパスに FIFO を置く（走査中の通常ファイル以外への差し替えの再現用）
+      if [ -n "${DELETE_INDEX_MKFIFO:-}" ]; then
+        mkfifo "${DELETE_INDEX_PATH}"
+      fi
+      # DELETE_INDEX_SYMLINK_TO があれば、消した後の同じパスにそのパスへのリンクを置く（走査中のリンクへの付け替えの再現用）
+      if [ -n "${DELETE_INDEX_SYMLINK_TO:-}" ]; then
+        ln -s "${DELETE_INDEX_SYMLINK_TO}" "${DELETE_INDEX_PATH}"
+      fi
+      break
+    fi
+  done
+fi
+# MUTATE_INDEX_ON_ARG を含む呼び出しの前に一度だけ、元の index へ MUTATE_INDEX_ADD のパスを git add する（走査中の index の変化の再現用）。
+# 検出器は固定した複写を GIT_INDEX_FILE で指して git を呼ぶため、それを外して既定の index を書き換える。
+if [ -n "${MUTATE_INDEX_ON_ARG:-}" ] && [ ! -e "${MUTATE_INDEX_FLAG:-/nonexistent}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "${MUTATE_INDEX_ON_ARG}" ]; then
+      : > "${MUTATE_INDEX_FLAG}"
+      (unset GIT_INDEX_FILE; "${REAL_GIT}" add -- "${MUTATE_INDEX_ADD}")
+      break
+    fi
+  done
+fi
+# FAIL_GIT_BOTH1・FAIL_GIT_BOTH2 の両方を引数に含む呼び出しだけを失敗させる（cat-file -s は通し cat-file blob だけを失敗させる再現用）
+if [ -n "${FAIL_GIT_BOTH1:-}" ]; then
+  both1=0
+  both2=0
+  for arg in "$@"; do
+    [ "${arg}" = "${FAIL_GIT_BOTH1}" ] && both1=1
+    [ "${arg}" = "${FAIL_GIT_BOTH2:-}" ] && both2=1
+  done
+  if [ "${both1}" -eq 1 ] && [ "${both2}" -eq 1 ]; then
+    echo "git shim: forced failure on a pair" >&2
+    exit 128
+  fi
+fi
 for arg in "$@"; do
   if [ "${arg}" = "${FAIL_GIT_ARG:-}" ]; then
     echo "git shim: forced failure on ${arg}" >&2
@@ -133,7 +194,7 @@ new_repo() {
 check_scan() {
   local desc="$1" want="$2" want_file="${3:-}" rc=0 out needle
   # SCAN_ARG は空（staged モード）か `--tracked` など 1 語の引数
-  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" ${SCAN_ARG:+"${SCAN_ARG}"} > "${work_dir}/out" 2>&1 || rc=$?
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SCAN_BIN:-${SECRET_SCAN}}" ${SCAN_ARG:+"${SCAN_ARG}"} > "${work_dir}/out" 2>&1 || rc=$?
   out="$(cat "${work_dir}/out")"
   last_out="${out}"
   if [ "${rc}" -ne "${want}" ]; then
@@ -162,12 +223,49 @@ expect_out() {
   fi
 }
 
+# stage_lock: 走査対象の index に、検出器と同じ内容の skills-lock.json（lock_ok）を登録する。
+# 除外は検出器の一覧と対象の index の一覧の共通部分だけに効く（#6000）。lock_ok は後ろで定義されるため実行時に参照する。
+stage_lock() {
+  printf '%s\n' "${lock_ok}" > skills-lock.json
+  git add -- skills-lock.json
+}
+
 # stage <path> <内容（printf の書式ではなくそのまま書き込む）>
 stage() {
   mkdir -p "$(dirname "$1")"
   printf '%s\n' "$2" > "$1"
   git add -- "$1"
 }
+
+# make_detector <名前> [skills-lock.json の内容]: 検出器の複製を ${work_dir}/det-<名前>/ に作り、
+# スクリプトのパスを det_bin に入れる。内容を省くと skills-lock.json を置かない（除外なし）。
+# 除外の一覧は検出器の repo の skills-lock.json から読む（走査対象の repo のものは読まない。#6000）。
+det_bin=""
+make_detector() {
+  local d="${work_dir}/det-$1"
+  mkdir -p "${d}/scripts/hooks"
+  cp "${SECRET_SCAN}" "${d}/scripts/hooks/secret-scan.sh"
+  if [ "$#" -ge 2 ]; then
+    printf '%s\n' "$2" > "${d}/skills-lock.json"
+  fi
+  det_bin="${d}/scripts/hooks/secret-scan.sh"
+}
+lock_ok='{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "example/skills",
+      "skillPath": "skills/vendored-a/SKILL.md"
+    },
+    "vendored-b": {
+      "source": "example/skills"
+    }
+  }
+}'
+make_detector ok "${lock_ok}"
+det_ok="${det_bin}"
+make_detector nolock
+det_nolock="${det_bin}"
 
 echo "# hooks under test run with: ${HOOK_BASH} (${BASH_VERSION}), locale ${utf8_locale}"
 
@@ -206,9 +304,14 @@ check_scan "file name with spaces is reported correctly" 1 "dir with space/app.t
 new_repo; stage src/app.txt "x = ${token}"; mkdir -p sub/dir; cd sub/dir
 check_scan "run from a subdirectory scans the whole index" 1 src/app.txt
 
-new_repo; mkdir -p .agents/skills/x; stage .agents/skills/x/doc.md "x = ${token}"
-git commit -q -m "chore: vendored"; mkdir -p src; git mv .agents/skills/x/doc.md src/doc.md
-check_scan "file moved out of an excluded path" 1 src/doc.md
+# 移動元は検出器と走査対象の index の両方に登録した除外の下に置き、除外の境界をまたぐ移動にする（#6011）
+new_repo; stage_lock; mkdir -p .agents/skills/vendored-a; stage .agents/skills/vendored-a/doc.md "x = ${token}"
+git commit -q -m "chore: vendored"; mkdir -p src; git mv .agents/skills/vendored-a/doc.md src/doc.md
+SCAN_BIN="${det_ok}" check_scan "file moved out of an excluded path" 1 src/doc.md
+# 除外の無い場所どうしの移動も、移動先の全行を走査する（--no-renames。リネームの検出で本文が出なくならない）
+new_repo; stage old/doc.md "x = ${token}"
+git commit -q -m "chore: add"; mkdir -p src; git mv old/doc.md src/doc.md
+check_scan "file renamed between scanned paths" 1 src/doc.md
 
 # (b) 非 UTF-8 のバイトと同じ行にあるトークン
 new_repo; stage latin1.txt "caf"$'\xe9'" ${token}"
@@ -247,10 +350,11 @@ check_scan "(d) diff.noprefix keeps file attribution" 1 app.txt
 new_repo; git config diff.mnemonicPrefix true; stage app.txt "x = ${token}"
 check_scan "(d) diff.mnemonicPrefix keeps file attribution" 1 app.txt
 
-new_repo; git config diff.renames copies; mkdir -p .claude/skills/x
-stage .claude/skills/x/doc.md "x = ${token}"; git commit -q -m "chore: vendored"
-cp .claude/skills/x/doc.md copy.md; git add copy.md
-check_scan "(d) diff.renames=copies does not hide a copied file" 1 copy.md
+# コピー元は検出器と走査対象の index の両方に登録した除外の下に置き、除外の境界をまたぐコピーにする（#6011）
+new_repo; git config diff.renames copies; stage_lock; mkdir -p .agents/skills/vendored-a
+stage .agents/skills/vendored-a/doc.md "x = ${token}"; git commit -q -m "chore: vendored"
+cp .agents/skills/vendored-a/doc.md copy.md; git add copy.md
+SCAN_BIN="${det_ok}" check_scan "(d) diff.renames=copies does not hide a copied file" 1 copy.md
 
 # ---------------------------------------------------------------- secret-scan: 許可
 new_repo
@@ -270,9 +374,1409 @@ check_scan "env var placeholder" 0
 new_repo; stage README.md "see https://example.com/path and user${at}example.com"
 check_scan "URL without credentials" 0
 
-new_repo; stage .agents/skills/x/SKILL.md "x = ${token}"; stage .claude/skills/y/SKILL.md "${dsn_line}"
-stage deps.lock "x = ${token}"
-check_scan "excluded paths (.agents/skills, .claude/skills, *.lock)" 0
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"; stage .agents/skills/vendored-b/sub/n.md "${dsn_line}"
+SCAN_BIN="${det_ok}" check_scan "paths registered in the detector's skills-lock.json are excluded" 0
+
+# 走査対象の index で登録が消えた名前は、検出器の一覧に残っていても除外しない（共通部分だけを除外に使う。#6000）
+new_repo; stage skills-lock.json '{"version":2,"skills":{"vendored-b":{"source":"x"}}}'
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "a registration removed in the target index no longer excludes the directory" 1 .agents/skills/vendored-a/SKILL.md
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "a target index without skills-lock.json excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# git add -N（intent-to-add）の skills-lock.json は未登録として扱い、無関係な変更を止めない。実際にステージした空ファイルは拒否する（#6000）
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add -N skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "an intent-to-add skills-lock.json is treated as unregistered" 0
+# intent-to-add の判定は固定した index だけで行い、作業ツリーに依らない（add -N の後に作業ツリーから消しても未登録のまま。#6011）
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add -N skills-lock.json; rm skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "an intent-to-add skills-lock.json removed from the working tree is treated as unregistered" 0
+# 判定の出力の形を環境に依らせない（GIT_PRINT_SHA1_ELLIPSIS=yes は省略した oid の後に ... を付ける。--no-abbrev で固定する。#6011）
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add -N skills-lock.json
+GIT_PRINT_SHA1_ELLIPSIS=yes SCAN_BIN="${det_ok}" check_scan "an intent-to-add skills-lock.json is treated as unregistered with GIT_PRINT_SHA1_ELLIPSIS=yes" 0
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add skills-lock.json; rm skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "a really staged empty skills-lock.json removed from the working tree is still rejected" 2
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "a really staged empty skills-lock.json is still rejected" 2
+
+# 除外は検出器の skills-lock.json に登録された .agents/skills/<名前>/ の下だけ。パスの形では決めない（#6000）
+new_repo; stage_lock; stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "unregistered .agents/skills directory is scanned" 1 .agents/skills/other/SKILL.md
+
+new_repo; stage_lock; stage .agents/skills/vendored-a-evil/x.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "name prefix match does not exclude a sibling directory" 1 .agents/skills/vendored-a-evil/x.md
+
+new_repo; stage_lock; stage .agents/skills/vendored-a "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "a file named exactly like a registered skill is scanned" 1 .agents/skills/vendored-a
+
+new_repo; stage_lock; stage .agents/skills/loose.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "a file directly under .agents/skills is scanned" 1 .agents/skills/loose.md
+
+new_repo; stage_lock; stage .agents/skills/VENDORED-A/x.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "case-changed skill name is scanned" 1 .agents/skills/VENDORED-A/x.md
+GIT_ICASE_PATHSPECS=1 SCAN_BIN="${det_ok}" check_scan "case-changed skill name is scanned (GIT_ICASE_PATHSPECS=1)" 1 .agents/skills/VENDORED-A/x.md
+
+new_repo; stage_lock; stage nested/.agents/skills/vendored-a/x.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "nested .agents/skills path is scanned" 1 nested/.agents/skills/vendored-a/x.md
+
+new_repo; stage deps.lock "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "*.lock at the root is scanned" 1 deps.lock
+
+new_repo; stage a/b/foo.lock "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "nested *.lock is scanned" 1 a/b/foo.lock
+
+new_repo; stage .claude/skills/y/SKILL.md "${dsn_line}"
+SCAN_BIN="${det_ok}" check_scan ".claude/skills real directory is scanned" 1 .claude/skills/y/SKILL.md
+
+# 走査対象の repo が自分の skills-lock.json に名前を足しても、除外にならない（中心のケース）
+new_repo
+printf '%s\n' '{' '  "version": 2,' '  "skills": {' '    "other": {' '      "source": "x"' '    }' '  }' '}' > skills-lock.json
+git add skills-lock.json; stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "the scanned repo's own skills-lock.json does not add exclusions" 1 .agents/skills/other/SKILL.md
+
+# 走査対象の一覧は除外に使わないが、壊れていれば検査不能（2）にしてマージ前に見つける（#6000）
+new_repo
+printf '%s\n' '{ "version": 2, "skills": {' > skills-lock.json
+git add skills-lock.json; stage src/app.txt "hello"
+SCAN_BIN="${det_ok}" check_scan "the scanned repo's broken skills-lock.json is rejected (not adopted)" 2
+
+new_repo
+printf '%s\n' '{ "version": 3, "skills": { "other": { "source": "x" } } }' > skills-lock.json
+git add skills-lock.json; stage src/app.txt "hello"
+SCAN_BIN="${det_ok}" check_scan "the scanned repo's skills-lock.json with an unsupported version is rejected" 2
+
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_nolock}" check_scan "detector without skills-lock.json excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# 除外にかからないパスのダミーは検出される（陰性対照。#6000 の受け入れ条件）
+new_repo; stage src/app.txt "${dsn_line}"
+SCAN_BIN="${det_ok}" check_scan "dummy under a non-excluded path is detected" 1 src/app.txt
+
+# 検出器の skills-lock.json が壊れていれば検査不能（fail-closed）。診断に名前・パスを出さない
+bad_n=0
+# grep_none <パターン> <ファイル>: 不一致（終了コード 1）のときだけ成功。読み取り失敗等（2 以上）は失敗にする。
+grep_none() {
+  local grc=0
+  grep -q "$1" "$2" || grc=$?
+  [ "${grc}" -eq 1 ]
+}
+# run_bad_lock <説明>: 準備済みの検出器（det_bin）が、固定の文言・終了コード 2 で止まること
+run_bad_lock() {
+  local desc="$1" rc=0
+  new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_bin}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting" "${work_dir}/out" \
+    && grep_none "vendored\|det-bad\|/" "${work_dir}/out"; then
+    pass "secret-scan: ${desc}"
+  else
+    fail "secret-scan: ${desc}" "expected exit 2 with a fixed message, got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+}
+check_bad_lock() {
+  bad_n=$((bad_n + 1))
+  make_detector "bad${bad_n}" "$2"
+  run_bad_lock "$1"
+}
+check_bad_lock "skills-lock.json with version 3 is rejected" '{
+  "version": 3,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json without skills is rejected" '{
+  "version": 2
+}'
+check_bad_lock "skills-lock.json with an empty skills map is rejected" '{
+  "version": 2,
+  "skills": {
+  }
+}'
+check_bad_lock "skills-lock.json name with a slash is rejected" '{
+  "version": 2,
+  "skills": {
+    "a/b": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json name with dot-dot is rejected" '{
+  "version": 2,
+  "skills": {
+    "..": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json name with a glob character is rejected" '{
+  "version": 2,
+  "skills": {
+    "a*": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json name with a space is rejected" '{
+  "version": 2,
+  "skills": {
+    "a b": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with unbalanced braces is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }'
+check_bad_lock "skills-lock.json with a duplicate name is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    },
+    "vendored-a": {
+      "source": "y"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with an unexpected top-level key is rejected" '{
+  "version": 2,
+  "extra": 1,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+
+check_bad_lock "skills-lock.json with a missing comma between members is rejected" '{
+  "version": 2
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a missing comma between skills is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+    "vendored-b": {
+      "source": "y"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a trailing comma is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    },
+  }
+}'
+check_bad_lock "skills-lock.json with a broken skill body is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x",
+      "hash":
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with an unquoted skill key body is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      source: "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with skills as an array is rejected" '{
+  "version": 2,
+  "skills": ["vendored-a"]
+}'
+check_bad_lock "skills-lock.json with a string skill value is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": "x"
+  }
+}'
+check_bad_lock "skills-lock.json with a string version is rejected" '{
+  "version": "2",
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with trailing garbage is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+} x'
+check_bad_lock "skills-lock.json with a second top-level value is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}
+{}'
+check_bad_lock "skills-lock.json with an escaped skill name is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored\/a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with an invalid string escape is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "a\qb"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with an unterminated string is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a duplicate version is rejected" '{
+  "version": 2,
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json that is empty is rejected" ''
+
+# 一覧の source 欄だけを差し替えた最小の一覧
+lock_with_source() {
+  printf '{\n  "version": 2,\n  "skills": {\n    "vendored-a": {\n      "source": "%s"\n    }\n  }\n}' "$1"
+}
+bs=$'\x5c'
+check_bad_lock "skills-lock.json with an invalid UTF-8 byte is rejected" "$(lock_with_source "a"$'\xff'"b")"
+check_bad_lock "skills-lock.json with an overlong UTF-8 sequence is rejected" "$(lock_with_source "a"$'\xc0\x80'"b")"
+check_bad_lock "skills-lock.json with a UTF-8 surrogate is rejected" "$(lock_with_source "a"$'\xed\xa0\x80'"b")"
+check_bad_lock "skills-lock.json with a truncated UTF-8 sequence is rejected" "$(lock_with_source "a"$'\xe3\x81'"b")"
+# 不正なバイトの両側が、正しい列の除去で接して新しい列にならない（c2 + 正しい 3 バイト列 + 80）
+check_bad_lock "skills-lock.json with a stray UTF-8 lead around a valid sequence is rejected" "$(lock_with_source "a"$'\xc2\xe2\x82\xac\x80'"b")"
+check_bad_lock "skills-lock.json with a raw U+0001 in a string is rejected" "$(lock_with_source "a"$'\x01'"b")"
+check_bad_lock "skills-lock.json with a raw U+001F in a string is rejected" "$(lock_with_source "a"$'\x1f'"b")"
+check_bad_lock "skills-lock.json with a raw tab in a string is rejected" "$(lock_with_source "a"$'\t'"b")"
+check_bad_lock "skills-lock.json with a raw newline in a string is rejected" "$(lock_with_source "a"$'\n'"b")"
+check_bad_lock "skills-lock.json without a version is rejected" '{
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a duplicate skills key is rejected" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    }
+  },
+  "skills": {
+    "vendored-b": {
+      "source": "y"
+    }
+  }
+}'
+check_bad_lock "skills-lock.json with a unicode-escaped skill name is rejected" "{
+  \"version\": 2,
+  \"skills\": {
+    \"vendored${bs}u0061\": {
+      \"source\": \"x\"
+    }
+  }
+}"
+deep_open="$(printf '[%.0s' {1..40})"
+deep_close="$(printf ']%.0s' {1..40})"
+check_bad_lock "skills-lock.json nested deeper than the limit is rejected" "{
+  \"version\": 2,
+  \"skills\": {
+    \"vendored-a\": {
+      \"deep\": ${deep_open}${deep_close}
+    }
+  }
+}"
+# NUL を含む一覧（読み取りが NUL で止まり、後ろが未検証になる経路）
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+printf '{\n  "version": 2,\n  "skills": {\n    "vendored-a": {\n      "source": "x"\n    }\n  }\n}\n\0trailing' > "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json containing a NUL byte is rejected"
+# 一覧が普通のファイルでない（行き先の無いシンボリックリンク・ディレクトリ・FIFO）
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+rm -f "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+ln -s "no-such-target" "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json as a dangling symlink is rejected"
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+rm -f "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+mkdir "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json as a directory is rejected"
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+rm -f "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+mkfifo "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json as a FIFO is rejected"
+
+# 構造の記号を含む文字列値・1 行に詰めた JSON は正しく読める（行単位の深さの数え方では誤判定した形）
+check_good_lock() {
+  local desc="$1" content="$2"
+  make_detector "good${bad_n}" "${content}"
+  bad_n=$((bad_n + 1))
+  new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+  SCAN_BIN="${det_bin}" check_scan "${desc}" 0
+}
+check_good_lock "skills-lock.json with braces inside strings is accepted" '{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "a{b}c } {",
+      "note": "q\"{\\"
+    }
+  }
+}'
+check_good_lock "skills-lock.json packed on one line is accepted" '{"version":2,"skills":{"vendored-a":{"source":"x","n":[1,-2.5e3,true,null,{"k":[]}]}}}'
+
+check_good_lock "skills-lock.json with valid multibyte UTF-8 is accepted" "$(lock_with_source "$(printf 'caf\xc3\xa9 \xe6\x97\xa5\xe6\x9c\xac \xf0\x9f\x98\x80')")"
+check_good_lock "skills-lock.json with a raw U+0020 in a string is accepted" "$(lock_with_source "a b")"
+check_good_lock "skills-lock.json with a raw U+007F in a string is accepted" "$(lock_with_source "a"$'\x7f'"b")"
+check_good_lock "skills-lock.json with a 70-digit number is accepted" "{
+  \"version\": 2,
+  \"skills\": {
+    \"vendored-a\": {
+      \"big\": $(printf '1%.0s' {1..70}),
+      \"neg\": -$(printf '2%.0s' {1..70}).5e10
+    }
+  }
+}"
+check_good_lock "skills-lock.json nested within the depth limit is accepted" "{
+  \"version\": 2,
+  \"skills\": {
+    \"vendored-a\": {
+      \"deep\": $(printf '[%.0s' {1..20})$(printf ']%.0s' {1..20})
+    }
+  }
+}"
+
+# 検出器のあるディレクトリ名が改行で終わっていても、除外の一覧を読める（dirname のコマンド置換は末尾の改行を落とす）
+nl_root="${work_dir}/det-nl"
+nl_dir="${nl_root}/s/h"$'\n'
+mkdir -p "${nl_dir}"
+cp "${SECRET_SCAN}" "${nl_dir}/secret-scan.sh"
+printf '%s\n' "${lock_ok}" > "${nl_root}/skills-lock.json"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${nl_dir}/secret-scan.sh" check_scan "detector in a directory whose name ends with a newline reads its list" 0
+
+# scripts がシンボリックリンクでも、検出器の実体の場所から一覧を読む（論理的な `..` で別のルートを選ばない。#6000）
+lnk_real="${work_dir}/det-real"
+lnk_other="${work_dir}/det-other"
+mkdir -p "${lnk_real}/scripts/hooks" "${lnk_other}"
+cp "${SECRET_SCAN}" "${lnk_real}/scripts/hooks/secret-scan.sh"
+printf '%s\n' "${lock_ok}" > "${lnk_real}/skills-lock.json"
+ln -s "${lnk_real}/scripts" "${lnk_other}/scripts"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${lnk_other}/scripts/hooks/secret-scan.sh" check_scan "detector reached through a symlinked scripts directory reads the real list" 0
+
+# ファイル名だけで起動した相対リンクの先が / を含んでも、リンクの親ディレクトリを基準に解決する（#6000）
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+ln -s "../det-real/scripts/hooks/secret-scan.sh" sslink
+SCAN_BIN="sslink" check_scan "a bare-name symlink with a relative target containing a slash resolves from the link's directory" 0
+
+# 同じ checkout（検出器と走査対象が同じ repo）では、除外に使うのは HEAD・作業ツリー・index の 3 つすべてに
+# 登録された名前（共通部分）だけ（#6000）。未コミットの作業ツリー・index の編集で除外を足せない。
+same_lock_two='{
+  "version": 2,
+  "skills": {
+    "vendored-a": {
+      "source": "x"
+    },
+    "other": {
+      "source": "y"
+    }
+  }
+}'
+# same_checkout_repo [skills-lock.json の内容]: 検出器の複製と一覧をコミットした repo を作る
+same_checkout_repo() {
+  new_repo
+  mkdir -p scripts/hooks
+  cp "${SECRET_SCAN}" scripts/hooks/secret-scan.sh
+  if [ "$#" -ge 1 ]; then
+    printf '%s\n' "$1" > skills-lock.json
+  fi
+  git add -A
+  git commit -q -m "chore: add detector"
+}
+same_bin="scripts/hooks/secret-scan.sh"
+
+same_checkout_repo "${lock_ok}"; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a committed name is excluded" 0
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' "${same_lock_two}" > skills-lock.json
+stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a name added in the working tree only is scanned" 1 .agents/skills/other/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' "${same_lock_two}" > skills-lock.json
+git add skills-lock.json
+stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a name staged but not committed is scanned" 1 .agents/skills/other/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' "${same_lock_two}" > skills-lock.json
+stage .agents/skills/other/SKILL.md "x = ${token}"
+SCAN_ARG=--tracked SCAN_BIN="${same_bin}" check_scan "same checkout (--tracked): a name added in the working tree only is scanned" 1 .agents/skills/other/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{"version":2,"skills":{"vendored-b":{"source":"x"}}}' > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a committed name removed in the working tree is scanned" 1 .agents/skills/vendored-a/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{ "version": 2, "skills": {' > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken working-tree list is rejected" 2
+
+# 登録の削除をステージしたあと、作業ツリーだけへ登録を戻しても除外は残らない（index の一覧でも名前を確かめる。#6000）
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{"version":2,"skills":{"vendored-b":{"source":"x"}}}' > skills-lock.json
+git add skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a name unregistered in the index is scanned even if restored in the working tree" 1 .agents/skills/vendored-a/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+git rm -q --cached skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a list deleted from the index excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{ "version": 2, "skills": {' > skills-lock.json
+git add skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken staged list is rejected" 2
+
+same_checkout_repo
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a list absent from HEAD excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# 作業ツリーに一覧が無くても、同じ checkout では HEAD の一覧を検証する（壊れていれば 2。#6011）
+# 拒否の原因を HEAD に限るため、index には有効な一覧を登録してから作業ツリーの一覧を消す（index の検証が先に拒否しない形）
+same_checkout_repo '{ "version": 2, "skills": {'
+printf '%s\n' "${lock_ok}" > skills-lock.json
+git add skills-lock.json
+rm -f skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken committed list is rejected even without a working-tree list" 2
+expect_out "same checkout: a broken committed list without a working-tree list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# 作業ツリーに一覧が無く HEAD の一覧が有効なら、何も除外しない
+same_checkout_repo "${lock_ok}"
+rm -f skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a valid committed list without a working-tree list excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# 作業ツリーの一覧がシンボリックリンクなら（リンク先が有効でも）拒否する
+same_checkout_repo "${lock_ok}"
+cp skills-lock.json real-lock.json
+rm -f skills-lock.json
+ln -s real-lock.json skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a working-tree list that is a symlink is rejected" 2
+expect_out "same checkout: a symlinked working-tree list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# HEAD の一覧がシンボリックリンクなら（作業ツリーが通常ファイルでも）拒否する
+new_repo
+mkdir -p scripts/hooks
+cp "${SECRET_SCAN}" scripts/hooks/secret-scan.sh
+# リンク先の文字列そのものを有効な一覧にして、blob の中身の構文検査だけでは拒否されない形にする
+ln -s '{"version":2,"skills":{"vendored-a":{}}}' skills-lock.json
+git add -A
+git commit -q -m "chore: add detector with a symlinked list"
+rm -f skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+# index も通常ファイルの有効な一覧にして、拒否の原因を HEAD の種類に限る
+git add skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a committed list that is a symlink is rejected" 2
+expect_out "same checkout: a symlinked committed list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# index の一覧がシンボリックリンク（mode 120000）なら、作業ツリーと HEAD が通常ファイルの有効な一覧でも拒否する。
+# リンク先の文字列そのものを有効な一覧にして、blob の中身の構文検査だけでは拒否されない形にする（拒否の原因を index の種類に限る）
+same_checkout_repo "${lock_ok}"
+rm -f skills-lock.json
+ln -s '{"version":2,"skills":{"vendored-a":{}}}' skills-lock.json
+git add skills-lock.json
+rm -f skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+if [ "$(git ls-files -s -- skills-lock.json | cut -d' ' -f1)" = 120000 ]; then
+  pass "secret-scan: same checkout: the staged list is a symlink entry in the test setup"
+else
+  fail "secret-scan: same checkout: the staged list is a symlink entry in the test setup" "index: $(git ls-files -s -- skills-lock.json)"
+fi
+SCAN_BIN="${same_bin}" check_scan "same checkout: a staged list that is a symlink is rejected" 2
+expect_out "same checkout: a symlinked staged list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# 検出器の一覧がシンボリックリンク（リンク先は有効）なら拒否する
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+mv "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json" "${det_bin%/scripts/hooks/secret-scan.sh}/real-lock.json"
+ln -s real-lock.json "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json as a symlink to a valid file is rejected"
+
+# HEAD の参照: 未作成ブランチは除外なしで走査する。参照があるのに解決できない場合は検査不能（2）
+same_checkout_repo "${lock_ok}"
+git symbolic-ref HEAD refs/heads/unborn
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: an unborn branch excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+head_sha="$(git rev-parse HEAD)"
+rm -f ".git/objects/${head_sha:0:2}/${head_sha:2}"
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a HEAD whose commit object is missing exits 2" 2
+expect_out "same checkout: an unresolvable HEAD reports a fixed message" "secret-scan: cannot read HEAD; aborting"
+
+# 壊れた参照（内容が不正）は未作成ブランチと区別し、検査不能（2）にする（show-ref の終了コード 1 は両方で返る。#6011）
+same_checkout_repo "${lock_ok}"
+git symbolic-ref HEAD refs/heads/broken
+printf '%s\n' 'not-a-valid-object-id' > .git/refs/heads/broken
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken loose ref is not treated as an unborn branch" 2
+expect_out "same checkout: a broken ref reports a fixed message" "secret-scan: cannot read HEAD; aborting"
+
+# 他のブランチが packed-refs にあっても、HEAD の指す参照が無ければ未作成ブランチとして除外なしで走査する
+same_checkout_repo "${lock_ok}"
+git pack-refs --all
+git symbolic-ref HEAD refs/heads/unborn-packed
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: an unborn branch next to packed refs excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# 空の skills は、同じ checkout の HEAD の一覧でも固定の診断文で 2 にする（Bash 3.2 の空配列に依らない）
+same_checkout_repo '{"version":2,"skills":{}}'
+# 作業ツリーと index は有効な一覧にして、拒否の原因を HEAD に限る
+printf '%s\n' "${lock_ok}" > skills-lock.json
+git add skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a committed list with an empty skills map exits 2" 2
+expect_out "same checkout: an empty committed skills map reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# 実装の形の確認（macOS の bash 3.2 が無い環境向け）: 空になり得る配列の長さ参照・素の展開を使わない。
+# 一覧の読み取りは一時ファイルへの複写 1 回だけにし、元のパスを read・wc で別々に開かない
+bad_forms="$(grep -nE '[$]\{#parsed_names\[@\]\}|[^+]"[$]\{(parsed_names|work_names)\[@\]\}"' "${SECRET_SCAN}" | grep -v '^[0-9]*:[[:space:]]*#' | grep -vF '[@]+' || true)"
+if [ -z "${bad_forms}" ]; then
+  pass "secret-scan: no length reference or bare expansion of possibly-empty arrays (bash 3.2 set -u)"
+else
+  fail "secret-scan: no length reference or bare expansion of possibly-empty arrays (bash 3.2 set -u)" "found: ${bad_forms}"
+fi
+snap_reads="$(grep -cE '(js|wc -c) < "[$]1"' "${SECRET_SCAN}" || true)"
+# shellcheck disable=SC2016 # 検索する文字列そのもの（展開しない）
+snap_copies="$(grep -cF -e 'head -c $((lock_max_bytes + 1)) -- "$1" > "${snap}"' "${SECRET_SCAN}" || true)"
+if [ "${snap_reads}" = 0 ] && [ "${snap_copies}" = 1 ]; then
+  pass "secret-scan: the list is read from a single snapshot"
+else
+  fail "secret-scan: the list is read from a single snapshot" "direct reads: ${snap_reads}, copies: ${snap_copies}"
+fi
+# 読み取りの監視（TERM で止める子シェル）は、EXIT の trap（一時ディレクトリの削除）を外した状態で fork し、fork の直後に戻す。
+# 起動直後の子に TERM が届くと、子が親の EXIT の trap を実行して走査中の一時ディレクトリを消し、有効な一覧が 2 になる（#6011）。
+# 競合は負荷に依って稀にしか起きず実行では安定して再現できないため、形で確かめる（外す → fork → 戻すの順で各 1 か所）。
+# 外す行の次の行は子の開き `(` の行に限る（子の中で外す形では、外す前の子が TERM を受けて親の trap を実行し得る）
+wd_clear="$(grep -nxE '[[:space:]]*trap - EXIT' "${SECRET_SCAN}" | cut -d: -f1 | tr '\n' ' ' || true)"
+wd_open=""
+if [[ "${wd_clear}" =~ ^[0-9]+\ $ ]]; then
+  wd_open="$(sed -n "$((${wd_clear% } + 1))p" "${SECRET_SCAN}")"
+fi
+wd_fork="$(grep -nxF '    ) > /dev/null 2>&1 < /dev/null &' "${SECRET_SCAN}" | cut -d: -f1 | tr '\n' ' ' || true)"
+wd_restore="$(grep -nxF '    trap cleanup_tmp EXIT' "${SECRET_SCAN}" | cut -d: -f1 | tr '\n' ' ' || true)"
+wd_pid="$(grep -nxF '    lock_wd=$!' "${SECRET_SCAN}" | cut -d: -f1 | tr '\n' ' ' || true)"
+if [[ "${wd_clear}" =~ ^[0-9]+\ $ ]] && [[ "${wd_fork}" =~ ^[0-9]+\ $ ]] && [[ "${wd_restore}" =~ ^[0-9]+\ $ ]] \
+  && [[ "${wd_pid}" =~ ^[0-9]+\ $ ]] && [ "${wd_open}" = "    (" ] && [ "${wd_clear% }" -lt "${wd_fork% }" ] \
+  && [ "$((${wd_fork% } + 1))" -eq "${wd_pid% }" ] && [ "$((${wd_pid% } + 1))" -eq "${wd_restore% }" ]; then
+  pass "secret-scan: the read watchdog is forked without the EXIT trap and the trap is restored right after"
+else
+  fail "secret-scan: the read watchdog is forked without the EXIT trap and the trap is restored right after" \
+    "clear: ${wd_clear}, next: ${wd_open}, fork: ${wd_fork}, pid: ${wd_pid}, restore: ${wd_restore}"
+fi
+
+# HEAD のコミット ID は最初に 1 回だけ確定し、ls-tree・cat-file・staged の差分の基準に同じ ID を渡す（#6011）。
+# git の呼び出しの引数を記録し、`HEAD` の名前が残らず、3 つとも同じ ID であることを確かめる
+same_checkout_repo "${lock_ok}"
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+stage src/app.txt "x = ${token}"
+head_sha="$(git rev-parse HEAD)"
+: > "${work_dir}/gitlog"
+LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${same_bin}" check_scan "same checkout: the pinned HEAD id does not disturb a scan" 1 src/app.txt
+pin_ok=1
+for sub in "ls-tree" "cat-file" "diff"; do
+  grep -E "(^| )${sub}( |$)" "${work_dir}/gitlog" > "${work_dir}/gitlog-sub" || true
+  # cat-file は index の一覧の blob（オブジェクト ID だけを渡す）も読むため、HEAD の一覧を読む呼び出し（`<ID>:skills-lock.json`）だけを見る
+  if [ "${sub}" = cat-file ]; then
+    grep -F ":skills-lock.json" "${work_dir}/gitlog-sub" > "${work_dir}/gitlog-sub2" || true
+    mv "${work_dir}/gitlog-sub2" "${work_dir}/gitlog-sub"
+  fi
+  # index の比較・intent-to-add の判定の diff（--ita-*-in-index）は HEAD ではなく空の tree と比べる。空の tree の ID を
+  # 渡していることを確かめてから、HEAD の ID の照合（走査の diff）から外す。index の比較は固定時と走査後の 2 回ある
+  if [ "${sub}" = diff ]; then
+    empty_sha="$(git hash-object -t tree /dev/null)"
+    grep -E -- "--ita-(in)?visible-in-index" "${work_dir}/gitlog-sub" > "${work_dir}/gitlog-ita" || true
+    ita_total="$(wc -l < "${work_dir}/gitlog-ita")"
+    ita_total="${ita_total//[[:space:]]/}"
+    ita_with_empty="$(grep -c "${empty_sha}" "${work_dir}/gitlog-ita" || true)"
+    if [ "${ita_total}" -lt 2 ] || [ "${ita_total}" -ne "${ita_with_empty}" ]; then
+      pin_ok=0
+    fi
+    grep -vE -- "--ita-(in)?visible-in-index" "${work_dir}/gitlog-sub" > "${work_dir}/gitlog-sub2" || true
+    mv "${work_dir}/gitlog-sub2" "${work_dir}/gitlog-sub"
+  fi
+  sub_total="$(wc -l < "${work_dir}/gitlog-sub")"
+  sub_total="${sub_total//[[:space:]]/}"
+  sub_with_id="$(grep -c "${head_sha}" "${work_dir}/gitlog-sub" || true)"
+  # 名前の一覧と本文の 2 回の diff を含め、すべての呼び出しが同じ ID を渡す（片方が基準を落とすと検出する）
+  if [ "${sub_total}" -lt 1 ] || [ "${sub_total}" -ne "${sub_with_id}" ]; then
+    pin_ok=0
+  fi
+  # どの呼び出しにも、解決し直される `HEAD` の名前が残らない
+  if grep -Eq "(^| )HEAD(:| |$)" "${work_dir}/gitlog-sub"; then
+    pin_ok=0
+  fi
+  if [ "${sub}" = diff ] && [ "${sub_total}" -lt 2 ]; then
+    pin_ok=0
+  fi
+done
+if [ "${pin_ok}" -eq 1 ]; then
+  pass "secret-scan: ls-tree, cat-file and the staged diff all use the same pinned HEAD commit id"
+else
+  fail "secret-scan: ls-tree, cat-file and the staged diff all use the same pinned HEAD commit id" "git calls: $(cat "${work_dir}/gitlog")"
+fi
+
+# 走査中に HEAD が動いたら、古い基準の結果で合格させない（2）。本文の diff（-U0）の直前に動かす
+same_checkout_repo "${lock_ok}"
+git commit -q --allow-empty -m "chore: second"
+second_sha="$(git rev-parse HEAD)"
+git reset -q --hard HEAD~1
+stage src/app.txt "x = placeholder"
+rm -f "${work_dir}/moved"
+move_rc=0
+MOVE_HEAD_ON_ARG=-U0 MOVE_HEAD_TO="${second_sha}" MOVE_HEAD_FLAG="${work_dir}/moved" PATH="${shim_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || move_rc=$?
+if [ "${move_rc}" -eq 2 ] && grep -qxF "secret-scan: HEAD changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: HEAD moving during a staged scan is a scan failure (2)"
+else
+  fail "secret-scan: HEAD moving during a staged scan is a scan failure (2)" "got ${move_rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 未作成ブランチのまま始まり、走査中にブランチが作られた場合も 2
+new_repo
+git branch other
+other_sha="$(git rev-parse other)"
+git symbolic-ref HEAD refs/heads/unborn
+stage src/app.txt "x = placeholder"
+rm -f "${work_dir}/moved"
+move_rc=0
+MOVE_HEAD_ON_ARG=-U0 MOVE_HEAD_TO="${other_sha}" MOVE_HEAD_FLAG="${work_dir}/moved" PATH="${shim_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_ok}" > "${work_dir}/out" 2>&1 || move_rc=$?
+if [ "${move_rc}" -eq 2 ] && grep -qxF "secret-scan: HEAD changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an unborn branch created during a staged scan is a scan failure (2)"
+else
+  fail "secret-scan: an unborn branch created during a staged scan is a scan failure (2)" "got ${move_rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 走査中に元の index が変わったら、固定した複写に基づく結果で合格させない（2）。本文の diff（-U0）の直前に git add する
+# run_index_mutation <説明> <走査中に add するパス>
+run_index_mutation() {
+  local rc=0
+  rm -f "${work_dir}/mutated"
+  MUTATE_INDEX_ON_ARG=-U0 MUTATE_INDEX_ADD="$2" MUTATE_INDEX_FLAG="${work_dir}/mutated" PATH="${shim_dir}:${PATH}" \
+    LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ -e "${work_dir}/mutated" ] && [ "${rc}" -eq 2 ] \
+    && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+    pass "secret-scan: $1"
+  else
+    fail "secret-scan: $1" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+}
+new_repo; stage src/app.txt "hello"; printf '%s\n' "x = placeholder" > other.txt
+run_index_mutation "a file staged during the scan is a scan failure (2)" other.txt
+# intent-to-add の空ファイルを走査中に実際にステージしても 2。ls-files -s では両者が同じ行になるため、印の変化も比べる（#6011）
+new_repo; stage src/app.txt "hello"; : > .env; git add -N .env
+check_scan "an intent-to-add .env is not part of the commit" 0
+run_index_mutation "an intent-to-add file really staged during the scan is a scan failure (2)" .env
+# 走査後の比較は、元の index を 1 回だけ複写し、ls-files -s と intent-to-add の印の 2 つの一覧を同じ複写から取る（#6011）。
+# 元の index を別々に開くと、2 つの呼び出しの間の更新で一覧が別の版を見る。本文の diff（-U0）より後の 2 つの呼び出しが、
+# 同じ index のファイルを読み、それが元の index でも固定時の複写（本文の diff が読むもの）でもないことを確かめる
+# 検出器の一時ディレクトリの親（TMPDIR）を既知の場所にし、パスは実パス（pwd -P）に直して比べる（macOS の /var と /private/var）
+new_repo; stage src/app.txt "hello"
+scan_tmp="${work_dir}/scan-tmp"
+mkdir -p "${scan_tmp}"
+scan_tmp_real="$(cd "${scan_tmp}" && pwd -P)"
+orig_idx="$(cd "$(git rev-parse --absolute-git-dir)" && pwd -P)/index"
+: > "${work_dir}/gitindex"
+TMPDIR="${scan_tmp}" LOG_GIT_INDEX="${work_dir}/gitindex" PATH="${shim_dir}:${PATH}" check_scan "the post-scan index comparison runs on a fresh copy" 0
+body_idx=""
+after_ls=""
+after_ita=""
+seen_body=0
+while IFS=$'\t' read -r idx args; do
+  if [ "${seen_body}" -eq 0 ]; then
+    case " ${args} " in
+      *" -U0 "*)
+        seen_body=1
+        body_idx="${idx}"
+        ;;
+    esac
+    continue
+  fi
+  case " ${args} " in
+    *" ls-files -s -z "*) after_ls="${after_ls}${idx}"$'\n' ;;
+    *" --ita-invisible-in-index "*) after_ita="${after_ita}${idx}"$'\n' ;;
+  esac
+done < "${work_dir}/gitindex"
+# 記録したパスの TMPDIR の部分を実パスに置き換える（一時ディレクトリは走査の後に消えるため、親だけを正規化する）
+after_one="${after_ls%$'\n'}"
+after_real="${after_one}"
+case "${after_one}" in
+  "${scan_tmp}"/*) after_real="${scan_tmp_real}/${after_one#"${scan_tmp}"/}" ;;
+esac
+body_dir="${body_idx%/*}"
+if [ -n "${body_idx}" ] && [ "${after_ls}" = "${after_ita}" ] && [ "$(printf '%s' "${after_ls}" | wc -l | tr -d ' ')" = 1 ] \
+  && [ "${body_idx}" = "${body_dir}/index-snap" ] && [ "${after_one}" = "${body_dir}/index-after" ] \
+  && [[ "${after_real}" == "${scan_tmp_real}"/secret-scan.*/index-after ]] \
+  && [ "${after_real}" != "${orig_idx}" ] && [ "${after_one}" != "${body_idx}" ]; then
+  pass "secret-scan: both post-scan listings read the same fresh copy of the index"
+else
+  fail "secret-scan: both post-scan listings read the same fresh copy of the index" "git calls: $(cat "${work_dir}/gitindex")"
+fi
+
+# 固定時にあった元の index が走査中に消えたら、一覧の差か有無の記録（index_pinned）のどちらでも 2（#6011）
+new_repo; stage src/app.txt "hello"
+rm -f "${work_dir}/deleted"
+rc=0
+DELETE_INDEX_ON_ARG=-U0 DELETE_INDEX_PATH="$(git rev-parse --path-format=absolute --git-path index)" DELETE_INDEX_FLAG="${work_dir}/deleted" \
+  PATH="${shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/deleted" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: the index removed during the scan is a scan failure (2)"
+else
+  fail "secret-scan: the index removed during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 終了時の元の index の複写（index-after への cp）が失敗したら 2。固定時の複写（index-snap）は通す（#6011）
+cp_shim_dir="${work_dir}/cp-shim"
+mkdir -p "${cp_shim_dir}"
+REAL_CP="$(command -v cp)"
+export REAL_CP
+cat > "${cp_shim_dir}/cp" <<'EOF2'
+#!/bin/sh
+for last in "$@"; do :; done
+case "${last}" in
+  */index-after) : > "${CP_SHIM_FLAG}"; exit 1 ;;
+esac
+exec "${REAL_CP}" "$@"
+EOF2
+chmod +x "${cp_shim_dir}/cp"
+new_repo; stage src/app.txt "hello"
+rm -f "${work_dir}/cp-failed"
+rc=0
+CP_SHIM_FLAG="${work_dir}/cp-failed" PATH="${cp_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/cp-failed" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a failure to copy the index at the end of the scan is a scan failure (2)"
+else
+  fail "secret-scan: a failure to copy the index at the end of the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 終了時の index の検証の途中（元の index の複写の直後）に HEAD が動いても、古い基準の結果で合格させない（2）。
+# HEAD の取り直しは集計の直前に置く（.claude/rules/git-hooks.md の (f)。index の検証より前に置くと、その後の動きを見落とす。#6011）
+cp_head_shim_dir="${work_dir}/cp-head-shim"
+mkdir -p "${cp_head_shim_dir}"
+cat > "${cp_head_shim_dir}/cp" <<'EOF3'
+#!/bin/sh
+for last in "$@"; do :; done
+"${REAL_CP}" "$@" || exit $?
+case "${last}" in
+  */index-after)
+    if [ ! -e "${CP_HEAD_FLAG}" ]; then
+      : > "${CP_HEAD_FLAG}"
+      "${REAL_GIT}" update-ref HEAD "${CP_HEAD_TO}"
+    fi
+    ;;
+esac
+EOF3
+chmod +x "${cp_head_shim_dir}/cp"
+same_checkout_repo "${lock_ok}"
+git commit -q --allow-empty -m "chore: second"
+second_sha="$(git rev-parse HEAD)"
+git reset -q --hard HEAD~1
+stage src/app.txt "x = placeholder"
+rm -f "${work_dir}/head-moved"
+rc=0
+CP_HEAD_FLAG="${work_dir}/head-moved" CP_HEAD_TO="${second_sha}" PATH="${cp_head_shim_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/head-moved" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: HEAD changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: HEAD moving during the end-of-scan index check is a scan failure (2)"
+else
+  fail "secret-scan: HEAD moving during the end-of-scan index check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# index の親ディレクトリに検索権限が無いときは、未作成（空の index）として扱わず 2（git 自身の解決が Permission denied で失敗するため、開始時に止まる。#6011）。
+# ルートは権限を迂回するため、この試験は一般ユーザーのときだけ行い、ルートでは skip を明示する。
+if [ "$(id -u)" -ne 0 ]; then
+  new_repo; stage src/app.txt "x = ${token}"
+  noperm_dir="${work_dir}/noperm-index"
+  mkdir -p "${noperm_dir}"
+  cp "$(git rev-parse --path-format=absolute --git-path index)" "${noperm_dir}/index"
+  chmod 000 "${noperm_dir}"
+  rc=0
+  GIT_INDEX_FILE="${noperm_dir}/index" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  chmod 755 "${noperm_dir}"
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+    pass "secret-scan: an index in an unsearchable directory is a scan failure (2), not an empty index"
+  else
+    fail "secret-scan: an index in an unsearchable directory is a scan failure (2), not an empty index" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+else
+  echo "ok - secret-scan: an index in an unsearchable directory is a scan failure (2): skipped (running as root bypasses permissions)"
+fi
+# 親が検索可能で index が無いだけなら、従来どおり空として扱う（走査は続く）。権限に関係しないため root でも行う。
+# 本物の index には検出対象を stage しておく。git が使うのは GIT_INDEX_FILE の指す（無い）index なので、それでも 0 になる
+new_repo; stage src/app.txt "x = ${token}"
+rc=0
+GIT_INDEX_FILE="${work_dir}/no-such-index" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: a missing index in a searchable directory is still treated as empty"
+else
+  fail "secret-scan: a missing index in a searchable directory is still treated as empty" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 登録 0 件の index でも、固定時にあった index が終了時に無ければ 2（一覧の差だけで判定すると空のまま変わらず 0 になる。#6011）
+new_repo
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+if [ -f "${idx_path}" ] && [ -z "$(git ls-files)" ]; then
+  pass "secret-scan: precondition: the index exists and registers no file"
+else
+  fail "secret-scan: precondition: the index exists and registers no file"
+fi
+rm -f "${work_dir}/deleted"
+rc=0
+DELETE_INDEX_ON_ARG=-U0 DELETE_INDEX_PATH="${idx_path}" DELETE_INDEX_FLAG="${work_dir}/deleted" \
+  PATH="${shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/deleted" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index with no registrations removed during the scan is a scan failure (2)"
+else
+  fail "secret-scan: an index with no registrations removed during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# index が通常ファイルでない（FIFO）ときは、複写せず（cp が読み手の到着待ちで止まらない）2。開始時・走査中の差し替えの両方。
+# 退行すると止まり続けるため、背景で実行して 10 秒で打ち切り、打ち切りは失敗にする
+# run_bounded <コマンド...>: 出力は ${work_dir}/out に残し、終了コードを返す（打ち切りは 99）
+run_bounded() {
+  local pid i
+  "$@" > "${work_dir}/out" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 100; i++)); do
+    kill -0 "${pid}" 2> /dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "${pid}" 2> /dev/null; then
+    # 子プロセス（FIFO の open で止まった cp 等）も止める。pkill が無い環境では親だけ（残りは終了時に手で確認する）
+    if command -v pkill > /dev/null 2>&1; then
+      pkill -KILL -P "${pid}" 2> /dev/null || true
+    fi
+    kill -9 "${pid}" 2> /dev/null || true
+    wait "${pid}" 2> /dev/null || true
+    return 99
+  fi
+  wait "${pid}"
+}
+new_repo; stage src/app.txt "hello"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+rm -f -- "${idx_path}"
+mkfifo "${idx_path}"
+rc=0
+LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index that is a FIFO at the start is a scan failure (2) without blocking"
+else
+  fail "secret-scan: an index that is a FIFO at the start is a scan failure (2) without blocking" "got ${rc} (99 = timed out)" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}"
+
+# 開始時の index がシンボリックリンクなら、辿らず 2（実体に解いて固定すると、走査中のリンクの付け替えに気づけない）。
+# 以前は「実体が通常ファイルなら走査する（秘密値があれば 1）」を期待していた。リンクなら 2 へ強める向きの変更（AUDB-6 に当たらない）
+new_repo; stage leak.txt "x = ${token}"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+mv -- "${idx_path}" "${idx_path}.real"
+ln -s "${idx_path}.real" "${idx_path}"
+rc=0
+LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index that is a symlink (to a regular file) at the start is a scan failure (2)"
+else
+  fail "secret-scan: an index that is a symlink (to a regular file) at the start is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}" "${idx_path}.real"
+# サブディレクトリから起動しても同じ（解く前のパスは作業ツリーのルート基準で見る）
+new_repo; stage leak.txt "x = ${token}"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+mv -- "${idx_path}" "${idx_path}.real"
+ln -s "${idx_path}.real" "${idx_path}"
+mkdir -p sub
+rc=0
+(cd sub && LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}") || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index that is a symlink is a scan failure (2) from a subdirectory too"
+else
+  fail "secret-scan: an index that is a symlink is a scan failure (2) from a subdirectory too" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}" "${idx_path}.real"
+# 走査中にリンクへ替わった場合も 2（終了時の確認）
+new_repo; stage src/app.txt "hello"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+cp -- "${idx_path}" "${work_dir}/swap-target-index"
+rm -f "${work_dir}/deleted"
+rc=0
+DELETE_INDEX_SYMLINK_TO="${work_dir}/swap-target-index" DELETE_INDEX_ON_ARG=-U0 DELETE_INDEX_PATH="${idx_path}" DELETE_INDEX_FLAG="${work_dir}/deleted" \
+  PATH="${shim_dir}:${PATH}" LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ -e "${work_dir}/deleted" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index replaced by a symlink during the scan is a scan failure (2)"
+else
+  fail "secret-scan: an index replaced by a symlink during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}"
+new_repo; stage src/app.txt "hello"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+rm -f -- "${idx_path}"
+mkfifo "${idx_path}.fifo"
+ln -s "${idx_path}.fifo" "${idx_path}"
+rc=0
+LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index that is a symlink to a FIFO is a scan failure (2) without blocking"
+else
+  fail "secret-scan: an index that is a symlink to a FIFO is a scan failure (2) without blocking" "got ${rc} (99 = timed out)" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}" "${idx_path}.fifo"
+
+new_repo; stage src/app.txt "hello"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+rm -f "${work_dir}/deleted"
+rc=0
+DELETE_INDEX_MKFIFO=1 DELETE_INDEX_ON_ARG=-U0 DELETE_INDEX_PATH="${idx_path}" DELETE_INDEX_FLAG="${work_dir}/deleted" \
+  PATH="${shim_dir}:${PATH}" LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ -e "${work_dir}/deleted" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index replaced by a FIFO during the scan is a scan failure (2) without blocking"
+else
+  fail "secret-scan: an index replaced by a FIFO during the scan is a scan failure (2) without blocking" "got ${rc} (99 = timed out)" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}"
+
+# 外部コマンドは使う前に確かめ、欠けていれば 2（固定の診断文）。使うコマンドの一覧は検出器の確認ループと同じ。
+# 一覧にあるコマンドだけを置いた PATH で通常の走査が通る（= 一覧に漏れが無い。同じ checkout・リンク経由の起動で readlink・head・sleep も踏む）
+req_cmds="git readlink mktemp rm cp head wc sleep tr cmp"
+# make_minpath <ディレクトリ> [置かないコマンド]
+make_minpath() {
+  local c
+  mkdir -p "$1"
+  for c in ${req_cmds}; do
+    [ "${c}" = "${2:-}" ] || ln -s "$(command -v "${c}")" "$1/${c}"
+  done
+}
+same_checkout_repo "${lock_ok}"; stage src/app.txt "hello"
+ln -s scripts/hooks/secret-scan.sh sslink-min
+make_minpath "${work_dir}/minpath-all"
+rc=0
+PATH="${work_dir}/minpath-all" LC_ALL="${utf8_locale}" "${HOOK_BASH}" sslink-min > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: a PATH holding only the required commands passes a scan (the list is complete)"
+else
+  fail "secret-scan: a PATH holding only the required commands passes a scan (the list is complete)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+for missing_cmd in ${req_cmds}; do
+  make_minpath "${work_dir}/minpath-no-${missing_cmd}" "${missing_cmd}"
+  rc=0
+  PATH="${work_dir}/minpath-no-${missing_cmd}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" sslink-min > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: required command not found on PATH: ${missing_cmd}; aborting" "${work_dir}/out"; then
+    pass "secret-scan: a missing ${missing_cmd} is a scan failure (2) with a fixed message"
+  else
+    fail "secret-scan: a missing ${missing_cmd} is a scan failure (2) with a fixed message" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+done
+# --summary でも診断は出る（fd 4）
+rc=0
+PATH="${work_dir}/minpath-no-sleep" LC_ALL="${utf8_locale}" "${HOOK_BASH}" sslink-min --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: required command not found on PATH: sleep; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a missing command is reported under --summary"
+else
+  fail "secret-scan: a missing command is reported under --summary" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 一覧の読み取りの失敗は、どちらの一覧かで固定の文言を分ける（パス・オブジェクト指定は出さない）。
+# index 側は blob の oid だけを渡して cat-file を失敗させ、HEAD 側は `<コミット>:skills-lock.json` の形で失敗させる
+new_repo; stage_lock
+lock_oid="$(git hash-object skills-lock.json)"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG="${lock_oid}" SCAN_BIN="${det_ok}" check_scan "a failure to read the staged list exits 2" 2
+expect_out "a staged-list read failure reports the staged message" "secret-scan: cannot read the staged skills-lock.json; aborting"
+if [[ "${last_out}" == *committed* ]]; then
+  fail "secret-scan: a staged-list read failure does not mention the committed list" "output: ${last_out}"
+else
+  pass "secret-scan: a staged-list read failure does not mention the committed list"
+fi
+# cat-file blob（本文の取得）の失敗も、同じく側ごとの文言にする（大きさの取得 cat-file -s は通す）
+new_repo; stage_lock
+PATH="${shim_dir}:${PATH}" FAIL_GIT_BOTH1=blob FAIL_GIT_BOTH2="${lock_oid}" SCAN_BIN="${det_ok}" check_scan "a failure to fetch the staged list body exits 2" 2
+expect_out "a staged-list body failure reports the staged message" "secret-scan: cannot read the staged skills-lock.json; aborting"
+same_checkout_repo "${lock_ok}"; stage src/app.txt "hello"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_BOTH1=blob FAIL_GIT_BOTH2="$(git rev-parse HEAD):skills-lock.json" SCAN_BIN="${same_bin}" check_scan "a failure to fetch the committed list body exits 2" 2
+expect_out "a committed-list body failure reports the committed message" "secret-scan: cannot read the committed skills-lock.json; aborting"
+same_checkout_repo "${lock_ok}"; stage src/app.txt "hello"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG="$(git rev-parse HEAD):skills-lock.json" SCAN_BIN="${same_bin}" check_scan "a failure to read the committed list exits 2" 2
+expect_out "a committed-list read failure reports the committed message" "secret-scan: cannot read the committed skills-lock.json; aborting"
+
+# 相対パスの GIT_INDEX_FILE は、git と同じく作業ツリーのルートを基準に読む（起動時の作業ディレクトリではない。#6011）。
+# サブディレクトリから GIT_INDEX_FILE=sub/alt で起動すると、git は <root>/sub/alt を読む。起動時の作業ディレクトリを基準にした
+# <root>/sub/sub/alt には秘密値の無い index を置き、取り違えると 0 になる形にする
+new_repo; stage src/app.txt "hello"; git commit -q -m "chore: base"
+mkdir -p sub/sub
+cp "$(git rev-parse --path-format=absolute --git-path index)" sub/sub/alt
+cp "$(git rev-parse --path-format=absolute --git-path index)" sub/alt
+printf '%s\n' "x = ${token}" > leak.txt
+GIT_INDEX_FILE="${repo}/sub/alt" git add leak.txt
+rm -f leak.txt
+cd sub
+git_view="$(GIT_INDEX_FILE=sub/alt git diff --cached --name-only HEAD)"
+if [ "${git_view}" = "leak.txt" ]; then
+  pass "secret-scan: git reads a relative GIT_INDEX_FILE from the work tree root"
+else
+  fail "secret-scan: git reads a relative GIT_INDEX_FILE from the work tree root" "git sees: ${git_view}"
+fi
+GIT_INDEX_FILE=sub/alt check_scan "a relative GIT_INDEX_FILE from a subdirectory pins the index git uses" 1 leak.txt
+cd "${repo}"
+
+# 一覧の大きさの上限（作業ツリー側・HEAD 側・境界）。上限は検出器の lock_max_bytes（暫定 64 KiB）
+lock_max="$(sed -n 's/^lock_max_bytes=\([0-9][0-9]*\)$/\1/p' "${SECRET_SCAN}")"
+# padded_lock <総バイト数>: 正しい JSON に末尾の空白を詰めて指定の大きさにする
+padded_lock() {
+  local base pad
+  base='{"version":2,"skills":{"vendored-a":{"source":"x"}}}'
+  pad=$(($1 - ${#base}))
+  printf '%s' "${base}"
+  head -c "${pad}" /dev/zero | tr '\000' ' '
+}
+run_big_lock() {
+  local desc="$1" rc=0
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "$2" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: skills-lock.json is too large; aborting" "${work_dir}/out" \
+    && grep_none "vendored\|/" "${work_dir}/out"; then
+    pass "secret-scan: ${desc}"
+  else
+    fail "secret-scan: ${desc}" "expected exit 2 with a fixed message, got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+}
+make_detector "big" "x"
+padded_lock $((lock_max + 1)) > "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+run_big_lock "skills-lock.json one byte over the size limit is rejected" "${det_bin}"
+make_detector "edge" "x"
+padded_lock "${lock_max}" > "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_bin}" check_scan "skills-lock.json exactly at the size limit is accepted" 0
+# 解析は小さな窓を足しながら読むため、窓（1024 バイト）をまたぐ長い文字列・数・空白・エスケープを受理・拒否することを確かめる（#6011）
+# rep_chars <文字> <個数>: 指定の文字を個数だけ並べる
+# 個数 0 は何も出さない（BSD の head は `-c 0` を "illegal byte count" で拒否する。macOS の CI で落ちた。#6011）。
+# 負の個数・数字以外は、計算の誤りを見逃さないよう診断を出して終了コード 2 で戻す（呼び出しは代入のため set -e で止まる）。
+rep_chars() {
+  case "$2" in
+    '' | *[!0-9]*)
+      echo "test-hooks: rep_chars: invalid count: $2" >&2
+      return 2
+      ;;
+  esac
+  if [ "$2" -eq 0 ]; then
+    return 0
+  fi
+  head -c "$2" /dev/zero | tr '\000' "$1"
+}
+long_a="$(rep_chars a 3000)"
+long_d="$(rep_chars 1 200)"
+long_ws="$(rep_chars ' ' 3000)"
+window_lock="{${long_ws}\"version\":2,\"skills\":{\"vendored-a\":{\"k\":\"${long_a}\\n${long_a}\\u00e9${long_a}\",\"n\":-0.${long_d}e+${long_d},\"l\":[true,false,null,${long_d}]${long_ws}},${long_ws}\"vendored-b\":{}}}${long_ws}"
+make_detector "window" "${window_lock}"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_bin}" check_scan "skills-lock.json with strings, numbers and spaces longer than the read window is accepted" 0
+# 閉じていない長い文字列・不正なエスケープ・後ろに文字が続く長い数は、窓をまたいでも拒否する
+check_bad_lock "skills-lock.json with a long unterminated string is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":\"${long_a}}}}"
+check_bad_lock "skills-lock.json with an invalid escape after a long string is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":\"${long_a}\\x\"}}}"
+check_bad_lock "skills-lock.json with a short unicode escape after a long string is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":\"${long_a}\\u12\"}}}"
+check_bad_lock "skills-lock.json with a long number followed by a letter is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${long_d}x}}}"
+check_bad_lock "skills-lock.json with a long number followed by a bare exponent is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${long_d}e}}}"
+# 窓（1024 バイト）を何度も補充しないと読み終えない長い数（#6011）
+huge_d="$(rep_chars 1 5000)"
+huge_f="$(rep_chars 2 3000)"
+huge_e="$(rep_chars 3 3000)"
+make_detector "hugenum" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":-${huge_d}.${huge_f}e+${huge_e}}}}"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_bin}" check_scan "skills-lock.json with a number needing many window refills is accepted" 0
+check_bad_lock "skills-lock.json with a number needing many window refills followed by a letter is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${huge_d}x}}}"
+check_bad_lock "skills-lock.json with a long number and a bare exponent at the end is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${huge_d}.${huge_f}e+}}}"
+check_bad_lock "skills-lock.json with a long number and a trailing dot is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${huge_d}.}}}"
+check_bad_lock "skills-lock.json with a trailing garbage after long spaces is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{}}}${long_ws}x"
+# skills の名前の重複の確認に使う内部の変数と、名前・環境の変数が衝突しない（名前 vars・a など。#6011）
+make_detector "seen1" '{"version":2,"skills":{"vars":{"k":1},"a":{},"b":{}}}'
+new_repo; stage src/app.txt "hello"
+SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "a skill named vars first is accepted" 0
+make_detector "seen2" '{"version":2,"skills":{"a":{},"vars":{},"b":{},"vars-x":{}}}'
+SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "a skill named vars not first is accepted" 0
+make_detector "seen3" '{"version":2,"skills":{"a":{}}}'
+JSEEN_a=1 JSEEN_vars=1 jseen_a=1 jseen_vars=x SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "variables inherited from the environment do not affect the duplicate check" 0
+# compgen を無効にした bash（programmable completion を外したビルドの再現）でも、継いだ JSEEN_a=1 に影響されない
+nocompgen_env="${work_dir}/nocompgen-env.sh"
+printf '%s\n' 'enable -n compgen' > "${nocompgen_env}"
+JSEEN_a=1 BASH_ENV="${nocompgen_env}" SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "a JSEEN_ variable inherited from the environment is cleared without compgen" 0
+# 同じプロセスで続けて解析する（作業ツリー・index・HEAD の一覧が互いに違う）。前の解析の記録が次の解析に残らない
+same_checkout_repo '{"version":2,"skills":{"vars":{},"a":{}}}'
+printf '%s\n' '{"version":2,"skills":{"vars":{}}}' > skills-lock.json
+git add -- skills-lock.json
+printf '%s\n' '{"version":2,"skills":{"a":{},"vars":{},"b":{}}}' > skills-lock.json
+stage src/app.txt "hello"
+SCAN_BIN="${same_bin}" check_scan "lists parsed one after another in one process do not leak names into each other" 0
+# 重複は拒否のまま（vars の重複）
+check_bad_lock "skills-lock.json with a duplicate skill named vars is rejected" '{"version":2,"skills":{"vars":{},"a":{},"vars":{}}}'
+# 読み取りの 5 秒の打ち切りは、解析の拒否とは別の固定の診断で 2 にする（拒否の試験が、打ち切りでも通ってしまわないように。#6011）。
+# 読み取り用の head を、返ってこない shim に差し替えて打ち切りを起こす（5 秒掛かる）
+timeout_shim_dir="${work_dir}/timeout-shim"
+mkdir -p "${timeout_shim_dir}"
+printf '%s\n' '#!/bin/sh' 'exec sleep 30' > "${timeout_shim_dir}/head"
+chmod +x "${timeout_shim_dir}/head"
+make_detector "timeout" "${lock_ok}"
+new_repo; stage src/app.txt "hello"
+rc=0
+PATH="${timeout_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_bin}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: reading skills-lock.json timed out; aborting" "${work_dir}/out" \
+  && ! grep -qF "unreadable or has an unexpected shape" "${work_dir}/out"; then
+  pass "secret-scan: a read that does not finish in time exits 2 with its own message (not the parse rejection)"
+else
+  fail "secret-scan: a read that does not finish in time exits 2 with its own message (not the parse rejection)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# 窓の境目の総当たり: 先頭の空白を 0〜70 バイトずつずらし、次の字句（先頭が 985〜1055 バイト目）が 1024 バイトの境目をまたぐ位置をすべて通す。
+# 窓の大きさは変えず、入力の側をずらす。受理するはずのものは受理（0）、拒否するはずのものは固定の文言・終了コード 2 になること。
+# 1 件ごとに検出器を 1 回走らせるため、1 つの検出器と 1 つの repo を使い回し、結果は字句ごとに 1 件の試験にまとめる。
+make_detector "brute" "x"
+brute_lock_path="${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+new_repo; stage src/app.txt "hello"
+brute_head='{"version":2,"skills":{"vendored-a":{"k":'
+brute_total=0
+# brute_sweep <説明> <期待する終了コード> <種別: str|raw> <字句> <字句の後ろ>
+# str: "k":"<a を並べて字句を境目の付近に置く><字句><字句の後ろ>   raw: "k":<空白を並べて字句を境目の付近に置く><字句><字句の後ろ>
+brute_sweep() {
+  local desc="$1" want="$2" kind="$3" tok="$4" tail="$5" n rc fill_len bad="" bad_out="" cnt=0 lead body
+  for ((n = 0; n <= 70; n++)); do
+    lead="$(rep_chars ' ' "${n}")"
+    if [ "${kind}" = str ]; then
+      fill_len=$((985 - ${#brute_head} - 1))
+      body="\"$(rep_chars a "${fill_len}")${tok}${tail}"
+    else
+      fill_len=$((985 - ${#brute_head}))
+      body="$(rep_chars ' ' "${fill_len}")${tok}${tail}"
+    fi
+    printf '%s' "${lead}${brute_head}${body}}}}" > "${brute_lock_path}"
+    rc=0
+    LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_bin}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+    cnt=$((cnt + 1))
+    brute_total=$((brute_total + 1))
+    if [ "${rc}" -ne "${want}" ]; then
+      bad="${bad} ${n}"
+      [ -n "${bad_out}" ] || bad_out="exit ${rc}, output: $(cat "${work_dir}/out")"
+    elif [ "${want}" -eq 2 ] && ! grep -qxF "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting" "${work_dir}/out"; then
+      bad="${bad} ${n}"
+      [ -n "${bad_out}" ] || bad_out="exit ${rc}, output: $(cat "${work_dir}/out")"
+    fi
+  done
+  # 試行の回数（0〜70 の 71 位置）が欠けていないことを確かめる（ループの誤りで黙って件数が減るのを防ぐ）。
+  if [ "${cnt}" -ne 71 ]; then
+    fail "secret-scan: window boundary sweep: ${desc}" "expected 71 offsets, ran ${cnt}"
+  elif [ -z "${bad}" ]; then
+    pass "secret-scan: window boundary sweep (${cnt} offsets): ${desc}"
+  else
+    fail "secret-scan: window boundary sweep: ${desc}" "expected exit ${want} at leading-space counts:${bad}" "first failure: ${bad_out}"
+  fi
+}
+brute_start="${SECONDS}"
+brute_sweep "an escaped quote is accepted" 0 str '\"x' '"'
+brute_sweep "a multibyte character is accepted" 0 str 'éx' '"'
+brute_sweep "a unicode escape is accepted" 0 str '\u00e9x' '"'
+brute_sweep "a closing quote is accepted" 0 str '' '"'
+brute_sweep "a number with a signed exponent is accepted" 0 raw '1e+5' ''
+brute_sweep "a number with a fraction is accepted" 0 raw '1.5' ''
+brute_sweep "a literal true is accepted" 0 raw 'true' ''
+brute_sweep "an invalid escape is rejected" 2 str '\x' 'y"'
+brute_sweep "a short unicode escape is rejected" 2 str '\u12' '"'
+brute_sweep "a bare exponent is rejected" 2 raw '1e+' ''
+brute_sweep "a fraction without digits is rejected" 2 raw '1.' ''
+brute_sweep "a truncated literal is rejected" 2 raw 'tru' ''
+# 総当たり全体の回数（12 字句 × 71 位置）も確かめる（字句の行が黙って欠けるのを防ぐ）。
+if [ "${brute_total}" -ne 852 ]; then
+  fail "secret-scan: window boundary sweep total" "expected 852 detector runs, ran ${brute_total}"
+fi
+printf '# window boundary sweep: %s detector runs, %s seconds\n' "${brute_total}" "$((SECONDS - brute_start))"
+# 深さの上限: 配列で入れ子にした先の {"k":1} の深さが 31 なら受理、32 なら拒否（値は深さ + 1 で読むため。1 段の object の早道も同じ上限）
+depth_lock() {
+  printf '{"version":2,"skills":{"vendored-a":{"k":%s{"k":1}%s}}}' "$(rep_chars '[' "$1")" "$(rep_chars ']' "$1")"
+}
+make_detector "depth31" "$(depth_lock 28)"
+new_repo; stage src/app.txt "hello"
+SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "skills-lock.json with an object at depth 31 is accepted" 0
+check_bad_lock "skills-lock.json with an object at depth 32 is rejected" "$(depth_lock 29)"
+# 1 段の object の早道に当たる形でも、不正な値は拒否する
+check_bad_lock "skills-lock.json with an uppercase literal is rejected" '{"version":2,"skills":{"vendored-a":{"k":TRUE}}}'
+check_bad_lock "skills-lock.json with a leading-zero number in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k":01}}}'
+check_bad_lock "skills-lock.json with a fraction without digits in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k":1.}}}'
+check_bad_lock "skills-lock.json with a bare minus in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k":-}}}'
+check_bad_lock "skills-lock.json with a bare exponent in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k":1e}}}'
+check_bad_lock "skills-lock.json with a missing colon in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k" 1}}}'
+# 作業ツリー・index・HEAD の一覧が同じ内容なら解析結果を再利用するが、内容が違えば版ごとに解析する（除外は共通部分だけ）
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{"version":2,"skills":{"vendored-a":{"source":"example/skills"}}}' > skills-lock.json
+git add skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+stage .agents/skills/vendored-b/sub/n.md "${dsn_line}"
+SCAN_BIN="${same_bin}" check_scan "an index list that differs from the working tree list is parsed separately and narrows the exclusions" 1 .agents/skills/vendored-b/sub/n.md
+# HEAD 側だけが上限を超える（同じ checkout。作業ツリーの一覧は小さい）
+same_checkout_repo "${lock_ok}"
+padded_lock $((lock_max + 1)) > skills-lock.json
+git add skills-lock.json
+git commit -q -m "chore: big lock"
+# 小さい一覧を作業ツリーと index の両方へ戻す（上限を超える版を HEAD だけに残す）。index に大きい一覧が残ると、
+# 検出器は HEAD より先に index の一覧を検証して同じ診断で止まり、HEAD 側の検査がなくても通ってしまう（#6011）
+printf '%s\n' "${lock_ok}" > skills-lock.json
+git add -- skills-lock.json
+stage src/app.txt "x = placeholder"
+# 大きさは終了コードを確かめた cat-file -s で取る（index に登録が無いと空の出力が 0 に読めて「小さい」が成り立ってしまう）
+idx_size=""
+head_size=""
+if idx_size="$(git cat-file -s :skills-lock.json 2> /dev/null)" && head_size="$(git cat-file -s HEAD:skills-lock.json 2> /dev/null)" \
+  && [ "${idx_size}" -gt 0 ] && [ "${idx_size}" -le "${lock_max}" ] && [ "${head_size}" -gt "${lock_max}" ]; then
+  pass "secret-scan: precondition: only the committed skills-lock.json is over the size limit"
+else
+  fail "secret-scan: precondition: only the committed skills-lock.json is over the size limit" "index size: ${idx_size:-none}, HEAD size: ${head_size:-none}"
+fi
+run_big_lock "the committed skills-lock.json over the size limit is rejected" "${same_bin}"
+
+# リビジョン（空の tree・HEAD のコミット ID）と同名のパスがあっても、引数をパスと取り違えて止まらない（`--` で区切る。#6011）
+empty_tree_id="$(git hash-object -t tree --stdin < /dev/null)"
+# 中身に検出対象を入れ、同名のパスが黙って走査から外れていないこと（検出して 1・ファイル名が報告に出る）も確かめる
+new_repo; stage "${empty_tree_id}" "x = ${token}"
+SCAN_ARG=--tracked check_scan "tracked: a path named like the empty tree id does not stop the scan and is still scanned" 1 "${empty_tree_id}"
+new_repo; stage "${empty_tree_id}" "x = ${token}"
+check_scan "staged: a path named like the empty tree id does not stop the scan and is still scanned" 1 "${empty_tree_id}"
+new_repo; stage src/app.txt "hello"; git commit -q -m "chore: base"
+stage "$(git rev-parse HEAD)" "x = ${token}"
+check_scan "staged: a path named like the HEAD commit id is still scanned" 1 "$(git rev-parse HEAD)"
+
+# 別の checkout の staged でも、差分の基準は確定した ID を使う
+new_repo; stage src/app.txt "x = ${token}"
+head_sha="$(git rev-parse HEAD)"
+: > "${work_dir}/gitlog"
+LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${det_ok}" check_scan "staged: a scan from another checkout succeeds with the pinned id" 1 src/app.txt
+if grep -E "(^| )diff( |$)" "${work_dir}/gitlog" | grep -q "${head_sha}"; then
+  pass "secret-scan: the staged diff of another checkout uses the pinned HEAD commit id"
+else
+  fail "secret-scan: the staged diff of another checkout uses the pinned HEAD commit id" "git calls: $(cat "${work_dir}/gitlog")"
+fi
+
+# 未作成ブランチの staged の差分は、空の tree の ID を明示して固定する（名前の検査と本文の検査の 2 回とも）
+new_repo
+git symbolic-ref HEAD refs/heads/unborn
+stage src/app.txt "x = ${token}"
+: > "${work_dir}/gitlog"
+LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${det_ok}" check_scan "staged: an unborn branch is scanned against the empty tree" 1 src/app.txt
+empty_id="$(git hash-object -t tree --stdin < /dev/null)"
+# index の比較の diff（--ita-*-in-index。常に空の tree と比べる）は数えず、走査の 2 回の diff だけを見る
+grep -E "(^| )diff( |$)" "${work_dir}/gitlog" | grep -vE -- "--ita-(in)?visible-in-index" > "${work_dir}/gitlog-sub" || true
+sub_total="$(wc -l < "${work_dir}/gitlog-sub")"
+sub_total="${sub_total//[[:space:]]/}"
+sub_with_id="$(grep -c "${empty_id}" "${work_dir}/gitlog-sub" || true)"
+if [ "${sub_total}" -ge 2 ] && [ "${sub_total}" -eq "${sub_with_id}" ]; then
+  pass "secret-scan: both staged diffs of an unborn branch pass the empty tree id"
+else
+  fail "secret-scan: both staged diffs of an unborn branch pass the empty tree id" "git calls: $(cat "${work_dir}/gitlog")"
+fi
+
+# 一覧が通常ファイルでない（FIFO）・リンクのときは、止まらずに 2
+same_checkout_repo "${lock_ok}"
+rm -f skills-lock.json
+stage src/app.txt "x = placeholder"
+fifo_dir="."
+rm -f "${fifo_dir}/skills-lock.json"
+if mkfifo "${fifo_dir}/skills-lock.json" 2> /dev/null; then
+  fifo_rc=0
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 < /dev/null || fifo_rc=$?
+  if [ "${fifo_rc}" -eq 2 ]; then
+    pass "secret-scan: a FIFO in place of the list is rejected without hanging (2)"
+  else
+    fail "secret-scan: a FIFO in place of the list is rejected without hanging (2)" "got ${fifo_rc}" "output: $(cat "${work_dir}/out")"
+  fi
+  rm -f "${fifo_dir}/skills-lock.json"
+fi
+
+# CDPATH で相対パスの cd が別のディレクトリ（一覧の無いおとり）へ向かっても、検出器の場所を取り違えない。
+# repo 側にコミットした正しい一覧が使われれば除外され（0）、CDPATH を効かせると一覧を失って検出になる（1）。
+decoy="${work_dir}/decoy"
+mkdir -p "${decoy}/scripts/hooks"
+same_checkout_repo "${lock_ok}"
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+CDPATH="${decoy}" SCAN_BIN="${same_bin}" check_scan "a CDPATH decoy does not displace the detector location" 0
+
+# 登録名の下でも、env-file の名前の検査は全パスに掛かる
+new_repo; stage_lock; stage .agents/skills/vendored-a/.env "KEY=value"
+SCAN_BIN="${det_ok}" check_scan "an env file under a registered skill is still reported" 1 .agents/skills/vendored-a/.env
+
+# 同じ checkout で HEAD の一覧が壊れている・読めないときは検査不能（2）。固定の文言だけを出す
+same_checkout_repo '{ "version": 2, "skills": {'
+# 作業ツリーと index は有効な一覧にして、拒否の原因を HEAD に限る
+printf '%s\n' "${lock_ok}" > skills-lock.json
+git add skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken committed list is rejected" 2
+expect_out "same checkout: a broken committed list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+same_checkout_repo "${lock_ok}"
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=ls-tree SCAN_BIN="${same_bin}" check_scan "same checkout: a failure to look up the committed list exits 2" 2
+expect_out "same checkout: a failed lookup reports a fixed message" "secret-scan: cannot read the committed skills-lock.json; aborting"
+# 固定した index の一覧が先に読まれるため、cat-file をすべて失敗させると最初に失敗するのは index 側（staged の文言。HEAD 側の文言は下の試験で確かめる）
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=cat-file SCAN_BIN="${same_bin}" check_scan "same checkout: a failure to read the lists exits 2" 2
+expect_out "same checkout: a failed read of the staged list reports a fixed message" "secret-scan: cannot read the staged skills-lock.json; aborting"
 
 new_repo; stage leaked.txt "$(printf '%s\n%s' "keep" "x = ${token}")"; git commit -q -m "chore: leak"
 printf '%s\n' "keep" > leaked.txt; git add leaked.txt
@@ -342,8 +1846,17 @@ else
   fail "secret-scan: (tracked) --summary omits file names" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-new_repo; stage .agents/skills/x/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
-check_scan "(tracked) excluded paths" 0
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
+SCAN_BIN="${det_ok}" check_scan "(tracked) registered skill path is excluded" 0
+
+new_repo; stage_lock; stage .agents/skills/other/SKILL.md "x = ${token}"; stage deps.lock "x = ${token}"
+stage a/b/foo.lock "x = ${token}"; stage .claude/skills/y/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
+SCAN_BIN="${det_ok}" check_scan "(tracked) unregistered skill path, *.lock and .claude/skills are scanned" 1 deps.lock
+expect_out "(tracked) all four paths are counted" "total: 4 finding(s) in 4 file(s)"
+
+new_repo; stage_lock; stage .agents/skills/vendored-a-evil/x.md "x = ${token}"; stage .agents/skills/vendored-a "x = ${token}"
+git commit -q -m "chore: skill"
+SCAN_BIN="${det_ok}" check_scan "(tracked) sibling name and exact-name blob are scanned" 1 .agents/skills/vendored-a
 
 new_repo; printf 'x = %s\n\000' "${token}" > bin.dat; git add bin.dat; git commit -q -m "chore: bin"
 check_scan "(tracked) NUL-containing file is scanned (fail-closed)" 1 bin.dat
@@ -555,6 +2068,22 @@ if [ "${rc}" -eq 2 ]; then
 else
   fail "scan-canary: grep error on the leak check fails (exit 2)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
+# 検出器の 1 行目のバイト単位の確認（grep -anxF）のエラーも、不一致と取り違えず検査不能（2）にする（#6011）
+cat > "${grep_shim_dir}/grep" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "-anxF" ]; then
+  exit 2
+fi
+exec "${REAL_GREP}" "$@"
+EOF
+chmod +x "${grep_shim_dir}/grep"
+rc=0
+REAL_GREP="${real_grep}" PATH="${grep_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF "scan-canary: could not check the scanner's first line (grep exit 2)" "${work_dir}/out"; then
+  pass "scan-canary: grep error on the shebang check fails (exit 2)"
+else
+  fail "scan-canary: grep error on the shebang check fails (exit 2)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
 rc=0
 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
 if [ "${rc}" -eq 0 ]; then
@@ -616,6 +2145,116 @@ if [ "${rc}" -eq 2 ]; then
   pass "scan-canary: scanner exit 2 makes the canary exit 2"
 else
   fail "scan-canary: scanner exit 2 makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# secret-scan-canary.sh: 陰性対照の結果はリポジトリの内容に依らない。作業ツリー・HEAD の skills-lock.json が壊れていても、
+# 検出器の複製を一覧の無い場所から動かすため、ダミーの検出（終了コード 0）を確かめられる（#6011）。
+# 検出器とスクリプトの複製を一時 repo に置き、壊れた一覧をコミットした上で作業ツリーも壊す
+canary_root="${work_dir}/canary-root"
+mkdir -p "${canary_root}/scripts/hooks"
+cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${canary_root}/scripts/"
+cp "${SECRET_SCAN}" "${canary_root}/scripts/hooks/secret-scan.sh"
+(
+  cd "${canary_root}"
+  git -c init.defaultBranch=main init -q
+  printf '%s\n' '{ "version": 2, "skills": {' > skills-lock.json
+  git add -A
+  git commit -q -m "chore: broken lock"
+  printf '%s\n' 'not json' > skills-lock.json
+)
+rc=0
+(cd "${canary_root}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "scan-canary: a broken skills-lock.json in the repository does not affect the canary"
+else
+  fail "scan-canary: a broken skills-lock.json in the repository does not affect the canary" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 検出器の実行ビットが無ければ、陰性対照は 2 で終わる（CI の本走査は検出器を直接起動する。#6011）
+chmod -x "${canary_root}/scripts/hooks/secret-scan.sh"
+rc=0
+(cd "${canary_root}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF "scan-canary: the scanner is not executable" "${work_dir}/out"; then
+  pass "scan-canary: a scanner without the execute bit makes the canary exit 2"
+else
+  fail "scan-canary: a scanner without the execute bit makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
+
+# 検出器の 1 行目が `#!/usr/bin/env bash` に完全一致しなければ、実行ビットがあっても陰性対照は 2 で終わる
+# （CI の本走査と make secret-scan は検出器を直接起動し、shebang が壊れていると起動できない。陰性対照は複製を bash に
+# 読み込ませるため shebang に依らず、確かめないと通ってしまう。#6011）。
+# 壊し方は bash として読めば動くもの（解釈系の名前の誤り・CR の付加・別の解釈系のパス）にし、確かめなければ 0 で通る形にする。
+# NUL は変数に持てないため、1 行目は printf の書式で直接書く（bash 4 以降の read は NUL を落とし、文字列の比較だけでは通る）。
+# 判定は固定の診断と、ERR trap（同じく 2）ではないことの両方で行う
+for broken_kind in misspelled cr other-interpreter nul; do
+  case "${broken_kind}" in
+    misspelled) shebang_fmt='#!/usr/bin/env bsah\n' ;;
+    cr) shebang_fmt='#!/usr/bin/env bash\r\n' ;;
+    other-interpreter) shebang_fmt='#!/bin/bash\n' ;;
+    nul) shebang_fmt='#!/usr/bin/env b\000ash\n' ;;
+  esac
+  {
+    # shellcheck disable=SC2059 # 書式は上の固定の値（NUL・CR を書くため書式として渡す）
+    printf "${shebang_fmt}"
+    tail -n +2 "${SECRET_SCAN}"
+  } > "${canary_root}/scripts/hooks/secret-scan.sh"
+  chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
+  rc=0
+  (cd "${canary_root}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh) > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qF "scan-canary: the scanner's first line is not the expected shebang" "${work_dir}/out" \
+    && ! grep -qF "internal error" "${work_dir}/out"; then
+    pass "scan-canary: a scanner with a broken shebang (${broken_kind}) makes the canary exit 2"
+  else
+    fail "scan-canary: a scanner with a broken shebang (${broken_kind}) makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+done
+unset broken_kind shebang_fmt
+cp "${SECRET_SCAN}" "${canary_root}/scripts/hooks/secret-scan.sh"
+chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
+
+# 一時領域が noexec のマウントでも、陰性対照は検出器の複製を起動できる（複製は bash に読み込ませる。#6011）。
+# noexec を mount なしで再現するため、複製先の実行ビットを落とす cp の shim を使う（直接起動なら同じく EACCES で起動できない）。
+# shim は実行ビットを落とした後に、複製先に実行ビットが無いことを確かめてそのパスを印のファイルへ書く。
+# 印で shim が実際に呼ばれ、検出器の複製の実行ビットが落ちた状態で起動されたことを確かめる（shim が効かずに通る形を防ぐ）
+noexec_shim_dir="${work_dir}/noexec-cp-shim"
+mkdir -p "${noexec_shim_dir}"
+real_cp="$(command -v cp)"
+# shellcheck disable=SC2016 # 展開させない固定のコード
+printf '%s\n' '#!/usr/bin/env bash' \
+  '"${REAL_CP}" "$@" || exit $?' \
+  'for _last in "$@"; do :; done' \
+  'chmod a-x -- "${_last}"' \
+  'if [ ! -x "${_last}" ]; then printf "%s\n" "${_last}" >> "${NOEXEC_MARK}"; fi' > "${noexec_shim_dir}/cp"
+chmod +x "${noexec_shim_dir}/cp"
+noexec_mark="${work_dir}/noexec-mark"
+rm -f "${noexec_mark}"
+rc=0
+(cd "${canary_root}" && NOEXEC_MARK="${noexec_mark}" REAL_CP="${real_cp}" PATH="${noexec_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ] && [ -f "${noexec_mark}" ] && grep -qE '/scripts/hooks/secret-scan[.]sh$' "${noexec_mark}"; then
+  pass "scan-canary: a copy of the scanner without the execute bit (noexec temp) still runs"
+else
+  fail "scan-canary: a copy of the scanner without the execute bit (noexec temp) still runs" "exit ${rc}" \
+    "shim mark: $(cat "${noexec_mark}" 2> /dev/null || echo none)" "output: $(cat "${work_dir}/out")"
+fi
+
+# 陰性対照は検出器の複製を PATH の bash のパス（`type -P`）で起動し、環境から取り込まれた関数 bash（BASH_FUNC_bash%%）に差し替えられない（#6011）。
+# 関数は印を残して 0 で返す（関数が使われれば、陰性対照は検出の欠落として 1 で終わる）
+bash_fn_mark="${work_dir}/bash-fn-mark"
+rm -f "${bash_fn_mark}"
+rc=0
+(
+  cd "${canary_root}"
+  # shellcheck disable=SC2329,SC2153 # 子の陰性対照が呼び得る関数（ここでは呼ばない）。印のパスは呼び出し時の環境で渡す
+  bash() { : > "${BASH_FN_MARK}"; return 0; }
+  export -f bash
+  BASH_FN_MARK="${bash_fn_mark}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh
+) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ] && [ ! -e "${bash_fn_mark}" ]; then
+  pass "scan-canary: an exported bash function does not replace the scanner run"
+else
+  fail "scan-canary: an exported bash function does not replace the scanner run" "exit ${rc}" \
+    "function ran: $([ -e "${bash_fn_mark}" ] && echo yes || echo no)" "output: $(cat "${work_dir}/out")"
 fi
 
 # secret-scan-canary.sh: 元のリポジトリの hooks（post-index-change）を起動しない
@@ -751,11 +2390,12 @@ rm -rf "${leak_tmp}"
 
 # 検出器が 0 を返しても、走査完了の集計行（検出 0 件）がちょうど 1 行で、ほかの許可行が無いことを合格の条件にする。
 # 検出器を差し替えた複製（scripts/ だけ）で、出力と終了状態を固定の検出器から返す。
+# 差し替えの 1 行目は検出器の起動の契約（`#!/usr/bin/env bash`）に合わせる（陰性対照が 1 行目を確かめるため。#6011）。
 stub_root="${work_dir}/stub-root"
 mkdir -p "${stub_root}/scripts/hooks"
 cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${stub_root}/scripts/"
 cat > "${stub_root}/scripts/hooks/secret-scan.sh" <<'EOF'
-#!/bin/sh
+#!/usr/bin/env bash
 if [ -n "${STUB_OUT:-}" ]; then
   printf '%s\n' "${STUB_OUT}"
 fi
@@ -809,8 +2449,8 @@ for missing in git mktemp grep rm; do
   fi
 done
 unset run_arg
-for missing in git mktemp mkdir rm sort cmp grep; do
-  run_without_cmd "${missing}" "${HOOKS_DIR}/../secret-scan-canary.sh" git mktemp mkdir rm sort cmp grep
+for missing in git mktemp mkdir rm sort cmp grep cp; do
+  run_without_cmd "${missing}" "${HOOKS_DIR}/../secret-scan-canary.sh" git mktemp mkdir rm sort cmp grep cp
   # 依存の確認より前に、確認していない外部コマンド（basename 等）を呼ばない（command not found が出ないこと）
   if [ "${rc}" -eq 2 ] && grep -q "required command not found on PATH: ${missing}" "${work_dir}/out" \
     && ! grep -q "command not found$" "${work_dir}/out"; then
@@ -891,8 +2531,16 @@ check_scan "(bash3.2) no-argument staged path reaches diff scan" 0
 
 # ---------------------------------------------------------------- secret-scan: 検査エラー（fail-closed）
 # (e) git の失敗を「対象なし」として合格させない
+# ファイル名の一覧の取得（--name-only と --diff-filter=ACMR の両方を持つ呼び出し）だけを失敗させる。
+# --name-only だけでは、先に index を固定する処理（index_listing）の呼び出しに当たってしまい、この段階の失敗の扱いを試せない（#6011）
 new_repo; stage .env "A=1"
-PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=--name-only check_scan "(e) failure listing staged files" 2
+rc=0
+PATH="${shim_dir}:${PATH}" FAIL_GIT_BOTH1=--name-only FAIL_GIT_BOTH2=--diff-filter=ACMR LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: failed to list files; aborting" "${work_dir}/out"; then
+  pass "secret-scan: (e) failure listing staged files exits 2 with the stage-specific message"
+else
+  fail "secret-scan: (e) failure listing staged files exits 2 with the stage-specific message" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
 
 new_repo; stage app.txt "x = ${token}"
 PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=-U0 check_scan "(e) failure reading staged diff" 2

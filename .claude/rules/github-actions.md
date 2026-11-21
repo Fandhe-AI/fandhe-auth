@@ -324,6 +324,14 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
   - `trusted/`: `git init`・`git fetch --depth=1`・`git checkout -q --detach FETCH_HEAD`（検出器を実行するので作業ツリーを展開する）
   - `target/`: `git init`・`git fetch --depth=1`・`git update-ref HEAD`（作業ツリーを展開せずオブジェクトだけを取る）
   - 取得処理は `scripts/` に置かない（取得の前に `trusted/` が無く、PR の CI では main の版に新しいスクリプトが無いため）
+- 本文の走査の除外（`.agents/skills/<名前>/`）の名前は、`trusted/` の `skills-lock.json` から検出器が読む。走査対象（`target/`）の
+  `skills-lock.json` から名前を足さない（PR が自分で名前を足して検査を免れないため。#6000）。PR 側の一覧は、通常ファイルか・大きさ・構文・対応形式を検出器が検証し、違反は検査不能（2）にする（マージ前に壊れた一覧を見つけるため）。
+  検証を通った PR 側（対象の index）の一覧は除外を縮めるためにだけ使い、除外にするのは `trusted/` の一覧と対象の index の一覧の共通部分だけ（PR が登録を削除した名前はマージ前に走査される。対象に一覧が無ければ除外は 0 件）。
+  index は走査の最初に複写して固定し、登録の確認・パス一覧・本文の走査はその複写から行う。走査中に元の index の内容が変われば検査不能（2）。`*.lock`・`.claude/skills/` は除外しない。
+  除外はディレクトリ単位で、登録名の下の既存ファイルへの追記・新規ファイル・リネームによる移動は走査されない（残る限界。TASK-6・#6000 で追跡。
+  登録名の下の変更は人がレビューで確かめる）。
+  新しい skill を足す PR は、main の一覧にまだ名前が無いため中身が全部走査される。誤検出が出たときの扱い（除外の範囲・手順）は人が決める。
+  lock だけを先に main へ入れて名前を事前登録する運用は、後続の PR が足す本文を初回から走査対象外にするため案内しない
 - 取得は匿名で `GITHUB_TOKEN` を使わないため、ジョブの権限は `permissions: {}` にする
 - 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
 - 既知の限界: pull_request の workflow 定義自体は PR が書き換えられる（#5985 で追跡。人の担当）

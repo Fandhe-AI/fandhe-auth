@@ -4,6 +4,9 @@
 # 実行時に組み立てた既知のダミーだけを入れた一時 index（空から開始）を検出器に走査させ、
 # 終了コード 1・出力が許可した集計行の集合と完全に一致すること（余計な行は失敗）・ダミーの値が出力に無いことを確かめる。リポジトリの内容（PR・base の検出対象の有無）に結果が依存しない。「意図的に混入させたダミーで検査が失敗する」ことの証拠をログに残す役割を持つ。
 #
+# 検出器は検出器の複製（一覧の無い一時領域）から動かすため、常に「別の checkout」の分岐（CI の本走査と同じ）で動く。「同じ checkout」の
+# 分岐（作業ツリー・HEAD・index の一覧の共通部分）と一覧の解析は、この陰性対照の範囲外で、test-hooks と CI の本走査が受け持つ。
+#
 # なぜ commit しないか: ダミーのコミットは pre-commit の同じ規則に止められ（--no-verify は禁止）、
 # コミットすれば CI を恒久的に赤にする。そのため一時 index・一時 object dir の中だけで足す。
 # 元の index・作業ツリー・object store は変えない（object は alternates 経由で読むだけ）。
@@ -47,7 +50,7 @@ done
 unset _v env_names
 export GIT_NO_REPLACE_OBJECTS=1
 # 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
-for _c in git mktemp mkdir rm sort cmp grep; do
+for _c in git mktemp mkdir rm sort cmp grep cp bash; do
   require_cmd "${_c}" || exit 2
 done
 unset _c
@@ -104,8 +107,56 @@ canary_dir="secret-scan-canary"
 plant "${canary_dir}/dummy.txt" "${key_line}"
 plant "${canary_dir}/.env" "canary placeholder"
 
+# 検出器は、自身の場所の skills-lock.json（と同じ checkout なら HEAD の一覧）から本文の除外を読み、壊れていれば検査不能（2）にする（#6000）。
+# 陰性対照の結果はリポジトリの内容に依らない契約のため、検出器の複製を一時領域へ置き、一覧の無い場所から動かす
+# （一覧が無ければ除外は 0 件で、ダミーは必ず走査される）。複製は同じバイト列であることを確かめ、検出器そのものを試す。
+detector_dir="${work_dir}/detector"
+mkdir -p "${detector_dir}/scripts/hooks" 2> /dev/null || die "mkdir failed"
+# CI の本走査（scripts/secret-scan-ci.sh）と make secret-scan は検出器を直接起動する。直接起動の契約は
+# 「実行ビットがある」と「1 行目が `#!/usr/bin/env bash` に完全一致する」の 2 つで、どちらかが欠ければ
+# 陰性対照だけ通さずここで 2 にする（複製を bash に読み込ませる下の起動は、どちらにも依らないため）。
+# 複製は一時領域に置くため、PATH の bash に読み込ませて起動する（一時領域が noexec のマウントでも動かす。
+# 1 行目の確認により、直接起動と同じ PATH の bash を使うことになる）。
+# PATH の bash は `type -P` でパスに解決し、そのパスで起動する。`/` を含む語は関数の探索に掛からないため、
+# 環境から取り込まれた同名の関数（BASH_FUNC_bash%%）による差し替えを飛ばす。
+# `command bash … || rc=$?` は使わない。bash 3.2（macOS の /bin/bash）は `command` の中の失敗を `||` の左辺でも
+# set -e で止め（errexit を外す対象が eval だけ。4.0 で command・source に広がった）、検出（1）が ERR trap の 2 になる。
+[ -x "${ROOT_DIR}/scripts/hooks/secret-scan.sh" ] || die "the scanner is not executable"
+# 1 行目は組み込みの read で読む（外部コマンドを足さない）。-r で CR などを残し、行全体を文字列で比べる。
+# read の失敗（末尾の改行が無い・読めない）は値の比較で不一致として扱う（`|| true` で受け、ERR trap にしない）。
+# 読めないときの生の診断はパスを含むため捨てる。
+scanner_shebang=""
+{ IFS= read -r scanner_shebang < "${ROOT_DIR}/scripts/hooks/secret-scan.sh"; } 2> /dev/null || true
+[ "${scanner_shebang}" = '#!/usr/bin/env bash' ] || die "the scanner's first line is not the expected shebang"
+# bash 4 以降の read は NUL を黙って落とすため、行の中の NUL（直接起動では解釈系の名前がそこで切れる）を上の比較では弾けない。
+# バイト単位でも、1 行目が同じ文言の行全体の一致（-x）であることを grep で確かめる。grep の終了状態は
+# 0 = 一致 / 1 = 不一致 / 2 以上 = エラー（検査不能）。一致した最初の行が 1 行目であることを行番号で見る。
+shebang_rc=0
+LC_ALL=C grep -anxF -- '#!/usr/bin/env bash' "${ROOT_DIR}/scripts/hooks/secret-scan.sh" > "${work_dir}/shebang" 2> /dev/null || shebang_rc=$?
+case "${shebang_rc}" in
+  0) ;;
+  1) die "the scanner's first line is not the expected shebang" ;;
+  *) die "could not check the scanner's first line (grep exit ${shebang_rc})" ;;
+esac
+shebang_hit=""
+{ IFS= read -r shebang_hit < "${work_dir}/shebang"; } 2> /dev/null || true
+[ "${shebang_hit}" = '1:#!/usr/bin/env bash' ] || die "the scanner's first line is not the expected shebang"
+cp -p -- "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" 2> /dev/null || die "failed to copy the scanner"
+copy_rc=0
+cmp -s "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" || copy_rc=$?
+[ "${copy_rc}" -eq 0 ] || die "the copied scanner differs from the original"
+
+# 起動の直前・同じ作業ディレクトリで解決する（PATH に相対の要素があっても、解決と起動が同じものを指す）。
+# 見つからない・`/` を含まない（起動時に再び関数の探索に掛かる）結果は検査不能（2）。
+if ! scanner_bash="$(type -P bash)" || [ -z "${scanner_bash}" ]; then
+  die "bash not found on PATH"
+fi
+case "${scanner_bash}" in
+  */*) ;;
+  *) die "bash did not resolve to a path" ;;
+esac
 rc=0
-"${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+"${scanner_bash}" "${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
 
 fail() {
   echo "scan-canary: FAILED: $1" >&2
@@ -119,6 +170,33 @@ case "${rc}" in
   0) fail "scanner exit code was 0, expected 1" ;;
   *)
     echo "scan-canary: scanner could not complete (exit ${rc}); cannot judge" >&2
+    # 検出器の固定の診断文だけを原因の調査用に出す。許可した文言との行全体の完全一致（-Fx）に限り、
+    # 値・パスを含み得る行（形の緩い一致）は公開ログへ転送しない（SECR-23）。
+    # grep の失敗はここでは無視する（既に検査不能（2）で終える）。
+    printf '%s\n' \
+      'secret-scan: HEAD changed during the scan; aborting' \
+      'secret-scan: the index changed during the scan; aborting' \
+      'secret-scan: cannot snapshot the index; aborting' \
+      'secret-scan: cannot enter the repository root; aborting' \
+      'secret-scan: cannot read HEAD; aborting' \
+      'secret-scan: cannot read the committed skills-lock.json; aborting' \
+      'secret-scan: cannot read the staged skills-lock.json; aborting' \
+      'secret-scan: cannot resolve the detector location; aborting' \
+      'secret-scan: cannot resolve the repository root; aborting' \
+      'secret-scan: failed to list files; aborting' \
+      'secret-scan: failed to list tracked files; aborting' \
+      'secret-scan: failed to normalize diff; aborting' \
+      'secret-scan: failed to read diff; aborting' \
+      'secret-scan: failed to resolve the empty tree; aborting' \
+      'secret-scan: internal error; aborting' \
+      'secret-scan: mktemp failed; aborting' \
+      'secret-scan: not inside a git work tree; aborting' \
+      'secret-scan: self-test failed (regex engine / locale mismatch?); aborting' \
+      'secret-scan: reading skills-lock.json timed out; aborting' \
+      'secret-scan: skills-lock.json is too large; aborting' \
+      'secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting' \
+      'secret-scan: tracked files exist but none were selected for scanning; aborting' > "${work_dir}/allowed-diag" 2> /dev/null || true
+    grep -aFx -f "${work_dir}/allowed-diag" "${work_dir}/out" >&2 2> /dev/null || true
     exit 2
     ;;
 esac
