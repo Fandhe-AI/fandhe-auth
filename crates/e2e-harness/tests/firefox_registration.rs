@@ -11,9 +11,10 @@ use std::time::Duration;
 
 use fandhe_auth_e2e_harness::{
     Browser, E2eConfig, E2eHarness, GeckoDriverComponent, GeckoDriverConfig, PasskeyOperation,
-    Protocol, Transport, VirtualAuthenticatorOptions, register_once,
+    Protocol, RunResult, Transport, VirtualAuthenticatorOptions, register_once,
 };
 use support::TestOrigin;
+use support::passkey::RecordSink;
 
 #[test]
 #[ignore = "geckodriver と Firefox が要る。make e2e-firefox で流す"]
@@ -26,6 +27,7 @@ fn registers_one_passkey_with_firefox_virtual_authenticator() {
     )
     .expect("start");
 
+    let mut sink = RecordSink::new(&handle, Browser::Firefox, PasskeyOperation::Registration);
     // 試験の値。PoC の値（QP-1）であり要件の値ではない。
     let aid = handle
         .add_virtual_authenticator(&VirtualAuthenticatorOptions {
@@ -43,7 +45,12 @@ fn registers_one_passkey_with_firefox_virtual_authenticator() {
         .set_script_timeout(Duration::from_secs(20))
         .expect("timeout");
 
-    let outcome = register_once(&handle, &origin.origin(), "localhost").expect("register");
+    let result = register_once(&handle, &origin.origin(), "localhost");
+    sink.record(
+        PasskeyOperation::Registration,
+        RunResult::from_registration(&result),
+    );
+    let outcome = result.expect("register");
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
@@ -51,6 +58,7 @@ fn registers_one_passkey_with_firefox_virtual_authenticator() {
     let creds = handle.credentials(&aid).expect("credentials");
     assert_eq!(creds.len(), 1);
     assert_eq!(creds[0].rp_id, "localhost");
+    sink.finish();
 
     running.stop().expect("stop");
 }

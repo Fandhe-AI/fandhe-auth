@@ -72,7 +72,7 @@ log() {
 # 呼び出し元: scripts/e2e-chrome.sh・scripts/e2e-firefox.sh（コマンド契約の一元化。makefile.md）。
 # 試験の対象は cfg(unix) 限定のため、uname ではなく実行した試験の件数で確かめる。
 # どの target も 0 件のまま成功しない（DPOL-30〜32）。`--test-threads=1` はブラウザを同時に複数起動しないための安全側の選択、
-# `--show-output` は成功した試験の結果行（e2e-result:）も実行のログに出すため。
+# `--show-output` は成功した試験の実行の記録の本文（format: で始まる行。5/6）も実行のログに出すため。
 run_e2e() {
   local script_name="$1" driver="$2" target out
   shift 2

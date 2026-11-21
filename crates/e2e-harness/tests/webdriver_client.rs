@@ -10,8 +10,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use fandhe_auth_e2e_harness::{
-    AuthenticatorId, E2eErrorKind, Protocol, Transport, VirtualAuthenticatorOptions,
-    WebDriverClient,
+    AuthenticatorId, BrowserVersion, E2eErrorKind, Protocol, Transport,
+    VirtualAuthenticatorOptions, WebDriverClient,
 };
 use serde_json::{Value, json};
 
@@ -168,7 +168,7 @@ fn session_commands_send_the_five_keys_and_parse_credentials() {
         ),
     ]);
     let (sess, ver) = client(port).new_session(&caps(), "chrome").unwrap();
-    assert_eq!(ver, "1.2.3");
+    assert_eq!(ver, BrowserVersion::Known { major: 1 });
     let aid = sess.add_virtual_authenticator(&opts()).unwrap();
     let creds = sess.credentials(&aid).unwrap();
     assert_eq!(creds.len(), 1);
@@ -294,7 +294,18 @@ fn browser_version_equal_to_session_id_is_dropped() {
         r#"{"value":{"sessionId":"1234567890","capabilities":{"browserName":"chrome","browserVersion":"1234567890"}}}"#,
     ));
     let (_sess, version) = client(port).new_session(&caps(), "chrome").unwrap();
-    assert_eq!(version, "");
+    assert_eq!(version, BrowserVersion::Unknown);
+    h.join().unwrap();
+}
+
+#[test]
+fn ipv4_like_browser_version_shows_only_the_major() {
+    let (port, h, _) = fake_driver(http(
+        "200 OK",
+        r#"{"value":{"sessionId":"sid-9","capabilities":{"browserName":"chrome","browserVersion":"10.0.0.5"}}}"#,
+    ));
+    let (_sess, version) = client(port).new_session(&caps(), "chrome").unwrap();
+    assert_eq!(version.to_string(), "10");
     h.join().unwrap();
 }
 

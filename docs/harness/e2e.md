@@ -99,12 +99,44 @@ PKEY の振る舞いを満たしたとは主張しない。
 欠落・不一致ならセッションを最善で閉じて `CommandFailed` にする（照合しない経路は残さない）。失敗時は handle に公開せず、`start()` の後片付けが
 プロセスグループごと止める。Firefox の `firefox` はこの環境では実測していない（W3C の名前）。
 
-### 暫定の結果行（4/6。正式な形式は 5/6）
+### 暫定の結果行（4/6。5/6 で実行の記録に置き換え済み）
+
+> 5/6 で下の `e2e-result:` の行は廃止し、「実行の記録の形式（5/6）」の節の記録に移した。以下は 4/6 時点の記録として残す。
 
 試験が標準出力に 1 行出す（`tests/support/passkey.rs`。crate の公開 API にしない）:
 `e2e-result: operation=… browser=… authenticator=WebDriverVirtual evidence=Virtual counts_as_real_device=false counts_as_safari=false result=succeeded|rejected:<名前>`。
-ドライバが返す文字列（ブラウザの版を含む）は結果行に転記せず、URL・ポート・セッション ID・authenticator ID・credential ID は出さない（`SECR-11`・`SECR-23`）。
+ドライバが返す文字列（ブラウザの版を含む）は結果行に転記せず（5/6 で版は主番号の数値だけを型付きで出すよう改めた。下の節）、URL・ポート・セッション ID・authenticator ID・credential ID は出さない（`SECR-11`・`SECR-23`）。
 実行の回数の記録と正式な形は 5/6（#105）。入口のスクリプトは `--show-output` で成功した試験の出力も見せ、`--test-threads=1` でブラウザを同時に複数起動しない。
+
+## 実行の記録の形式（5/6）
+
+`fandhe_auth_e2e_harness::record::E2eRunRecord`。1 つのブラウザのセッション（`E2eHarness::start` 1 回、つまり E2E の試験の関数 1 つ）で
+行った登録・認証の結果を、1 行 1 項目の `key: value`（UTF-8・LF）で出す。試験は `tests/support/passkey.rs` の `RecordSink` を使い、
+終了時（panic の巻き戻りを含む）に本文を標準出力へ出し、`CARGO_TARGET_TMPDIR/e2e-records/`（`target/` の下）へ
+`e2e-run-<browser>-<unix秒>-<pid>-<通し番号>.txt` として新規に書く（既存のファイルは上書きしない）。
+
+| キー | 内容 |
+| --- | --- |
+| `format` | 形式の識別子（`fandhe-auth-e2e-run-record/1`） |
+| `harness_version` | この crate の版 |
+| `browser` | `Chrome` または `Firefox` |
+| `browser_version_major` | ブラウザの版の主番号（数字）。解釈できなければ `unknown` |
+| `authenticator` | `WebDriverVirtual` |
+| `evidence` | `Virtual` |
+| `counts_as_real_device`・`counts_as_safari` | 常に `false`（`ACPT-7`・`ACPT-8`。型から導き、外から上書きできない） |
+| `target_operation` | その試験が対象とする操作 |
+| `completed` | 試験が最後まで到達したら `true`。到達しなければ `false` で、実行した分の回数は残る |
+| `run` | 実行の順に 1 行ずつ。`<通し番号> <操作> succeeded｜rejected:<名前>｜check_failed｜harness_error:<種類>` |
+| `count` | 操作ごと（登録・認証の 2 つ。0 件でも出す）の実行の回数と結果ごとの件数 |
+| `note` | 仮想の結果を実機・Safari に数えない旨 |
+
+- 回数の単位は 1 セッション内の `register_once`・`authenticate_once` の呼び出し（認証の試験の中の登録、UV 失敗の試験の対照の認証も数える）。
+  試験の関数・target をまたぐ合算は crate では行わず、ファイルが 1 セッションに 1 つなので読み手が合算する。
+- ブラウザの版は主番号（1〜4 桁の数字）だけを出す。ドライバの文字列は保持せず、空・文字種外・32 バイト超・先頭が「数字 + `.`」でない・
+  セッション ID と一致するものは `unknown` にする。記録に出る値は列挙の名前・数値・定数だけで、URL・ポート・セッション ID・各種 ID・署名・パスは入らない（`SECR-11`・`SECR-23`）。
+- 記録は実行の事実の出力で、合否の判定でも spec の「確定」でもない。結果は〔仮想〕で、実機・Safari の結果は別タスク（`TASK-784`・`TASK-75`〜`78`）である。
+- 偽のドライバを使う単体の試験は記録をファイルに書かない（E2E の実行回数に数えない）。
+- 日時はファイル名の秒で代え、source の revision・ドライバの版は入れていない（未決）。
 
 ## 試験用ページと origin の置き場（人が決める）
 
@@ -176,7 +208,7 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 | 2/6（#102） | Chrome の仮想 authenticator の結線と登録 1 件 |
 | 3/6（#103） | Firefox の結線と識別子の規則（`LGUI-35` → `ASCR-65`） |
 | 4/6（#104） | 登録の後の認証を両ブラウザで通す。失敗する場合の試験。暫定の結果行。3/6 のレビューの持ち越し（`browserName` の照合など） |
-| 5/6（#105） | 実行の記録の形式（ブラウザの版・authenticator の種類・回数・仮想の印） |
+| 5/6（#105） | 実行の記録の形式（ブラウザの版の主番号・authenticator の種類・回数・仮想の印）。暫定の結果行を置き換え |
 | 6/6（#106） | 使い方の文書と、実機の確認は別タスクである旨 |
 
 ## 未決・人の確認待ち
@@ -198,6 +230,10 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
   `--test-threads=1`。暫定の結果行
 - 4/6: Chrome（Chromium 157）では登録・認証・失敗の場合を実行して通った（〔仮想〕）。Firefox での認証と Set User Verified は未検証
   （作業環境に geckodriver・Firefox が無かった）。geckodriver・Firefox のある環境での `make e2e-firefox` の実行と記録は人の作業
+- 5/6: 形式の識別子・キー名・文言・ファイル名の形（仮置き）。ブラウザの版を主番号だけにした読み（代わりの案は、完全な版を文法と IPv4 様の値の除外の下で出すこと。
+  4/6 の「転記しない」方針を改めた範囲を含む）。回数の単位を 1 セッションとし合算は読み手が行うこと。上限 10,000 件の値。
+  日時・source の revision・ドライバの版を入れていないこと（it-harness への辺、または `DPOL-32` の読みが要る）。`Drop` で巻き戻る間に記録を書く作り。
+  Firefox での実行と記録（geckodriver と Firefox のある環境での `make e2e-firefox`）は人の作業
 - Chrome の起動 flag は `--headless=new` だけ（`DPOL-30` の走査語に掛かる flag は足していない）
 - it-harness・最小の組込み先への辺（足す段で許可表を人に確かめる）
 

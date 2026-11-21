@@ -10,10 +10,10 @@ mod support;
 
 use fandhe_auth_e2e_harness::{
     Browser, ChromeDriverComponent, ChromeDriverConfig, E2eConfig, E2eHarness, PasskeyOperation,
-    WebAuthnErrorName, authenticate_once,
+    RunResult, WebAuthnErrorName, authenticate_once,
 };
 use support::TestOrigin;
-use support::passkey::{Verdict, assert_one_localhost_credential, print_result, register};
+use support::passkey::{RecordSink, assert_one_localhost_credential, register};
 
 #[test]
 #[ignore = "chromedriver と Chrome が要る。make e2e-chrome で流す"]
@@ -26,20 +26,20 @@ fn authenticates_after_registration_with_chrome_virtual_authenticator() {
     )
     .expect("start");
 
-    let (aid, cred) = register(&handle, &origin, Browser::Chrome);
-    let outcome =
-        authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("authenticate");
+    let mut sink = RecordSink::new(&handle, Browser::Chrome, PasskeyOperation::Authentication);
+    let (aid, cred) = register(&handle, &origin, &mut sink);
+    let result = authenticate_once(&handle, &origin.origin(), "localhost", &cred);
+    sink.record(
+        PasskeyOperation::Authentication,
+        RunResult::from_authentication(&result),
+    );
+    let outcome = result.expect("authenticate");
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
 
     assert_one_localhost_credential(&handle, &aid);
-    print_result(
-        &handle,
-        PasskeyOperation::Authentication,
-        Browser::Chrome,
-        &Verdict::Succeeded,
-    );
+    sink.finish();
 
     running.stop().expect("stop");
 }
@@ -55,26 +55,30 @@ fn authentication_fails_when_user_verification_fails_with_chrome() {
     )
     .expect("start");
 
-    let (aid, cred) = register(&handle, &origin, Browser::Chrome);
+    let mut sink = RecordSink::new(&handle, Browser::Chrome, PasskeyOperation::Authentication);
+    let (aid, cred) = register(&handle, &origin, &mut sink);
     // 対照: 同じセッション・credential・UV 成功の状態で認証が通ることを先に確かめる。
     // NotAllowedError は期限切れ等でも返るため、これは UV の状態の変更後に NotAllowedError を観測する試験で、原因が UV であることまでは断定しない。
-    let control =
-        authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("control");
+    let control_result = authenticate_once(&handle, &origin.origin(), "localhost", &cred);
+    sink.record(
+        PasskeyOperation::Authentication,
+        RunResult::from_authentication(&control_result),
+    );
+    let control = control_result.expect("control");
     assert!(control.succeeded(), "error_name={:?}", control.error_name());
     // 登録の後に UV を失敗にする。判定は authenticator 側で完結し、ネットワークに出ない。
     handle.set_user_verified(&aid, false).expect("set uv");
-    let outcome =
-        authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("authenticate");
+    let result = authenticate_once(&handle, &origin.origin(), "localhost", &cred);
+    sink.record(
+        PasskeyOperation::Authentication,
+        RunResult::from_authentication(&result),
+    );
+    let outcome = result.expect("authenticate");
     assert!(!outcome.succeeded());
     // HarnessTimeout とは別の名前で、対照が成功した同一条件から UV だけを変えた後の結果としてだけ読み、原因の判別とは読まない。
     assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
     assert_one_localhost_credential(&handle, &aid);
-    print_result(
-        &handle,
-        PasskeyOperation::Authentication,
-        Browser::Chrome,
-        &Verdict::Rejected(WebAuthnErrorName::NotAllowed),
-    );
+    sink.finish();
 
     running.stop().expect("stop");
 }
