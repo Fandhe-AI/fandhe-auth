@@ -126,6 +126,8 @@ struct Shared {
     block_gen: AtomicU64,
     accepted: AtomicU64,
     refused: AtomicU64,
+    /// 上流への connect を始めた回数（試験の同期用。始めたことだけを示し、成否は `accepted`・`refused` で見る）。
+    upstream_attempts: AtomicU64,
     /// 両側を切るための複製（接続 ID と組）。両方向の転送が終わった接続の分は外す。
     /// accept・遮断の状態の確認・ここへの登録は、このロックの下で一度に行う。`block` の状態変更と切断も
     /// 同じロックの下で行うので、受理した接続が遮断から漏れない（ORST-17）。
@@ -144,6 +146,7 @@ impl Shared {
             block_gen: AtomicU64::new(0),
             accepted: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            upstream_attempts: AtomicU64::new(0),
             conns: Mutex::new(Vec::new()),
             next_conn_id: AtomicU64::new(0),
             workers: Mutex::new(Vec::new()),
@@ -301,6 +304,12 @@ impl DbFaultProxy {
     /// 上流へつないで転送を始めた接続の数。
     pub fn accepted_count(&self) -> u64 {
         self.shared.accepted.load(Ordering::SeqCst)
+    }
+
+    /// 上流への connect の試行を始めた回数。試験が accept のスレッドの停止点（connect の中）への到達を待つための値で、
+    /// 成否は表さない。
+    pub fn upstream_attempt_count(&self) -> u64 {
+        self.shared.upstream_attempts.load(Ordering::SeqCst)
     }
 
     /// 転送器が accept した後に直ちに閉じた接続の数（遮断中に accept して切ったもの・上流なし・上流への接続の失敗・
@@ -592,6 +601,7 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
         return None;
     };
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
     let Ok(up) = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT) else {
         shared.sever_conn(id);
         refuse(&accepted.client, shared);

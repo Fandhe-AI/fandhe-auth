@@ -98,14 +98,18 @@ fn echo_conn(mut s: TcpStream, stop: &AtomicBool) {
     }
 }
 
-fn connect(port: u16) -> TcpStream {
+/// 接続の確立。失敗は呼び出し側が段階つきで扱えるよう、誤りのまま返す。
+fn try_connect(port: u16) -> std::io::Result<TcpStream> {
     let s = TcpStream::connect_timeout(
         &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
         Duration::from_secs(5),
-    )
-    .unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    s
+    )?;
+    s.set_read_timeout(Some(Duration::from_secs(5)))?;
+    Ok(s)
+}
+
+fn connect(port: u16) -> TcpStream {
+    try_connect(port).unwrap()
 }
 
 /// 往復の結果。タイムアウトは切断と区別する（接続を閉じずに応答を止める回帰を検出するため）。
@@ -128,19 +132,8 @@ fn classify(e: &std::io::Error) -> Outcome {
     }
 }
 
-fn roundtrip(s: &mut TcpStream, msg: &[u8]) -> Outcome {
-    if let Err(e) = s.write_all(msg) {
-        return classify(&e);
-    }
-    let mut buf = vec![0u8; msg.len()];
-    match s.read_exact(&mut buf) {
-        Ok(()) => Outcome::Echoed(buf),
-        Err(e) => classify(&e),
-    }
-}
-
-/// `roundtrip` と同じ分類で、誤りがあったときは種類も返す（失敗の切り分けの文言用。比較には `Outcome` だけを使う）。
-fn roundtrip_kind(s: &mut TcpStream, msg: &[u8]) -> (Outcome, Option<ErrorKind>) {
+/// 往復を一か所で行う。誤りがあったときは種類も返す（失敗の文言用）。比較には `Outcome` だけを使う。
+fn roundtrip_detail(s: &mut TcpStream, msg: &[u8]) -> (Outcome, Option<ErrorKind>) {
     if let Err(e) = s.write_all(msg) {
         return (classify(&e), Some(e.kind()));
     }
@@ -149,6 +142,10 @@ fn roundtrip_kind(s: &mut TcpStream, msg: &[u8]) -> (Outcome, Option<ErrorKind>)
         Ok(()) => (Outcome::Echoed(buf), None),
         Err(e) => (classify(&e), Some(e.kind())),
     }
+}
+
+fn roundtrip(s: &mut TcpStream, msg: &[u8]) -> Outcome {
+    roundtrip_detail(s, msg).0
 }
 
 fn wait_until(mut f: impl FnMut() -> bool) -> bool {
@@ -227,9 +224,11 @@ fn conn_accepted_during_block_is_cut_and_later_conn_reaches_upstream() {
 /// 遮断中に再接続を繰り返す相手がいても、解除は期限の中で戻る。
 ///
 /// macOS で最後の往復が切れる（`Disconnected`）ことが報告されている（#6016。原因は未確定で、macOS での確認は未検証）。
-/// 期待（最後の往復が `Echoed`）は変えない（AUDB-6）。失敗の文言に、最後の往復の前後の `accepted`・`refused` の差と
-/// 誤りの種類を出す。両方 0 ならカーネルの段で切れており、`refused` が増えたなら転送器が accept した後に閉じ、
-/// `accepted` が増えたなら中継の開始後に切れている。
+/// 期待（最後の往復が `Echoed`）は変えない（AUDB-6）。失敗の文言には、失敗した段階（connect・往復）と誤りの種類、
+/// 最後の接続の前後の `accepted`・`refused`・上流への試行の差を出す。
+/// 集計値の限界: 計数は転送器全体の合計で、最後の接続だけのものではない。`storm.join()` が待つのは接続側のスレッドで、
+/// 転送器の accept のスレッドが storm の接続を処理し終えたことは保証しない。accept 済みで上流へ接続中の接続は
+/// どの計数も増やさないので、差がすべて 0 でも「カーネルの段で切れた」とは断定できない（手掛かりにとどめる）。
 #[test]
 fn release_returns_in_time_under_reconnect_storm() {
     let up = echo_upstream();
@@ -255,25 +254,42 @@ fn release_returns_in_time_under_reconnect_storm() {
     storm.join().unwrap();
     r.unwrap();
     assert!(elapsed < Duration::from_secs(5), "release returned late");
-    let (a0, r0) = (p.accepted_count(), p.refused_count());
-    let mut c = connect(port);
-    let (outcome, kind) = roundtrip_kind(&mut c, b"s");
-    if outcome != Outcome::Echoed(b"s".to_vec()) {
+    let before = (
+        p.accepted_count(),
+        p.refused_count(),
+        p.upstream_attempt_count(),
+    );
+    let failure = match try_connect(port) {
+        Err(e) => Some(("connect", format!("{:?}", e.kind()))),
+        Ok(mut c) => match roundtrip_detail(&mut c, b"s") {
+            (Outcome::Echoed(b), _) if b == b"s" => None,
+            (outcome, kind) => Some(("roundtrip", format!("{outcome:?} (io kind {kind:?})"))),
+        },
+    };
+    if let Some((stage, what)) = failure {
         // 診断の値を安定させるため、計数が落ち着くまで短く待つ（合否には使わない。失敗したときだけ）。
-        let mut last = (p.accepted_count(), p.refused_count());
+        let snap = || {
+            (
+                p.accepted_count(),
+                p.refused_count(),
+                p.upstream_attempt_count(),
+            )
+        };
+        let mut last = snap();
         let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
-            let now = (p.accepted_count(), p.refused_count());
+            let now = snap();
             if now == last {
                 break;
             }
             last = now;
         }
         panic!(
-            "final roundtrip after release was {outcome:?} (io kind {kind:?}): accepted +{}, refused +{}",
-            last.0.saturating_sub(a0),
-            last.1.saturating_sub(r0)
+            "final {stage} after release failed: {what}; accepted +{}, refused +{}, upstream attempts +{} (aggregate counters; see the test doc for limits)",
+            last.0.saturating_sub(before.0),
+            last.1.saturating_sub(before.1),
+            last.2.saturating_sub(before.2)
         );
     }
 }
@@ -385,8 +401,9 @@ fn stalled_upstream() -> StalledUpstream {
             Ok(s) => filled.push(s),
             Err(e) if e.kind() == ErrorKind::TimedOut => break,
             Err(e) => panic!(
-                "cannot stall upstream connect: accept-queue overflow returned {:?} (this OS or setting resets on overflow)",
-                e.kind()
+                "cannot stall upstream connect: error kind {:?} after {} filled connections (accept-queue overflow is one possible cause; fd exhaustion or an OS that resets on overflow are others)",
+                e.kind(),
+                filled.len()
             ),
         }
         assert!(filled.len() < 20_000, "backlog never filled");
@@ -402,22 +419,23 @@ fn stalled_upstream() -> StalledUpstream {
 /// `Applied` の記録から実際の遮断までに、上流への接続の上限（5 秒）に及ぶずれを作らない（ORST-17）。
 /// 固まった接続は遮断で切れる。
 ///
-/// 上流を固める土台は、待ち行列があふれたときに SYN を黙って捨てる Linux の既定（`tcp_abort_on_overflow=0`）に依る。
-/// macOS ではあふれた接続がリセットされて土台を組めない（推定。macOS での確認は未検証。#6016）ため、Linux 以外では
-/// `ignore` にする。Linux でも土台が組めていることを `block()` の前に確かめる（中身の無い合格にしない）。
+/// 上流を固める土台は、待ち行列があふれたときに SYN を黙って捨てる挙動（Linux の既定 `tcp_abort_on_overflow=0`）に依る。
+/// 土台が組めない環境では `ignore` で外さず、観測した誤りの種類つきで失敗させる（検証を黙って外さない。AUDB-6）。
+/// `block()` の前に、accept のスレッドが上流への connect に入ったこと（`upstream_attempt_count`）を待って確かめ、
+/// その後も拒否も転送も始まっていないことを見る（中身の無い合格にしない）。
 #[test]
-#[cfg_attr(
-    not(target_os = "linux"),
-    ignore = "stalling an upstream connect relies on Linux dropping SYNs on accept-queue overflow"
-)]
 fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     let up = stalled_upstream();
     let mut p = ExternalStoreFaultProxy::start_to_port(up.port).unwrap();
     let mut tl = timeline();
     let mut stuck = connect(p.listen_port());
-    // accept のスレッドが上流への connect に入るのを待つ（値は下限。待ちすぎても害はない）。
-    thread::sleep(Duration::from_millis(300));
-    // 前提: accept のスレッドは上流への接続で止まっており、拒否も転送も始まっていない。
+    // 停止点への到達: accept のスレッドが上流への connect に入ったことを同期して待つ。
+    assert!(
+        wait_until(|| p.upstream_attempt_count() >= 1),
+        "accept thread never began the upstream connect"
+    );
+    // 前提: 入った後も上流への接続で止まっており、拒否も転送も始まっていない（上流の待ち行列の満杯は
+    // `stalled_upstream` が connect の時間切れで確かめ済み。connect の上限は 5 秒で、ここまでは数 ms）。
     assert_eq!(
         p.refused_count(),
         0,
