@@ -88,6 +88,8 @@ pub enum StageError {
     },
     /// 時計を作る関数が panic した（段階・回は 1 始まり）。panic の文言は載せない。
     ClockPanicked { stage: u64, run: u64 },
+    /// 全回が終わった後に、時計を作る関数が所有する値の破棄が panic した。panic の文言は載せない。
+    ClockDropPanicked,
     /// 番号の計算が溢れた。
     CounterOverflow,
 }
@@ -100,6 +102,7 @@ impl fmt::Display for StageError {
             Self::Aggregate { .. } => "aggregate error in stage",
             Self::Clock { .. } => "clock error in stage",
             Self::ClockPanicked { .. } => "clock panicked in stage",
+            Self::ClockDropPanicked => "clock drop panicked after stages",
             Self::CounterOverflow => "counter overflow",
         };
         f.write_str(msg)
@@ -306,11 +309,16 @@ where
     C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
     F: Fn() -> CallResult + Sync,
 {
+    // あらゆる早期リターン（不正な計画の拒否を含む）より前に hook を入れる。所有する値の Drop の panic 文言を出さない（SECR-23）。
+    install_quiet_hook();
     let result = run_stages_inner(&mut new_clock, spec, plan, &call);
-    // 時計を作る関数（クロージャ）の破棄も抑止と捕捉の内側で行う。所有する値の Drop が panic しても
-    // 文言を hook に渡さず、返す結果を変えない（SECR-23）。
-    let _ = quiet_catch(move || drop(new_clock));
-    result
+    // 時計を作る関数（クロージャ）の破棄も抑止と捕捉の内側で行う。所有する値の Drop が panic しても文言を hook に渡さない。
+    // 実行の誤りがあればその最初の誤りを保ち、実行が成功して破棄だけが失敗したときは専用の誤りを返す（fail-closed。SECR-23）。
+    let dropped = quiet_catch(move || drop(new_clock));
+    match (result, dropped) {
+        (Ok(_), None) => Err(StageError::ClockDropPanicked),
+        (result, _) => result,
+    }
 }
 
 /// 抑止の印を立てて `f` を呼び、panic は捕捉して `None` にする。
@@ -343,7 +351,6 @@ where
     if !plan.allowed_intervals.contains(spec.interval()) {
         return Err(StageError::InvalidPlan);
     }
-    install_quiet_hook();
     let mut stages = Vec::with_capacity(plan.stages.len());
     for (si, cfg) in plan.stages.iter().enumerate() {
         let stage = number(si)?;

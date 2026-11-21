@@ -322,6 +322,10 @@ fn error_display_is_fixed_english() {
     assert_eq!(c.to_string(), "clock error in stage");
     let p = StageError::ClockPanicked { stage: 7, run: 9 };
     assert_eq!(p.to_string(), "clock panicked in stage");
+    assert_eq!(
+        StageError::ClockDropPanicked.to_string(),
+        "clock drop panicked after stages"
+    );
 }
 
 #[test]
@@ -689,4 +693,81 @@ fn multi_worker_stages_really_overlap() {
         .map(|s| s.runs().iter().map(|x| x.max_in_flight).collect())
         .collect();
     assert_eq!(observed, [[4, 4], [3, 3]]);
+}
+
+/// 全回が成功し、破棄だけが panic したときは Ok を返さず専用の誤りにする（fail-closed。SECR-23）。
+#[test]
+fn drop_panic_after_successful_run_is_an_error() {
+    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let guard = PanicOnDrop;
+    let r = run_stages(
+        move || {
+            let _keep = &guard;
+            Ok(step_clock(10))
+        },
+        &spec(),
+        &plan,
+        || CallResult::Ok,
+    );
+    assert_eq!(r, Err(StageError::ClockDropPanicked));
+}
+
+const CHILD_PLAN_ENV: &str = "FANDHE_STAGE_INVALID_PLAN_CHILD";
+const CHILD_DROP_CANARY: &str = "canary_invalid_plan_drop_zt";
+
+struct PanicOnDropCanary;
+impl Drop for PanicOnDropCanary {
+    fn drop(&mut self) {
+        panic!("{}", CHILD_DROP_CANARY);
+    }
+}
+
+#[test]
+fn child_invalid_plan_drop_body() {
+    if std::env::var_os(CHILD_PLAN_ENV).is_none() {
+        return;
+    }
+    // 語彙外の区間名で早期に拒否される経路。hook が未登録の子プロセスで走らせる。
+    let plan = StagePlan::new(
+        vec![sc(1, 1, 0, 1)],
+        MetricKey::P99Ns,
+        limits(),
+        vec![IntervalName::new("other").unwrap()],
+    )
+    .unwrap();
+    let guard = PanicOnDropCanary;
+    let r = run_stages(
+        move || {
+            let _keep = &guard;
+            Ok(step_clock(10))
+        },
+        &spec(),
+        &plan,
+        || CallResult::Ok,
+    );
+    assert_eq!(r, Err(StageError::InvalidPlan));
+}
+
+#[test]
+fn invalid_plan_path_does_not_write_drop_panic_to_stderr() {
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "child_invalid_plan_drop_body",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_PLAN_ENV, "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "child failed");
+    assert!(
+        stdout.contains("child_invalid_plan_drop_body"),
+        "child did not run"
+    );
+    assert!(!stderr.contains(CHILD_DROP_CANARY));
+    assert!(!stdout.contains(CHILD_DROP_CANARY));
 }
