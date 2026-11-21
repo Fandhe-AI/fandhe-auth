@@ -30,7 +30,8 @@
 #       `OPENSSL_STATIC` と `<TARGET>_OPENSSL_STATIC` を値によらず違反にする（安全側）。コメントや他の設定値の中の文字列は数えない。
 #       TOML が読めない・不正なら検査不能（2）。名前と値は出さず件数だけ出す。
 #       PKG_CONFIG_ALL_STATIC（と <TARGET>_PKG_CONFIG_ALL_STATIC）も存在だけで静的を選ぶため同じく違反にする。同じ .cargo に config と config.toml が
-#       共存する場合は Cargo と同じく config だけを検査し、無視される config.toml は見ない。
+#       共存する場合は両方を検査する（片方が消えると残りが有効になるため。dependency-policy.md の配置禁止に合わせ、優先順位で無視される側も見ない道を作らない）。
+#       `[env]` が存在してテーブルでない（`env = []` 等）場合は検査不能（2）。
 #   報告: 本番の依存の木の openssl-sys の件数（package ごと。(*) の付記は除いて重複排除）を出す（参考。合否に入れない）。
 #       依存の木だけではリンク方式（動的か静的か）を断定できない。1 件以上なら版の記録の要否と最終バイナリのリンク方式の確認は
 #       Hub の `AOPS-2` で行う（本体は記録を持たない。D-2026-10-30-1）。0 件なら本体の依存の木から `AOPS-2` に載せるものは無い。
@@ -199,14 +200,10 @@ count_static_env() {
 # 読めない・TOML として不正なファイルは検査不能（2）。python の診断（パスを含み得る）は出さない。
 count_static_config() {
   local f c n=0
-  # Cargo は同じディレクトリに .cargo/config と .cargo/config.toml が共存すると拡張子なしを採り、config.toml は読まない。
-  # 無視される側を数えて誤検出しないよう、実際に読まれる 1 ファイルだけを検査する。
-  if [ -e "$1/.cargo/config" ]; then
-    f="$1/.cargo/config"
-  else
-    f="$1/.cargo/config.toml"
-  fi
-  if [ -e "${f}" ]; then
+  # 優先順位で片方が無視されても、消えると残りが有効になるため、存在する両方のファイルを検査する（安全側）。
+  for f in "$1/.cargo/config" "$1/.cargo/config.toml"; do
+    [ -e "${f}" ] || continue
+    {
     [ -r "${f}" ] || return 2
     c="$(python3 -I -c '
 import sys, tomllib
@@ -216,14 +213,17 @@ try:
 except Exception:
     sys.exit(2)
 e = d.get("env", {})
+if not isinstance(e, dict):
+    sys.exit(2)
 n = 0
-if isinstance(e, dict):
+if True:
     n = sum(1 for k in e if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")))
 print(n)
 ' "${f}" 2>/dev/null)" || return 2
     case "${c}" in '' | *[!0-9]*) return 2 ;; esac
     n=$((n + c))
-  fi
+    }
+  done
   echo "${n}"
 }
 
@@ -392,11 +392,15 @@ selftest() {
     ! printf '[env]\nPKG_CONFIG_ALL_STATIC = "1"\n' 2>/dev/null >"${f}/c9/.cargo/config.toml" ||
     ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config.toml" ||
     ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config" ||
-    ! printf '[env\nOPENSSL_STATIC = 1\n' 2>/dev/null >"${f}/c8/.cargo/config.toml"; then
+    ! printf '[env\nOPENSSL_STATIC = 1\n' 2>/dev/null >"${f}/c8/.cargo/config.toml" ||
+    ! mkdir -p "${f}/c11/.cargo" "${f}/c12/.cargo" 2>/dev/null ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c11/.cargo/config.toml" ||
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c11/.cargo/config" ||
+    ! printf 'env = []\n' 2>/dev/null >"${f}/c12/.cargo/config.toml"; then
     log "error: cannot write fixture (f11); cannot inspect"
     exit 2
   fi
-  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0 c5:ge1 c6:eq0 c7:ge1 c9:ge1 c10:eq0; do
+  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0 c5:ge1 c6:eq0 c7:ge1 c9:ge1 c10:ge1 c11:ge1; do
     cnt="$(count_static_config "${f}/${cfg%%:*}")" || exit 2
     if { [ "${cfg##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${cfg##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
       log "FAIL selftest F11: static config check wrong (${cfg%%:*})"
@@ -405,12 +409,14 @@ selftest() {
   done
 
   # F11b: TOML として不正な設定は検査不能（2）で止まる（構文・読み取りの失敗を 0 件に丸めない）
-  rc=0
-  count_static_config "${f}/c8" >/dev/null 2>&1 || rc=$?
-  if [ "${rc}" -ne 2 ]; then
-    log "FAIL selftest F11: invalid config not treated as cannot-inspect"
-    exit 1
-  fi
+  for cfg in c8 c12; do
+    rc=0
+    count_static_config "${f}/${cfg}" >/dev/null 2>&1 || rc=$?
+    if [ "${rc}" -ne 2 ]; then
+      log "FAIL selftest F11: invalid config not treated as cannot-inspect (${cfg})"
+      exit 1
+    fi
+  done
 
   # F12: openssl-sys の件数の報告。F3（vendored なしの openssl）は 1 以上、F4（依存なし）は 0
   t="$(run_tree "${f}/f3" offline)" || exit 2
