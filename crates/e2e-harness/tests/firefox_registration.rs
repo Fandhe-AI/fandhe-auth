@@ -46,19 +46,16 @@ fn registers_one_passkey_with_firefox_virtual_authenticator() {
         .expect("timeout");
 
     let result = register_once(&handle, &origin.origin(), "localhost");
-    sink.record(
-        PasskeyOperation::Registration,
-        support::passkey::registration_run_result(&handle, &aid, &result),
-    )
-    .expect("record");
+    // credential の取得と検査は 1 回だけ行い、記録と合否の両方に同じ結果を使う。
+    let (run, check_ok) = support::passkey::registration_run_result(&handle, &aid, &result);
+    sink.record(PasskeyOperation::Registration, run)
+        .expect("record");
     let outcome = result.expect("register");
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
 
-    let creds = handle.credentials(&aid).expect("credentials");
-    assert_eq!(creds.len(), 1);
-    assert_eq!(creds[0].rp_id, "localhost");
+    assert!(check_ok, "credential check failed");
     running.stop().expect("stop");
     sink.finish().expect("record");
 }

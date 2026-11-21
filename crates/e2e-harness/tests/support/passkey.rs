@@ -42,23 +42,24 @@ pub fn register(
         .set_script_timeout(Duration::from_secs(20))
         .expect("timeout");
     let result = register_once(handle, &origin.origin(), "localhost");
-    sink.record(
-        PasskeyOperation::Registration,
-        registration_run_result(handle, &aid, &result),
-    )
-    .expect("record");
+    // credential の取得と検査は 1 回だけ行い、記録と合否の両方に同じ結果を使う。
+    let (run, check_ok) = registration_run_result(handle, &aid, &result);
+    sink.record(PasskeyOperation::Registration, run)
+        .expect("record");
     let outcome = result.expect("register");
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
     // docs/harness/e2e.md の登録成功条件: credential がちょうど 1 件で RP ID が localhost。
-    assert_one_localhost_credential(handle, &aid);
+    assert!(check_ok, "credential check failed");
     let cred = outcome.credential().expect("credential").clone();
     (aid, cred)
 }
 
-/// 登録の呼び出し結果と後続の検査（credential がちょうど 1 件・RP ID が `localhost`）をあわせた実行の結果を返す。
-/// 呼び出しが成功でも後続の検査を満たさなければ `CheckFailed` にし、成功に数えない（SECR-23: 値は出さない）。
+/// 登録の呼び出し結果と後続の検査（credential がちょうど 1 件・RP ID が `localhost`）をあわせた実行の結果と、
+/// 後続の検査を満たしたか（取得の失敗を含めて満たさなければ `false`）を返す。`credentials` の取得は呼び出し 1 回で、
+/// 取得の誤りは `HarnessError`（種類のみ）、取得後の条件の不一致だけを `CheckFailed` にする（SECR-23: 値は出さない）。
+/// 呼び出しが成功でも後続の検査を満たさなければ成功に数えない。
 pub fn registration_run_result(
     handle: &DriverHandle,
     aid: &AuthenticatorId,
@@ -66,14 +67,15 @@ pub fn registration_run_result(
         fandhe_auth_e2e_harness::RegistrationOutcome,
         fandhe_auth_e2e_harness::E2eError,
     >,
-) -> RunResult {
+) -> (RunResult, bool) {
     let run = RunResult::from_registration(result);
     if run != RunResult::Succeeded {
-        return run;
+        return (run, false);
     }
     match handle.credentials(aid) {
-        Ok(creds) if creds.len() == 1 && creds[0].rp_id == "localhost" => run,
-        _ => RunResult::CheckFailed,
+        Ok(creds) if creds.len() == 1 && creds[0].rp_id == "localhost" => (run, true),
+        Ok(_) => (RunResult::CheckFailed, false),
+        Err(e) => (RunResult::HarnessError(e.kind()), false),
     }
 }
 

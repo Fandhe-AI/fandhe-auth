@@ -24,6 +24,8 @@ const done = arguments[arguments.length - 1];
 const rpId = arguments[0];
 const expectedOrigin = arguments[1];
 (async () => {
+    // 'call' の間だけ、例外を WebAuthn 呼び出し自体の拒否として name で返す。前後の処理の例外は固定名 HarnessScript にする。
+    let phase = 'pre';
     try {
         // 登録の前に、今のページが試験用の origin であることを確かめる（別の origin で create() を呼ばない）。
         if (location.origin !== expectedOrigin) {
@@ -33,7 +35,7 @@ const expectedOrigin = arguments[1];
         const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
         const b64u = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         const challenge = rnd(32);
-        const cred = await navigator.credentials.create({ publicKey: {
+        const opts = { publicKey: {
             rp: { id: rpId, name: 'e2e' },
             user: { id: rnd(16), name: 'e2e-user', displayName: 'e2e-user' },
             challenge,
@@ -41,7 +43,10 @@ const expectedOrigin = arguments[1];
             authenticatorSelection: { residentKey: 'discouraged', userVerification: 'required' },
             attestation: 'none',
             timeout: 60000
-        }});
+        }};
+        phase = 'call';
+        const cred = await navigator.credentials.create(opts);
+        phase = 'post';
         const cd = JSON.parse(new TextDecoder().decode(cred.response.clientDataJSON));
         done({
             ok: true,
@@ -54,7 +59,7 @@ const expectedOrigin = arguments[1];
             challengeOk: cd.challenge === b64u(challenge)
         });
     } catch (e) {
-        done({ ok: false, errorName: String((e && e.name) || 'Error') });
+        done({ ok: false, errorName: phase === 'call' ? String((e && e.name) || 'Error') : 'HarnessScript' });
     }
 })();
 "#;

@@ -122,6 +122,8 @@ impl RunResult {
             match n {
                 WebAuthnErrorName::OriginMismatch => Self::PreflightFailed,
                 WebAuthnErrorName::HarnessTimeout => Self::HarnessTimedOut,
+                // 呼び出しの前後のスクリプトの例外は、ブラウザの拒否ではなくハーネスの検査の失敗に数える。
+                WebAuthnErrorName::HarnessScript => Self::CheckFailed,
                 n => Self::Rejected(n),
             }
         } else {
@@ -229,6 +231,7 @@ impl E2eRunRecord {
         let result = match result {
             RunResult::Rejected(WebAuthnErrorName::OriginMismatch) => RunResult::PreflightFailed,
             RunResult::Rejected(WebAuthnErrorName::HarnessTimeout) => RunResult::HarnessTimedOut,
+            RunResult::Rejected(WebAuthnErrorName::HarnessScript) => RunResult::CheckFailed,
             other => other,
         };
         self.runs.push((op, result));
@@ -416,6 +419,10 @@ mod tests {
         assert_eq!(
             RunResult::classify(false, Some(N::HarnessTimeout)),
             RunResult::HarnessTimedOut
+        );
+        assert_eq!(
+            RunResult::classify(false, Some(N::HarnessScript)),
+            RunResult::CheckFailed
         );
         assert_eq!(RunResult::classify(false, None), RunResult::CheckFailed);
     }

@@ -39,6 +39,8 @@ const credB64u = arguments[2];
         clearTimeout(timer);
         done(result);
     };
+    // 'call' の間だけ、例外を WebAuthn 呼び出し自体の拒否として name で返す。前後の処理の例外は固定名 HarnessScript にする。
+    let phase = 'pre';
     try {
         if (location.origin !== expectedOrigin) {
             finish({ ok: false, errorName: 'OriginMismatch' });
@@ -51,13 +53,16 @@ const credB64u = arguments[2];
             return Uint8Array.from(atob(p), (c) => c.charCodeAt(0));
         };
         const challenge = rnd(32);
-        const cred = await navigator.credentials.get({ signal: ctl.signal, publicKey: {
+        const opts = { signal: ctl.signal, publicKey: {
             challenge,
             rpId,
             allowCredentials: [{ type: 'public-key', id: unb64u(credB64u) }],
             userVerification: 'required',
             timeout: 15000
-        }});
+        }};
+        phase = 'call';
+        const cred = await navigator.credentials.get(opts);
+        phase = 'post';
         if (finished) { return; }
         clearTimeout(timer);
         const cd = JSON.parse(new TextDecoder().decode(cred.response.clientDataJSON));
@@ -80,7 +85,7 @@ const credB64u = arguments[2];
             signatureLen: sig.length
         });
     } catch (e) {
-        finish({ ok: false, errorName: timedOut ? 'HarnessTimeout' : String((e && e.name) || 'Error') });
+        finish({ ok: false, errorName: timedOut ? 'HarnessTimeout' : (phase === 'call' ? String((e && e.name) || 'Error') : 'HarnessScript') });
     }
 })();
 "#;
