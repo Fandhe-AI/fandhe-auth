@@ -29,7 +29,7 @@
 #       repo の `.cargo/config.toml`・`.cargo/config` の `[env]` のキー（TOML を構造として読み、引用キーのエスケープを復号した後の名前）の
 #       `OPENSSL_STATIC` と `<TARGET>_OPENSSL_STATIC` を値によらず違反にする（安全側）。コメントや他の設定値の中の文字列は数えない。
 #       TOML が読めない・不正なら検査不能（2）。名前と値は出さず件数だけ出す。
-#       PKG_CONFIG_ALL_STATIC（と <TARGET>_PKG_CONFIG_ALL_STATIC）も存在だけで静的を選ぶため同じく違反にする。同じ .cargo に config と config.toml が
+#       PKG_CONFIG_ALL_STATIC も存在だけで静的を選ぶため同じく違反にする（上流が読む名前の正確な一覧と、多めに数える分は count_static_env のコメント）。同じ .cargo に config と config.toml が
 #       共存する場合は両方を検査する（片方が消えると残りが有効になるため。dependency-policy.md の配置禁止に合わせ、優先順位で無視される側も見ない道を作らない）。
 #       `[env]` が存在してテーブルでない（`env = []` 等）場合は検査不能（2）。
 #   報告: 本番の依存の木の openssl-sys の件数（package ごと。(*) の付記は除いて重複排除）を出す（参考。合否に入れない）。
@@ -151,14 +151,20 @@ count_rule() {
   echo "${n}"
 }
 
-# count_static_env [前置コマンド...]: 環境変数のうち、名前が次の 4 つの形のものの数を返す（R4）。
-#   OPENSSL_STATIC・PKG_CONFIG_ALL_STATIC、<TARGET>_OPENSSL_STATIC・<TARGET>_PKG_CONFIG_ALL_STATIC（末尾一致）
+# count_static_env [前置コマンド...]: 環境変数のうち、名前が次のどれかの形のものの数を返す（R4。count_static_config の `[env]` のキーも同じ規則）。
+#   (a) 接頭辞なし: OPENSSL_STATIC・PKG_CONFIG_ALL_STATIC
+#   (b) 末尾一致: <TARGET>_OPENSSL_STATIC・<TARGET>_PKG_CONFIG_ALL_STATIC（HOST_・TARGET_ の接頭辞の形を含む）
+#   (c) 接尾辞: OPENSSL_STATIC_<target>・PKG_CONFIG_ALL_STATIC_<target>（<target> は `-` のままでも `_` でもよい）
+# 上流が実際に読む名前（openssl-sys 0.9.117 の build/main.rs、pkg-config 0.3.34 の lib.rs で確認）:
+#   openssl-sys: `OPENSSL_STATIC` と、<TARGET> を大文字にして `-` を `_` に替えた <TARGET>_OPENSSL_STATIC の 2 つ（env 関数）。
+#   pkg-config: infer_static が `<LIB>_STATIC`（OPENSSL_STATIC。接頭辞なし）と PKG_CONFIG_ALL_STATIC を接頭辞なしで読むだけ。
+#     targeted_env_var（PKG_CONFIG_PATH 等の他の変数用）がターゲット付きで読む形は、接尾辞の <VAR>_<target>（`-` のままと `_` に替えた形）と
+#     HOST_・TARGET_ の接頭辞。infer_static はこれを通さないが、上流の版が変わっても漏らさないよう (c) も数える。
+#   <TARGET>_PKG_CONFIG_ALL_STATIC と、ハイフン入りの名前は上流が読まない。見えれば安全側に多めに数える分で、検査契約の中心ではない。
+# 上流の版を上げたら、読む名前の形（上の 2 crate の箇所）が変わっていないか確かめ直す。
 # pkg-config crate は存在だけで静的を選ぶため、値が `0` でも数える。名前も値も出さない。値は判定に使わず、eval やコマンドの引数にも展開しない。
-# <TARGET> はハイフンを含み得る（上流の openssl-sys はハイフンを `_` に替えた名前を読むため、ここでは上流の版が変わっても漏らさないよう、
-# 安全側に多めに数える）。bash の変数名にならない名前も見落とさないよう、compgen ではなく python の os.environ で列挙する。
+# bash の変数名にならない名前も見落とさないよう、compgen ではなく python の os.environ で列挙する。
 # 前置コマンドは試験用（env -i で子の環境を作る）。bash を経ず、解決済みの Python の実体（PY）を直接起動する。
-# <TARGET> の検査契約は上流と同じ「大文字にし `-` を `_` に替えた名前」（openssl-sys 0.9.117 の build/main.rs、pkg-config 0.3.34 の lib.rs で確認）。
-# ハイフン入りの名前は上流が読まないので契約の外で、見えれば多めに数える分。上流の版を上げたら、読む名前の形が変わっていないか確かめ直す。
 # 出力が数字でなければ検査不能（2）。python が 0 で何も出さない場合を 0 件として扱わない（fail-closed）。
 count_static_env() {
   local c
@@ -166,7 +172,7 @@ count_static_env() {
 import os
 n = 0
 for k in os.environ:
-    if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")):
+    if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")) or k.startswith(("OPENSSL_STATIC_", "PKG_CONFIG_ALL_STATIC_")):
         n += 1
 print(n)
 ' 2>/dev/null)" || return 2
@@ -195,7 +201,7 @@ except Exception:
 e = d.get("env", {})
 if not isinstance(e, dict):
     sys.exit(2)
-n = sum(1 for k in e if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")))
+n = sum(1 for k in e if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")) or k.startswith(("OPENSSL_STATIC_", "PKG_CONFIG_ALL_STATIC_")))
 print(n)
 ' "${f}" 2>/dev/null)" || return 2
     case "${c}" in '' | *[!0-9]*) return 2 ;; esac
@@ -343,7 +349,7 @@ selftest() {
   # F10: 静的リンクの環境変数（R4）。env -i で外側の環境（PATH・HOME も）を消し、試験の変数だけを渡して解決済みの Python の実体を直接起動して数える。
   # ハイフンを含む名前（bash の変数名にならない）も数えることを確かめる。
   local ev cnt rc
-  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'PKG_CONFIG_ALL_STATIC=1:ge1' 'x86_64-unknown-linux-gnu_OPENSSL_STATIC=1:ge1' 'aarch64-linux-android_PKG_CONFIG_ALL_STATIC=1:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0' 'NOT-OPENSSL_STATIC_X=1:eq0'; do
+  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'PKG_CONFIG_ALL_STATIC=1:ge1' 'x86_64-unknown-linux-gnu_OPENSSL_STATIC=1:ge1' 'aarch64-linux-android_PKG_CONFIG_ALL_STATIC=1:ge1' 'OPENSSL_STATIC_x86_64-unknown-linux-gnu=1:ge1' 'PKG_CONFIG_ALL_STATIC_x86_64_unknown_linux_gnu=1:ge1' 'HOST_PKG_CONFIG_ALL_STATIC=1:ge1' 'OPENSSL_STATICX=1:eq0' 'PKG_CONFIG_ALL_STATICX=1:eq0' 'NOT_OPENSSL_STATIC_X=1:eq0' 'NOT-OPENSSL_STATIC_X=1:eq0'; do
     cnt="$(count_static_env env -i "${ev%:*}")" || exit 2
     case "${cnt}" in '' | *[!0-9]*) log "error: selftest F10: non-numeric count; cannot inspect"; exit 2 ;; esac
     if { [ "${ev##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${ev##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
@@ -362,7 +368,7 @@ selftest() {
       exit 2
     fi
     rc=0
-    PY="${f}/fakepy-${fk}/python3" count_static_env env -i >/dev/null 2>&1 || rc=$?
+    ( PY="${f}/fakepy-${fk}/python3"; count_static_env env -i ) >/dev/null 2>&1 || rc=$?
     if [ "${rc}" -ne 2 ]; then
       log "FAIL selftest F10b: fake python output (${fk}) not treated as cannot-inspect"
       exit 1
@@ -375,6 +381,10 @@ selftest() {
   rc=0
   # shellcheck disable=SC2016 # 単引用符の中身は子の bash が展開する（$1 は子の引数）。
   out="$(env "X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=1" "${BASH}" -c '. "$1"; resolve_python; count_static_env' _ "${DIR}/check-openssl-vendored.sh" 2>&1)" || rc=$?
+  if [ "${rc}" -eq 2 ]; then
+    log "error: selftest F10c: child exited 2; cannot inspect"
+    exit 2
+  fi
   case "${out}" in '' | *[!0-9]*) rc=1 ;; *) [ "${out}" -ge 1 ] || rc=1 ;; esac
   if [ "${rc}" -ne 0 ]; then
     log "FAIL selftest F10c: normalized target env not counted via sourced shell, or main ran on source"
@@ -396,7 +406,8 @@ selftest() {
     ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config.toml" ||
     ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config" ||
     ! printf '[env\nOPENSSL_STATIC = 1\n' 2>/dev/null >"${f}/c8/.cargo/config.toml" ||
-    ! mkdir -p "${f}/c11/.cargo" "${f}/c12/.cargo" "${f}/c13/.cargo" 2>/dev/null ||
+    ! mkdir -p "${f}/c11/.cargo" "${f}/c12/.cargo" "${f}/c13/.cargo" "${f}/c14/.cargo" 2>/dev/null ||
+    ! printf '[env]\nOPENSSL_STATIC_x86_64 = "1"\nPKG_CONFIG_ALL_STATICX = "1"\n' 2>/dev/null >"${f}/c14/.cargo/config.toml" ||
     ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c13/.cargo/config" ||
     ! ln -s missing-target "${f}/c13/.cargo/config.toml" 2>/dev/null ||
     ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c11/.cargo/config.toml" ||
@@ -405,7 +416,7 @@ selftest() {
     log "error: cannot write fixture (f11); cannot inspect"
     exit 2
   fi
-  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0 c5:ge1 c6:eq0 c7:ge1 c9:ge1 c10:ge1 c11:ge1; do
+  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0 c5:ge1 c6:eq0 c7:ge1 c9:ge1 c10:ge1 c11:ge1 c14:ge1; do
     cnt="$(count_static_config "${f}/${cfg%%:*}")" || exit 2
     if { [ "${cfg##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${cfg##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
       log "FAIL selftest F11: static config check wrong (${cfg%%:*})"
