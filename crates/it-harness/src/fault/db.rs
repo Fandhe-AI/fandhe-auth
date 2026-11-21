@@ -578,7 +578,8 @@ impl DbFaultProxy {
     }
 
     /// 中継を始める段で遮断の世代の比較が外れ、client のバイトを上流へ送らずに拒否した回数（ORST-17）。
-    /// 停止による拒否・接続の失敗・ソケットの複製の失敗・遮断中の accept での拒否は数えない。
+    /// `start_relay` の世代の比較で見つけた世代の不一致を伴う拒否は、停止・遮断と重なっても数える（`halted` と世代の不一致の両方が真でも数える）。
+    /// `connect_upstream` の接続前の確認で起きる世代の不一致、世代の不一致を伴わない停止・遮断による拒否、接続の失敗、ソケットの複製の失敗、遮断中の accept での拒否は数えない。
     /// それらは [`Self::refused_count`] に出て、到達した段階の計数にも残る（接続の失敗は
     /// [`Self::upstream_attempt_count`]、上流へ接続した後の複製の失敗は [`Self::upstream_connected_count`] にも出る）。
     /// 転送器全体の数。接続を 1 本に限った試験でだけ、接続ごとの証拠になる。
@@ -911,8 +912,10 @@ fn dial_upstream(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
 }
 
 /// 本番の接続。`TcpStream::connect_timeout` そのもの。
+/// この 1 行だけをロックで囲む回帰は、全 OS の停止点の試験では検出できず、Linux の試験
+/// `block_returns_promptly_while_real_upstream_connect_is_stalled_linux` が本物の connect を詰まらせて検出する。
 /// ここで `conns` のロックを取らない。ロックで囲む回帰を試験が検出できる境界は、この関数の上の `dial_upstream` の
-/// `shared.connect` の呼び出しで、停止点はその内側にある。この関数の中は停止点より下なので、囲んでも試験は検出できない（ORST-17）。
+/// `shared.connect` の呼び出しで、停止点はその内側にある。この関数の中は停止点より下なので、囲んでも全 OS の停止点の試験では検出できない（ORST-17）。
 fn connect_real(_: &Shared, addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
     TcpStream::connect_timeout(addr, timeout)
 }
@@ -962,7 +965,7 @@ fn start_relay(connected: Connected, shared: &Arc<Shared>) {
     if halted || gen_mismatch {
         let _ = up.shutdown(Shutdown::Both);
         shared.sever_conn(id);
-        // 世代の比較が外れたときだけ数える（停止・現在の遮断による拒否は数えない）。
+        // 世代の比較が外れたときだけ数える（世代の不一致が無い停止・遮断による拒否は数えない）。
         if gen_mismatch {
             shared.generation_refused.fetch_add(1, Ordering::SeqCst);
         }

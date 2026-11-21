@@ -628,6 +628,67 @@ fn stop_returns_while_accept_is_held_at_stall_point() {
     );
 }
 
+/// 上流の待ち行列を満杯にして、本物の上流への connect が固まる状態を作る。返す値は drop まで保つ。
+/// 待ち行列があふれると SYN を捨てる挙動に依るので Linux だけに限る（`docs/harness/fault-injection.md` の OS の条件）。
+#[cfg(target_os = "linux")]
+struct StalledUpstream {
+    port: u16,
+    _listener: TcpListener,
+    _filled: Vec<TcpStream>,
+}
+
+#[cfg(target_os = "linux")]
+fn stalled_upstream() -> StalledUpstream {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut filled = Vec::new();
+    loop {
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+            Ok(s) => filled.push(s),
+            Err(e) if e.kind() == ErrorKind::TimedOut => break,
+            Err(e) => panic!("unexpected connect error: {:?}", e.kind()),
+        }
+        assert!(filled.len() < 20_000, "backlog never filled");
+    }
+    StalledUpstream {
+        port,
+        _listener: listener,
+        _filled: filled,
+    }
+}
+
+/// ORST-17: 本物の上流への connect が固まっていても `block()` は待たされない（Linux のみ。検出を足す試験で、契約を変えない）。
+/// 停止点の試験（全 OS）は OS の connect の 1 行を停止点の外に残す。この試験は本物の connect を詰まらせ、
+/// その 1 行だけを `conns` のロックで囲む回帰を `block()` の 1 秒超えで検出する。
+#[cfg(target_os = "linux")]
+#[test]
+fn block_returns_promptly_while_real_upstream_connect_is_stalled_linux() {
+    let up = stalled_upstream();
+    let mut p = ExternalStoreFaultProxy::start_to_port(up.port).unwrap();
+    let mut tl = timeline();
+    let mut stuck = connect(p.listen_port());
+    // 転送器の connect が実際に固まっている（試行 1 回・成功 0 回・拒否 0 回）のを確かめてから `block()` を呼ぶ。
+    assert!(
+        wait_until(|| p.upstream_attempt_count() == 1
+            && p.upstream_connected_count() == 0
+            && p.refused_count() == 0),
+        "the forwarder connect did not reach the stalled state"
+    );
+    let started = Instant::now();
+    p.block(&mut tl).unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "block waited for the stalled connect: {elapsed:?}"
+    );
+    assert_eq!(
+        roundtrip(&mut stuck, b"s"),
+        Outcome::Disconnected,
+        "stalled conn is cut by the block"
+    );
+}
+
 /// 接続の試行が続いていても `block()` は期限の中で戻る（Cursor Bugbot の指摘の回帰防止。
 /// accept のスレッドがロックを取り直し続けて `block()` を待たせない）。
 #[test]
