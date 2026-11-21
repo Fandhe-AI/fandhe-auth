@@ -38,6 +38,8 @@ pub enum ClockSkewError {
     AlreadyActive,
     /// 適用中のずれが無い。
     NotActive,
+    /// 適用した実行と別の実行の記録を渡された（状態も記録も変えない）。
+    RunMismatch,
     /// 基準の時刻にずれを足すと表せない、または UNIX 紀元より前になる。
     OutOfRange,
     /// 記録に拒否された（基準線の実行等）。
@@ -50,6 +52,7 @@ impl fmt::Display for ClockSkewError {
             Self::InvalidParam => "invalid parameter",
             Self::AlreadyActive => "already active",
             Self::NotActive => "not active",
+            Self::RunMismatch => "run mismatch",
             Self::OutOfRange => "skewed time out of range",
             Self::Record(_) => "record rejected",
         };
@@ -131,6 +134,8 @@ pub struct ClockSkewInjector {
     skew_ms: Arc<AtomicI64>,
     base: BaseClock,
     active: Option<FaultKind>,
+    /// 適用した実行の識別（`active` と同時に入れ替える）。`release`・`step` は同じ実行の記録だけを受ける。
+    run_id: Option<u64>,
 }
 
 impl fmt::Debug for ClockSkewInjector {
@@ -159,6 +164,7 @@ impl ClockSkewInjector {
             skew_ms: Arc::new(AtomicI64::new(0)),
             base: Arc::new(base),
             active: None,
+            run_id: None,
         }
     }
 
@@ -206,29 +212,41 @@ impl ClockSkewInjector {
             .map_err(ClockSkewError::Record)?;
         self.skew_ms.store(skew_ms, Ordering::SeqCst);
         self.active = Some(kind);
+        self.run_id = Some(timeline.run_id());
         Ok(())
+    }
+
+    /// 適用した実行の記録かを確かめる（別の実行なら状態も記録も変えない）。
+    fn check_run(&self, timeline: &FaultTimeline) -> Result<(), ClockSkewError> {
+        if self.run_id == Some(timeline.run_id()) {
+            Ok(())
+        } else {
+            Err(ClockSkewError::RunMismatch)
+        }
     }
 
     /// ずれを解除する。`Applied` と同じ値で `Released` を記録する。
     ///
     /// # Errors
-    /// 適用中でなければ `NotActive`。記録が拒否されたら `Record` で状態を変えない。
+    /// 適用中でなければ `NotActive`、別の実行の記録は `RunMismatch`。記録が拒否されたら `Record` で状態を変えない。
     pub fn release(&mut self, timeline: &mut FaultTimeline) -> Result<(), ClockSkewError> {
         let Some(kind) = self.active else {
             return Err(ClockSkewError::NotActive);
         };
+        self.check_run(timeline)?;
         timeline
             .record_now(kind, FaultPhase::Released)
             .map_err(ClockSkewError::Record)?;
         self.skew_ms.store(0, Ordering::SeqCst);
         self.active = None;
+        self.run_id = None;
         Ok(())
     }
 
     /// ずれを別の値へ段階的に変える（AVLB-31）。記録は `Released(旧)` の後に `Applied(新)`。
     ///
     /// # Errors
-    /// 適用中でなければ `NotActive`。0・同じ値は `InvalidParam`、表せない時刻は `OutOfRange`（いずれも何も記録しない）。
+    /// 適用中でなければ `NotActive`、別の実行の記録は `RunMismatch`（何も変えない）。0・同じ値は `InvalidParam`、表せない時刻は `OutOfRange`（いずれも何も記録しない）。
     /// `Released` の記録が拒否されたら状態を変えない。`Applied` の記録だけが拒否されたときは、記録と一致させて
     /// 「解除済み（ずれなし）」の状態で `Record` を返す。
     pub fn step(
@@ -239,14 +257,18 @@ impl ClockSkewInjector {
         let Some(old) = self.active else {
             return Err(ClockSkewError::NotActive);
         };
-        let new = self.prepare(skew_ms)?;
+        self.check_run(timeline)?;
+        // 0・同じ値の検査は基準時計の読み取り・範囲検査より先（InvalidParam を OutOfRange に化けさせない）。
+        let new = FaultKind::clock_skew(skew_ms).map_err(|_| ClockSkewError::InvalidParam)?;
         if new == old {
             return Err(ClockSkewError::InvalidParam);
         }
+        shifted((self.base)(), skew_ms)?;
         timeline
             .record_now(old, FaultPhase::Released)
             .map_err(ClockSkewError::Record)?;
         self.active = None;
+        self.run_id = None;
         // 読み取り側に「ずれなし」の時刻を見せないため、旧い値から新しい値へ直接入れ替える。
         // 0 へ戻すのは `Applied` の記録が拒否されたときだけ（記録と一致させる）。
         if let Err(e) = timeline.record_now(new, FaultPhase::Applied) {
@@ -255,6 +277,7 @@ impl ClockSkewInjector {
         }
         self.skew_ms.store(skew_ms, Ordering::SeqCst);
         self.active = Some(new);
+        self.run_id = Some(timeline.run_id());
         Ok(())
     }
 }
@@ -295,14 +318,49 @@ mod tests {
         let mut inj = injector();
         let mut tl = timeline();
         inj.apply(&mut tl, 1_000).unwrap();
-        // 基準線の timeline で Released を拒否させる: 状態は変わらない。
+        // 基準線の timeline は別の実行なので Released の前に拒否される: 状態は変わらない。
         let mut base = FaultTimeline::baseline(Instant::now(), SystemTime::now()).unwrap();
         assert!(matches!(
             inj.step(&mut base, 2_000),
-            Err(ClockSkewError::Record(_))
+            Err(ClockSkewError::RunMismatch)
         ));
         assert_eq!(inj.active_skew_ms(), Some(1_000));
         assert_eq!(inj.clock().skew_ms(), 1_000);
+    }
+
+    #[test]
+    fn other_run_timeline_is_rejected() {
+        let mut inj = injector();
+        let mut tl = timeline();
+        let mut other = timeline();
+        inj.apply(&mut tl, 1_000).unwrap();
+        assert_eq!(inj.release(&mut other), Err(ClockSkewError::RunMismatch));
+        assert_eq!(
+            inj.step(&mut other, 2_000),
+            Err(ClockSkewError::RunMismatch)
+        );
+        assert_eq!(inj.active_skew_ms(), Some(1_000));
+        assert_eq!(inj.clock().skew_ms(), 1_000);
+        inj.release(&mut tl).unwrap();
+    }
+
+    #[test]
+    fn step_same_or_zero_is_invalid_even_if_base_is_out_of_range() {
+        use std::sync::atomic::AtomicU64;
+        let secs = Arc::new(AtomicU64::new(BASE_SECS));
+        let s2 = Arc::clone(&secs);
+        let mut inj = ClockSkewInjector::with_base_clock(move || {
+            UNIX_EPOCH + Duration::from_secs(s2.load(Ordering::SeqCst))
+        });
+        let mut tl = timeline();
+        inj.apply(&mut tl, -1_000_000).unwrap();
+        // 基準が後退して現在の値でも範囲外になる状態。
+        secs.store(1, Ordering::SeqCst);
+        assert_eq!(
+            inj.step(&mut tl, -1_000_000),
+            Err(ClockSkewError::InvalidParam)
+        );
+        assert_eq!(inj.step(&mut tl, 0), Err(ClockSkewError::InvalidParam));
     }
 
     #[test]
