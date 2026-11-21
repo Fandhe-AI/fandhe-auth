@@ -38,7 +38,7 @@ check_tool required cargo-fmt cargo fmt --version
 check_tool required cargo-clippy cargo clippy --version
 # check-openssl-vendored.sh が TOML の解析に python3 の tomllib（3.11 以上）を使う。import できなければ検査不能になる。
 # check_tool は名前を command -v に使うため、python3 は専用に判定する。
-if out="$(python3 -c 'import sys, tomllib; print("python3 " + sys.version.split()[0] + " (tomllib ok)")' 2>&1)"; then
+if out="$(python3 -I -c 'import sys, tomllib; print("python3 " + sys.version.split()[0] + " (tomllib ok)")' 2>&1)"; then
   echo "ok   python3: ${out}"
 else
   echo "miss python3: not found or tomllib not importable; Python 3.11+ is required (required)"

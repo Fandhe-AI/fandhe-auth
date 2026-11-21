@@ -29,6 +29,8 @@
 #       repo の `.cargo/config.toml`・`.cargo/config` の `[env]` のキー（TOML を構造として読み、引用キーのエスケープを復号した後の名前）の
 #       `OPENSSL_STATIC` と `<TARGET>_OPENSSL_STATIC` を値によらず違反にする（安全側）。コメントや他の設定値の中の文字列は数えない。
 #       TOML が読めない・不正なら検査不能（2）。名前と値は出さず件数だけ出す。
+#       PKG_CONFIG_ALL_STATIC（と <TARGET>_PKG_CONFIG_ALL_STATIC）も存在だけで静的を選ぶため同じく違反にする。同じ .cargo に config と config.toml が
+#       共存する場合は Cargo と同じく config だけを検査し、無視される config.toml は見ない。
 #   報告: 本番の依存の木の openssl-sys の件数（package ごと。(*) の付記は除いて重複排除）を出す（参考。合否に入れない）。
 #       依存の木だけではリンク方式（動的か静的か）を断定できない。1 件以上なら版の記録の要否と最終バイナリのリンク方式の確認は
 #       Hub の `AOPS-2` で行う（本体は記録を持たない。D-2026-10-30-1）。0 件なら本体の依存の木から `AOPS-2` に載せるものは無い。
@@ -186,7 +188,7 @@ count_static_env() {
   local name n=0
   while IFS= read -r name; do
     case "${name}" in
-      OPENSSL_STATIC | *_OPENSSL_STATIC) n=$((n + 1)) ;;
+      OPENSSL_STATIC | *_OPENSSL_STATIC | PKG_CONFIG_ALL_STATIC | *_PKG_CONFIG_ALL_STATIC) n=$((n + 1)) ;;
     esac
   done < <(compgen -e)
   echo "${n}"
@@ -196,9 +198,15 @@ count_static_env() {
 # （R4。値が 0 でも数える＝安全側）。TOML を tomllib で構造として読み、復号後のキー名で判定する。コメント・他の値の文字列は数えない。
 # 読めない・TOML として不正なファイルは検査不能（2）。python の診断（パスを含み得る）は出さない。
 count_static_config() {
-  local f n=0 c
-  for f in "$1/.cargo/config.toml" "$1/.cargo/config"; do
-    [ -e "${f}" ] || continue
+  local f c n=0
+  # Cargo は同じディレクトリに .cargo/config と .cargo/config.toml が共存すると拡張子なしを採り、config.toml は読まない。
+  # 無視される側を数えて誤検出しないよう、実際に読まれる 1 ファイルだけを検査する。
+  if [ -e "$1/.cargo/config" ]; then
+    f="$1/.cargo/config"
+  else
+    f="$1/.cargo/config.toml"
+  fi
+  if [ -e "${f}" ]; then
     [ -r "${f}" ] || return 2
     c="$(python3 -I -c '
 import sys, tomllib
@@ -210,12 +218,12 @@ except Exception:
 e = d.get("env", {})
 n = 0
 if isinstance(e, dict):
-    n = sum(1 for k in e if k == "OPENSSL_STATIC" or k.endswith("_OPENSSL_STATIC"))
+    n = sum(1 for k in e if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")))
 print(n)
 ' "${f}" 2>/dev/null)" || return 2
     case "${c}" in '' | *[!0-9]*) return 2 ;; esac
     n=$((n + c))
-  done
+  fi
   echo "${n}"
 }
 
@@ -356,10 +364,10 @@ selftest() {
 
   # F10: 静的リンクの環境変数（R4）。外側の環境に左右されないよう、サブシェルで該当の変数を消してから試す。
   local ev cnt nm
-  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0'; do
+  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'PKG_CONFIG_ALL_STATIC=1:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0'; do
     cnt="$(
       while IFS= read -r nm; do
-        case "${nm}" in OPENSSL_STATIC | *_OPENSSL_STATIC) unset "${nm}" ;; esac
+        case "${nm}" in OPENSSL_STATIC | *_OPENSSL_STATIC | PKG_CONFIG_ALL_STATIC | *_PKG_CONFIG_ALL_STATIC) unset "${nm}" ;; esac
       done < <(compgen -e)
       export "${ev%%:*}"
       count_static_env
@@ -380,11 +388,15 @@ selftest() {
     ! printf '[env]\n"OPENSSL_\\u0053TATIC" = "1"\n' 2>/dev/null >"${f}/c5/.cargo/config.toml" ||
     ! printf '# OPENSSL_STATIC = "1"\n[env]\nOTHER = "OPENSSL_STATIC"\n' 2>/dev/null >"${f}/c6/.cargo/config.toml" ||
     ! printf 'env.X86_OPENSSL_STATIC = "0"\n' 2>/dev/null >"${f}/c7/.cargo/config.toml" ||
+    ! mkdir -p "${f}/c9/.cargo" "${f}/c10/.cargo" 2>/dev/null ||
+    ! printf '[env]\nPKG_CONFIG_ALL_STATIC = "1"\n' 2>/dev/null >"${f}/c9/.cargo/config.toml" ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config.toml" ||
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config" ||
     ! printf '[env\nOPENSSL_STATIC = 1\n' 2>/dev/null >"${f}/c8/.cargo/config.toml"; then
     log "error: cannot write fixture (f11); cannot inspect"
     exit 2
   fi
-  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0 c5:ge1 c6:eq0 c7:ge1; do
+  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0 c5:ge1 c6:eq0 c7:ge1 c9:ge1 c10:eq0; do
     cnt="$(count_static_config "${f}/${cfg%%:*}")" || exit 2
     if { [ "${cfg##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${cfg##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
       log "FAIL selftest F11: static config check wrong (${cfg%%:*})"
