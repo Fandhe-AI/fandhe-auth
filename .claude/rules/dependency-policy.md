@@ -85,7 +85,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 ## 依存を足す・更新するときの確認手順
 
-この手順は暫定で、cargo-audit の DB の取得が監査を兼ねており DPOL-33 の取得と監査の分離を満たさない。正式な手順と記録の様式は TASK-679、`deny.toml` は TASK-668 で決める。
+この手順は暫定で、cargo-audit の DB の取得が監査を兼ねており DPOL-33 の取得と監査の分離を満たさない。正式な手順と記録の様式は TASK-679（DPOL-33）、`deny.toml` は TASK-668 で決める。
 この手順の合格を DPOL-34 の合格とは扱わない。
 `deny.toml`（TASK-668）が無い間は、既定の設定で bans・licenses・sources が成功しても DPOL-18・DPOL-22・DPOL-24・DPOL-25 への適合は確かめられない。
 この 4 つの規約は PR 本文に「未評価」と書き、既定の設定の出力は「参考結果（規約の合否ではない）」として記録する（`dependency-auditor` Agent の手順と同じ）。
@@ -95,10 +95,10 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 ```bash
 # advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。使った DB の commit と取得日を記録する
 cargo deny fetch
-cargo audit --file Cargo.lock        # cargo-audit の DB の取得を兼ねる（QP-2 の手順）
+cargo audit --file Cargo.lock        # cargo-audit の DB の取得を兼ねる（QP-2 の手順）。脆弱性の検出で非 0 になるが、取得の成否とは別（下の記録の項）
+date -u +%FT%TZ                      # 取得日（ツールごとに、取得の成功を確かめた直後。git log より前に流す。上の %cI は DB の commit 日時で取得日ではない）
 git -C ~/.cargo/advisory-db log -1 --format='%H %cI'                  # cargo-audit の DB の commit と日時
 git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'  # cargo-deny の DB の commit と日時
-date -u +%FT%TZ                      # 取得に成功した後の日時（取得日。上の %cI は DB の commit 日時で取得日ではない）
 
 # 取得なしで流す（DPOL-33・DPOL-34）
 cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
@@ -114,11 +114,14 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
 ```
 
-- advisory DB の「取得日」（DPOL-33）は、取得が成功したことを確かめた時点の日時で、`git log` の `%cI`（DB の commit の日時）とは別に記録する。
-  取得（`cargo deny fetch`・`cargo audit --file Cargo.lock`）の成功を確かめられなかったときは、取得日を書かず、取得を確認できなかったと報告する。
+- advisory DB の「取得日」（DPOL-33）は、ツールごとに取得が成功したことを確かめた時点の日時で、`git log` の `%cI`（DB の commit の日時）とは別に記録する。
+  取得の成否と監査結果の終了コードは分ける。`cargo deny fetch` は終了コード 0 を取得の成功とする。`cargo audit --file Cargo.lock` は脆弱性の検出でも非 0 で終わるため、
+  出力に DB の読み込みの記録（`Loaded <N> security advisories`）があり、取得の失敗の誤りが無いことで取得の成功を確かめる（検出による非 0 は監査結果として別に記録する）。
+  成功を確かめられなかったツールは、取得日を書かず、取得を確認できなかったと報告する。
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
-  0 にならない（cargo 1.100.0 で 101 を確認）。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
-  「一致なし」と読むのは、stderr を取得でき、指定した `-i` の対象（例: `rsa`）についての `did not match any packages` の診断だけのとき。
+  0 にならない（cargo 1.100.0 で 101 を確認）。対象が `Cargo.lock` にあっても指定した依存の種類・feature のグラフに無いときは、終了コード 0 で `nothing to print` を出す。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
+  「一致なし」と読むのは、stderr を取得でき、指定した `-i` の対象（例: `rsa`）についての `did not match any packages` の診断だけのとき、
+  または終了コード 0 で `nothing to print` の他に木の出力が無いときで、後者を実行失敗と書かない。
   stderr を取得できない・別の誤り（lockfile・manifest・fetch・未知の feature 等）・別の対象への診断は「実行失敗」で不合格とし、「依存なし」と読まない。
   `absent`（一致なし）と、`--exclude` 等で絞り込んだ結果の 0 件（`filtered`）は区別して書く。集計行でも混ぜず、禁止依存が見つからなかったことだけを示すなら絞り込みの有無を併記する。
   `openssl` が見つかったときは、手動で確認した結果（逆依存の根と、DPOL-10・DPOL-11 への適合の判定）を PR 本文に記録する。

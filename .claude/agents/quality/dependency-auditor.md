@@ -56,7 +56,7 @@ cargo audit --file Cargo.lock
 
 2 つ目は cargo-audit の DB の取得を兼ねる（QP-2 の手順）ため、DPOL-33 の取得と監査の分離を満たさない暫定の手順である（正式な手順と記録の様式は TASK-679。`../../rules/dependency-policy.md` の「依存を足す・更新するときの確認手順」と同じ）。
 取得はこの 1 回だけで、以後の実行は全て取得なしで流す。報告には「暫定の手順で、DPOL-34 の合格ではない」と書く。
-使った DB の commit と取得日を記録する（DPOL-33）。取得日は、2 つの取得コマンドが成功した（終了コード 0）直後に `date -u +%FT%TZ` を流して得た日時とし、下の `%cI`（DB の commit の日時）とは別に書く。取得の成功を確認できなかったときは取得日を書かず、「取得を確認できなかった」と報告する。commit は次で読む（`<hash>` は `ls ~/.cargo/advisory-dbs` で確かめる）。
+使った DB の commit と取得日を記録する（DPOL-33）。取得の成否と監査結果の終了コードは分けて読む。`cargo deny fetch` は終了コード 0 を取得の成功とする。`cargo audit --file Cargo.lock` は脆弱性を検出すると非 0 で終わるため、終了コードでは取得の成否を決めず、出力に DB の取得と読み込みの記録（`Loaded <N> security advisories`）があり、取得の失敗の誤り（fetch・network・git 等）が無いことで取得の成功を確かめる（検出による非 0 は取得の失敗ではなく、監査結果として別に記録する）。取得日は、ツールごとに取得の成功を確かめた直後に `date -u +%FT%TZ` を流して得た日時とし（commit を読む `git log` より前に流す）、下の `%cI`（DB の commit の日時）とは別に書く。取得の成功を確かめられなかったツールは取得日を書かず、「取得を確認できなかった」と報告する。commit は次で読む（`<hash>` は `ls ~/.cargo/advisory-dbs` で確かめる）。
 
 ```bash
 git -C ~/.cargo/advisory-db log -1 --format='%H %cI'
@@ -119,7 +119,7 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 
 `web-sys` は、持てる 1 crate（段階 2 のブラウザ側 WebAuthn モジュール `fandhe-auth-webauthn-wasm`）を `--exclude` で除いた workspace 全体で調べる（DPOL-40）。サーバー側の crate の選定を判断に任せない。`--exclude` の crate が workspace に無い（段階 2 の前）と cargo が誤りで止まる場合は、`--exclude` を外して同じコマンドを流す（除く対象が無いので全 crate が対象になる）。それでも `web-sys` が出たら検出ありとして書く。Hub の本番バイナリのビルドでの確認は Hub の担当（`ARUN-16`）で、この Agent は扱わない。
 
-一致が無いと `did not match any packages` の誤りで非 0 終了する。終了コードだけで読まず、stderr の文言で読む。「一致なし（absent）」と読むのは、stderr を取得でき、指定した `-i` の対象についての `did not match any packages` の診断だけのとき。別の誤り・別の対象への診断・stderr 不明は「実行失敗」と書き、「検出なし」に集計しない。`--exclude` 等で絞り込んだ結果の 0 件は「filtered」と書き、absent と混ぜない（`../../rules/dependency-policy.md` と同じ）。
+一致が無いときの出力は 2 通りある。(1) 対象が `Cargo.lock` に無いと `did not match any packages` の誤りで非 0 終了する。(2) 対象が `Cargo.lock` にあっても本番のグラフ（`-e normal,build`）に無いと、終了コード 0 で `nothing to print` を出す。終了コードだけで読まず、出力の文言で読む。「一致なし（absent）」と読むのは、(1) は stderr を取得でき、指定した `-i` の対象についての `did not match any packages` の診断だけのとき、(2) は終了コード 0 で、`nothing to print` の他に木の出力が無いとき。(2) を実行失敗と書かない。別の誤り・別の対象への診断・stderr 不明は「実行失敗」と書き、「検出なし」に集計しない。`--exclude` 等で絞り込んだ結果の 0 件は「filtered」と書き、absent と混ぜない（`../../rules/dependency-policy.md` と同じ）。
 `openssl` は逆依存の根が webauthn-rs 系だけかを見る（DPOL-10・DPOL-11・DPOL-13。DPOL-12 は移管 → Hub `AOPS-2`）。`rsa` は本番依存（RP 向け crate を含む）で 0 件か（DPOL-18・DPOL-21）、
 `native-tls` は 0 件か（DPOL-46）、`reqwest` は本体の依存で 0 件か（HOST-7・HOST-9。`D-2026-11-20-4`（根拠は HOST-7 の期待欄）で HTTP クライアントの具象 crate は本体の依存に持たない。検討中・〔提案〕）、`web-sys` はサーバー側のビルドに入る crate で 0 件か（DPOL-40）を見る。`-e normal,build` は build-dependencies を含め、dev-dependencies を除く（`-e normal` だけでは build-dependencies が抜ける）。
 試験だけの依存は呼び出し元が求めたときに `-e dev` で別に見る。
@@ -137,7 +137,7 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 - [ ] DB の取得を 1 回にし、以後の実行を取得なし（`--disable-fetch`・`--no-fetch`）で流した。cargo deny と cargo tree は `--locked`、cargo audit は `git diff --exit-code Cargo.lock` で書き換えなしを確かめた
 - [ ] 逆引きは本番の feature を明示し（`--all-features` なし）、`-e normal,build` で流した
 - [ ] 5 つの実行と 5 つの逆引きの結果を表にした（逆引きは absent・filtered・実行失敗を区別した）
-- [ ] DB の取得日を取得成功時の日時として commit 日時と別に記録した（確認できなければその旨を報告した）
+- [ ] DB の取得日をツールごとに、取得の成功を確かめた時点の日時として commit 日時と別に記録した（cargo audit は検出による非 0 と取得の成否を分けた。確認できなければその旨を報告した）
 - [ ] `deny.toml` が無いとき、規約固有の検査（DPOL-18・DPOL-22・DPOL-24・DPOL-25）を「未評価」とし、既定の設定の結果を参考結果と明示した
 - [ ] 例外の承認・ファイルの変更をしていない
 
@@ -148,7 +148,9 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 
 ### 実行の条件
 - cargo-deny: {版} / cargo-audit: {版}
-- advisory DB の取得日（取得成功時の日時。取得を確認できなければその旨）: {日時}（commit と commit 日時 %cI は別: commit: cargo-deny {commit} / cargo-audit {commit}）
+- advisory DB の記録（ツールごと。取得日時は取得の成功を確かめた時点の日時で、commit 日時 `%cI` とは別。取得を確認できなければ「取得を確認できなかった」と書く）:
+  - cargo-deny: 取得確認の結果 {成功 / 確認できず} / 取得日時 {日時} / commit SHA {commit} / commit 日時 {%cI}
+  - cargo-audit: 取得確認の結果 {成功 / 確認できず（検出による非 0 とは別）} / 取得日時 {日時} / commit SHA {commit} / commit 日時 {%cI}
 - 監査の対象: ルートの `Cargo.lock`（`crates/trial-deps/fuzz/Cargo.lock` は未実施）
 - 逆引きで有効にした feature: {PROD_FEATURES} / {SERVER_FEATURES}（空なら既定の feature だけ）
 
@@ -162,7 +164,7 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 | cargo-audit | | | | DPOL-34 |
 
 ### 逆引き
-| crate | 逆依存の有無（あり / absent / filtered / 実行失敗） | 経路（直下の依存元） | 関係する ID |
+| crate | 逆依存の有無（あり / absent〔did not match または nothing to print〕/ filtered / 実行失敗） | 経路（直下の依存元） | 関係する ID |
 |-------|------------|-------------------|--------------|
 | rsa | | | DPOL-18・DPOL-21 |
 | openssl（見つかったら、逆依存の根と DPOL-10・DPOL-11 への適合の手動確認結果を PR 本文に記録するよう人へ伝える） | | | DPOL-10・DPOL-11・DPOL-13 |
