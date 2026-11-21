@@ -2,7 +2,7 @@
 //! PoC の数値・要件の値を置かない（ACPT-7）。
 
 use fandhe_auth_load_harness::{
-    ApprovedValue, CallResult, ComparisonValue, ComponentConditions, IntervalName,
+    ApprovedValues, CallResult, ComparisonValue, ComponentConditions, IntervalName,
     InvalidValueReason, LOAD_RECORD_FORMAT, LoadConfig, LoadRecord, LoadRecordError, LoopModel,
     MeasurementConditions, MetricKey, RefId, RunRecordFile, StageConfig, StageLimits, StagePlan,
     StagedRun, StdMonotonicClock, TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
@@ -24,17 +24,14 @@ fn val(
     v: Option<u64>,
     ids: &[&str],
 ) -> Result<ComparisonValue, LoadRecordError> {
-    // 承認済みの組は引数と同じ内容で用意する（一致の検査そのものは approval_* の試験で確かめる）。
-    let approved: Vec<ApprovedValue<'_>> = v
-        .map(|value| ApprovedValue {
-            name,
-            class,
-            value,
-            unit: ValueUnit::Ns,
-            refs: ids,
-        })
-        .into_iter()
-        .collect();
+    // 承認済みの一覧は引数と同じ内容を本文から読んで用意する（一致の検査そのものは approval_* の試験で確かめる）。
+    let text = match (v, class) {
+        (Some(value), ValueClass::Requirement | ValueClass::Initial) => {
+            format!("{name}|{}|{value}|ns|{}\n", class.as_str(), ids.join(","))
+        }
+        _ => String::new(),
+    };
+    let approved = ApprovedValues::parse(&text).unwrap();
     ComparisonValue::new(vname(name), class, v, ValueUnit::Ns, refs(ids), &approved)
 }
 
@@ -42,7 +39,7 @@ fn approval(
     class: ValueClass,
     v: u64,
     ids: &[&str],
-    approved: &[ApprovedValue<'_>],
+    approved: &ApprovedValues,
 ) -> Result<ComparisonValue, LoadRecordError> {
     ComparisonValue::new(
         vname("v"),
@@ -54,38 +51,51 @@ fn approval(
     )
 }
 
-/// ACPT-7・load.md 規則 4: 承認済みの組と一致しない値は、無関係な承認済み ID を添えても出せない。
+fn list(text: &str) -> ApprovedValues {
+    ApprovedValues::parse(text).unwrap()
+}
+
+/// ACPT-7・load.md 規則 4: 承認済みの一覧と一致しない値は、無関係な承認済み ID を添えても出せない。
 #[test]
 fn approval_must_match_name_class_value_unit_refs() {
     use ValueClass::*;
-    let ok = ApprovedValue {
-        name: "v",
-        class: Initial,
-        value: 5,
-        unit: ValueUnit::Ns,
-        refs: &["A-1"],
-    };
-    assert!(approval(Initial, 5, &["A-1"], &[ok]).is_ok());
+    let ok = list("v|initial|5|ns|A-1\n");
+    assert!(approval(Initial, 5, &["A-1"], &ok).is_ok());
     let na = LoadRecordError::InvalidValue(InvalidValueReason::NotApproved);
-    assert_eq!(approval(Initial, 5, &["A-1"], &[]).unwrap_err(), na);
+    assert_eq!(
+        approval(Initial, 5, &["A-1"], &ApprovedValues::default()).unwrap_err(),
+        na
+    );
     // 数値・区分・出典・単位・項目のどれか 1 つが違っても出せない。
-    assert_eq!(approval(Initial, 6, &["A-1"], &[ok]).err(), Some(na));
-    assert_eq!(approval(Requirement, 5, &["A-1"], &[ok]).err(), Some(na));
-    assert_eq!(approval(Initial, 5, &["B-2"], &[ok]).err(), Some(na));
-    assert_eq!(approval(Initial, 5, &["A-1", "B-2"], &[ok]).err(), Some(na));
-    let other_unit = ApprovedValue {
-        unit: ValueUnit::Count,
-        ..ok
-    };
-    assert_eq!(
-        approval(Initial, 5, &["A-1"], &[other_unit]).err(),
-        Some(na)
-    );
-    let other_name = ApprovedValue { name: "w", ..ok };
-    assert_eq!(
-        approval(Initial, 5, &["A-1"], &[other_name]).err(),
-        Some(na)
-    );
+    assert_eq!(approval(Initial, 6, &["A-1"], &ok).err(), Some(na));
+    assert_eq!(approval(Requirement, 5, &["A-1"], &ok).err(), Some(na));
+    assert_eq!(approval(Initial, 5, &["B-2"], &ok).err(), Some(na));
+    assert_eq!(approval(Initial, 5, &["A-1", "B-2"], &ok).err(), Some(na));
+    let other_unit = list("v|initial|5|count|A-1\n");
+    assert_eq!(approval(Initial, 5, &["A-1"], &other_unit).err(), Some(na));
+    let other_name = list("w|initial|5|ns|A-1\n");
+    assert_eq!(approval(Initial, 5, &["A-1"], &other_name).err(), Some(na));
+}
+
+/// 承認済みの一覧は本文からだけ読む。PoC の区分・不正な行は受けない（規則 5）。
+#[test]
+fn approved_list_parse_is_strict() {
+    assert!(ApprovedValues::parse("# c\n\nv|initial|5|ns|A-1,B-2\n").is_ok());
+    for bad in [
+        "v|poc_parameter|5|ns|A-1",
+        "v|initial|x|ns|A-1",
+        "v|initial|5|ms|A-1",
+        "v|initial|5|ns|",
+        "v|initial|5|ns|A-1,A-1",
+        "v|initial|5|ns",
+        "V|initial|5|ns|A-1",
+    ] {
+        assert_eq!(
+            ApprovedValues::parse(bad).err(),
+            Some(LoadRecordError::Format),
+            "{bad}"
+        );
+    }
 }
 
 fn invalid(r: Result<ComparisonValue, LoadRecordError>) -> bool {
@@ -95,11 +105,16 @@ fn invalid(r: Result<ComparisonValue, LoadRecordError>) -> bool {
 #[test]
 fn class_rules_fail_closed() {
     use ValueClass::*;
-    for c in [Requirement, Initial, PocParameter] {
+    for c in [Requirement, Initial] {
         assert!(invalid(val("v", c, Some(1), &[])));
         assert!(invalid(val("v", c, None, &["X-1"])));
         assert!(val("v", c, Some(1), &["X-1"]).is_ok());
     }
+    // 規則 5: PoC の数値は比べる値として置かない。
+    assert_eq!(
+        val("v", PocParameter, Some(1), &["X-1"]).unwrap_err(),
+        LoadRecordError::InvalidValue(InvalidValueReason::ClassNotAllowed)
+    );
     assert!(val("v", Undecided, None, &[]).is_ok());
     assert!(val("v", Undecided, None, &["X-1"]).is_ok());
     assert!(invalid(val("v", Undecided, Some(1), &[])));

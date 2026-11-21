@@ -49,7 +49,7 @@ pub use meter::{
 };
 
 pub use record::{
-    ApprovedValue, ComparisonValue, InvalidValueReason, LOAD_RECORD_FORMAT, LoadRecord,
+    ApprovedValues, ComparisonValue, InvalidValueReason, LOAD_RECORD_FORMAT, LoadRecord,
     LoadRecordError, RefId, RunRecordFile, ValueClass, ValueName, ValueUnit,
 };
 

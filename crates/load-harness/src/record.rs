@@ -254,27 +254,84 @@ impl fmt::Debug for RunRecordFile {
 }
 
 /// 人が承認した「項目・区分・数値・単位・出典」の組（`load.md` の「値の区別」規則 4。ACPT-7）。
-/// 要件の値・初期値・PoC のパラメータは、この組と完全に一致するときだけ記録に出せる。
-/// 組の中身は呼び出し元が人の承認を経て渡し、ハーネスは作らない。
-#[derive(Clone, Copy)]
-pub struct ApprovedValue<'a> {
-    pub name: &'a str,
-    pub class: ValueClass,
-    pub value: u64,
-    pub unit: ValueUnit,
-    /// 出典の ID（順序を問わず集合として比べる）。
-    pub refs: &'a [&'a str],
+/// 要件の値・初期値は、この組と完全に一致するときだけ記録に出せる。フィールドは非公開で、
+/// 呼び出し元がその場で組み立てる口はない（[`ApprovedValues::parse`] だけが作る）。
+#[derive(Clone, PartialEq, Eq)]
+struct ApprovedValue {
+    name: String,
+    class: ValueClass,
+    value: u64,
+    unit: ValueUnit,
+    refs: BTreeSet<String>,
 }
 
+/// 人の承認を経た一覧。記録の候補（[`ComparisonValue::new`] の引数）とは独立した経路で読み込み、
+/// 候補をこの一覧に照合する（ACPT-7・規則 4）。記録の候補から一覧を作る経路はない。
+///
+/// 書式（仮置き）: 1 行 1 件 `項目|区分|数値|単位|出典,出典`。区分は `requirement`・`initial` だけ。
+/// 単位は `ns`・`count`・`per_s`。空行と `#` で始まる行は読み飛ばす。
+/// PoC のパラメータは受けない（規則 5。比べる値として置かない）。
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ApprovedValues(Vec<ApprovedValue>);
+
 /// SECR-23・SECR-26: 中身を出さない。
-impl fmt::Debug for ApprovedValue<'_> {
+impl fmt::Debug for ApprovedValues {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ApprovedValue(..)")
+        f.write_str("ApprovedValues(..)")
     }
 }
 
-impl ApprovedValue<'_> {
-    fn matches(
+impl ApprovedValues {
+    /// 承認済みの一覧の本文を読む。人が承認した一覧の読み込みに使い、記録の候補の値からは作らない。
+    ///
+    /// # Errors
+    /// 書式に反する行・未知の区分や単位・数値でない値・出典の欠け・重複のとき [`LoadRecordError::Format`]
+    /// （入力の値を誤りに載せない）。
+    pub fn parse(text: &str) -> Result<Self, LoadRecordError> {
+        let bad = LoadRecordError::Format;
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split('|').collect();
+            let [name, class, value, unit, refs] = f[..] else {
+                return Err(bad);
+            };
+            let class = match class {
+                "requirement" => ValueClass::Requirement,
+                "initial" => ValueClass::Initial,
+                _ => return Err(bad),
+            };
+            let unit = match unit {
+                "ns" => ValueUnit::Ns,
+                "count" => ValueUnit::Count,
+                "per_s" => ValueUnit::PerS,
+                _ => return Err(bad),
+            };
+            let value: u64 = value.parse().map_err(|_| bad)?;
+            if !is_name(name) || refs.is_empty() {
+                return Err(bad);
+            }
+            let list: Vec<&str> = refs.split(',').collect();
+            let set: BTreeSet<String> = list.iter().map(|r| (*r).to_owned()).collect();
+            if list.iter().any(|r| r.is_empty()) || set.len() != list.len() || list.len() > MAX_REFS
+            {
+                return Err(bad);
+            }
+            out.push(ApprovedValue {
+                name: name.to_owned(),
+                class,
+                value,
+                unit,
+                refs: set,
+            });
+        }
+        Ok(Self(out))
+    }
+
+    fn contains(
         &self,
         name: &str,
         class: ValueClass,
@@ -282,13 +339,14 @@ impl ApprovedValue<'_> {
         unit: ValueUnit,
         refs: &[RefId],
     ) -> bool {
-        let want: BTreeSet<&str> = self.refs.iter().copied().collect();
         let got: BTreeSet<&str> = refs.iter().map(|r| r.0.as_str()).collect();
-        self.name == name
-            && self.class == class
-            && self.value == value
-            && self.unit == unit
-            && want == got
+        self.0.iter().any(|a| {
+            a.name == name
+                && a.class == class
+                && a.value == value
+                && a.unit == unit
+                && a.refs.iter().map(String::as_str).collect::<BTreeSet<_>>() == got
+        })
     }
 }
 
@@ -303,7 +361,7 @@ pub struct ComparisonValue {
 }
 
 impl ComparisonValue {
-    /// 要件の値・初期値・PoC のパラメータは、`approved`（人が承認した組）の 1 件と項目・区分・数値・単位・出典が
+    /// 要件の値・初期値は、`approved`（人が承認した一覧）の 1 件と項目・区分・数値・単位・出典が
     /// 完全一致するときだけ作る（一致しなければ `NotApproved`。ACPT-7）。他の区分は `approved` を見ない。
     ///
     /// # Errors
@@ -315,7 +373,7 @@ impl ComparisonValue {
         value: Option<u64>,
         unit: ValueUnit,
         refs: Vec<RefId>,
-        approved: &[ApprovedValue<'_>],
+        approved: &ApprovedValues,
     ) -> Result<Self, LoadRecordError> {
         let bad = LoadRecordError::InvalidValue;
         use InvalidValueReason::{
@@ -335,17 +393,16 @@ impl ComparisonValue {
             return Err(bad(ClassNotAllowed));
         }
         match class {
-            ValueClass::Requirement | ValueClass::Initial | ValueClass::PocParameter => {
+            // 規則 5: PoC のパラメータの数値は比べる値として置かない（区分を受けない）。
+            ValueClass::PocParameter => return Err(bad(ClassNotAllowed)),
+            ValueClass::Requirement | ValueClass::Initial => {
                 if refs.is_empty() {
                     return Err(bad(RefsRequired));
                 }
                 let Some(v) = value else {
                     return Err(bad(ValueRequired));
                 };
-                if !approved
-                    .iter()
-                    .any(|a| a.matches(name.0.as_str(), class, v, unit, &refs))
-                {
+                if !approved.contains(name.0.as_str(), class, v, unit, &refs) {
                     return Err(bad(NotApproved));
                 }
             }
@@ -493,6 +550,8 @@ impl LoadRecord {
     }
 
     /// 新規のファイルへ書き出す。`dir` は呼び出し元が渡し、無ければ作る。既存のファイルは上書きしない。
+    /// 出力先のファイルシステムはハードリンクに対応している必要がある（公開に `hard_link` を使う。
+    /// 非対応の出力先では [`LoadRecordError::WriteFailed`] になる）。
     /// 名前は `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`（乱数を使わない）。
     ///
     /// # Errors
@@ -560,17 +619,38 @@ mod tests {
         }
     }
 
-    fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// 排他的に新規作成したディレクトリ。既存のものは消さず、自分が作ったものだけを Drop で片付ける。
+    struct TestDir(PathBuf);
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn dir(name: &str) -> TestDir {
+        static N: AtomicU64 = AtomicU64::new(0);
+        for _ in 0..100 {
+            let d = std::env::temp_dir().join(format!(
+                "{name}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            // create_dir は既存なら失敗する。別の名前で作り直し、既存を消さない。
+            match std::fs::create_dir(&d) {
+                Ok(()) => return TestDir(d),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("create test dir: {e}"),
+            }
+        }
+        panic!("no free test dir name");
     }
 
     /// 一時名が衝突したら WriteFailed。既存の内容を消さず、最終名も作らない。
     #[test]
     fn tmp_name_collision_fails_and_keeps_existing() {
-        let d = dir("load-collision-tmp");
+        let td = dir("load-collision-tmp");
+        let d = td.0.clone();
         let pid = std::process::id();
         let tmp = d.join(format!(".tmp-load-run-0-{pid}-7"));
         std::fs::write(&tmp, b"keep").unwrap();
@@ -585,7 +665,8 @@ mod tests {
     /// 最終名が衝突したら WriteFailed。既存の内容は保たれ、一時ファイルは残らない。
     #[test]
     fn final_name_collision_fails_and_keeps_existing() {
-        let d = dir("load-collision-final");
+        let td = dir("load-collision-final");
+        let d = td.0.clone();
         let pid = std::process::id();
         let fin = d.join(format!("load-run-0-{pid}-9.txt"));
         std::fs::write(&fin, b"keep").unwrap();

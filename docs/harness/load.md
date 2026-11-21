@@ -368,11 +368,11 @@ judgment:
 - API: `LoadRecord::new`（実行の記録のファイル名・起動時刻・記録時刻・機材と構成・段階の結果・比べる値を受ける）、`LoadRecord::write_new(dir)`、
   `ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`LoadRecordError`。
 - 行の順: `format:` → `run_record_file:` → `run_started_at:` → `recorded_at:` → 条件 → 段階 → `value:` → `judgment:`（形式の 7 の見本どおり）。`judgment:` は常に空で、ハーネスは書かない。
-- 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial`・`poc_parameter` は出典と整数の値が必須で、さらに人が承認した「項目・区分・数値・単位・出典」の組（`ApprovedValue`）の 1 件と完全一致しなければ `NotApproved` で拒否する（規則 4・`ACPT-7`。出典 ID が信頼済み一覧にあるだけでは足りない）、`undecided` は値なし、`external` は値なし・出典必須、
+- 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial` は出典と整数の値が必須で、さらに人が承認した「項目・区分・数値・単位・出典」の一覧（`ApprovedValues`。フィールドは非公開で、`ApprovedValues::parse` が承認済みの本文〔1 行 `項目|区分|数値|単位|出典,出典`〕から読む。記録の候補とは独立した経路で、候補から作る口はない）の 1 件と完全一致しなければ `NotApproved` で拒否する（規則 4・`ACPT-7`。出典 ID が信頼済み一覧にあるだけでは足りない）。`poc_parameter` は比べる値として置かない（規則 5）ため `ClassNotAllowed` で拒否する、`undecided` は値なし、`external` は値なし・出典必須、
   `test_condition`・`measured` は整数の値が必須で出典を受けず、行には固定の印（`harness_config`・`measured`）を出す。出典は 1 行 8 件まで・重複は誤り。
   測定値・既定値を要件の値へ上げる経路は作らない。
 - 書き出し: `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。無ければ `dir` を作る。隠し名の一時ファイルへ書ききってから、上書きなしの `hard_link` で最終名へ公開する
-  （途中の失敗で不完全なファイルを完成品の名前で残さない。一時ファイルは作れたときだけ消しにいくが、削除の失敗は無視するため、失敗時は残りうる。名前が衝突して作れなかったときは既存のファイルを消さない）。乱数・環境変数・設定ファイルを使わない。
+  （途中の失敗で不完全なファイルを完成品の名前で残さない。一時ファイルは作れたときだけ消しにいくが、削除の失敗は無視するため、失敗時は残りうる。名前が衝突して作れなかったときは既存のファイルを消さない）。乱数・環境変数・設定ファイルを使わない。出力先のファイルシステムはハードリンクに対応している必要がある（非対応だと `WriteFailed`）。
 - 入力の検査（仮置き）: `ValueName::new` は呼び出し元が渡す承認済みの語彙に含まれる名前だけを受ける。`RefId::new` は呼び出し元が渡す信頼済みの出典の一覧（spec の ID 等）に完全一致するものだけを受け、予約語（`none`・`harness_config`・`measured`）を拒否する。
   `p99_target` は `undecided`・`external` 以外の区分を `ClassNotAllowed` で拒否する（`AUDP-29`）。`RunRecordFile` は生成元と同じ整数型で解析し、再整形した名前と一致しない名前（先頭ゼロ等）を拒否する。
   `RunRecordFile` の起動秒と `run_started_at` が違えば `RunStartMismatch`。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
@@ -412,7 +412,7 @@ judgment:
 - 「結果が記録される」の読み: `TargetRun` の構造体まで。ファイルへの出力を担当する段は未決（人が決める。受け入れ条件を満たしたかの判定も人）
 - 8/10 の仮置き: `StageLimits` の項目と区間名の語彙を呼び出し元の設定で受けること、誤りのときに終わった段階を捨てること、行を出す順、API の名前（`stage`・`run_stages`・`StagePlan`・`StageConfig`・`StageResult`・`StagedRun`・`StageError`）
 - 「段階ごとに記録される」の読み: 構造体と行の `Display` まで。ファイルへの出力を担当する段は未決のまま（人が決める。受け入れ条件を満たしたかの判定も人）
-- 9/10 の仮置き: 記録のファイル全体の出力を 9/10 に置いたこと、`requirement`・`initial`・`poc_parameter` で値を必須にしたこと、`test_condition`・`measured` に出典を受けないこと、
+- 9/10 の仮置き: 記録のファイル全体の出力を 9/10 に置いたこと、`requirement`・`initial` で値を必須にし `poc_parameter` を拒否したこと、`test_condition`・`measured` に出典を受けないこと、
   値の行の上限（64）と出典の上限（8）、`load-run-…` の名前を `run_started_at` の秒で作ること、時刻の整形を it-harness と別に持つこと、
   API の名前（`record`・`LoadRecord`・`ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`LoadRecordError`）
 - 「小さな試し実行が終わり記録が出る」の読み: `make test` の中の試験でファイルが出ること（人が確認する。受け入れ条件を満たしたかの判定も人）

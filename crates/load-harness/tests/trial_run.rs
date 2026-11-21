@@ -14,10 +14,10 @@ use fandhe_auth_it_harness::{
     ComponentKind, Harness, HarnessConfig, HubStubComponent, VersionInfo,
 };
 use fandhe_auth_load_harness::{
-    CallResult, ComparisonValue, ComponentConditions, ConditionComponent, IntervalName, LoadConfig,
-    LoadRecord, LoopModel, MeasurementConditions, MetricKey, RefId, RunRecordFile, StageConfig,
-    StageLimits, StagePlan, StdMonotonicClock, TargetName, TargetSpec, ValueClass, ValueName,
-    ValueUnit, run_stages,
+    ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
+    IntervalName, LoadConfig, LoadRecord, LoopModel, MeasurementConditions, MetricKey, RefId,
+    RunRecordFile, StageConfig, StageLimits, StagePlan, StdMonotonicClock, TargetName, TargetSpec,
+    ValueClass, ValueName, ValueUnit, run_stages,
 };
 
 const T0: u64 = 1_000;
@@ -115,7 +115,7 @@ fn small_trial_run_writes_record_without_requirement_values() {
         None,
         ValueUnit::Ns,
         vec![RefId::new("AUDP-29", &["AUDP-29"]).unwrap()],
-        &[],
+        &ApprovedValues::default(),
     )
     .unwrap();
     // 記録を組み立てる時点の実測時刻。逆行していれば LoadRecord が ClockOrder で拒否する（補正しない）。
