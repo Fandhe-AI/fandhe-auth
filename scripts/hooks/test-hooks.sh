@@ -51,7 +51,8 @@ if [ -z "${utf8_locale}" ]; then
 fi
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/test-hooks.XXXXXX")"
-trap 'rm -rf "${work_dir}"' EXIT
+# 権限を落とした試験用ディレクトリ（chmod 000）がシグナルで止まった後も残らないよう、消す前に権限を戻す。
+trap 'chmod -R u+rwx "${work_dir}" 2> /dev/null; rm -rf "${work_dir}"' EXIT
 
 # 開発者・CI ランナーの git 設定（署名・色・フック・テンプレート）から隔離する。
 # lefthook 経由で起動された場合に備え、親リポジトリを指す環境変数も外す。
@@ -1197,6 +1198,36 @@ if [ -e "${work_dir}/head-moved" ] && [ "${rc}" -eq 2 ] \
   pass "secret-scan: HEAD moving during the end-of-scan index check is a scan failure (2)"
 else
   fail "secret-scan: HEAD moving during the end-of-scan index check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# index の親ディレクトリに検索権限が無いときは、未作成（空の index）として扱わず 2（git 自身の解決が Permission denied で失敗するため、開始時に止まる。#6011）。
+# ルートは権限を迂回するため、この試験は一般ユーザーのときだけ行い、ルートでは skip を明示する。
+if [ "$(id -u)" -ne 0 ]; then
+  new_repo; stage src/app.txt "x = ${token}"
+  noperm_dir="${work_dir}/noperm-index"
+  mkdir -p "${noperm_dir}"
+  cp "$(git rev-parse --path-format=absolute --git-path index)" "${noperm_dir}/index"
+  chmod 000 "${noperm_dir}"
+  rc=0
+  GIT_INDEX_FILE="${noperm_dir}/index" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  chmod 755 "${noperm_dir}"
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+    pass "secret-scan: an index in an unsearchable directory is a scan failure (2), not an empty index"
+  else
+    fail "secret-scan: an index in an unsearchable directory is a scan failure (2), not an empty index" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+else
+  echo "ok - secret-scan: an index in an unsearchable directory is a scan failure (2): skipped (running as root bypasses permissions)"
+fi
+# 親が検索可能で index が無いだけなら、従来どおり空として扱う（走査は続く）。権限に関係しないため root でも行う。
+# 本物の index には検出対象を stage しておく。git が使うのは GIT_INDEX_FILE の指す（無い）index なので、それでも 0 になる
+new_repo; stage src/app.txt "x = ${token}"
+rc=0
+GIT_INDEX_FILE="${work_dir}/no-such-index" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: a missing index in a searchable directory is still treated as empty"
+else
+  fail "secret-scan: a missing index in a searchable directory is still treated as empty" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 # 登録 0 件の index でも、固定時にあった index が終了時に無ければ 2（一覧の差だけで判定すると空のまま変わらず 0 になる。#6011）
