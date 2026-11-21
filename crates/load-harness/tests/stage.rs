@@ -320,12 +320,6 @@ fn error_display_is_fixed_english() {
         error: MeterError::ClockOverflow,
     };
     assert_eq!(c.to_string(), "clock error in stage");
-    let p = StageError::ClockPanicked { stage: 7, run: 9 };
-    assert_eq!(p.to_string(), "clock panicked in stage");
-    assert_eq!(
-        StageError::ClockDropPanicked.to_string(),
-        "clock drop panicked after stages"
-    );
 }
 
 #[test]
@@ -369,114 +363,93 @@ fn clock_factory_error_is_numbered_and_stops() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
+/// 生成の誤りの経路は対象の名前を運ばない。目印の対象名で回し、誤りのどの表示にも目印が出ないことを固定する（SECR-23）。
 #[test]
-fn clock_factory_panic_is_caught_and_numbered() {
-    // SECR-23: 生成の panic は捕捉して番号付きの誤りにし、文言（目印）を誤りに載せない。
-    let canary = "canary_clock_panic_zq";
+fn clock_error_display_and_debug_hide_target_name() {
+    let canary = "canary_clock_err_target_qv";
+    let spec = TargetSpec::new(
+        TargetName::new(canary).unwrap(),
+        IntervalName::new("op").unwrap(),
+    );
+    // 目印が対象の名前まで届いていること（届いていなければ出ないのは当然になる）。
+    assert_eq!(spec.name().as_str(), canary);
+    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let kinds = [
+        MeterError::InvalidName,
+        MeterError::InvalidIntervals,
+        MeterError::UndeclaredInterval,
+        MeterError::DuplicateStart,
+        MeterError::NotStarted,
+        MeterError::ClockReversed,
+        MeterError::ClockOverflow,
+        MeterError::IncompleteIntervals,
+        MeterError::CounterOverflow,
+        MeterError::TrialsInFlight,
+        MeterError::InvariantViolated,
+        MeterError::StatePoisoned,
+    ];
+    for kind in kinds {
+        let e = run_stages(|| Err(kind), &spec, &plan, || CallResult::Ok).unwrap_err();
+        assert_eq!(
+            e,
+            StageError::Clock {
+                stage: 1,
+                run: 1,
+                error: kind
+            }
+        );
+        let shown = [
+            e.to_string(),
+            format!("{e:?}"),
+            format!("{e:#?}"),
+            format!("{kind}"),
+        ];
+        for text in &shown {
+            assert!(!text.contains(canary));
+        }
+        assert_eq!(shown[0], "clock error in stage");
+        assert_eq!(
+            shown[1],
+            format!("Clock {{ stage: 1, run: 1, error: {kind:?} }}")
+        );
+        assert!(std::error::Error::source(&e).is_none());
+    }
+}
+
+/// 生成関数の panic は捕捉せず、そのまま呼び出し元へ伝わる（誤りに変えない。生成関数のために panic hook を触らない）。
+/// 文言を伏せる保証は `Result` の経路だけで、panic の文言は生成関数の書き手が持つ（`run_stages` の doc）。
+#[test]
+fn clock_factory_panic_propagates_unchanged() {
     let plan = StagePlan::new(vec![sc(1, 3, 0, 3)], MetricKey::P99Ns, limits(), vocab()).unwrap();
     let clocks = AtomicU64::new(0);
     let calls = AtomicU64::new(0);
-    let r = run_stages(
-        || {
-            if clocks.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
-                panic!("{}", canary);
-            }
-            Ok(step_clock(10))
-        },
-        &spec(),
-        &plan,
-        || {
-            calls.fetch_add(1, Ordering::SeqCst);
-            CallResult::Ok
-        },
-    );
-    let e = r.unwrap_err();
-    assert_eq!(e, StageError::ClockPanicked { stage: 1, run: 2 });
-    assert!(!format!("{e:?}").contains(canary));
-    assert!(!e.to_string().contains(canary));
-    assert_eq!(e.to_string(), "clock panicked in stage");
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_stages(
+            || {
+                // 2 回目（段階 1 の 2 回目）の生成だけが panic する。
+                if clocks.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                    std::panic::panic_any(FactoryPanic);
+                }
+                Ok(step_clock(10))
+            },
+            &spec(),
+            &plan,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                CallResult::Ok
+            },
+        )
+    }));
+    // 誤りの値として返らず、生成関数の panic の値がそのまま届く。
+    let payload = caught.unwrap_err();
+    assert!(payload.downcast_ref::<FactoryPanic>().is_some());
+    // panic の後は以後の回を始めない（1 回目の 3 件だけ）。
     assert_eq!(clocks.load(Ordering::SeqCst), 2);
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
-/// 子プロセスで走らせる本体。親が環境変数で起動したときだけ動く（単独で走らせたときは何もしない）。
-const CHILD_ENV: &str = "FANDHE_STAGE_PANIC_CHILD";
-const CHILD_CANARY: &str = "canary_stderr_clock_panic_qx";
-
-#[test]
-fn child_clock_panic_body() {
-    if std::env::var_os(CHILD_ENV).is_none() {
-        return;
-    }
-    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
-    let r = run_stages(
-        || -> Result<Box<dyn MonotonicClock>, MeterError> { panic!("{}", CHILD_CANARY) },
-        &spec(),
-        &plan,
-        || CallResult::Ok,
-    );
-    assert_eq!(
-        r.unwrap_err(),
-        StageError::ClockPanicked { stage: 1, run: 1 }
-    );
-}
-
-#[test]
-fn clock_factory_panic_message_is_not_written_to_stderr() {
-    // SECR-23: 独立した子プロセスで時計の生成を panic させ、目印が stderr にも出ないことを確かめる。
-    let exe = std::env::current_exe().unwrap();
-    let out = std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "child_clock_panic_body",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(CHILD_ENV, "1")
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "child failed");
-    // 子が本当に走ったこと（走っていなければ目印が無いのは当然になる）。
-    assert!(
-        stdout.contains("child_clock_panic_body"),
-        "child did not run"
-    );
-    assert!(!stderr.contains(CHILD_CANARY));
-    assert!(!stdout.contains(CHILD_CANARY));
-}
-
-/// Drop が panic する値を持つ時計の生成関数でも、結果は変わらず文言も出ない。
-struct PanicOnDrop;
-impl Drop for PanicOnDrop {
-    fn drop(&mut self) {
-        panic!("canary_drop_panic_vk");
-    }
-}
-
-#[test]
-fn clock_closure_drop_panic_is_swallowed_and_result_kept() {
-    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
-    let guard = PanicOnDrop;
-    let r = run_stages(
-        move || {
-            let _keep = &guard;
-            Err(MeterError::ClockOverflow)
-        },
-        &spec(),
-        &plan,
-        || CallResult::Ok,
-    );
-    assert!(matches!(
-        r,
-        Err(StageError::Clock {
-            stage: 1,
-            run: 1,
-            ..
-        })
-    ));
-}
+/// 生成関数が panic で投げる目印の値（文言を持たない）。
+struct FactoryPanic;
 
 #[test]
 fn staged_run_debug_hides_target_name() {
@@ -693,162 +666,4 @@ fn multi_worker_stages_really_overlap() {
         .map(|s| s.runs().iter().map(|x| x.max_in_flight).collect())
         .collect();
     assert_eq!(observed, [[4, 4], [3, 3]]);
-}
-
-/// 全回が成功し、破棄だけが panic したときは Ok を返さず専用の誤りにする（fail-closed。SECR-23）。
-#[test]
-fn drop_panic_after_successful_run_is_an_error() {
-    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
-    let guard = PanicOnDrop;
-    let r = run_stages(
-        move || {
-            let _keep = &guard;
-            Ok(step_clock(10))
-        },
-        &spec(),
-        &plan,
-        || CallResult::Ok,
-    );
-    assert_eq!(r, Err(StageError::ClockDropPanicked));
-}
-
-const CHILD_PLAN_ENV: &str = "FANDHE_STAGE_INVALID_PLAN_CHILD";
-const CHILD_DROP_CANARY: &str = "canary_invalid_plan_drop_zt";
-
-struct PanicOnDropCanary;
-impl Drop for PanicOnDropCanary {
-    fn drop(&mut self) {
-        panic!("{}", CHILD_DROP_CANARY);
-    }
-}
-
-#[test]
-fn child_invalid_plan_drop_body() {
-    if std::env::var_os(CHILD_PLAN_ENV).is_none() {
-        return;
-    }
-    // 語彙外の区間名で早期に拒否される経路。hook が未登録の子プロセスで走らせる。
-    let plan = StagePlan::new(
-        vec![sc(1, 1, 0, 1)],
-        MetricKey::P99Ns,
-        limits(),
-        vec![IntervalName::new("other").unwrap()],
-    )
-    .unwrap();
-    let guard = PanicOnDropCanary;
-    let r = run_stages(
-        move || {
-            let _keep = &guard;
-            Ok(step_clock(10))
-        },
-        &spec(),
-        &plan,
-        || CallResult::Ok,
-    );
-    assert_eq!(r, Err(StageError::InvalidPlan));
-}
-
-#[test]
-fn invalid_plan_path_does_not_write_drop_panic_to_stderr() {
-    let exe = std::env::current_exe().unwrap();
-    let out = std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "child_invalid_plan_drop_body",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(CHILD_PLAN_ENV, "1")
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "child failed");
-    assert!(
-        stdout.contains("child_invalid_plan_drop_body"),
-        "child did not run"
-    );
-    assert!(!stderr.contains(CHILD_DROP_CANARY));
-    assert!(!stdout.contains(CHILD_DROP_CANARY));
-}
-
-#[test]
-fn hook_unavailable_has_fixed_message() {
-    assert_eq!(
-        StageError::HookUnavailable.to_string(),
-        "quiet hook unavailable"
-    );
-}
-
-const CHILD_UNWIND_ENV: &str = "FANDHE_STAGE_UNWIND_CHILD";
-const CHILD_UNWIND_CANARY: &str = "canary_unwind_generator_drop_qk";
-
-/// 破棄で panic する時計。`run_target` の中で panic がアンワインドする経路を作る。
-struct PanicOnDropClock(StepClock);
-
-impl MonotonicClock for PanicOnDropClock {
-    fn now_ns(&self) -> Result<u64, MeterError> {
-        self.0.now_ns()
-    }
-}
-
-impl Drop for PanicOnDropClock {
-    fn drop(&mut self) {
-        panic!("clock_drop_panic_for_unwind_test");
-    }
-}
-
-struct PanicOnDropCanary2;
-impl Drop for PanicOnDropCanary2 {
-    fn drop(&mut self) {
-        panic!("{}", CHILD_UNWIND_CANARY);
-    }
-}
-
-#[test]
-fn child_unwind_generator_drop_body() {
-    if std::env::var_os(CHILD_UNWIND_ENV).is_none() {
-        return;
-    }
-    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
-    // hook を通常の文脈で先に入れる。
-    let _ = run_stages(|| Ok(step_clock(10)), &spec(), &plan, || CallResult::Ok);
-    let guard = PanicOnDropCanary2;
-    let caught = std::panic::catch_unwind(|| {
-        let _ = run_stages(
-            move || {
-                let _keep = &guard;
-                Ok(Box::new(PanicOnDropClock(StepClock {
-                    now: AtomicU64::new(0),
-                    step: 10,
-                })) as Box<dyn MonotonicClock>)
-            },
-            &spec(),
-            &plan,
-            || CallResult::Ok,
-        );
-    });
-    assert!(caught.is_err());
-}
-
-/// アンワインドで生成関数が破棄されても、その panic 文言は出ない（SECR-23）。
-#[test]
-fn unwinding_path_does_not_write_generator_drop_panic() {
-    let exe = std::env::current_exe().unwrap();
-    let out = std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "child_unwind_generator_drop_body",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(CHILD_UNWIND_ENV, "1")
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "child failed");
-    assert!(stdout.contains("child_unwind_generator_drop_body"));
-    assert!(!stderr.contains(CHILD_UNWIND_CANARY));
-    assert!(!stdout.contains(CHILD_UNWIND_CANARY));
 }

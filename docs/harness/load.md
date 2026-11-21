@@ -344,13 +344,12 @@ judgment:
 - 段階と回は計画の順に 1 つずつ回し、重ならない。各回は `run_target` で回す。段階の全回が終わったら `worst_run` で段階の最悪の回を求める。
 - 誤り（fail-closed・仮置き）: 最初の誤りで以後の回・段階を始めず、終わった段階の結果も返さない（部分の結果を正しい結果に見せないため）。
   誤りは種類と整数の番号だけを持つ（`SECR-11`・`SECR-23`）。
-- 時計の生成の誤り（仮置き）: 生成関数の `Err` は `StageError::Clock`、panic は捕捉して（文言を既定の hook に出さず）`StageError::ClockPanicked` とし、
-  どちらも段階・回の番号付きで返す。回を始める前の失敗で、対象は呼ばない。panic の後は生成関数を呼ばない。
-- 生成関数の破棄の失敗: 全回が成功しても破棄で panic したときは `StageError::ClockDropPanicked` を返す。実行中の誤りが先にあればその誤りを保つ。
-  返せるのは捕捉できるアンワインドだけで、生成関数が所有する複数の値の Drop が続けて panic する二重 panic はプロセスが中断し、誤りを返せない。
-- 文言の抑止は panic hook の包みに依る。包みは初回の呼び出しで 1 度だけ入れるため、呼び出し元は初回の後に `set_hook` で差し替えない
-  （差し替えるなら直前の hook を包んで呼ぶ）。アンワインド中のスレッドから初めて呼ぶと hook は入らないので、
-  生成関数を呼ばず・破棄もせず（所有する値は漏らす）`StageError::HookUnavailable` を返す。先に通常の文脈で 1 度呼んでおく。
+- 時計の生成の誤り（仮置き）: 生成関数の `Err` は `StageError::Clock` とし、段階・回の番号付きで返す。回を始める前の失敗で、その回の対象は呼ばない。
+  誤りは中身を持たない `MeterError` の種類だけで、対象の名前を運ばない（`SECR-23`）。
+- 生成関数の panic: 捕捉せず、そのまま呼び出し元へ伝わる。生成関数・時計の破棄の panic も同じ。これらの panic のために panic hook を差し替え・抑止しない
+  （hook はプロセス全体の共有状態で、ハーネスが握り続けることを保証できないため。対象の閉包の panic の扱いは `run_closed_loop` のまま）。対象の名前を伏せることをハーネスが保証するのは
+  `Result` の誤りの経路（`StageError` の `Display`・`Debug`）だけで、panic の文言に対象の名前を入れないのは生成関数の書き手の責任である。
+  伏せたい失敗は panic ではなく `Err` で返す。
 - 結果は非公開フィールド+読み取りだけのアクセサーで持ち、回ごとに残すのは集計のみ（生標本は回の終了時に捨てる）。回の削除・並べ替えで `Display` の番号と `worst_run` がずれない。
 - 記録の行: `StagedRun` の `Display` が、段階ごとに `stage`・（回ごとに）`run`・`failure_kind`・`metric`・`failure_metric`、最後に `worst_run` を出す（形式の 3・4）。
   `n=0` のときは百分位・最大・`max_trial` を `none` で出す。出るのは検査済みの名前・固定の語・整数だけ（形式の 6）。
@@ -392,7 +391,7 @@ judgment:
   自動取得した値の区分を `test_condition`・`refs=harness_config` とすること、「記録」の読み（ファイル出力を含まない）、API の名前（`condition` 以下）
 - 「結果が記録される」の読み: `TargetRun` の構造体まで。ファイルへの出力を担当する段は未決（人が決める。受け入れ条件を満たしたかの判定も人）
 - 8/10 の仮置き: `StageLimits` の項目と区間名の語彙を呼び出し元の設定で受けること、誤りのときに終わった段階を捨てること、行を出す順、API の名前（`stage`・`run_stages`・`StagePlan`・`StageConfig`・`StageResult`・`StagedRun`・`StageError`）
-- 8/10 の時計の生成の誤り（#6017。仮置き。承認は得ていない）: 生成関数の型を `FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>` にしたこと、
-  誤りの型を中身を持たない `MeterError` に固定したこと（`StageError` を `Copy` で種類と整数だけに保つため）、
-  panic を捕捉して抑止すること（もう一方の案は「捕捉せず伝播する」）、variant 名（`Clock`・`ClockPanicked`）。人が決める
+- 8/10 の時計の生成の誤り（#6017。仮置き）: 生成関数を `Result` で返す形にし、panic は捕捉せず伝播すること（panic hook で抑止する方式は採らない）は利用者の方針に沿う。
+  生成関数の型を `FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>` にしたこと、誤りの型を中身を持たない `MeterError` に固定したこと
+  （`StageError` を `Copy` で種類と整数だけに保つため）、variant 名（`Clock`）は仮置きで、人が決める
 - 「段階ごとに記録される」の読み: 構造体と行の `Display` まで。ファイルへの出力を担当する段は未決のまま（人が決める。受け入れ条件を満たしたかの判定も人）

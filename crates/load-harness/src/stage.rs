@@ -7,8 +7,8 @@
 //! 呼び出し元: 結合試験のハーネスの上で構成要素へ負荷をかける試験（試験ビルド）だけ。
 //! 呼び出し先: 対象の呼び出し（`target`）と集計（`aggregate`）だけ。時計は回ごとに作る関数（`Result` を返す）で受け、
 //! 環境変数・設定ファイル・壁時計を読まない（DPOL-32）。
-//! 時計の生成の誤り・panic は段階と回の番号付きの [`StageError`] で返す（panic は捕捉し、文言を出さない。
-//! 仮置きで人の確認待ち。`docs/harness/load.md`）。
+//! 時計の生成の誤りは段階と回の番号付きの [`StageError::Clock`] で返す。生成関数の panic は捕捉せず、そのまま伝わる
+//! （生成関数のために panic hook を差し替え・抑止しない。境界は [`run_stages`] の doc。仮置きで人の確認待ち。`docs/harness/load.md`）。
 //!
 //! 段階と回は順に回し、重ならない（`run_target` は自分のワーカーを join して戻る）。
 //! 誤り（fail-closed・仮置き）: 最初の誤りで以後の回・段階を始めず、終わった段階の結果も返さない
@@ -21,10 +21,9 @@
 //! （A-2026-10-28-9・ACPT-7）。
 
 use std::fmt;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::aggregate::{AggregateError, IntervalStats, MetricKey, RunSummary, worst_run};
-use crate::generate::{LoadConfig, QuietGuard, install_quiet_hook};
+use crate::generate::LoadConfig;
 use crate::meter::{IntervalName, MeterError, MonotonicClock};
 use crate::target::{CallResult, TargetError, TargetName, TargetSpec, run_target};
 
@@ -80,19 +79,13 @@ pub enum StageError {
     },
     /// 段階の最悪の回の集計の誤り。
     Aggregate { stage: u64, error: AggregateError },
-    /// 時計を作る関数が誤りを返した（段階・回は 1 始まり。回を始める前の失敗で、対象は呼んでいない）。
+    /// 時計を作る関数が誤りを返した（段階・回は 1 始まり）。回を始める前の失敗で、その回の対象は呼んでいない。
+    /// 誤りは中身を持たない [`MeterError`] の種類だけで、対象の名前を運ばない（SECR-23）。
     Clock {
         stage: u64,
         run: u64,
         error: MeterError,
     },
-    /// 時計を作る関数が panic した（段階・回は 1 始まり）。panic の文言は載せない。
-    ClockPanicked { stage: u64, run: u64 },
-    /// 全回が終わった後に、時計を作る関数が所有する値の破棄が panic した。panic の文言は載せない。
-    ClockDropPanicked,
-    /// 抑止の hook を入れられなかった（アンワインド中のスレッドからの初回の呼び出し）。
-    /// 時計の生成も対象の呼び出しもしていない。
-    HookUnavailable,
     /// 番号の計算が溢れた。
     CounterOverflow,
 }
@@ -104,9 +97,6 @@ impl fmt::Display for StageError {
             Self::Target { .. } => "target error in stage",
             Self::Aggregate { .. } => "aggregate error in stage",
             Self::Clock { .. } => "clock error in stage",
-            Self::ClockPanicked { .. } => "clock panicked in stage",
-            Self::ClockDropPanicked => "clock drop panicked after stages",
-            Self::HookUnavailable => "quiet hook unavailable",
             Self::CounterOverflow => "counter overflow",
         };
         f.write_str(msg)
@@ -294,103 +284,26 @@ impl StagedRun {
     }
 }
 
-/// 段階を計画の順に 1 つずつ回す。
+/// 段階を計画の順に 1 つずつ回す。各回の時計は `new_clock` で作る（回ごとに新しい計測を始めるため）。
 ///
-/// 文言の抑止は panic hook の包みに依る（SECR-23）。包みは初回の呼び出しで 1 度だけ入れるため、
-/// 呼び出し元は初回の後に `std::panic::set_hook` で hook を差し替えない（差し替えると抑止の印が参照されず、
-/// 時計の生成・生成関数の破棄の panic 文言が出得る）。差し替えるなら、直前の hook を包んで呼ぶ形にする。
-/// アンワインド中のスレッドから初めて呼ぶ場合、hook は入らない（`take_hook` が panic するため）。
-/// その場合は生成関数を呼ばず・破棄もせず（所有する値は `forget` で漏らす）、[`StageError::HookUnavailable`] を返す（SECR-23）。
-/// 先に通常の文脈から 1 度呼んで hook を入れておく。各回の時計は `new_clock` で作る（回ごとに新しい計測を始めるため）。
+/// `new_clock` は回ごとに `run_target` の直前に 1 度、計画の順に呼ばれる。`Err` は [`StageError::Clock`] として
+/// 段階・回の番号付きで返し、以後の生成・対象の呼び出しをせず、終わった段階の結果も返さない。
+/// この形（`Result` で返す・誤りの型を [`MeterError`] に固定）は仮置きで、型と variant 名は人の確認待ちである。
 ///
-/// `new_clock` は回ごとに `run_target` の直前に 1 度、計画の順に呼ばれる。`Err` は [`StageError::Clock`]、
-/// panic は捕捉して（文言を既定の hook に出さず。SECR-23）[`StageError::ClockPanicked`] として、段階・回の番号付きで返す。
-/// どちらも以後の生成・対象の呼び出しをせず、終わった段階の結果は返さない。panic の後は `new_clock` を二度と呼ばない。
-/// この形（誤りの型を [`MeterError`] に固定・panic の捕捉）は仮置きで、人の確認待ちである。
+/// # Panics
+/// `new_clock` の panic と、`new_clock`・作った時計の破棄の panic は捕捉せず、そのまま呼び出し元へ伝わる
+/// （これらの panic のために panic hook を差し替え・抑止しない。hook はプロセス全体の共有状態で、ハーネスが握り続けることを
+/// 保証できないため。対象の閉包の panic の扱いは [`run_target`] が使う `run_closed_loop` の既存のとおりで、ここでは変えない）。
+/// 対象の名前を伏せることをハーネスが保証するのは、`Result` の誤りの経路（[`StageError`] の `Display`・`Debug`）だけである。
+/// panic の文言に対象の名前を入れないのは生成関数の書き手の責任で、伏せたい失敗は panic ではなく `Err` で返す（SECR-23）。
 ///
 /// # Errors
-/// 計画の不正・時計の生成の誤りまたは panic・回の誤り・集計の誤り。最初の誤りで止め、終わった段階の結果は返さない。
-/// 全回が成功しても生成関数の破棄で panic したときは [`StageError::ClockDropPanicked`] を返す。
-/// 返せるのは捕捉できるアンワインドだけである。生成関数が所有する複数の値の Drop が、先の panic のアンワインド中に
-/// 続けて panic すると二重 panic でプロセスが中断し、誤りを返せない（`panic = "abort"` の設定でも同じ）。
-/// 実行中の誤りが先にあれば、破棄の panic の有無に関わらずその誤りを返す。
+/// 計画の不正・時計の生成の誤り・回の誤り・集計の誤り。最初の誤りで止め、終わった段階の結果は返さない。
 pub fn run_stages<C, F>(
-    new_clock: C,
+    mut new_clock: C,
     spec: &TargetSpec,
     plan: &StagePlan,
     call: F,
-) -> Result<StagedRun, StageError>
-where
-    C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
-    F: Fn() -> CallResult + Sync,
-{
-    // 不正な計画の拒否（InvalidPlan）でも生成関数の破棄の文言を出さないため、早期リターンより前に hook を入れる（SECR-23）。
-    // アンワインド中の初回は `take_hook` が panic するので入れられない。その場合は生成関数を実行も破棄もせず誤りで返す。
-    // 破棄の panic 文言が既定の hook に出ないよう、所有する値は漏らす（SECR-23）。
-    if !install_quiet_hook() {
-        std::mem::forget(new_clock);
-        return Err(StageError::HookUnavailable);
-    }
-    // 生成関数は抑止付きの破棄ガードが所有する。正常に戻る経路は `dispose` で、`run_target` 内の panic が
-    // 伝播するアンワインドの経路はガードの Drop で、どちらも抑止と捕捉の内側で破棄する（SECR-23）。
-    let mut owner = ClockOwner(Some(new_clock));
-    let result = run_stages_inner(owner.get_mut(), spec, plan, &call);
-    // 実行の誤りがあればその最初の誤りを保ち、実行が成功して破棄だけが失敗したときは専用の誤りを返す（fail-closed。SECR-23）。
-    let dropped = owner.dispose();
-    match (result, dropped) {
-        (Ok(_), None) => Err(StageError::ClockDropPanicked),
-        (result, _) => result,
-    }
-}
-
-/// 時計の生成関数の所有者。破棄を必ず抑止と捕捉の内側で行う（SECR-23）。
-struct ClockOwner<C>(Option<C>);
-
-impl<C> ClockOwner<C> {
-    fn get_mut(&mut self) -> &mut C {
-        // 生成中は常に Some。`dispose` は所有者を消費するため、その後に呼べない。
-        self.0
-            .as_mut()
-            .expect("clock owner holds the generator until disposed")
-    }
-
-    /// 破棄して、panic しなければ `Some(())` を返す。
-    fn dispose(mut self) -> Option<()> {
-        let c = self.0.take()?;
-        quiet_catch(move || drop(c))
-    }
-}
-
-impl<C> Drop for ClockOwner<C> {
-    /// アンワインドで届く経路。破棄の panic は捕捉して呼び出し側へ伝えない（二重 panic の回避）。
-    fn drop(&mut self) {
-        if let Some(c) = self.0.take() {
-            let _ = quiet_catch(move || drop(c));
-        }
-    }
-}
-
-/// 抑止の印を立てて `f` を呼び、panic は捕捉して `None` にする。
-/// ペイロードの Drop も印の内側で走らせる。その Drop の中で起きた二次 panic のペイロードは、
-/// Drop を走らせずに忘れる（Drop がまた panic して伝播しないように。SECR-23）。
-fn quiet_catch<R>(f: impl FnOnce() -> R) -> Option<R> {
-    let _quiet = QuietGuard::new();
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(v) => Some(v),
-        Err(payload) => {
-            if let Err(second) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
-                std::mem::forget(second);
-            }
-            None
-        }
-    }
-}
-
-fn run_stages_inner<C, F>(
-    new_clock: &mut C,
-    spec: &TargetSpec,
-    plan: &StagePlan,
-    call: &F,
 ) -> Result<StagedRun, StageError>
 where
     C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
@@ -407,13 +320,8 @@ where
         let mut runs: Vec<RunSummary> = Vec::new();
         for ri in 0..cfg.repetitions {
             let run = ri.checked_add(1).ok_or(StageError::CounterOverflow)?;
-            let made = quiet_catch(&mut *new_clock);
-            let clock = match made {
-                None => return Err(StageError::ClockPanicked { stage, run }),
-                Some(Err(error)) => return Err(StageError::Clock { stage, run, error }),
-                Some(Ok(clock)) => clock,
-            };
-            let r = run_target(clock, spec, &cfg.load, call)
+            let clock = new_clock().map_err(|error| StageError::Clock { stage, run, error })?;
+            let r = run_target(clock, spec, &cfg.load, &call)
                 .map_err(|error| StageError::Target { stage, run, error })?;
             runs.push(r.summary);
         }
