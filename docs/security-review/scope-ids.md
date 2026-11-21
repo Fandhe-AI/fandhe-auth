@@ -14,34 +14,36 @@
 
 | 項目 | 内容 |
 |---|---|
-| spec repo と commit | `Fandhe-AI/fandhe-auth-spec`（private）の `eb418ff0084bf5d5704dbd06ddbc790401980b45` |
+| spec repo と commit | `Fandhe-AI/fandhe-auth-spec`（private）の `4987777db3db59064e7fe2d1d5c7302d0f719847`（2026-11-21 に利用者が `TASK-83` の着手を指示した時点の spec の commit。`D-2026-11-21-22`。`eb418ff` から付け直した。付け直しの方針は `D-2026-11-21-20` の (4)(a)）。`D-2026-11-21-22` は `4987777` より後の spec の commit に記録した |
 | 範囲の定義 | `03-poc/quality-checks/qp1-security-review/README.md` の「6. 利用者の判断が要る点」の判断 3（`ACPT-12` の操作欄が範囲を列挙している） |
 | 範囲の行の所在 | 同 README の「1.2 T ごとの表」（T 行）、「4.1 重大」（R-1〜R-4）、「4.2 中」（R-5・R-6） |
-| 対応 ID の指定 | `04-behavior/acceptance-retest.md` の `ACPT-12` の対応 ID 欄と、`05-tasks.md` の `TASK-82` の内容 |
+| 対応 ID の指定 | `04-behavior/acceptance-retest.md` の `ACPT-12` の対応 ID 欄（2026-11-21 の追記が T-16 の行き先を訂正している）と、`05-tasks.md` の `TASK-82` の内容 |
 | ステータス | 同 commit の `04-behavior/` の各項目のステータス列を写した（取得手順は [README.md](../../README.md) の「仕様」節） |
 
 ## 範囲の行と対応 ID
 
 範囲は 20 行（T 行 14 件、R-1〜R-6）である。範囲の外の別枠として `AGCR-29` を 1 行足した。
+Hub へ移管した ID は、ステータス欄に「移管 → Hub の ID・この repo のレビューの範囲外」と書く。決定（`D-2026-11-21-20` の (4)(b)）は記録票の書き方である。本表のステータス欄もこれに合わせた（当てはめは決定の外）。
+本体側の移管先 `UISF-37` は、この repo のレビューの範囲に残す。
 
 | 範囲の行 | QP-1 での所在 | 対応 ID | 区分 | ステータス（commit 時点） | 選定の根拠・備考 |
 |---|---|---|---|---|---|
 | T-1 | 1.2 節（T 表） | `LIFE-7〜LIFE-9` | 候補（AI。採否は `TASK-83`） | 確定: LIFE-7・LIFE-8・LIFE-9 | 根拠欄が PoC-8 手順 4（T-1）を引く |
 | T-2 | 1.2 節（T 表） | `THRT-3`・`THRT-19`・`THRT-25` | 候補（AI。採否は `TASK-83`） | 確定: THRT-3・THRT-25<br>検討中: THRT-19 | 根拠欄が PoC-8 の T-2 を引く。残り (1) の判定と加算の単位は `THRT-6`・`AUDB-27` が持つ（`security.md` の参照） |
 | T-4 | 1.2 節（T 表） | `SESS-14`・`SESS-38`・`SESS-45`・`LIFE-28`・`LIFE-29`・`THRT-15` | 候補（AI。採否は `TASK-83`） | 確定: SESS-14・SESS-38・SESS-45・LIFE-29<br>検討中: LIFE-28・THRT-15 | 根拠欄が PoC-8 手順 3・4 の T-4 を引く。残り (3) は `THRT-15` |
-| T-6 | 1.2 節（T 表） | `DGRT-29` | 原文指定 | 検討中: DGRT-29 | `TASK-82`・`ACPT-12` の指定 |
+| T-6 | 1.2 節（T 表） | `DGRT-29` | 原文指定 | 移管 → Hub `ASCR-84`・この repo のレビューの範囲外: DGRT-29 | `TASK-82`・`ACPT-12` の指定。対応 ID が全て Hub へ移管した行。この行の判定の書き方は未決（利用者が決める） |
 | T-7 | 1.2 節（T 表） | `SESS-32`・`LIFE-32` | 候補（AI。採否は `TASK-83`） | 確定: SESS-32・LIFE-32 | 根拠欄が PoC-8 の T-7 を引く |
 | T-10 | 1.2 節（T 表） | `OCL-49` | 原文指定 | 検討中: OCL-49 | `TASK-82`・`ACPT-12` の指定 |
 | T-13 | 1.2 節（T 表） | `AGCR-52`・`OCL-14`・`OPRV-38` | 候補（AI。採否は `TASK-83`） | 検討中: AGCR-52<br>確定: OCL-14・OPRV-38 | `AGCR-52` が T-13 を引く。`OCL-14` が PoC-5 手順 3、`OPRV-38` が PoC-4 手順 5 を引く |
-| T-16 | 1.2 節（T 表） | `DVUI-19〜DVUI-21` | 原文指定 | 検討中: DVUI-19・DVUI-20・DVUI-21 | `TASK-82`・`ACPT-12` の指定 |
+| T-16 | 1.2 節（T 表） | `DVUI-19〜DVUI-21`・`UISF-37` | 原文指定 | 検討中: DVUI-19・UISF-37<br>移管 → Hub `ASCR-42`・この repo のレビューの範囲外: DVUI-20<br>移管 → Hub `ASCR-37`・この repo のレビューの範囲外（本体側は `UISF-37`）: DVUI-21 | `TASK-82`・`ACPT-12` の指定。`UISF-37` は `DVUI-21` の本体側の移管先で、範囲に残す（`D-2026-11-21-20` の (4)(b)）。`DVUI-19` は本体に残る行で、範囲の扱いは既存のまま（決めていない） |
 | T-17 | 1.2 節（T 表） | `AGCR-25`・`AGCR-45`・`AGCR-47` | 候補（AI。採否は `TASK-83`） | 検討中: AGCR-25・AGCR-47<br>確定: AGCR-45 | `AGCR-45`・`AGCR-47` が T-17 を引く。残り (3) の nonce は `AGCR-25` |
-| T-19 | 1.2 節（T 表） | `SIGN-36`・`SIGN-61`・`ORST-27` | 候補（AI。採否は `TASK-83`） | 確定: SIGN-36<br>検討中: SIGN-61・ORST-27 | `SIGN-61` が T-19 を引く。`SIGN-36`・`ORST-27` が PoC-10 手順 3・12 を引く |
-| T-20 | 1.2 節（T 表） | `ORST-14`・`ORST-18`・`AVLB-9`・`AVLB-11` | 候補（AI。採否は `TASK-83`） | 確定: ORST-14・ORST-18<br>検討中: AVLB-9・AVLB-11 | 根拠欄が PoC-10 手順 4（R0d・R0u）を引く。R-2 の行と対応 ID が重なる |
+| T-19 | 1.2 節（T 表） | `SIGN-36`・`SIGN-61`・`ORST-27` | 候補（AI。採否は `TASK-83`） | 確定: SIGN-36<br>検討中: SIGN-61<br>移管 → Hub `AOPS-39`・この repo のレビューの範囲外: ORST-27 | `SIGN-61` が T-19 を引く。`SIGN-36`・`ORST-27` が PoC-10 手順 3・12 を引く |
+| T-20 | 1.2 節（T 表） | `ORST-14`・`ORST-18`・`AVLB-9`・`AVLB-11` | 候補（AI。採否は `TASK-83`） | 確定: ORST-14<br>検討中: AVLB-9・AVLB-11<br>移管 → Hub `AOPS-24`・この repo のレビューの範囲外: ORST-18 | 根拠欄が PoC-10 手順 4（R0d・R0u）を引く。R-2 の行と対応 ID が重なる |
 | T-21 | 1.2 節（T 表） | `SECR-1`・`SECR-18`・`SECR-23`・`AAUD-30` | 候補（AI。採否は `TASK-83`） | 確定: SECR-1・SECR-18・SECR-23・AAUD-30 | 根拠欄が PoC-1 ADB-25・PoC-10 手順 9 を引く。`SECR-23` は `ACPT-6` の観点 (6) の指定 |
-| T-22 | 1.2 節（T 表） | `AUDB-28`・`AUDB-29`・`AUDB-35`・`AVLB-33`・`AVLB-34` | 候補（AI。採否は `TASK-83`） | 確定: AUDB-28・AUDB-29・AVLB-33<br>検討中: AUDB-35・AVLB-34 | 根拠欄が PoC-1 ADB-15・ADB-16、PoC-10 手順 5 を引く |
+| T-22 | 1.2 節（T 表） | `AUDB-28`・`AUDB-29`・`AUDB-35`・`AVLB-33`・`AVLB-34` | 候補（AI。採否は `TASK-83`） | 確定: AUDB-28・AUDB-29・AVLB-33<br>移管 → Hub `ASTORE-84`・この repo のレビューの範囲外: AUDB-35<br>移管 → Hub `AOPS-16`・この repo のレビューの範囲外: AVLB-34 | 根拠欄が PoC-1 ADB-15・ADB-16、PoC-10 手順 5 を引く |
 | T-23 | 1.2 節（T 表） | `ADLG-3`・`ADLG-11`・`ADLG-15` | 候補（AI。採否は `TASK-83`） | 確定: ADLG-3・ADLG-11・ADLG-15 | 根拠欄が T-23 を引く |
 | R-1 | 4.1 節（重大） | `ADLG-24`・`ADLG-26`・`ADLG-25` | 原文指定 | 検討中: ADLG-24・ADLG-26<br>確定: ADLG-25 | `ACPT-12` の対応 ID（`ADLG-26` は持ち越しで連動） |
-| R-2 | 4.1 節（重大） | `ORST-20`・`ORST-23`・`LIFE-54`・`AVLB-16〜AVLB-18` | 原文指定 | 検討中: ORST-20・ORST-23・LIFE-54・AVLB-16・AVLB-17・AVLB-18 | `ACPT-12` の対応 ID |
+| R-2 | 4.1 節（重大） | `ORST-20`・`ORST-23`・`LIFE-54`・`AVLB-16〜AVLB-18` | 原文指定 | 検討中: ORST-20・ORST-23・LIFE-54・AVLB-16・AVLB-17・AVLB-18 | `ACPT-12` の対応 ID。`ORST-23` は一部移管（Hub `AOPS-25`）。本体に残る部分は範囲に残し、Hub の部分は範囲外（`D-2026-11-21-22` の (4)(b)） |
 | R-3 | 4.1 節（重大） | `DPOL-31`・`DPOL-30`・`ADLG-9` | 原文指定 | 検討中: DPOL-31<br>確定: DPOL-30・ADLG-9 | `ACPT-12` の対応 ID |
 | R-4 | 4.1 節（重大） | `HAPR-9`・`HAPR-10`・`ADLG-7` | 原文指定 | 検討中: HAPR-9・HAPR-10<br>確定: ADLG-7 | `ACPT-12` の対応 ID |
 | R-5 | 4.2 節（中） | `SIGN-49`・`SIGN-50`・`SIGN-48` | 原文指定 | 検討中: SIGN-49・SIGN-50<br>確定: SIGN-48 | `ACPT-12` の対応 ID。反映（P4）の確認が要る |
@@ -50,7 +52,7 @@
 
 ## 注記
 
-- ステータスは上の commit 時点の写しである。spec 側の変更で古くなるため、`TASK-83` の着手時に原文で確かめ直す。
+- ステータスは上の commit 時点の写しである。`eb418ff` からの差分は [gap-check.md](gap-check.md) の点検 C にある。spec 側の変更で古くなるため、`TASK-83` の着手時に原文で確かめ直す。
   ステータスの「確定／検討中」は spec 上の語であり、AI の判断の強さではない（ACPT-7）。
 - `ACPT-12` の区分では、`ADLG-26`（R-1）は「持ち越しで連動」である（窓の上限の数値は測って決める持ち越し。`D-2026-10-17-2`・
   `D-2026-10-17-84`）。表のステータス欄の値とは別に、原文の区分を確かめる。
