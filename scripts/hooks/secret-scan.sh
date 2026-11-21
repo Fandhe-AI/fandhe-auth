@@ -250,7 +250,8 @@ json_string() {
     rest="${js:jp}"
     chunk="${rest%%[\"\\]*}"
     [ "${chunk}" != "${rest}" ] || lock_fail
-    [[ "${chunk}" != *[[:cntrl:]]* ]] || lock_fail
+    # JSON でエスケープが必須なのは U+0001〜U+001F（NUL は読み取りの検査で拒否済み）。U+007F は有効な文字。
+    [[ "${chunk}" != *[$'\x01'-$'\x1f']* ]] || lock_fail
     str_raw="${str_raw}${chunk}"
     jp=$((jp + ${#chunk}))
     c="${js:jp:1}"
@@ -444,21 +445,25 @@ parse_lock() {
   fi
 }
 load_skill_names() {
-  local repo_real rc name n head_names=" " keep
+  local repo_real rc name n head_names=" " keep head_ref head_entry head_mode work_present=0
   local -a work_names
-  if [ ! -e "${detector_lock}" ] && [ ! -L "${detector_lock}" ]; then
-    return 0
+  work_names=()
+  if [ -e "${detector_lock}" ] || [ -L "${detector_lock}" ]; then
+    # シンボリックリンクは -f・-r がリンク先を検査するため明示的に拒否する（読み取り元を検出器の repo の
+    # 通常ファイルに限る。.claude/rules/git-hooks.md の (f)）。
+    if [ -L "${detector_lock}" ] || [ ! -f "${detector_lock}" ] || [ ! -r "${detector_lock}" ]; then
+      lock_fail
+    fi
+    parse_lock "${detector_lock}"
+    work_names=("${parsed_names[@]}")
+    work_present=1
   fi
-  if [ ! -f "${detector_lock}" ] || [ ! -r "${detector_lock}" ]; then
-    lock_fail
-  fi
-  parse_lock "${detector_lock}"
-  work_names=("${parsed_names[@]}")
   # 検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のとき、作業ツリーの
   # skills-lock.json は走査対象の側にもあり、未コミットの編集で除外を足せてしまう（走査対象から読まない規則の
   # ローカル版。.claude/rules/git-hooks.md の (f)）。コミット済み（HEAD）の一覧にある名前だけを使う
   # （作業ツリーの名前との共通部分。常に作業ツリーの一覧の部分集合で、除外を広げない）。
-  # HEAD が無い・HEAD に一覧が無いときは除外なし。git の失敗は検査不能（2）。
+  # 作業ツリーに一覧が無くても HEAD の一覧は検証する（壊れていれば 2）。
+  # 未作成ブランチ（参照が無い）・HEAD に一覧が無いときは除外なし。git の失敗・参照の解決失敗は検査不能（2）。
   if ! repo_real="$(pwd -P && printf x)"; then
     echo "secret-scan: cannot resolve the repository root; aborting" >&4
     exit 2
@@ -466,14 +471,23 @@ load_skill_names() {
   repo_real="${repo_real%x}"
   repo_real="${repo_real%$'\n'}"
   if [ "${repo_real}" != "${detector_root}" ]; then
-    skill_names=("${work_names[@]}")
+    if [ "${work_present}" -eq 1 ]; then
+      skill_names=("${work_names[@]}")
+    fi
     return 0
   fi
-  rc=0
-  g rev-parse -q --verify 'HEAD^{commit}' > /dev/null 2>&1 || rc=$?
-  if [ "${rc}" -eq 1 ]; then
-    return 0
-  elif [ "${rc}" -ne 0 ]; then
+  if ! g rev-parse -q --verify 'HEAD^{commit}' > /dev/null 2>&1; then
+    # 未作成ブランチ（HEAD の指す参照そのものが無い）だけを除外なしで通す。参照があるのにコミットとして
+    # 解決できない（オブジェクトの欠損等）・detached HEAD の解決失敗・参照の判定の失敗は検査不能（2）。
+    rc=0
+    head_ref="$(g symbolic-ref -q HEAD 2> /dev/null)" || rc=$?
+    if [ "${rc}" -eq 0 ] && [ -n "${head_ref}" ]; then
+      rc=0
+      g show-ref --verify -q "${head_ref}" > /dev/null 2>&1 || rc=$?
+      if [ "${rc}" -eq 1 ]; then
+        return 0
+      fi
+    fi
     echo "secret-scan: cannot read HEAD; aborting" >&4
     exit 2
   fi
@@ -485,11 +499,22 @@ load_skill_names() {
   if [ ! -s "${tmp_dir}/head-entry" ]; then
     return 0
   fi
+  # HEAD 側も通常ファイル（100644・100755）だけを受ける。シンボリックリンク・submodule 等は検査不能（2）。
+  head_entry=""
+  IFS= read -r -d '' head_entry < "${tmp_dir}/head-entry" || true
+  head_mode="${head_entry%% *}"
+  case "${head_mode}" in
+    100644 | 100755) ;;
+    *) lock_fail ;;
+  esac
   if ! g cat-file blob "HEAD:skills-lock.json" > "${tmp_dir}/head-lock"; then
     echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
     exit 2
   fi
   parse_lock "${tmp_dir}/head-lock"
+  if [ "${work_present}" -eq 0 ]; then
+    return 0
+  fi
   for n in "${parsed_names[@]}"; do
     head_names="${head_names}${n} "
   done

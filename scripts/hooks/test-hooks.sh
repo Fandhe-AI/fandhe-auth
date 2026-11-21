@@ -645,6 +645,7 @@ check_good_lock "skills-lock.json with braces inside strings is accepted" '{
 check_good_lock "skills-lock.json packed on one line is accepted" '{"version":2,"skills":{"vendored-a":{"source":"x","n":[1,-2.5e3,true,null,{"k":[]}]}}}'
 
 check_good_lock "skills-lock.json with valid multibyte UTF-8 is accepted" "$(lock_with_source "$(printf 'caf\xc3\xa9 \xe6\x97\xa5\xe6\x9c\xac \xf0\x9f\x98\x80')")"
+check_good_lock "skills-lock.json with a raw U+007F in a string is accepted" "$(lock_with_source "a"$'\x7f'"b")"
 check_good_lock "skills-lock.json with a 70-digit number is accepted" "{
   \"version\": 2,
   \"skills\": {
@@ -731,6 +732,62 @@ same_checkout_repo
 printf '%s\n' "${lock_ok}" > skills-lock.json
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a list absent from HEAD excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# 作業ツリーに一覧が無くても、同じ checkout では HEAD の一覧を検証する（壊れていれば 2。#6011）
+same_checkout_repo '{ "version": 2, "skills": {'
+rm -f skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken committed list is rejected even without a working-tree list" 2
+expect_out "same checkout: a broken committed list without a working-tree list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# 作業ツリーに一覧が無く HEAD の一覧が有効なら、何も除外しない
+same_checkout_repo "${lock_ok}"
+rm -f skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a valid committed list without a working-tree list excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# 作業ツリーの一覧がシンボリックリンクなら（リンク先が有効でも）拒否する
+same_checkout_repo "${lock_ok}"
+cp skills-lock.json real-lock.json
+rm -f skills-lock.json
+ln -s real-lock.json skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a working-tree list that is a symlink is rejected" 2
+expect_out "same checkout: a symlinked working-tree list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# HEAD の一覧がシンボリックリンクなら（作業ツリーが通常ファイルでも）拒否する
+new_repo
+mkdir -p scripts/hooks
+cp "${SECRET_SCAN}" scripts/hooks/secret-scan.sh
+# リンク先の文字列そのものを有効な一覧にして、blob の中身の構文検査だけでは拒否されない形にする
+ln -s '{"version":2,"skills":{"vendored-a":{}}}' skills-lock.json
+git add -A
+git commit -q -m "chore: add detector with a symlinked list"
+rm -f skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a committed list that is a symlink is rejected" 2
+expect_out "same checkout: a symlinked committed list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# 検出器の一覧がシンボリックリンク（リンク先は有効）なら拒否する
+bad_n=$((bad_n + 1))
+make_detector "bad${bad_n}" "${lock_ok}"
+mv "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json" "${det_bin%/scripts/hooks/secret-scan.sh}/real-lock.json"
+ln -s real-lock.json "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+run_bad_lock "skills-lock.json as a symlink to a valid file is rejected"
+
+# HEAD の参照: 未作成ブランチは除外なしで走査する。参照があるのに解決できない場合は検査不能（2）
+same_checkout_repo "${lock_ok}"
+git symbolic-ref HEAD refs/heads/unborn
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: an unborn branch excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+head_sha="$(git rev-parse HEAD)"
+rm -f ".git/objects/${head_sha:0:2}/${head_sha:2}"
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a HEAD whose commit object is missing exits 2" 2
+expect_out "same checkout: an unresolvable HEAD reports a fixed message" "secret-scan: cannot read HEAD; aborting"
 
 # CDPATH で相対パスの cd が別のディレクトリ（一覧の無いおとり）へ向かっても、検出器の場所を取り違えない。
 # repo 側にコミットした正しい一覧が使われれば除外され（0）、CDPATH を効かせると一覧を失って検出になる（1）。
