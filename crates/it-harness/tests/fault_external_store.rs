@@ -706,8 +706,15 @@ fn block_returns_promptly_while_real_upstream_connect_is_stalled_linux() {
         elapsed < Duration::from_secs(1),
         "block waited for the stalled connect: {elapsed:?}"
     );
+    let outcome = roundtrip(&mut stuck, b"s");
+    // 切断を観測した時点でも connect は SYN_SENT のまま。`block()` が切らずに、上流への connect の満了の後処理が
+    // クライアントを閉じて `Disconnected` になる回帰を、合格にしない（満了後は SYN_SENT が消える）。
+    assert!(
+        syn_sent_to(up.port),
+        "the connect ended before the client was cut; the disconnect may not come from the block"
+    );
     assert_eq!(
-        roundtrip(&mut stuck, b"s"),
+        outcome,
         Outcome::Disconnected,
         "stalled conn is cut by the block"
     );
