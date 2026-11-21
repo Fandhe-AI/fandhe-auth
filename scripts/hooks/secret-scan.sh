@@ -121,14 +121,16 @@ while [ -L "${_src}" ]; do
   _link="${_link%x}"
   _link="${_link%$'\n'}"
   [ -n "${_link}" ] || detector_fail
+  # 相対リンクは常にリンクの親ディレクトリを基準に解決する（リンク名に / が無ければ親は .）。
   case "${_link}" in
     /*) _src="${_link}" ;;
-    */*) _src="${_src%/*}/${_link}" ;;
     *)
       case "${_src}" in
-        */*) _src="${_src%/*}/${_link}" ;;
-        *) _src="${_link}" ;;
+        */*) _link_dir="${_src%/*}" ;;
+        *) _link_dir="." ;;
       esac
+      [ -n "${_link_dir}" ] || _link_dir="/"
+      _src="${_link_dir}/${_link}"
       ;;
   esac
 done
@@ -150,7 +152,7 @@ esac
 detector_root="${_real_dir%/*}"
 detector_root="${detector_root%/*}"
 [ -n "${detector_root}" ] || detector_root="/"
-unset _src _src_dir _hops _link _real_dir
+unset _src _src_dir _hops _link _link_dir _real_dir
 detector_lock="${detector_root}/skills-lock.json"
 
 # 呼び出し側の環境変数で pathspec の解釈（literal・glob・大文字小文字無視）が変わると、除外の範囲がずれる。
@@ -439,15 +441,18 @@ parse_lock() {
   if ! head -c $((lock_max_bytes + 1)) -- "$1" > "${snap}"; then
     lock_fail
   fi
-  size="$(wc -c < "${snap}")"
+  # サイズは複写に対して一度だけ取得する。失敗・数字以外は検査不能（2）。代入の失敗を set -e に任せない
+  # （検出の終了コード 1 と取り違えないため）。
+  if ! size="$(wc -c < "${snap}")"; then
+    lock_fail
+  fi
   size="${size//[[:space:]]/}"
+  [[ "${size}" =~ ^[0-9]+$ ]] || lock_fail
   if [ "${size}" -gt "${lock_max_bytes}" ]; then
     lock_too_large
   fi
   IFS= read -r -d '' js < "${snap}" || true
   # NUL を含むと bash の読み取りがそこで止まり、後ろが未検証になる。読めたバイト数とサイズを突き合わせる。
-  size="$(wc -c < "${snap}")"
-  size="${size//[[:space:]]/}"
   [ "${#js}" -eq "${size}" ] || lock_fail
   # 構文解析の前に、入力全体が正しい UTF-8 であることを確かめる（C ロケールのバイト単位の照合。iconv 等に依存しない）。
   # 正しい多バイト列（最短形・サロゲート不可・U+10FFFF 以下）を ASCII の 1 文字へ置き換え、80 以上のバイトが残れば不正。
@@ -566,8 +571,63 @@ resolve_head() {
   echo "secret-scan: cannot read HEAD; aborting" >&4
   exit 2
 }
+# parse_git_lock <オブジェクト指定> <複写先>: git のオブジェクトの skills-lock.json を大きさの確認後に複写して解析する。
+# 取得の失敗・非数値・上限超過は検査不能（2）。解析結果は parsed_names に入る。
+parse_git_lock() {
+  local size
+  if ! size="$(g cat-file -s "$1" 2> /dev/null)" || [[ ! "${size}" =~ ^[0-9]+$ ]]; then
+    echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
+    exit 2
+  fi
+  if [ "${size}" -gt "${lock_max_bytes}" ]; then
+    lock_too_large
+  fi
+  if ! g cat-file blob "$1" > "$2" 2> /dev/null; then
+    echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
+    exit 2
+  fi
+  parse_lock "$2"
+}
+# load_index_lock: 走査対象の index の skills-lock.json を検証し、名前を index_names（" a b " 形式）へ入れる。
+# 一覧が index に無ければ index_names は空（" "）。通常ファイル（100644・100755）・単一の stage 0 以外は検査不能（2）。
+index_names=" "
+load_index_lock() {
+  local entry mode rest oid
+  index_names=" "
+  # 標準エラーは抑止しない（--summary では fd 2 が捨てられる。通常モードは git の診断を残す）。
+  if ! g ls-files -s -z -- skills-lock.json > "${tmp_dir}/index-entry"; then
+    echo "secret-scan: cannot read the staged skills-lock.json; aborting" >&4
+    exit 2
+  fi
+  if [ ! -s "${tmp_dir}/index-entry" ]; then
+    return 0
+  fi
+  entry=""
+  {
+    IFS= read -r -d '' entry || true
+    # 2 件目があれば（競合の stage 1〜3）検査不能。
+    IFS= read -r -d '' rest || true
+    [ -z "${rest}" ] || lock_fail
+  } < "${tmp_dir}/index-entry"
+  # 形は "<mode> <oid> <stage>\t<path>"。stage 0 の 1 件だけを受ける（競合・複数件は検査不能）。
+  mode="${entry%% *}"
+  rest="${entry#* }"
+  oid="${rest%% *}"
+  case "${mode}" in
+    100644 | 100755) ;;
+    *) lock_fail ;;
+  esac
+  idx_re='^[0-9a-f]{40}([0-9a-f]{24})?[[:space:]]0'
+  idx_re="${idx_re}"$'\t''skills-lock\.json$'
+  [[ "${rest}" =~ ${idx_re} ]] || lock_fail
+  parse_git_lock "${oid}" "${tmp_dir}/index-lock"
+  local n
+  for n in ${parsed_names[@]+"${parsed_names[@]}"}; do
+    index_names="${index_names}${n} "
+  done
+}
 load_skill_names() {
-  local repo_real rc name n head_names=" " keep head_ref head_entry head_mode head_size work_present=0 lock_pid lock_wd lock_rc
+  local repo_real rc name n head_names=" " keep head_ref head_entry head_mode work_present=0 lock_pid lock_wd lock_rc
   local -a work_names
   work_names=()
   if [ -e "${detector_lock}" ] || [ -L "${detector_lock}" ]; then
@@ -584,9 +644,14 @@ load_skill_names() {
     # 上限 + 1 バイトだけ複写する（超過は parse_lock が固定の診断で止める）。
     head -c $((lock_max_bytes + 1)) 2> /dev/null < "${detector_lock}" > "${tmp_dir}/work-lock" &
     lock_pid=$!
+    # 監視は TERM を受けたら起動済みの sleep も終わらせて抜ける（読み終えた後に sleep が最大 5 秒残らないようにする）。
     (
-      sleep 5
-      kill "${lock_pid}"
+      trap - ERR
+      sleep 5 &
+      _sleep_pid=$!
+      trap 'kill "${_sleep_pid}" > /dev/null 2>&1 || true; wait "${_sleep_pid}" > /dev/null 2>&1 || true; exit 0' TERM
+      wait "${_sleep_pid}" || true
+      kill "${lock_pid}" > /dev/null 2>&1 || true
     ) > /dev/null 2>&1 < /dev/null &
     lock_wd=$!
     lock_rc=0
@@ -603,24 +668,31 @@ load_skill_names() {
     work_names=(${parsed_names[@]+"${parsed_names[@]}"})
     work_present=1
   fi
-  # 検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のとき、作業ツリーの
-  # skills-lock.json は走査対象の側にもあり、未コミットの編集で除外を足せてしまう（走査対象から読まない規則の
-  # ローカル版。.claude/rules/git-hooks.md の (f)）。コミット済み（HEAD）の一覧にある名前だけを使う
-  # （作業ツリーの名前との共通部分。常に作業ツリーの一覧の部分集合で、除外を広げない）。
-  # 作業ツリーに一覧が無くても HEAD の一覧は検証する（壊れていれば 2）。
-  # 未作成ブランチ（参照が無い）・HEAD に一覧が無いときは除外なし。git の失敗・参照の解決失敗は検査不能（2）。
+  # 走査対象の側（index）にも skills-lock.json がある。走査対象の一覧は除外を広げる用途には使わない（PR・未コミットの
+  # 編集で名前を足して検査を免れないため）。使うのは次の 2 つだけ。
+  #   - 検証: 通常ファイル・大きさ・構文・対応形式を確かめ、違反は検査不能（2）にする（マージ前に壊れた一覧を見つける）。
+  #   - 除外を狭める: 同じ checkout では、検査対象の index で登録が消えた名前の除外を取り消す
+  #     （登録の削除をステージしたあとに作業ツリーだけへ登録を戻して除外を残す経路を塞ぐ）。
+  # 一覧が index に無い（走査対象に skills-lock.json が無い）ときの検証は行わない。
   if ! repo_real="$(pwd -P && printf x)"; then
     echo "secret-scan: cannot resolve the repository root; aborting" >&4
     exit 2
   fi
   repo_real="${repo_real%x}"
   repo_real="${repo_real%$'\n'}"
+  load_index_lock
   if [ "${repo_real}" != "${detector_root}" ]; then
     if [ "${work_present}" -eq 1 ]; then
       skill_names=(${work_names[@]+"${work_names[@]}"})
     fi
     return 0
   fi
+  # 検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のとき、作業ツリーの
+  # skills-lock.json は走査対象の側にもあり、未コミットの編集で除外を足せてしまう（走査対象から読まない規則の
+  # ローカル版。.claude/rules/git-hooks.md の (f)）。作業ツリー・HEAD・index の 3 つすべてに登録された名前だけを使う
+  # （常に作業ツリーの一覧の部分集合で、除外を広げない）。
+  # 作業ツリーに一覧が無くても HEAD の一覧は検証する（壊れていれば 2）。
+  # 未作成ブランチ（参照が無い）・HEAD に一覧が無いときは除外なし。git の失敗・参照の解決失敗は検査不能（2）。
   resolve_head
   if [ -z "${head_id}" ]; then
     return 0
@@ -641,18 +713,7 @@ load_skill_names() {
     100644 | 100755) ;;
     *) lock_fail ;;
   esac
-  if ! head_size="$(g cat-file -s "${head_id}:skills-lock.json" 2> /dev/null)" || [[ ! "${head_size}" =~ ^[0-9]+$ ]]; then
-    echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
-    exit 2
-  fi
-  if [ "${head_size}" -gt "${lock_max_bytes}" ]; then
-    lock_too_large
-  fi
-  if ! g cat-file blob "${head_id}:skills-lock.json" > "${tmp_dir}/head-lock" 2> /dev/null; then
-    echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
-    exit 2
-  fi
-  parse_lock "${tmp_dir}/head-lock"
+  parse_git_lock "${head_id}:skills-lock.json" "${tmp_dir}/head-lock"
   if [ "${work_present}" -eq 0 ]; then
     return 0
   fi
@@ -664,6 +725,10 @@ load_skill_names() {
     keep=0
     case "${head_names}" in
       *" ${name} "*) keep=1 ;;
+    esac
+    case "${index_names}" in
+      *" ${name} "*) ;;
+      *) keep=0 ;;
     esac
     if [ "${keep}" -eq 1 ]; then
       skill_names+=("${name}")

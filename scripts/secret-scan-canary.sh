@@ -119,6 +119,9 @@ case "${rc}" in
   0) fail "scanner exit code was 0, expected 1" ;;
   *)
     echo "scan-canary: scanner could not complete (exit ${rc}); cannot judge" >&2
+    # 検出器の固定の診断文（`secret-scan: ...; aborting`。パス・値を含まない）だけを原因の調査用に出す。
+    # grep の失敗はここでは無視する（既に検査不能（2）で終える）。
+    grep -aE '^secret-scan: [A-Za-z0-9 ,.()=-]+; aborting$' "${work_dir}/out" >&2 2> /dev/null || true
     exit 2
     ;;
 esac

@@ -352,6 +352,17 @@ printf '%s\n' '{' '  "version": 2,' '  "skills": {' '    "other": {' '      "sou
 git add skills-lock.json; stage .agents/skills/other/SKILL.md "x = ${token}"
 SCAN_BIN="${det_ok}" check_scan "the scanned repo's own skills-lock.json does not add exclusions" 1 .agents/skills/other/SKILL.md
 
+# 走査対象の一覧は除外に使わないが、壊れていれば検査不能（2）にしてマージ前に見つける（#6000）
+new_repo
+printf '%s\n' '{ "version": 2, "skills": {' > skills-lock.json
+git add skills-lock.json; stage src/app.txt "hello"
+SCAN_BIN="${det_ok}" check_scan "the scanned repo's broken skills-lock.json is rejected (not adopted)" 2
+
+new_repo
+printf '%s\n' '{ "version": 3, "skills": { "other": { "source": "x" } } }' > skills-lock.json
+git add skills-lock.json; stage src/app.txt "hello"
+SCAN_BIN="${det_ok}" check_scan "the scanned repo's skills-lock.json with an unsupported version is rejected" 2
+
 new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${det_nolock}" check_scan "detector without skills-lock.json excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
 
@@ -708,6 +719,11 @@ ln -s "${lnk_real}/scripts" "${lnk_other}/scripts"
 new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${lnk_other}/scripts/hooks/secret-scan.sh" check_scan "detector reached through a symlinked scripts directory reads the real list" 0
 
+# ファイル名だけで起動した相対リンクの先が / を含んでも、リンクの親ディレクトリを基準に解決する（#6000）
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+ln -s "../det-real/scripts/hooks/secret-scan.sh" sslink
+SCAN_BIN="sslink" check_scan "a bare-name symlink with a relative target containing a slash resolves from the link's directory" 0
+
 # 同じ checkout（検出器と走査対象が同じ repo）では、除外の一覧はコミット済み（HEAD）の名前だけを使う（#6000）。
 # 未コミットの作業ツリー・index の編集で除外を足せない。
 same_lock_two='{
@@ -762,6 +778,26 @@ same_checkout_repo "${lock_ok}"
 printf '%s\n' '{ "version": 2, "skills": {' > skills-lock.json
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a broken working-tree list is rejected" 2
+
+# 登録の削除をステージしたあと、作業ツリーだけへ登録を戻しても除外は残らない（index の一覧でも名前を確かめる。#6000）
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{"version":2,"skills":{"vendored-b":{"source":"x"}}}' > skills-lock.json
+git add skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a name unregistered in the index is scanned even if restored in the working tree" 1 .agents/skills/vendored-a/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+git rm -q --cached skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a list deleted from the index excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{ "version": 2, "skills": {' > skills-lock.json
+git add skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken staged list is rejected" 2
 
 same_checkout_repo
 printf '%s\n' "${lock_ok}" > skills-lock.json
@@ -873,6 +909,11 @@ LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${same_bi
 pin_ok=1
 for sub in "ls-tree" "cat-file" "diff"; do
   grep -E "(^| )${sub}( |$)" "${work_dir}/gitlog" > "${work_dir}/gitlog-sub" || true
+  # cat-file は index の一覧の blob（オブジェクト ID だけを渡す）も読むため、HEAD の一覧を読む呼び出し（`<ID>:skills-lock.json`）だけを見る
+  if [ "${sub}" = cat-file ]; then
+    grep -F ":skills-lock.json" "${work_dir}/gitlog-sub" > "${work_dir}/gitlog-sub2" || true
+    mv "${work_dir}/gitlog-sub2" "${work_dir}/gitlog-sub"
+  fi
   sub_total="$(wc -l < "${work_dir}/gitlog-sub")"
   sub_total="${sub_total//[[:space:]]/}"
   sub_with_id="$(grep -c "${head_sha}" "${work_dir}/gitlog-sub" || true)"
