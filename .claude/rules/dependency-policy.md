@@ -103,15 +103,15 @@ git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換�
 
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
 # SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形。無ければ空）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 検出なし（参考）は「did not match any packages」（一致なし）。DPOL-18・DPOL-21 は厳格版の bans も要るため、逆引きだけでは満たさない
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls  # 合格: 同上
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
-cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 検出なし（参考）は「did not match any packages」または終了コード 0 の「nothing to print」（一致なし。下の注記）。DPOL-18・DPOL-21 は厳格版の bans も要るため、逆引きだけでは満たさない
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls  # 参考: 同上
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 参考: 一致なし、または逆依存の根が webauthn-rs 系だけ
+cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 参考: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 参考: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
 ```
 
 - advisory DB の記録（DPOL-33）: DPOL-33 は Should で、使った DB の commit と取得日の両方の記録を求めるが、今は記録していない。取得日も DB の版も「未記録（TASK-679 で決める）」と書く。取得の開始ログ（`Fetching advisory database from` 等）・終了コード・DB の HEAD・取得元との照合（`ls-remote` 等）は、どれも取得や DB の版の根拠にしない。記録の手順は TASK-679 で決める。
-- advisory DB の取得の失敗（DPOL-33）: `cargo deny fetch` が非 0 で終わったら、取得の失敗を PR 本文に書き、cargo deny の advisories の結果を「実行失敗」とする（手元に残った DB で得た「検出なし」を参考結果に入れない）。`cargo audit --file Cargo.lock` は取得と監査を兼ね、advisory の検出でも非 0 で終わるため、終了コードだけで取得の失敗と読まない。出力に DB の取得の誤りがあるとき、または取得の誤りか検出かを読み分けられないときに取得の失敗とし、cargo-audit の結果を「実行失敗」とする。非 0 は失敗の記録にだけ使い、終了コード 0 や失敗の表示が無いことは取得の成功や DB の版の根拠にしない（上の記録の項。`dependency-auditor` Agent の Step 2 と同じ扱い）。
+- advisory DB の取得の失敗（DPOL-33）: `cargo deny fetch` は、非 0 で終わったとき、または出力に DB の取得の誤りがあるときに取得の失敗とする（終了コード 0 でも失敗し得るため、出力も読む）。取得の失敗を PR 本文に書き、cargo deny の advisories の結果を「実行失敗」とする（手元に残った DB で得た「検出なし」を参考結果に入れない）。`cargo audit --file Cargo.lock` は取得と監査を兼ね、advisory の検出でも非 0 で終わるため、終了コードだけで取得の失敗と読まない。出力に DB の取得の誤りがあるとき、または取得の誤りか検出かを出力から読み分けられないときに取得の失敗とし、取得の失敗を PR 本文に書き、cargo-audit の結果を「実行失敗」とする。非 0 の終了は、cargo-deny では取得の失敗の記録に使い、cargo-audit では出力と合わせて読む。どちらの道具でも、終了コード 0 や失敗の表示が無いことは取得の成功や DB の版の根拠にしない（上の記録の項。`dependency-auditor` Agent の Step 2 と同じ扱い）。
 - cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、すべて参考結果とする。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 の判定は未評価とする。読まれ得る設定ファイルの名前は未確認の例として、`deny.toml`・`.deny.toml`・`.cargo/deny.toml`・`audit.toml` がある（確かめ方は決めていない。親ディレクトリの設定を探すかも未確認）。
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。対象が `Cargo.lock` にあっても指定した依存の種類・feature のグラフに無いときは、終了コード 0 で `nothing to print` を出す。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
