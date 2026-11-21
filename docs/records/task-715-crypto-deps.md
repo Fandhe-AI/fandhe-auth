@@ -44,7 +44,7 @@
 | `cargo tree --locked --workspace -e normal,build,dev --target all -i chacha20` | 0 | `chacha20 v0.10.2` ← `proptest v1.12.0` ← `trial-deps`（dev）（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
 | `cargo tree --locked --workspace -e normal,build,dev --target all -i getrandom@0.2.17` | 0 | `getrandom v0.2.17` ← `ring v0.17.14` ← `hub-stub` ← `it-harness`・`load-harness`（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
 | `cargo tree --locked --workspace -e normal,build,dev --target all -i getrandom@0.4.3` | 0 | `getrandom v0.4.3` ← `rand v0.10.4` ← `proptest v1.12.0` ← `trial-deps`（dev）（`←` は依存先から依存元へ向かう逆引きの経路。根は 1 行目から最後の行） |
-| `cargo tree --locked --workspace -e normal,build,dev --target all -i openssl`（lock に無い名前） | 101 | ``error: package ID specification `openssl` did not match any packages``（実行失敗ではなく「lock に無い」の意味） |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i openssl`（lock に無い名前） | 101 | ``error: package ID specification `openssl` did not match any packages``（期待した未解決エラー。lock に一致が無いことの根拠は次行の grep の標準出力と終了コードに置く） |
 | `grep -c '^name = "<名前>"' Cargo.lock`（`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken` を 1 名ずつ） | 1（5 名とも） | 標準出力は `0`（一致 0 件。grep は一致 0 件で終了コード 1 を返す） |
 | `grep -c '^name = ' Cargo.lock` | 0 | `69` |
 
@@ -181,7 +181,7 @@
 
 ### 6. 結果 3: 出所や検証の記録を確かめられない部品（受入基準 (b)）
 
-- `aws-lc-rs`・`jsonwebtoken`・`webauthn-rs`: lock に無く（`ring` は本体に未導入だが lock に収録済みで結果 1 に記録がある）、出所・checksum・advisory を測れない。
+- `aws-lc-rs`・`jsonwebtoken`・`webauthn-rs`: 版ごとの配布元と上流リポジトリは調査済みで 6a に記録した。未確認なのは、採用版とその版を含む `Cargo.lock` に対する source・checksum・advisory の照合である（lock に無く測れない。`ring` は本体に未導入だが lock に収録済みで結果 1 に記録がある）。
 - 署名の実装の選び（`aws-lc-rs` か `ring` か）: 未定。
 - TOTP の本番の crate: 未定（`TASK-762`）。
 - 乱数の実装（`Rng`）: 組込み先が実装し、本体からは見えない（`HOST-2`）。
@@ -213,7 +213,7 @@
 | `cargo metadata --format-version 1 --locked` | 0 | `core`・`secret`・`db-tests`・`client` の `dependencies[]` はいずれも 0 件 |
 | `cargo tree --locked -p fandhe-auth-<名前> -e normal,build --depth 1 --target all`（4 crate） | 0（4 件とも） | 4 件とも出力 1 行 |
 | `cargo tree --locked --workspace -e normal,build,dev --target all -i <名前>`（`ring`・`untrusted`・`rand`・`getrandom@0.2.17`・`getrandom@0.4.3`） | 0（5 件とも） | 1 行目はそれぞれ `ring v0.17.14`・`untrusted v0.9.0`・`rand v0.10.4`・`getrandom v0.2.17`・`getrandom v0.4.3` |
-| 同上 `-i openssl` | 101 | ``error: package ID specification `openssl` did not match any packages``（lock に無い。実行失敗ではない） |
+| 同上 `-i openssl` | 101 | ``error: package ID specification `openssl` did not match any packages``（期待した未解決エラー。`openssl` は package ID として解決されない。lock に一致が無いことの根拠は次行の grep の標準出力と終了コードに置く） |
 | `grep -c '^name = "<名前>"' Cargo.lock`（`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken`） | 1（5 名とも） | 標準出力 `0`（一致 0 件。grep は一致 0 件で 1 を返す。2 以上のコマンド失敗ではない） |
 | `grep -c '^name = ' Cargo.lock` | 0 | `69` |
 | `cargo info aws-lc-rs`・`cargo info jsonwebtoken`・`cargo info webauthn-rs` | 0 | 6a の表のとおり |
