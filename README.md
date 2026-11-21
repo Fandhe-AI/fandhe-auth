@@ -113,7 +113,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 - `console-stub`（console の検証用 stub。`TASK-8`）: 試験専用で、扱いは `hub-stub` と同じです。
 - `it-harness`（結合試験のハーネスの枠。`TASK-10`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/integration.md` です。
 - `e2e-harness`（passkey の E2E のハーネスの枠。`TASK-11`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/e2e.md` です。
-- `load-harness`（計測・負荷のハーネスの計測・集計・負荷の生成・対象の呼び出し・段階を変える実行の部品。`TASK-12`）: 試験専用で、どの crate からも依存されません。試験（dev）だけ `it-harness`・`hub-stub` に依存します。構成は `docs/harness/load.md` です。
+- `load-harness`（計測・負荷のハーネスの計測・集計・負荷の生成・対象の呼び出し・段階を変える実行・記録の出力の部品。`TASK-12`）: 試験専用で、どの crate からも依存されません。試験（dev）だけ `it-harness`・`hub-stub` に依存します。構成は `docs/harness/load.md` です。
 
 手順は次の順です。直接実行する場合のコマンドも併記します。
 

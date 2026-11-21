@@ -96,7 +96,7 @@ impl IntervalName {
     }
 }
 
-/// SECR-23・SECR-26: 名前の中身を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
+/// SECR-23: 名前の中身を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
 /// 公開アクセサーが返す値（`RunSummary` のマップのキー等）の Debug にも名前を出さないため。
 impl fmt::Debug for IntervalName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -121,7 +121,7 @@ impl FailureKind {
     }
 }
 
-/// SECR-23・SECR-26: `IntervalName` と同じ理由で、名前の中身を出さない固定文字列にする。
+/// SECR-23: `IntervalName` と同じ理由で、名前の中身を出さない固定文字列にする。
 impl fmt::Debug for FailureKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("FailureKind(..)")

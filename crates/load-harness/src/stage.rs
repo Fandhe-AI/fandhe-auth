@@ -4,7 +4,8 @@
 //! 各回は [`crate::target::run_target`] で回し、段階の全回が終わったら [`crate::aggregate::worst_run`] で段階の最悪の回を求める。
 //! [`StagedRun`] の `Display` は `docs/harness/load.md` の 3・4 の `stage`・`run`・`failure_kind`・`metric`・`failure_metric`・
 //! `worst_run` の行を段階ごとに出す。
-//! 呼び出し元: 結合試験のハーネスの上で構成要素へ負荷をかける試験（試験ビルド）だけ。
+//! 呼び出し元: 結合試験のハーネスの上で構成要素へ負荷をかける試験（試験ビルド）と、記録の元を作る
+//! [`crate::record::RunSession::run`]（9/10）。
 //! 呼び出し先: 対象の呼び出し（`target`）と集計（`aggregate`）だけ。時計は回ごとに作る関数（`Result` を返す）で受け、
 //! 環境変数・設定ファイル・壁時計を読まない（DPOL-32）。
 //! 時計の生成の誤りは段階と回の番号付きの [`StageError::Clock`] で返す。生成関数の panic は捕捉せず、そのまま伝わる
@@ -140,7 +141,7 @@ pub struct StagePlan {
     allowed_intervals: Vec<IntervalName>,
 }
 
-/// SECR-23・SECR-26: 区間名の語彙を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
+/// SECR-23: 区間名の語彙を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
 impl fmt::Debug for StagePlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("StagePlan(..)")
@@ -152,7 +153,7 @@ impl StagePlan {
     ///
     /// `allowed_intervals` は記録に出してよい区間名の語彙で、呼び出し元が承認済みの名前だけを渡す（既定値なし）。
     /// [`run_stages`] は対象の区間名がこの語彙に無ければ、最初の回の前に拒否する
-    /// （`load.md` の 6・SECR-23・SECR-26）。
+    /// （`load.md` の 6・SECR-23）。
     ///
     /// # Errors
     /// 段階が 0 件または `limits` の段階数超、繰り返しが `limits` 超、全体の試行数の計算が溢れる、
@@ -222,7 +223,7 @@ pub struct StageResult {
     worst_run: Option<u64>,
 }
 
-/// SECR-23・SECR-26: 回の集計の指標のキー（区間名）を出さない固定文字列にする。
+/// SECR-23: 回の集計の指標のキー（区間名）を出さない固定文字列にする。
 impl fmt::Debug for StageResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("StageResult(..)")
@@ -260,7 +261,7 @@ pub struct StagedRun {
     stages: Vec<StageResult>,
 }
 
-/// SECR-23・SECR-26: 対象名・区間名・段階の中身を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
+/// SECR-23: 対象名・区間名・段階の中身を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
 impl fmt::Debug for StagedRun {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("StagedRun(..)")
