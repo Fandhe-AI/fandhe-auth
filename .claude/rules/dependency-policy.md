@@ -94,13 +94,17 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 ```bash
 # advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。使った DB の commit と取得日を記録する
-git -C ~/.cargo/advisory-db rev-parse HEAD                            # cargo-audit の DB の取得前の HEAD（読めなければ「前」は未記録）
-cargo deny fetch; echo "deny fetch exit=$?"; date -u +%FT%TZ   # exit=0 の直後の日時が cargo-deny の取得日の候補（下の記録の項の確認を通ったときだけ取得日にする）
+git -C ~/.cargo/advisory-db rev-parse HEAD                            # cargo-audit の DB の取得前の HEAD（読めなければ「前」を未記録にするだけ。判定には使わない）
+cargo deny fetch; echo "deny fetch exit=$?"                   # 終了コード 0 であること（取得日の判定の一部。下の記録の項）
 cargo audit --file Cargo.lock; echo "audit exit=$?"           # cargo-audit の DB の取得を兼ねる（QP-2 の手順）。終了コードでも出力の表示でも取得の成否を決めない
-git -C ~/.cargo/advisory-db ls-remote origin HEAD; date -u +%FT%TZ     # DB の実体と取得元の HEAD の突き合わせ（下の記録の項）。一致したときだけ、この日時を cargo-audit の取得日の候補にする
-# 取得日は上の各 date の出力。git log の %cI（DB の commit 日時）は取得日ではない。
+git -C ~/.cargo/advisory-db rev-parse HEAD                            # 実行後の HEAD（取得日の判定に使うのはこれだけ）
+ls -d ~/.cargo/advisory-dbs/advisory-db-*                             # ちょうど 1 行のときだけ、その値を DENY_DB_DIR に置く（0 行・2 行以上は cargo-deny の取得日を未記録にする）
+git -C "$DENY_DB_DIR" rev-parse HEAD                                  # cargo-deny の DB の実行後の HEAD
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git ls-remote https://github.com/RustSec/advisory-db.git HEAD   # 取得元の HEAD。repo の設定を読ませず、URL を固定する
+date -u +%FT%TZ                                                       # 上の比較が一致したツールだけ、この日時を取得日にする
+# 取得日は上の date の出力。git log の %cI（DB の commit 日時）は取得日ではない。
 git -C ~/.cargo/advisory-db log -1 --format='%H %cI'                  # cargo-audit の DB の commit と日時
-git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'  # cargo-deny の DB の commit と日時
+git -C "$DENY_DB_DIR" log -1 --format='%H %cI'  # cargo-deny の DB の commit と日時
 
 # 取得なしで流す（DPOL-33・DPOL-34）
 cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
@@ -116,18 +120,20 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
 ```
 
-- advisory DB の「取得日」（DPOL-33）は、ツールごとに取得が成功したと確かめた時点の日時で、`git log` の `%cI`（DB の commit の日時）とは別に記録する。
+- advisory DB の「取得日（取得元の最新と一致したことを確かめた日時）」（DPOL-33）は、ツールごとに記録し、`git log` の `%cI`（DB の commit の日時）とは別にする。
   取得の成否と監査結果の終了コードは分ける。取得の開始を示す表示（`Fetching advisory database from` 等）や、エラーの表示が無いことは成功の根拠にしない
-  （取得の途中の中断・stderr の欠落でも満たされ、古いキャッシュを今回取得した DB として記録できてしまうため）。成否は、終了コードと DB の実体の状態で判定する。
-  - cargo-deny: `cargo deny fetch` の終了コードが 0 で、`git -C ~/.cargo/advisory-dbs/advisory-db-<hash> rev-parse HEAD` が読めること。終了コード 0 の直後の日時を取得日とする。
-  - cargo-audit: `cargo audit --file Cargo.lock` は脆弱性の検出でも非 0 で終わるため、終了コードで取得の成否を決めない。実行の後に
-    `git -C ~/.cargo/advisory-db ls-remote origin HEAD` の commit が、ローカルの DB の `git -C ~/.cargo/advisory-db rev-parse HEAD` と一致したときだけ、
-    DB が取得元の最新だったと確かめたものとして、その `ls-remote` の直後の日時を取得日とする。取得の前後の HEAD も併記する（変わらなくてもよい。最新だったことの確認が目的）。
-    `ls-remote` が失敗した・commit が一致しない・HEAD を読めないときは、取得日を書かず「取得日は未記録（確認できず）」と報告する（fail-closed）。
+  （取得の途中の中断・stderr の欠落でも満たされ、古いキャッシュを今回取得した DB として記録できてしまうため）。判定に使うのは、実行後に読んだ DB の HEAD と、固定の取得元の HEAD の一致だけである。
+  - 取得元は repo の設定（`origin` の向き先・`core.sshCommand` 等）を読まない形に固定する。`GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git ls-remote https://github.com/RustSec/advisory-db.git HEAD`
+    の commit を読む（手元で確かめた既定: cargo-audit 0.22.2 の取得元の既定値は実行ファイルの文字列で `https://github.com/RustSec/advisory-db.git`、cargo-deny 0.19.8 は `https://github.com/RustSec/advisory-db`。同じ repo を指す。実際の取得での使用までは確かめていない）。
+  - cargo-deny: `cargo deny fetch` の終了コードが 0 で、`ls -d ~/.cargo/advisory-dbs/advisory-db-*` がちょうど 1 つを返し（`DENY_DB_DIR` とする）、実行後の `git -C "$DENY_DB_DIR" rev-parse HEAD` が取得元の HEAD と一致したとき、その直後の日時を取得日とする。
+    複数のディレクトリがあり 1 つに決まらないとき、または `deny.toml` に `db-path`・`db-urls` があるとき（Read・Grep で確かめる）は、取得日を「未記録」にする。
+  - cargo-audit: `cargo audit --file Cargo.lock` は脆弱性の検出でも非 0 で終わるため、終了コードで取得の成否を決めない。実行後に読んだ `git -C ~/.cargo/advisory-db rev-parse HEAD` が取得元の HEAD と一致したときだけ、その直後の日時を取得日とする。
+    取得前の HEAD は参考で、読めないときは「前」を未記録にするだけ（判定に使わない）。
+  - 確認できないとき（終了コード非 0〔cargo-deny〕・`ls-remote` の失敗・`ls-remote` の出力が空・commit の不一致・HEAD を読めない・DB のディレクトリが 1 つに決まらない）は、取得日を書かず「取得日は未記録（確認できず）」と報告し、DB の commit だけを記録する（fail-closed）。
   `Loaded <N> security advisories` はローカルの DB を読み込んだ表示で、取得の成功の証拠にならない。検出による非 0 は監査結果として別に記録する。
-  取得日は各ツールの確認を通した直後に `date -u +%FT%TZ` を流して得る（2 つのツールの実行の後に 1 回だけ流さない）。
-  確認できなかったツールは、取得日を書かず「取得日は未記録」と報告し、DB の commit だけを記録する。
-  未確認の点: cargo-audit が取得に失敗したときの終了コード、`--no-fetch` が DB の更新を一切しないこと（`--help` は「git fetch をしない」とだけ記す。この repo の手元の確認はそこまで）。`ls-remote` は取得元（`origin`）への通信を伴う。
+  取得日は確認を通した直後に `date -u +%FT%TZ` を流して得る。
+  未確認の点: cargo-audit が取得に失敗したときの終了コード、`--no-fetch` が DB の更新を一切しないこと（`--help` は「git fetch をしない」とだけ記す）。`ls-remote` は取得元への通信を伴う。
+- `deny.toml`（TASK-668）がある場合も、人が TASK-668 の厳格版だと確かめるまでは、ファイルの存在だけで bans・licenses・sources の「未評価」の印を外さない。DPOL-18・DPOL-22・DPOL-24・DPOL-25 は「未評価」のままにし、その設定の出力は参考結果として書く（`dependency-auditor` Agent も同じ）。
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。対象が `Cargo.lock` にあっても指定した依存の種類・feature のグラフに無いときは、終了コード 0 で `nothing to print` を出す。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
   「一致なし」と読むのは、stderr を取得でき、指定した `-i` の対象（例: `rsa`）についての `did not match any packages` の診断だけのとき、
