@@ -3,6 +3,7 @@
 # ローカル（`make check`）・Git hooks（lefthook.yml）・CI が同じコマンド契約を共有する。
 # CI 側で独自のチェックを定義せず、scripts/ の実体を呼ぶ（make スキルの「入口は複数でも
 # 実処理の定義は一つ」）。Rust のビルドと試験は build-test ジョブ、整形と lint は lint ジョブ、秘密情報の検査は secret-scan ジョブ、DB の結合試験の枠は it-db-ci ジョブで流す（TASK-6）。
+# 依存の検査（cargo-deny・cargo-audit）の枠は deps-audit ジョブで、道具の導入だけを置く（TASK-6 6/10。検査は未結線）。
 # 言語固有のジョブを足すときは、必ず ci-complete の needs にも追加すること。
 # ジョブ・発火条件の追加・変更時は .claude/rules/github-actions.md に従う。
 #
@@ -34,6 +35,12 @@ env:
   EDITORCONFIG_CHECKER_SHA256: "cd32084fce5f3d49ba49697f362ac3a114989715c98819303247dd54c1f368b0"
   SHELLCHECK_VERSION: "0.11.0"
   SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+  # 依存の検査の道具（deps-audit ジョブ）。版は暫定で、人が確定する。SHA256 は 2026-11-20 に資産を実測し、
+  # リリース API の digest と一致することを確認した値（x86_64-unknown-linux-musl の資産）。
+  CARGO_DENY_VERSION: "0.19.8"
+  CARGO_DENY_SHA256: "70e769ae3872e34d45132b17040859175e11401dc12dddb0303e0b8c7d088f3f"
+  CARGO_AUDIT_VERSION: "0.22.2"
+  CARGO_AUDIT_SHA256: "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
 
 jobs:
   check:
@@ -291,6 +298,58 @@ jobs:
       - name: make it-db-ci
         run: make it-db-ci
 
+  # 依存の検査の枠（TASK-6 6/10。#53）。cargo-deny・cargo-audit を版固定 + SHA256 検証で導入するだけで、検査は流さない。
+  # 緑でも DPOL-34（4 検査 + cargo-audit の合格）を満たしたことにならない。名前の「frame」は結線時に外す。
+  # 結線は TASK-680（前提: deny.toml の厳格版 TASK-668・監査の実行スクリプトと advisory DB の記録 TASK-679）。
+  # 定期の実行は TASK-681（#54）。結線の契約は .claude/rules/github-actions.md の「依存の検査の拡張点」。
+  # ジョブ ID は変えず、ci-complete の needs から外さない。if: による skip・continue-on-error は付けない（DPOL-34）。
+  # リポジトリを読まないので checkout は置かない（TASK-680 が要るときに persist-credentials: false で足す）。
+  deps-audit:
+    name: "deps audit frame (tool install only; checks wired in TASK-680)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Install pinned dependency audit tools
+        # 版固定 + SHA256 検証済みのプリビルトバイナリを導入する。URL は env の固定値だけから組み立てる。
+        run: |
+          set -euo pipefail
+          bin_dir="${RUNNER_TEMP}/deps-tools/bin"
+          work_dir="${RUNNER_TEMP}/deps-tools/work"
+          mkdir -p "${bin_dir}" "${work_dir}"
+          cd "${work_dir}"
+
+          deny_dir="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          deny_archive="${deny_dir}.tar.gz"
+          curl -fsSLo "${deny_archive}" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${deny_archive}"
+          echo "${CARGO_DENY_SHA256}  ${deny_archive}" | sha256sum -c -
+          tar -xzf "${deny_archive}" "${deny_dir}/cargo-deny"
+          install -m 0755 "${deny_dir}/cargo-deny" "${bin_dir}/cargo-deny"
+
+          audit_dir="cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}"
+          audit_archive="${audit_dir}.tgz"
+          curl -fsSLo "${audit_archive}" \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}/${audit_archive}"
+          echo "${CARGO_AUDIT_SHA256}  ${audit_archive}" | sha256sum -c -
+          tar -xzf "${audit_archive}" "${audit_dir}/cargo-audit"
+          install -m 0755 "${audit_dir}/cargo-audit" "${bin_dir}/cargo-audit"
+
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+
+      - name: Show tool versions
+        # 導入した版が env の宣言と一致することを確認する（不一致は失敗させる）
+        run: |
+          set -euo pipefail
+          actual_deny="$(cargo-deny --version)"
+          actual_audit="$(cargo-audit audit --version)"
+          [ "${actual_deny}" = "cargo-deny ${CARGO_DENY_VERSION}" ] || { echo "::error::${actual_deny} != cargo-deny ${CARGO_DENY_VERSION}"; exit 1; }
+          [ "${actual_audit}" = "cargo-audit-audit ${CARGO_AUDIT_VERSION}" ] || { echo "::error::${actual_audit} != cargo-audit-audit ${CARGO_AUDIT_VERSION}"; exit 1; }
+          echo "${actual_deny}"
+          echo "${actual_audit}"
+
+      # TODO(TASK-680): TASK-679 の入口（scripts/ と make ターゲット）を呼ぶ 4 検査 + cargo-audit をここへ結線する。
+
   # squash merge では PR タイトルがそのままコミット件名になるため、commit-msg フックと
   # 同じスクリプトで Conventional Commits 形式を検証する（フックの CI 側の対）。
   # PR タイトルは任意文字列のため、${{ }} を run へ直接展開せず env 経由でファイルへ書き出す
@@ -332,6 +391,7 @@ jobs:
       - lint
       - it-db-ci
       - secret-scan
+      - deps-audit
       - pr-title
     steps:
       - name: 全ジョブ結果の検証

@@ -56,10 +56,10 @@ nightly は最新を追う（`D-2026-11-20-9`）。実行の記録に nightly �
 
 ## 依存の監査
 
-- 正式な手順と `deny.toml` は `TASK-668` が作る。repo に `deny.toml` は置かない。
+- `deny.toml`（厳格版）は `TASK-668`、正式な手順と記録の様式は `TASK-679`（`DPOL-33`）が作る。repo に `deny.toml` は置かない。
 - 試しの実行の手順と結果は、PR #5980 の本文に記録した。
 - 合否は PR の head で、全検査が成功することで決める（`DPOL-34`）。結果の判定と例外の追加は人が決める（`DPOL-35`）。
-- `fuzz/` は別 workspace（ルートの `exclude`）で、独自の `Cargo.lock` を持つ。このため、ルートの `cargo deny`・`cargo audit` は `libfuzzer-sys` とその推移依存を見ない。合否には、ルートと fuzz 側の両方の結果を含める（`DPOL-33`・`DPOL-34`）。fuzz 側の対象は、manifest が `fuzz/Cargo.toml`、lockfile が `fuzz/Cargo.lock` である。fuzz 側を含めた監査の正式な手順は `TASK-668`（#321）で決める。
+- `fuzz/` は別 workspace（ルートの `exclude`）で、独自の `Cargo.lock` を持つ。このため、ルートの `cargo deny`・`cargo audit` は `libfuzzer-sys` とその推移依存を見ない。合否には、ルートと fuzz 側の両方の結果を含める（`DPOL-33`・`DPOL-34`）。fuzz 側の対象は、manifest が `fuzz/Cargo.toml`、lockfile が `fuzz/Cargo.lock` である。fuzz 側を含めた監査の正式な手順は `TASK-679`（`DPOL-33`）、厳格版の設定は `TASK-668`（#321）で決める。
 
 ## K11 と feature の選び
 

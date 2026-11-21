@@ -88,6 +88,14 @@ PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を�
 - 誤りと `Debug` にポート・アドレスを載せない（SECR-11・SECR-23）。
 - 根拠: ORST-17・ORST-2。保存先の実体は未決（Hub `ASTORE-38`）。Host への結線は `TODO(TASK-716)`。
 - 試験: `cargo test -p fandhe-auth-it-harness --test fault_external_store`（`make test` に含む）。
+  - OS の条件（#6016）: `block_returns_promptly_while_accept_is_stalled_on_upstream` は、旧実装では待ち行列のあふれで SYN を捨てる挙動に依っており、OS ごとに結果が分かれた（過去の制約）。現行の試験は SYN の破棄に依らない。
+    `ignore` で外さず全 OS で同じ契約を検証し、土台が組めない環境では観測した誤りの種類つきで失敗させる（AUDB-6。macOS での確認は未検証）。
+    これに加えて、待ち行列のあふれに依る `block_returns_promptly_while_real_upstream_connect_is_stalled_linux` は Linux に限る。契約は変えず、停止点の外に残る OS の connect の 1 行（本物の connect だけをロックで囲む回帰）の検出を足すもの。
+    現行の停止状態は、転送器が上流への接続の直前に置く同期点（`UpstreamStall`）で作る。試験は `wait_entered` で到達を待ってから `block()` を呼ぶ。
+    宛先の決定と接続は転送器が行い、停止点は接続先も結果も変えない。待ちは解放・停止・上限 5 秒で解ける。
+    `upstream_attempt_count` は接続処理の直前に加算する診断用の回数で、到達の確認には使わない。
+    `release_returns_in_time_under_reconnect_storm` は macOS で最後の往復が切れることが報告されており調査中。期待は緩めず、
+    失敗の文言に失敗した段階・誤りの種類・集計値の差を出す。集計値は転送器全体の合計で、最後の接続の失敗箇所を断定しない。
 
 ## 遮断の順序と境界の契約（#5983）
 
