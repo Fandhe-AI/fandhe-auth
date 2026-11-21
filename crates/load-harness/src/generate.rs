@@ -133,6 +133,10 @@ static HOOK_ONCE: Once = Once::new();
 /// 段階の実行の時計の生成（`stage::run_stages`）でも使う。
 /// 抑止はスレッドローカルの印で絞るので、他のスレッドの panic は直前の hook に渡す（SECR-23）。
 pub(crate) fn install_quiet_hook() {
+    // アンワインド中は `take_hook` が panic する（二重 panic）ので入れない。
+    if std::thread::panicking() {
+        return;
+    }
     HOOK_ONCE.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {

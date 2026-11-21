@@ -290,7 +290,13 @@ impl StagedRun {
     }
 }
 
-/// 段階を計画の順に 1 つずつ回す。各回の時計は `new_clock` で作る（回ごとに新しい計測を始めるため）。
+/// 段階を計画の順に 1 つずつ回す。
+///
+/// 文言の抑止は panic hook の包みに依る（SECR-23）。包みは初回の呼び出しで 1 度だけ入れるため、
+/// 呼び出し元は初回の後に `std::panic::set_hook` で hook を差し替えない（差し替えると抑止の印が参照されず、
+/// 時計の生成・生成関数の破棄の panic 文言が出得る）。差し替えるなら、直前の hook を包んで呼ぶ形にする。
+/// アンワインド中のスレッドから初めて呼ぶ場合、hook は入らない（`take_hook` が panic するため）。
+/// 先に通常の文脈から 1 度呼んで hook を入れておく。各回の時計は `new_clock` で作る（回ごとに新しい計測を始めるため）。
 ///
 /// `new_clock` は回ごとに `run_target` の直前に 1 度、計画の順に呼ばれる。`Err` は [`StageError::Clock`]、
 /// panic は捕捉して（文言を既定の hook に出さず。SECR-23）[`StageError::ClockPanicked`] として、段階・回の番号付きで返す。
@@ -299,6 +305,8 @@ impl StagedRun {
 ///
 /// # Errors
 /// 計画の不正・時計の生成の誤りまたは panic・回の誤り・集計の誤り。最初の誤りで止め、終わった段階の結果は返さない。
+/// 全回が成功しても生成関数の破棄で panic したときは [`StageError::ClockDropPanicked`] を返す。
+/// 実行中の誤りが先にあれば、破棄の panic の有無に関わらずその誤りを返す。
 pub fn run_stages<C, F>(
     mut new_clock: C,
     spec: &TargetSpec,
@@ -309,7 +317,14 @@ where
     C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
     F: Fn() -> CallResult + Sync,
 {
-    // あらゆる早期リターン（不正な計画の拒否を含む）より前に hook を入れる。所有する値の Drop の panic 文言を出さない（SECR-23）。
+    // 語彙外の区間名の拒否は hook を操作しない。アンワインド中の呼び出しでも InvalidPlan を返せるようにする。
+    // 時計を作る関数の破棄の panic は捕捉だけする（hook 未登録なら文言は既存の hook に出る）。
+    if !plan.allowed_intervals.contains(spec.interval()) {
+        let _ = quiet_catch(move || drop(new_clock));
+        return Err(StageError::InvalidPlan);
+    }
+    // 所有する値の Drop の panic 文言を出さないため hook を入れる（SECR-23）。
+    // アンワインド中は `take_hook` が panic するので入れない（`install_quiet_hook` が判定する）。
     install_quiet_hook();
     let result = run_stages_inner(&mut new_clock, spec, plan, &call);
     // 時計を作る関数（クロージャ）の破棄も抑止と捕捉の内側で行う。所有する値の Drop が panic しても文言を hook に渡さない。
