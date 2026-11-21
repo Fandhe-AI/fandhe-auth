@@ -267,4 +267,105 @@ check_bad_lock "skills-lock.json with an unexpected top-level key is rejected" '
 }'
 
 
+# ---------------------------------------------------------------- shellcheck-staged.sh（pre-commit の shellcheck の並列実行）
+# 本物の shellcheck には頼らず（macOS の CI にあるとは限らない）、PATH 先頭に置いた偽物で呼び方と集約を確かめる。
+# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。名前に bad を含むファイルは 3 行を出して 1 で終わり、slow を含むものは遅れて終わる。
+sc_shim_dir="${work_dir}/sc-shim"
+mkdir -p "${sc_shim_dir}"
+cat > "${sc_shim_dir}/shellcheck" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${SC_LOG}"
+for arg in "$@"; do
+  case "${arg}" in
+    *slow*) sleep 0.3 ;;
+  esac
+  case "${arg}" in
+    *bad*)
+      echo "${arg}: begin"
+      echo "${arg}: middle"
+      echo "${arg}: end"
+      exit 1
+      ;;
+  esac
+done
+exit 0
+EOF
+chmod +x "${sc_shim_dir}/shellcheck"
+SC_STAGED="${HOOKS_DIR}/shellcheck-staged.sh"
+sc_log="${work_dir}/sc.log"
+# sc_run <引数...>: 偽の shellcheck を先頭に置いて入口を起動する。終了コードは sc_rc、出力は ${work_dir}/out、呼び出しの記録は sc_log。
+sc_run() {
+  : > "${sc_log}"
+  if SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" "$@" > "${work_dir}/out" 2>&1; then
+    sc_rc=0
+  else
+    sc_rc=$?
+  fi
+}
+
+sc_run
+if [ "${sc_rc}" -eq 0 ] && [ ! -s "${sc_log}" ] && [ ! -s "${work_dir}/out" ]; then
+  pass "shellcheck-staged: no arguments exits 0 without starting shellcheck"
+else
+  fail "shellcheck-staged: no arguments exits 0 without starting shellcheck" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
+fi
+
+sc_run a.sh b.sh c.sh
+if [ "${sc_rc}" -eq 0 ] && [ "$(sort "${sc_log}")" = "$(printf '%s\n' '-- a.sh' '-- b.sh' '-- c.sh')" ] && [ ! -s "${work_dir}/out" ]; then
+  pass "shellcheck-staged: every file passing exits 0 and each file is checked once"
+else
+  fail "shellcheck-staged: every file passing exits 0 and each file is checked once" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
+fi
+
+# 失敗したファイルがあれば非 0。ほかのファイルも検査され、出力はファイル単位でまとまり、引数の順に並ぶ
+sc_run a.sh slow-bad1.sh c.sh bad2.sh
+sc_want="$(printf '%s\n' 'slow-bad1.sh: begin' 'slow-bad1.sh: middle' 'slow-bad1.sh: end' 'bad2.sh: begin' 'bad2.sh: middle' 'bad2.sh: end')"
+if [ "${sc_rc}" -eq 1 ] && [ "$(cat "${work_dir}/out")" = "${sc_want}" ] && [ "$(wc -l < "${sc_log}" | tr -d ' ')" = "4" ]; then
+  pass "shellcheck-staged: a failing file exits 1, the others are still checked and output is grouped per file in argument order"
+else
+  fail "shellcheck-staged: a failing file exits 1, the others are still checked and output is grouped per file in argument order" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
+fi
+
+# 1 件だけの検査で失敗しても非 0（失敗するファイルが 1 件だけの場合）
+sc_run a.sh only-bad.sh
+if [ "${sc_rc}" -eq 1 ]; then
+  pass "shellcheck-staged: exactly one failing file among passing ones exits 1"
+else
+  fail "shellcheck-staged: exactly one failing file among passing ones exits 1" "exit ${sc_rc}"
+fi
+
+# 空白を含むファイル名は 1 つの引数のまま渡る（空の引数で起動しない）
+sc_run "dir with space/my file.sh" "-dash.sh"
+if [ "${sc_rc}" -eq 0 ] && [ "$(sort "${sc_log}")" = "$(printf '%s\n' '-- -dash.sh' '-- dir with space/my file.sh')" ]; then
+  pass "shellcheck-staged: file names with spaces or a leading dash are passed intact after --"
+else
+  fail "shellcheck-staged: file names with spaces or a leading dash are passed intact after --" "exit ${sc_rc}, calls: $(cat "${sc_log}")"
+fi
+
+# 件数が並列数の上限を超えても、全件が 1 回ずつ検査される
+sc_many=()
+for sc_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+  sc_many+=("f${sc_i}.sh")
+done
+sc_run "${sc_many[@]}"
+if [ "${sc_rc}" -eq 0 ] && [ "$(wc -l < "${sc_log}" | tr -d ' ')" = "30" ] && [ "$(sort -u "${sc_log}" | wc -l | tr -d ' ')" = "30" ]; then
+  pass "shellcheck-staged: more files than the parallel limit are all checked once"
+else
+  fail "shellcheck-staged: more files than the parallel limit are all checked once" "exit ${sc_rc}, calls: $(wc -l < "${sc_log}")"
+fi
+
+# PATH に shellcheck が無いときは、未検査で成功にせず 2 で止まる
+sc_empty_path="${work_dir}/sc-empty-path"
+mkdir -p "${sc_empty_path}"
+if PATH="${sc_empty_path}" "${HOOK_BASH}" "${SC_STAGED}" a.sh > "${work_dir}/out" 2>&1; then
+  sc_rc=0
+else
+  sc_rc=$?
+fi
+if [ "${sc_rc}" -eq 2 ] && grep -qF "shellcheck not found" "${work_dir}/out"; then
+  pass "shellcheck-staged: a missing shellcheck exits 2"
+else
+  fail "shellcheck-staged: a missing shellcheck exits 2" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 finish "part 1"
