@@ -435,6 +435,8 @@ fn observe_upstream(up: TcpListener) -> thread::JoinHandle<UpstreamObservation> 
                 {
                     return UpstreamObservation::Received(total);
                 }
+                // 読み取りの失敗でも、届いたバイトがあれば数を返す（判定は失敗のまま。原因が分かるようにする）。
+                Err(_) if total > 0 => return UpstreamObservation::Received(total),
                 Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
             }
         }

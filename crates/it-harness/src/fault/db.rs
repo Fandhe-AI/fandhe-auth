@@ -126,7 +126,8 @@ impl Upstream {
 ///
 /// 転送器に渡すとき（`start_*_with_stall`）に、到達の記録（[`UpstreamStall::wait_entered`] の対象）と離れた理由
 /// （[`UpstreamStall::exit_reason`]）を戻す。前の転送器の到達で、今回の `wait_entered` が即座に `true` にならない（ORST-17）。
-/// 解放済みの状態（[`UpstreamStall::release`]）は戻さない（以後に入る接続も待たない契約のため）。
+/// 解放済み（[`UpstreamStall::release`]）の停止点は転送器に渡せず、起動は `StartFailed` になる（fail-closed）。
+/// 古い解放の記録が新しい保持を `Released` と読ませないため、解放済みの値は再利用せず新しく作る。
 #[derive(Clone, Default)]
 pub struct UpstreamStall {
     inner: Arc<StallInner>,
@@ -228,15 +229,20 @@ impl UpstreamStall {
         self.inner.cv.notify_all();
     }
 
-    /// 転送器に渡す時に呼ぶ。前の使用の到達と離れた理由を戻し、今回の到達だけを `wait_entered` が待てるようにする。
-    fn rebind(&self) {
+    /// 転送器に渡す時に呼ぶ。解放済みなら `false`（渡せない）。そうでなければ、前の使用の到達と離れた理由を戻し、
+    /// 今回の到達だけを `wait_entered` が待てるようにして `true` を返す。
+    fn rebind(&self) -> bool {
         let mut g = self
             .inner
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        if g.released {
+            return false;
+        }
         g.entered = 0;
         g.last_exit = None;
+        true
     }
 
     /// 転送器の停止を通知する。停止の時刻の記録と停止フラグの公開を同じロックの下で行ってから待ちを起こす。
@@ -292,7 +298,8 @@ impl UpstreamStall {
 }
 
 /// 停止点を離れた理由の決定。解除・停止のどちらも期限の後なら期限切れ（解除や停止が待ちを解いた、と読ませない）。
-/// どちらも期限内なら、先に記録されたほうを理由にする（停止が先に待ちを解いた後に解除が割り込んでも `Stopped`。同時刻は `Released`）。
+/// どちらも期限内なら、先に記録されたほうを理由にする（停止が先に待ちを解いた後に解除が割り込んでも `Stopped`。
+/// 同時刻は順序を決められないので `Stopped` に倒す）。
 fn classify_exit(
     released_at: Option<Instant>,
     stopped_at: Option<Instant>,
@@ -301,7 +308,7 @@ fn classify_exit(
     let released = released_at.filter(|t| *t <= deadline);
     let stopped = stopped_at.filter(|t| *t <= deadline);
     match (released, stopped) {
-        (Some(r), Some(s)) if s < r => StallExit::Stopped,
+        (Some(r), Some(s)) if s <= r => StallExit::Stopped,
         (Some(_), _) => StallExit::Released,
         (None, Some(_)) => StallExit::Stopped,
         (None, None) => StallExit::Expired,
@@ -476,8 +483,8 @@ impl DbFaultProxy {
         ) {
             return Err(DbFaultError::StartFailed);
         }
-        if let Some(stall) = &stall {
-            stall.rebind();
+        if stall.as_ref().is_some_and(|s| !s.rebind()) {
+            return Err(DbFaultError::StartFailed);
         }
         let listener =
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|_| DbFaultError::StartFailed)?;
@@ -541,7 +548,8 @@ impl DbFaultProxy {
     /// 4. 世代の比較。外れれば client のバイトを送らずに拒否（[`Self::generation_refused_count`]）。
     /// 5. 中継の開始（[`Self::accepted_count`]）。
     ///
-    /// 段階 1〜2 で終わった接続は `refused_count` にだけ現れる。接続の成否は 2 と 3 の差で、中継前の拒否は 4 で分ける。
+    /// 段階 1 で終わった接続（遮断中・上流なし）は `refused_count` にだけ現れる。段階 2 で終わった接続（connect の失敗）は
+    /// `refused_count` と試行の計数に現れ、成功の計数には現れない。接続の成否は 2 と 3 の差で、中継前の拒否は 4 で分ける。
     ///
     /// 上流への connect の試行回数（診断用）。`connect_timeout` の直前（停止点を通過した後）に加算するので、停止点への到達の確認には使えない
     /// （到達は [`UpstreamStall::wait_entered`] で待つ）。成否は表さない。
@@ -1613,22 +1621,40 @@ mod tests {
         let second = Some(deadline - Duration::from_millis(10));
         assert_eq!(c(second, first), StallExit::Stopped, "stop came first");
         assert_eq!(c(first, second), StallExit::Released, "release came first");
-        assert_eq!(c(first, first), StallExit::Released, "tie is release");
+        assert_eq!(c(first, first), StallExit::Stopped, "tie is stop");
     }
 
     /// 転送器に渡す時に前の使用の到達・離れた理由を戻す（ORST-17。再利用で `wait_entered` が即座に true にならない）。
     #[test]
     fn rebind_clears_previous_entry_and_exit() {
         let stall = UpstreamStall::new();
-        stall.release();
-        stall.hold(&AtomicBool::new(false));
+        stall.hold(&AtomicBool::new(true));
         assert!(stall.wait_entered(Duration::from_millis(1)));
         assert!(stall.exit_reason().is_some());
-        stall.rebind();
+        assert!(stall.rebind());
         assert!(
             !stall.wait_entered(Duration::from_millis(30)),
             "stale entry"
         );
         assert_eq!(stall.exit_reason(), None);
+    }
+
+    /// 解放済みの停止点は転送器に渡せない。渡すと古い解放が `Released` と読まれるため（ORST-17・AUDB-6）。
+    #[test]
+    fn released_stall_is_rejected_at_start() {
+        let stall = UpstreamStall::new();
+        stall.release();
+        assert!(!stall.rebind());
+        assert!(matches!(
+            DbFaultProxy::start_to_port_with_stall_as(
+                echo_upstream(),
+                FaultKind::DbBlock,
+                stall.clone()
+            ),
+            Err(DbFaultError::StartFailed)
+        ));
+        // 解放も到達も記録されないまま（待たずに `Released` が出ない）。
+        assert_eq!(stall.exit_reason(), None);
+        assert!(!stall.wait_entered(Duration::from_millis(20)));
     }
 }
