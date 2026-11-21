@@ -805,8 +805,8 @@ new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 ln -s "../det-real/scripts/hooks/secret-scan.sh" sslink
 SCAN_BIN="sslink" check_scan "a bare-name symlink with a relative target containing a slash resolves from the link's directory" 0
 
-# 同じ checkout（検出器と走査対象が同じ repo）では、除外の一覧はコミット済み（HEAD）の名前だけを使う（#6000）。
-# 未コミットの作業ツリー・index の編集で除外を足せない。
+# 同じ checkout（検出器と走査対象が同じ repo）では、除外に使うのは HEAD・作業ツリー・index の 3 つすべてに
+# 登録された名前（共通部分）だけ（#6000）。未コミットの作業ツリー・index の編集で除外を足せない。
 same_lock_two='{
   "version": 2,
   "skills": {
