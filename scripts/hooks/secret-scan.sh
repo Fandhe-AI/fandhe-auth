@@ -44,7 +44,7 @@
 #   HEAD に一覧が無いときは除外なし。一覧があるときは、ファイル全体を（正しい UTF-8 かを確かめてから）JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
 #   検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のときは、作業ツリー・index の一覧ではなく
 #   コミット済み（HEAD）の一覧にある名前だけを使う（未コミットの編集で除外を足せない）。同じ checkout では、
-#   HEAD と作業ツリーの双方に登録された名前（共通部分）だけが除外に使われる。片方にしか無い名前は除外しない。
+#   HEAD・作業ツリー・index の 3 つすべてに登録された名前（共通部分）だけが除外に使われる。一部にしか無い名前は除外しない。
 #   HEAD にまだ無い名前は、
 #   コミットされるまで走査される（PR では CI が保護された main の検出器で改めて走査する）。
 #   残る限界（TASK-6・#6000 で追跡。解消は人が方式を決める）: 除外はディレクトリ単位のため、登録済みの skill のディレクトリでは
@@ -650,6 +650,19 @@ load_index_lock() {
     100644 | 100755) ;;
     *) lock_fail ;;
   esac
+  # git add -N（intent-to-add）の項目は、ls-files -s が空 blob の stage 0 として返す。実際には登録されていないため
+  # 未登録（一覧なし）として扱う。判定は作業ツリーとの差分で行う（intent-to-add は元の側が mode 000000 の追加として出る）。
+  # 実際にステージされた空ファイルはこの形にならず、従来どおり解析へ進んで拒否する。
+  if [ "${oid}" = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" ] \
+    || [ "${oid}" = "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813" ]; then
+    if ! g diff-files --raw --no-renames -- skills-lock.json > "${tmp_dir}/index-ita"; then
+      echo "secret-scan: cannot read the staged skills-lock.json; aborting" >&4
+      exit 2
+    fi
+    if IFS= read -r rest < "${tmp_dir}/index-ita" && [[ "${rest}" == ":000000 "* ]]; then
+      return 0
+    fi
+  fi
   idx_re='^[0-9a-f]{40}([0-9a-f]{24})?[[:space:]]0'
   idx_re="${idx_re}"$'\t''skills-lock\.json$'
   [[ "${rest}" =~ ${idx_re} ]] || lock_fail

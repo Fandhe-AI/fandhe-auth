@@ -331,24 +331,30 @@ SCAN_BIN="${det_ok}" check_scan "a registration removed in the target index no l
 new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${det_ok}" check_scan "a target index without skills-lock.json excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
 
+# git add -N（intent-to-add）の skills-lock.json は未登録として扱い、無関係な変更を止めない。実際にステージした空ファイルは拒否する（#6000）
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add -N skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "an intent-to-add skills-lock.json is treated as unregistered" 0
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "a really staged empty skills-lock.json is still rejected" 2
+
 # 除外は検出器の skills-lock.json に登録された .agents/skills/<名前>/ の下だけ。パスの形では決めない（#6000）
-new_repo; stage .agents/skills/other/SKILL.md "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/other/SKILL.md "x = ${token}"
 SCAN_BIN="${det_ok}" check_scan "unregistered .agents/skills directory is scanned" 1 .agents/skills/other/SKILL.md
 
-new_repo; stage .agents/skills/vendored-a-evil/x.md "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/vendored-a-evil/x.md "x = ${token}"
 SCAN_BIN="${det_ok}" check_scan "name prefix match does not exclude a sibling directory" 1 .agents/skills/vendored-a-evil/x.md
 
-new_repo; stage .agents/skills/vendored-a "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/vendored-a "x = ${token}"
 SCAN_BIN="${det_ok}" check_scan "a file named exactly like a registered skill is scanned" 1 .agents/skills/vendored-a
 
-new_repo; stage .agents/skills/loose.md "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/loose.md "x = ${token}"
 SCAN_BIN="${det_ok}" check_scan "a file directly under .agents/skills is scanned" 1 .agents/skills/loose.md
 
-new_repo; stage .agents/skills/VENDORED-A/x.md "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/VENDORED-A/x.md "x = ${token}"
 SCAN_BIN="${det_ok}" check_scan "case-changed skill name is scanned" 1 .agents/skills/VENDORED-A/x.md
 GIT_ICASE_PATHSPECS=1 SCAN_BIN="${det_ok}" check_scan "case-changed skill name is scanned (GIT_ICASE_PATHSPECS=1)" 1 .agents/skills/VENDORED-A/x.md
 
-new_repo; stage nested/.agents/skills/vendored-a/x.md "x = ${token}"
+new_repo; stage_lock; stage nested/.agents/skills/vendored-a/x.md "x = ${token}"
 SCAN_BIN="${det_ok}" check_scan "nested .agents/skills path is scanned" 1 nested/.agents/skills/vendored-a/x.md
 
 new_repo; stage deps.lock "x = ${token}"
@@ -1072,7 +1078,7 @@ stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 CDPATH="${decoy}" SCAN_BIN="${same_bin}" check_scan "a CDPATH decoy does not displace the detector location" 0
 
 # 登録名の下でも、env-file の名前の検査は全パスに掛かる
-new_repo; stage .agents/skills/vendored-a/.env "KEY=value"
+new_repo; stage_lock; stage .agents/skills/vendored-a/.env "KEY=value"
 SCAN_BIN="${det_ok}" check_scan "an env file under a registered skill is still reported" 1 .agents/skills/vendored-a/.env
 
 # 同じ checkout で HEAD の一覧が壊れている・読めないときは検査不能（2）。固定の文言だけを出す
@@ -1160,12 +1166,12 @@ fi
 new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
 SCAN_BIN="${det_ok}" check_scan "(tracked) registered skill path is excluded" 0
 
-new_repo; stage .agents/skills/other/SKILL.md "x = ${token}"; stage deps.lock "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/other/SKILL.md "x = ${token}"; stage deps.lock "x = ${token}"
 stage a/b/foo.lock "x = ${token}"; stage .claude/skills/y/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
 SCAN_BIN="${det_ok}" check_scan "(tracked) unregistered skill path, *.lock and .claude/skills are scanned" 1 deps.lock
 expect_out "(tracked) all four paths are counted" "total: 4 finding(s) in 4 file(s)"
 
-new_repo; stage .agents/skills/vendored-a-evil/x.md "x = ${token}"; stage .agents/skills/vendored-a "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/vendored-a-evil/x.md "x = ${token}"; stage .agents/skills/vendored-a "x = ${token}"
 git commit -q -m "chore: skill"
 SCAN_BIN="${det_ok}" check_scan "(tracked) sibling name and exact-name blob are scanned" 1 .agents/skills/vendored-a
 
