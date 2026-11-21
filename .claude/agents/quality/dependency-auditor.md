@@ -141,6 +141,8 @@ cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確か�
 - cargo-deny: {版} / cargo-audit: {版}
 - advisory DB の記録: 取得日 未記録（TASK-679 で決める）/ DB の版 未記録（TASK-679 で決める）。DPOL-33 は Should で両方を求めるが、今は記録していない
 - 設定: 結果は全て参考結果（どの設定が読まれたかを確かめる手順が決まるまで。TASK-668・TASK-679）
+- 未評価: DPOL-18・DPOL-20・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34
+- advisory の取得: 暫定の手順で、DPOL-34 の合格ではない（advisories・cargo-audit の「検出なし」も合格として扱わない。正式な手順は TASK-679）
 - 監査の対象: ルートの `Cargo.lock`（`crates/trial-deps/fuzz/Cargo.lock` は未実施）
 - 逆引きで有効にした feature: {PROD_FEATURES} / {SERVER_FEATURES}（空なら既定の feature だけ）
 
