@@ -42,7 +42,7 @@ implement-review・implement-review-pr・create-pr 等）。サブエージェ�
 | `Makefile`・`scripts/*.sh` | `make help` と `scripts/help.sh` の一致 | `./makefile.md` の手順 5 |
 | `.github/workflows/` | `actionlint`・PR 上での実際の CI の実行 | `./github-actions.md` |
 
-Cargo の導入後（TASK-3 の雛形で make ターゲット化し、build・test・lint は CI に搭載済み、deny は TASK-6 で載せる予定。ターゲット名は未定）:
+Cargo の導入後（TASK-3 の雛形で make ターゲット化し、build・test・lint は CI に搭載済み、依存の検査の枠は `deps-audit`〔道具の導入だけ。TASK-6 6/10〕で置き、検査の結線は TASK-680、make ターゲットは TASK-679 の入口と一緒に足す。ターゲット名は未定）:
 
 - fmt・clippy は `make lint` に入った（上の表）
 - `cargo test` は `make test` に入った（上の表）

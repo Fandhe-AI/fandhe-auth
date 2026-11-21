@@ -13,7 +13,7 @@ use fandhe_auth_e2e_harness::{
     WebAuthnErrorName, authenticate_once,
 };
 use support::TestOrigin;
-use support::passkey::{Verdict, assert_one_localhost_credential, print_result, register};
+use support::passkey::{RecordSink, authentication_run_result, register};
 
 #[test]
 #[ignore = "geckodriver と Firefox が要る。make e2e-firefox で流す"]
@@ -26,22 +26,20 @@ fn authenticates_after_registration_with_firefox_virtual_authenticator() {
     )
     .expect("start");
 
-    let (aid, cred) = register(&handle, &origin, Browser::Firefox);
-    let outcome =
-        authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("authenticate");
+    let mut sink = RecordSink::new(&handle, Browser::Firefox, PasskeyOperation::Authentication);
+    let (aid, cred) = register(&handle, &origin, &mut sink);
+    let result = authenticate_once(&handle, &origin.origin(), "localhost", &cred);
+    // 認証後の credential の検査も記録へ反映する（WebAuthn の結果と検査の結果を 1 件にまとめる）。
+    let (run, check_ok) = authentication_run_result(&handle, &aid, &result);
+    sink.record(PasskeyOperation::Authentication, run)
+        .expect("record");
+    let outcome = result.expect("authenticate");
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
-
-    assert_one_localhost_credential(&handle, &aid);
-    print_result(
-        &handle,
-        PasskeyOperation::Authentication,
-        Browser::Firefox,
-        &Verdict::Succeeded,
-    );
-
+    assert!(check_ok, "credential check failed");
     running.stop().expect("stop");
+    sink.finish().expect("record");
 }
 
 #[test]
@@ -55,26 +53,28 @@ fn authentication_fails_when_user_verification_fails_with_firefox() {
     )
     .expect("start");
 
-    let (aid, cred) = register(&handle, &origin, Browser::Firefox);
+    let mut sink = RecordSink::new(&handle, Browser::Firefox, PasskeyOperation::Authentication);
+    let (aid, cred) = register(&handle, &origin, &mut sink);
     // 対照: 同じセッション・credential・UV 成功の状態で認証が通ることを先に確かめる。
     // NotAllowedError は期限切れ等でも返るため、これは UV の状態の変更後に NotAllowedError を観測する試験で、原因が UV であることまでは断定しない。
-    let control =
-        authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("control");
+    let control_result = authenticate_once(&handle, &origin.origin(), "localhost", &cred);
+    let (control_run, control_check_ok) = authentication_run_result(&handle, &aid, &control_result);
+    sink.record(PasskeyOperation::Authentication, control_run)
+        .expect("record");
+    let control = control_result.expect("control");
     assert!(control.succeeded(), "error_name={:?}", control.error_name());
+    assert!(control_check_ok, "credential check failed");
     // 登録の後に UV を失敗にする。判定は authenticator 側で完結し、ネットワークに出ない。
     handle.set_user_verified(&aid, false).expect("set uv");
-    let outcome =
-        authenticate_once(&handle, &origin.origin(), "localhost", &cred).expect("authenticate");
+    let result = authenticate_once(&handle, &origin.origin(), "localhost", &cred);
+    let (run, check_ok) = authentication_run_result(&handle, &aid, &result);
+    sink.record(PasskeyOperation::Authentication, run)
+        .expect("record");
+    let outcome = result.expect("authenticate");
     assert!(!outcome.succeeded());
     // HarnessTimeout とは別の名前で、対照が成功した同一条件から UV だけを変えた後の結果としてだけ読み、原因の判別とは読まない。
     assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
-    assert_one_localhost_credential(&handle, &aid);
-    print_result(
-        &handle,
-        PasskeyOperation::Authentication,
-        Browser::Firefox,
-        &Verdict::Rejected(WebAuthnErrorName::NotAllowed),
-    );
-
+    assert!(check_ok, "credential check failed");
     running.stop().expect("stop");
+    sink.finish().expect("record");
 }

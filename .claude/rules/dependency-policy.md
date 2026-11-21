@@ -43,7 +43,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 | 対象 | 規則 | 根拠 |
 | --- | --- | --- |
-| `rsa`（RUSTSEC-2023-0071） | 本番の依存（RP 向けの `fandhe-auth-client` を含む）に 0 件 | DPOL-18・DPOL-21 |
+| `rsa`（RUSTSEC-2023-0071） | 本番の依存（RP 向けの `fandhe-auth-client` を含む）に 0 件 | DPOL-18・DPOL-21（未評価。逆引きだけでは満たさない） |
 | `openssl` | 直接の宣言 0 件。逆依存の根は `webauthn-rs` 系だけ。`vendored` 不可。配備物は配備先の OpenSSL に動的にリンクする（版の記録 DPOL-12 は → Hub `AOPS-2`）。静的リンクを強いる `OPENSSL_STATIC` 系と `PKG_CONFIG_ALL_STATIC` 系（`<TARGET>_` 接頭辞付きを含む。上流が実際に読むのは、openssl-sys 0.9.117 が `OPENSSL_STATIC` と大文字・`_` 化した `<TARGET>_OPENSSL_STATIC`、pkg-config 0.3.34 が接頭辞なしの `OPENSSL_STATIC` と `PKG_CONFIG_ALL_STATIC`。`<TARGET>_PKG_CONFIG_ALL_STATIC`・ハイフン入りの名前・接尾辞の `OPENSSL_STATIC_<target>`・`PKG_CONFIG_ALL_STATIC_<target>` は上流が読まないが、安全側に多めに数える。上流の版を上げたら読む名前の形を確かめ直す。環境と `[env]` の両方）を repo の `.cargo/config*` と検査の環境に置かない（`D-2026-10-17-34` の (1)）。本体の検査は本番の木の `openssl-sys` の件数を報告するだけで、版の記録と最終バイナリのリンクの確認は Hub | DPOL-10・DPOL-11・DPOL-13（`vendored` は `scripts/check-openssl-vendored.sh`〔`make lint`・`make no-vendored`〕で機械的に検査する。合否の対象は試験専用メンバーを除いた本番メンバーの normal・build 依存で、既定 feature と `PROD_FEATURES` で明示した feature だけ。全 feature を有効にする走査は警告だけの参考。静的リンクを強いる設定の検査は R4、TASK-667 (2/4)） |
 | `native-tls` | 使わない。外向き通信の TLS は OS の信頼ストアに頼らない（DPOL-46。実クライアントの選定は Hub の `ARUN-14`） | DPOL-46 |
 | `web-sys` | サーバー側のビルドに 0 件。引いてよいのは `fandhe-auth-webauthn-wasm`（段階 2）だけ。サーバーのビルドの確認は Hub のビルドにも課される（→ Hub `ARUN-16`） | DPOL-40・`D-2026-10-17-35` の (2) |
@@ -58,10 +58,11 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
   `fandhe-backend` の `deny.toml` との照合は Hub の担当（DPOL-44・TASK-683 → Hub `AOPS-4`・`AOPS-5`）で、本体は TASK-668（厳格版）と TASK-2 の残りだけを持つ。
   作るまで下の基準を手元の確認に使う。MPL-2.0 を `fandhe-backend` の許可リストに足さない条件は緩めない（DPOL-45 → Hub `AOPS-5`）。
 - advisories・bans・licenses・sources の 4 検査と `cargo-audit` の 5 つが全て成功しない変更はマージしない（DPOL-34）。
+  CI の枠は `ci.yml` の `deps-audit`（道具の導入だけ。TASK-6 6/10）で、検査の結線は TASK-680。契約は `./github-actions.md` の「依存の検査の拡張点」。
 - 依存の変更のたびと、変更が無い期間も 1 日 1 回流す。1 日 1 回は初期値で、本番の開始から 3 か月の後に見直す。新しい advisory が
   見つかったら運用の監視の警報の経路（DPOL-34 の改訂では Hub の `AOPS-3`）で運用担当（人）へ知らせる（DPOL-35）。
 - advisory DB は実行の前に 1 回だけ取得し、全ての実行に `--disable-fetch`（cargo deny）・`--no-fetch`（cargo audit）を付ける。
-  使った DB の commit と取得日を記録し、`Cargo.lock` を書き換えない（DPOL-33）。
+  `Cargo.lock` は書き換えない（DPOL-33）。使った DB の commit と取得日は、今は記録していない（下の記録の項）。
 - licenses の許可リスト: MIT・Apache-2.0・Apache-2.0 WITH LLVM-exception・Unicode-3.0・BSD-3-Clause・ISC・BSD-2-Clause・
   MPL-2.0・BSL-1.0・CDLA-Permissive-2.0・Zlib・NCSA。NCSA は `libfuzzer-sys`（`(MIT OR Apache-2.0) AND NCSA`）のために足した（許可リスト全体に足す選択〔main の読み〕。確定の範囲（QP-2 の 18 ワークスペース）は広げない。crate 限りの例外（`[[licenses.exceptions]]`）にするかは、`deny.toml`（TASK-668）を作るときに決める未定。DPOL-22 の 2026-11-20 追記・`D-2026-11-20-9`。足した後の厳格版の通過は本番の依存解決では未確認）。LGPL-2.1-or-later は `r-efi` に限った例外で、単独の LGPL は通さない（DPOL-22・DPOL-24）。
 - 自身の crate は `license = "MIT OR Apache-2.0"` を宣言する（DPOL-26・`D-2026-10-23-8`）。
@@ -84,14 +85,16 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 ## 依存を足す・更新するときの確認手順
 
-ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（合否と、例外を足したならその理由）を PR 本文に書く。
+この手順は暫定で、cargo-audit の DB の取得が監査を兼ねており DPOL-33 の取得と監査の分離を満たさない。正式な手順と記録の様式は TASK-679（DPOL-33）、`deny.toml` は TASK-668 で決める。
+この手順の合格を DPOL-34 の合格とは扱わない。
+cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、`deny.toml` の有無にかかわらず参考結果（規約の合否ではない）とする。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 は PR 本文に「未評価」と書く（`dependency-auditor` Agent の手順と同じ）。
+
+ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（参考結果。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 は未評価）と、例外を足したならその理由を PR 本文に書く。
 
 ```bash
-# advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。使った DB の commit と取得日を記録する
+# advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。取得日・DB の版は記録しない（下の記録の項。TASK-679 で決める）。失敗の扱いは下の取得の失敗の項
 cargo deny fetch
-cargo audit --file Cargo.lock        # cargo-audit の DB の取得を兼ねる（QP-2 の手順）
-git -C ~/.cargo/advisory-db log -1 --format='%H %cI'                  # cargo-audit の DB の commit と日時
-git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'  # cargo-deny の DB の commit と日時
+cargo audit --file Cargo.lock   # cargo-audit の DB の取得を兼ねる（QP-2 の手順）
 
 # 取得なしで流す（DPOL-33・DPOL-34）
 cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
@@ -100,15 +103,23 @@ git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換�
 
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
 # SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形。無ければ空）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 合格: 「did not match any packages」（一致なし）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls  # 合格: 同上
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
-cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 検出なし（参考）は「did not match any packages」または終了コード 0 の「nothing to print」（一致なし。下の注記）。DPOL-18・DPOL-21 は厳格版の bans も要るため、逆引きだけでは満たさない
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls  # 参考: 同上
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 参考: 一致なし、または逆依存の根が webauthn-rs 系だけ
+cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 参考: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 参考: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
 ```
 
+- advisory DB の記録（DPOL-33）: DPOL-33 は Should で、使った DB の commit と取得日の両方の記録を求めるが、今は記録していない。取得日も DB の版も「未記録（TASK-679 で決める）」と書く。取得の開始ログ（`Fetching advisory database from` 等）・終了コード・DB の HEAD・取得元との照合（`ls-remote` 等）は、どれも取得や DB の版の根拠にしない。記録の手順は TASK-679 で決める。
+- advisory DB の取得の失敗（DPOL-33）: `cargo deny fetch` は、非 0 で終わったとき、または出力に DB の取得の誤りがあるときに取得の失敗とする（終了コード 0 でも失敗し得るため、出力も読む）。取得の失敗を PR 本文に書き、cargo deny の advisories の結果を「実行失敗」とする（手元に残った DB で得た「検出なし」を参考結果に入れない）。`cargo audit --file Cargo.lock` は取得と監査を兼ね、advisory の検出でも非 0 で終わるため、終了コードだけで取得の失敗と読まない。出力に DB の取得の誤りがあるとき、または取得の誤りか検出かを出力から読み分けられないときに取得の失敗とし、取得の失敗を PR 本文に書き、cargo-audit の結果を「実行失敗」とする。非 0 の終了は、cargo-deny では取得の失敗の記録に使い、cargo-audit では出力と合わせて読む。どちらの道具でも、終了コード 0 や失敗の表示が無いことは取得の成功や DB の版の根拠にしない（上の記録の項。`dependency-auditor` Agent の Step 2 と同じ扱い）。
+- cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、すべて参考結果とする。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 の判定は未評価とする。読まれ得る設定ファイルの名前は未確認の例として、`deny.toml`・`.deny.toml`・`.cargo/deny.toml`・`audit.toml` がある（確かめ方は決めていない。親ディレクトリの設定を探すかも未確認）。
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
-  0 にならない（cargo 1.100.0 で 101 を確認）。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
+  0 にならない（cargo 1.100.0 で 101 を確認）。対象が `Cargo.lock` にあっても指定した依存の種類・feature のグラフに無いときは、終了コード 0 で `nothing to print` を出す。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
+  「一致なし」と読むのは、stderr を取得でき、指定した `-i` の対象（例: `rsa`）についての `did not match any packages` の診断だけのとき、
+  または終了コード 0 で `nothing to print` の他に木の出力が無いときで、後者を実行失敗と書かない。
+  stderr を取得できない・別の誤り（lockfile・manifest・fetch・未知の feature 等）・別の対象への診断は「実行失敗」で不合格とし、「依存なし」と読まない。
+  `absent`（一致なし）と、`--exclude` 等で絞り込んだ結果の 0 件（`filtered`）は区別して書く。集計行でも混ぜず、禁止依存が見つからなかったことだけを示すなら絞り込みの有無を併記する。
+  `openssl` が見つかったときは、手動で確認した結果（逆依存の根と、DPOL-10・DPOL-11 への適合の判定）を PR 本文に記録する。
 - `-e normal` だけでは build-dependencies が抜けるので `-e normal,build` で見る。dev-dependencies は除く。試験だけで使う依存の
   監査は `-e dev` を足して別に見る。
 - `--all-features` は DPOL-31 の変異スイッチなど試験用の feature も有効にし、本番のビルドの木と変わるので使わない。

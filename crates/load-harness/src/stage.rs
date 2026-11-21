@@ -5,8 +5,11 @@
 //! [`StagedRun`] の `Display` は `docs/harness/load.md` の 3・4 の `stage`・`run`・`failure_kind`・`metric`・`failure_metric`・
 //! `worst_run` の行を段階ごとに出す。
 //! 呼び出し元: 結合試験のハーネスの上で構成要素へ負荷をかける試験（試験ビルド）だけ。
-//! 呼び出し先: 対象の呼び出し（`target`）と集計（`aggregate`）だけ。時計は回ごとに作る関数で受け、
+//! 呼び出し先: 対象の呼び出し（`target`）と集計（`aggregate`）だけ。時計は回ごとに作る関数（`Result` を返す）で受け、
 //! 環境変数・設定ファイル・壁時計を読まない（DPOL-32）。
+//! 時計の生成の誤りは段階と回の番号付きの [`StageError::Clock`] で返す。生成関数の panic は捕捉せず、そのまま伝わる
+//! （生成関数のために panic hook を差し替え・抑止しない。境界は [`run_stages`] の doc）。
+//! 誤りの型を `MeterError` に固定したことと variant 名は仮置きで、人の確認待ち（`docs/harness/load.md`）。
 //!
 //! 段階と回は順に回し、重ならない（`run_target` は自分のワーカーを join して戻る）。
 //! 誤り（fail-closed・仮置き）: 最初の誤りで以後の回・段階を始めず、終わった段階の結果も返さない
@@ -22,7 +25,7 @@ use std::fmt;
 
 use crate::aggregate::{AggregateError, IntervalStats, MetricKey, RunSummary, worst_run};
 use crate::generate::LoadConfig;
-use crate::meter::{IntervalName, MonotonicClock};
+use crate::meter::{IntervalName, MeterError, MonotonicClock};
 use crate::target::{CallResult, TargetError, TargetName, TargetSpec, run_target};
 
 /// 計画の上限。呼び出し元が実行環境に合わせて明示する（既定値・固定の上限は置かない。DPOL-32）。
@@ -77,6 +80,13 @@ pub enum StageError {
     },
     /// 段階の最悪の回の集計の誤り。
     Aggregate { stage: u64, error: AggregateError },
+    /// 時計を作る関数が誤りを返した（段階・回は 1 始まり）。回を始める前の失敗で、その回の対象は呼んでいない。
+    /// 誤りは中身を持たない [`MeterError`] の種類だけで、対象の名前を運ばない（SECR-23）。
+    Clock {
+        stage: u64,
+        run: u64,
+        error: MeterError,
+    },
     /// 番号の計算が溢れた。
     CounterOverflow,
 }
@@ -87,6 +97,7 @@ impl fmt::Display for StageError {
             Self::InvalidPlan => "invalid stage plan",
             Self::Target { .. } => "target error in stage",
             Self::Aggregate { .. } => "aggregate error in stage",
+            Self::Clock { .. } => "clock error in stage",
             Self::CounterOverflow => "counter overflow",
         };
         f.write_str(msg)
@@ -276,8 +287,22 @@ impl StagedRun {
 
 /// 段階を計画の順に 1 つずつ回す。各回の時計は `new_clock` で作る（回ごとに新しい計測を始めるため）。
 ///
+/// `new_clock` は回ごとに `run_target` の直前に 1 度、計画の順に呼ばれる。`Err` は [`StageError::Clock`] として
+/// 段階・回の番号付きで返し、以後の生成・対象の呼び出しをせず、終わった段階の結果も返さない。
+/// この形（`Result` で返す・誤りの型を [`MeterError`] に固定）は仮置きで、型と variant 名は人の確認待ちである。
+///
+/// # Panics
+/// `new_clock` の panic と、`new_clock`・作った時計の破棄の panic は捕捉せず、そのまま呼び出し元へ伝わる
+/// （これらの panic のために panic hook を差し替え・抑止しない。hook はプロセス全体の共有状態で、ハーネスが握り続けることを
+/// 保証できないため）。
+/// アンワインド中に生成関数や時計の破棄が続けて panic すると、二重 panic でプロセスが中断し、何も伝わらない。
+/// 対象の閉包の panic の文言の抑止は、[`run_target`] が使う `run_closed_loop` の既存の `install_quiet_hook` に依る。
+/// これも panic hook に依るので同じ限界を持つ（呼び出し元が後から hook を差し替えた場合など）。その扱いはこの PR（#6017）の範囲外で、ここでは変えない。
+/// 対象の名前を伏せることをハーネスが保証するのは、`Result` の誤りの経路（[`StageError`] の `Display`・`Debug`）だけである。
+/// panic の文言に対象の名前を入れないのは生成関数の書き手の責任で、伏せたい失敗は panic ではなく `Err` で返す（SECR-23）。
+///
 /// # Errors
-/// 計画の不正・回の誤り・集計の誤り。最初の誤りで止め、終わった段階の結果は返さない。
+/// 計画の不正・時計の生成の誤り・回の誤り・集計の誤り。最初の誤りで止め、終わった段階の結果は返さない。
 pub fn run_stages<C, F>(
     mut new_clock: C,
     spec: &TargetSpec,
@@ -285,7 +310,7 @@ pub fn run_stages<C, F>(
     call: F,
 ) -> Result<StagedRun, StageError>
 where
-    C: FnMut() -> Box<dyn MonotonicClock>,
+    C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
     F: Fn() -> CallResult + Sync,
 {
     // 語彙外の区間名は記録に出さず、最初の回の前に拒否する。
@@ -299,7 +324,8 @@ where
         let mut runs: Vec<RunSummary> = Vec::new();
         for ri in 0..cfg.repetitions {
             let run = ri.checked_add(1).ok_or(StageError::CounterOverflow)?;
-            let r = run_target(new_clock(), spec, &cfg.load, &call)
+            let clock = new_clock().map_err(|error| StageError::Clock { stage, run, error })?;
+            let r = run_target(clock, spec, &cfg.load, &call)
                 .map_err(|error| StageError::Target { stage, run, error })?;
             runs.push(r.summary);
         }

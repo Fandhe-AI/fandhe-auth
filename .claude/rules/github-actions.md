@@ -21,7 +21,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 
 | ファイル | ジョブ（check 名） | トリガー | runs-on |
 | --- | --- | --- | --- |
-| `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
+| `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `deps audit frame (tool install only; ...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
 
@@ -29,6 +29,25 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 入れるのは `scripts/install-msrv.sh` で、版は `scripts/msrv.sh` が読む（ルートの `[workspace.package].rust-version` を TOML の構造どおりに読み、全 workspace メンバーの `rust-version` と一致するときだけ採る。食い違いは終了コード 2）。
 MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・edition・整形」を正とし、ここには写さない。
 新しい stable での検査は無く、足すかは未定。入れ方の例外は「ジョブ・ワークフローを追加するときのチェックリスト」の 9 を参照する。
+
+## 依存の検査の拡張点（`deps-audit`。TASK-6 6/10）
+
+`ci.yml` の `deps-audit` は、cargo-deny・cargo-audit を版固定 + SHA256 検証で導入して版を照合するだけの枠で、検査は流さない。
+緑でも DPOL-34 を満たしたことにならない（ジョブ名の「frame」はそのため）。結線は TASK-680（前提は TASK-668・TASK-679）で、定期の実行は TASK-681（#54）。
+TASK-680 が結線するときの契約は次のとおり。値は spec の ID で引き、本文は写さない。
+
+1. ジョブ ID `deps-audit` を変えず、`ci-complete` の `needs` から外さない。`if:` による skip・`continue-on-error`・`paths` フィルタを付けない（DPOL-34）。
+2. 処理は TASK-679 の監査の入口（`scripts/` と make ターゲット。名前は未定）を呼ぶ。`ci.yml` に検査のロジックを書かない。
+3. DPOL-33 を満たす。advisory DB は実行の前に 1 回だけ取得し、以後の実行に取得なしの指定（cargo deny は `--disable-fetch`、cargo audit は `--no-fetch`）を付ける。
+    使った DB の commit と取得日を記録し、`Cargo.lock` を書き換えない。具体の手順は TASK-679 で決める（未定。cargo-audit の取得の方法、記録の様式、
+    `--locked` を持たない cargo-audit 0.22.2 での lock の不変の確かめ方を含む）。`./dependency-policy.md` の手元の手順はこの契約の実装ではない。
+4. 対象はルートの `Cargo.lock` と、別 workspace の `crates/trial-deps/fuzz/Cargo.lock` の両方で、合否に両方を含める（`crates/trial-deps/README.md` の「依存の監査」。DPOL-33・DPOL-34）。
+5. 設定は TASK-668 の厳格版 `deny.toml` だけを使う。例外（`ignore`・`skip`・許可の追加）を足すかは人が決め、足すときは理由・期限・範囲を同じ場所に書く（DPOL-20・DPOL-35）。
+6. 4 検査と cargo-audit の 5 つがすべて成功したときだけ緑にする（DPOL-34）。結線までの緑は道具の導入の成功だけを表し、DPOL-34 の合格ではない。
+    結線したらジョブ名から「frame」を外す（必須チェックは `ci-complete` だけなので影響しない）。
+7. 同じ入口を定期の実行（#54・TASK-681）からも呼べる形に保つ（DPOL-35）。
+8. 道具の版は `env` の版と SHA256 を同時に更新する。現在の版は暫定で、人が確定する。
+9. 公開ログには版・件数・advisory ID 程度だけを出し、秘密値は出さない（SECR-23）。
 
 ## runner 方針
 

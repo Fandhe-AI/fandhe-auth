@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::component::E2eComponentKind;
 use crate::harness::{E2eError, E2eErrorKind};
+use crate::record::BrowserVersion;
 use crate::virtual_authenticator::VirtualAuthenticatorOptions;
 
 /// 応答の大きさの上限。ハーネスの安全上の上限で、要件の値ではない。
@@ -271,7 +272,7 @@ impl WebDriverClient {
             .unwrap_or(false)
     }
 
-    /// 新しいセッションを作る。成功したらセッションとブラウザの版を返す。
+    /// 新しいセッションを作る。成功したらセッションとブラウザの版（主番号だけ）を返す。
     ///
     /// 応答の `capabilities.browserName` が `expected_browser_name` と完全一致しなければ、確立したセッションを
     /// 最善で閉じてから `CommandFailed` を返す（別のブラウザのドライバに繋がった記録を作らない。fail-closed）。
@@ -279,7 +280,7 @@ impl WebDriverClient {
         &self,
         capabilities: &Value,
         expected_browser_name: &str,
-    ) -> Result<(WebDriverSession, String), E2eError> {
+    ) -> Result<(WebDriverSession, BrowserVersion), E2eError> {
         let v = self.request(HttpMethod::Post, "/session", Some(capabilities))?;
         let id = v
             .get("sessionId")
@@ -294,12 +295,8 @@ impl WebDriverClient {
             client: *self,
             id: SessionId::new(id)?,
         };
-        // SECR-23: ドライバが現在のセッション ID を版の欄に返しても、結果行に出ないよう空にする。
-        let version = if version == id {
-            String::new()
-        } else {
-            version
-        };
+        // SECR-23: 主番号の数値だけを持ち、セッション ID・アドレス様の値は Unknown に落とす。
+        let version = BrowserVersion::from_driver(&version, id);
         let name_ok = v
             .pointer("/capabilities/browserName")
             .and_then(Value::as_str)
