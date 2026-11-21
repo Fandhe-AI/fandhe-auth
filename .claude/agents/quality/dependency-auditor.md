@@ -37,7 +37,7 @@ tools:
 ### Step 1: 前提を確かめる
 
 `Cargo.lock` の有無を確かめる。無いときは監査を流さず「前提なし（`Cargo.lock` は TASK-3 の雛形）」と報告して止まる。
-`deny.toml` は TASK-668 まで無いので、無いことを理由に止まらない。「`deny.toml` なし（TASK-668 待ち。cargo-deny の既定の設定で流した）」と報告に書き、その結果を DPOL-34 の合格として扱わない（`../../rules/dependency-policy.md` の暫定の手順と同じ扱い）。
+`deny.toml` は TASK-668 まで無いので、無いことを理由に止まらない。「`deny.toml` なし（TASK-668 待ち。cargo-deny の既定の設定で流した）」と報告に書く。厳格な設定（TASK-668）が無い間は、規約固有の検査（bans の DPOL-18・licenses の DPOL-22・DPOL-24・sources の DPOL-25）を「未評価」と書き、既定の設定で得た出力は「参考結果（規約の合否ではない）」と明示する。その結果を DPOL-34 の合格として扱わない（`../../rules/dependency-policy.md` の暫定の手順と同じ扱い）。
 `cargo deny` / `cargo audit` が未導入なら、その旨を報告して止まる（導入はしない）。
 本番のビルドで有効にする feature を呼び出し元から受け取り、`PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り）と
 `SERVER_FEATURES`（本体の workspace のうち、サーバー側のビルドに入る crate の feature だけ。`--workspace` と併用するため `<crate>/<feature>` のカンマ区切りで渡す。`fandhe-auth-server` は Hub の担当で本体の workspace に無い）に置く。受け取れなければ空（既定の feature だけ）で流し、その旨を報告に書く。
@@ -129,6 +129,7 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 
 `deny.toml` に例外（`advisories.ignore` 等）があれば、理由・期限・範囲がそろっているかと期限切れが無いかを読む（DPOL-20）。
 評価は「検出あり / 検出なし / 実行失敗」で書き、合否や承認を書かない。
+`deny.toml` が無いときは、bans・licenses・sources の行を「未評価（参考結果: 既定の設定での出力）」とし、DPOL-18・DPOL-22・DPOL-24・DPOL-25 にひも付けた評価として書かない。
 
 ## 完了条件
 
@@ -136,6 +137,7 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 - [ ] DB の取得を 1 回にし、以後の実行を取得なし（`--disable-fetch`・`--no-fetch`）で流した。cargo deny と cargo tree は `--locked`、cargo audit は `git diff --exit-code Cargo.lock` で書き換えなしを確かめた
 - [ ] 逆引きは本番の feature を明示し（`--all-features` なし）、`-e normal,build` で流した
 - [ ] 5 つの実行と 5 つの逆引きの結果を表にした
+- [ ] `deny.toml` が無いとき、規約固有の検査（DPOL-18・DPOL-22・DPOL-24・DPOL-25）を「未評価」とし、既定の設定の結果を参考結果と明示した
 - [ ] 例外の承認・ファイルの変更をしていない
 
 ## 報告フォーマット
@@ -152,9 +154,9 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 | 検査 | 結果（検出あり / なし / 実行失敗） | 件数 | 該当 crate・ID | 関係する ID |
 |------|--------------------------------|-----|---------------|--------------|
 | advisories | | | | DPOL-34 |
-| bans | | | | DPOL-18 |
-| licenses | | | | DPOL-22・DPOL-24 |
-| sources | | | | DPOL-25 |
+| bans（`deny.toml` なしなら「未評価（参考結果）」） | | | | DPOL-18 |
+| licenses（同上） | | | | DPOL-22・DPOL-24 |
+| sources（同上） | | | | DPOL-25 |
 | cargo-audit | | | | DPOL-34 |
 
 ### 逆引き
