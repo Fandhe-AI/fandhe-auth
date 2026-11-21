@@ -43,17 +43,6 @@ tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shellcheck-staged.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
 trap 'exit 1' INT TERM
 
-# check_one <番号> <ファイル>: 出力と終了コードを番号付きの一時ファイルへ書く
-check_one() {
-  local rc
-  if shellcheck -- "$2" > "${tmp_dir}/$1.out" 2>&1; then
-    rc=0
-  else
-    rc=$?
-  fi
-  echo "${rc}" > "${tmp_dir}/$1.rc"
-}
-
 # 重複を除いた引数を files に集める（名前の完全一致。引数は高々数百件で、二重の走査で足りる）
 files=()
 for file in "$@"; do
@@ -71,7 +60,7 @@ done
 total=${#files[@]}
 
 # 大きいファイルから先に起動する（検査時間はほぼ大きさに比例し、最後に起動した大きなファイルが全体の時間を決めるため）。
-# 起動順は番号だけで持ち、ファイル名を並べ替えの入力に使わない。出力は引数の順（番号順）のまま。
+# 並べ替えの入力は番号だけにし、ファイル名を使わない。出力は引数の順（番号順）のまま。
 i=0
 while [ "${i}" -lt "${total}" ]; do
   if size="$({ wc -c < "${files[i]}"; } 2> /dev/null)"; then
@@ -83,23 +72,21 @@ while [ "${i}" -lt "${total}" ]; do
   i=$((i + 1))
 done | sort -rn -k1,1 -k2,2n > "${tmp_dir}/order"
 
-pids=()
-launched=0
-reaped=0
+# 起動は xargs に任せる（-0 -n 2 -P は GNU・BSD とも使える。空いた枠からすぐ次を起動し、先頭の遅いファイルが列を止めない）。
+# 入力は「番号 NUL ファイル名 NUL」の列で、子は番号ごとの .out と .rc を tmp_dir に書く（$0 = tmp_dir、$1 = 番号、$2 = ファイル名）。
+# 子は検査の結果にかかわらず 0 で終わり、xargs の終了コードには頼らない。結果は下で .rc から読む。
+# shellcheck disable=SC2016 # 子の bash に渡す固定のコード（親では展開させない）
 while read -r _size idx; do
-  check_one "${idx}" "${files[idx]}" &
-  pids[launched]=$!
-  launched=$((launched + 1))
-  # 同時に走らせる数を上限に収める。最も古いものを待つ（wait -n は bash 3.2 に無い）。終了コードは rc ファイルから読む。
-  if [ $((launched - reaped)) -ge "${max_jobs}" ]; then
-    wait "${pids[reaped]}" || true
-    reaped=$((reaped + 1))
-  fi
-done < "${tmp_dir}/order"
-while [ "${reaped}" -lt "${launched}" ]; do
-  wait "${pids[reaped]}" || true
-  reaped=$((reaped + 1))
-done
+  printf '%s\0%s\0' "${idx}" "${files[idx]}"
+done < "${tmp_dir}/order" \
+  | xargs -0 -n 2 -P "${max_jobs}" bash -c '
+    if shellcheck -- "$2" > "$0/$1.out" 2>&1; then
+      rc=0
+    else
+      rc=$?
+    fi
+    echo "${rc}" > "$0/$1.rc"
+  ' "${tmp_dir}" || true
 
 status=0
 i=0
