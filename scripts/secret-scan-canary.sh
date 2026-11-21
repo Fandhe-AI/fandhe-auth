@@ -4,6 +4,9 @@
 # 実行時に組み立てた既知のダミーだけを入れた一時 index（空から開始）を検出器に走査させ、
 # 終了コード 1・出力が許可した集計行の集合と完全に一致すること（余計な行は失敗）・ダミーの値が出力に無いことを確かめる。リポジトリの内容（PR・base の検出対象の有無）に結果が依存しない。「意図的に混入させたダミーで検査が失敗する」ことの証拠をログに残す役割を持つ。
 #
+# 検出器は検出器の複製（一覧の無い一時領域）から動かすため、常に「別の checkout」の分岐（CI の本走査と同じ）で動く。「同じ checkout」の
+# 分岐（作業ツリー・HEAD・index の一覧の共通部分）と一覧の解析は、この陰性対照の範囲外で、test-hooks と CI の本走査が受け持つ。
+#
 # なぜ commit しないか: ダミーのコミットは pre-commit の同じ規則に止められ（--no-verify は禁止）、
 # コミットすれば CI を恒久的に赤にする。そのため一時 index・一時 object dir の中だけで足す。
 # 元の index・作業ツリー・object store は変えない（object は alternates 経由で読むだけ）。
@@ -153,6 +156,7 @@ case "${rc}" in
       'secret-scan: mktemp failed; aborting' \
       'secret-scan: not inside a git work tree; aborting' \
       'secret-scan: self-test failed (regex engine / locale mismatch?); aborting' \
+      'secret-scan: reading skills-lock.json timed out; aborting' \
       'secret-scan: skills-lock.json is too large; aborting' \
       'secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting' \
       'secret-scan: tracked files exist but none were selected for scanning; aborting' > "${work_dir}/allowed-diag" 2> /dev/null || true

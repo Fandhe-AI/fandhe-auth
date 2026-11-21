@@ -1505,6 +1505,43 @@ check_bad_lock "skills-lock.json with a number needing many window refills follo
 check_bad_lock "skills-lock.json with a long number and a bare exponent at the end is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${huge_d}.${huge_f}e+}}}"
 check_bad_lock "skills-lock.json with a long number and a trailing dot is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${huge_d}.}}}"
 check_bad_lock "skills-lock.json with a trailing garbage after long spaces is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{}}}${long_ws}x"
+# skills の名前の重複の確認に使う内部の変数と、名前・環境の変数が衝突しない（名前 vars・a など。#6011）
+make_detector "seen1" '{"version":2,"skills":{"vars":{"k":1},"a":{},"b":{}}}'
+new_repo; stage src/app.txt "hello"
+SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "a skill named vars first is accepted" 0
+make_detector "seen2" '{"version":2,"skills":{"a":{},"vars":{},"b":{},"vars-x":{}}}'
+SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "a skill named vars not first is accepted" 0
+make_detector "seen3" '{"version":2,"skills":{"a":{}}}'
+JSEEN_a=1 JSEEN_vars=1 jseen_a=1 jseen_vars=x SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "variables inherited from the environment do not affect the duplicate check" 0
+# compgen を無効にした bash（programmable completion を外したビルドの再現）でも、継いだ JSEEN_a=1 に影響されない
+nocompgen_env="${work_dir}/nocompgen-env.sh"
+printf '%s\n' 'enable -n compgen' > "${nocompgen_env}"
+JSEEN_a=1 BASH_ENV="${nocompgen_env}" SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "a JSEEN_ variable inherited from the environment is cleared without compgen" 0
+# 同じプロセスで続けて解析する（作業ツリー・index・HEAD の一覧が互いに違う）。前の解析の記録が次の解析に残らない
+same_checkout_repo '{"version":2,"skills":{"vars":{},"a":{}}}'
+printf '%s\n' '{"version":2,"skills":{"vars":{}}}' > skills-lock.json
+git add -- skills-lock.json
+printf '%s\n' '{"version":2,"skills":{"a":{},"vars":{},"b":{}}}' > skills-lock.json
+stage src/app.txt "hello"
+SCAN_BIN="${same_bin}" check_scan "lists parsed one after another in one process do not leak names into each other" 0
+# 重複は拒否のまま（vars の重複）
+check_bad_lock "skills-lock.json with a duplicate skill named vars is rejected" '{"version":2,"skills":{"vars":{},"a":{},"vars":{}}}'
+# 読み取りの 5 秒の打ち切りは、解析の拒否とは別の固定の診断で 2 にする（拒否の試験が、打ち切りでも通ってしまわないように。#6011）。
+# 読み取り用の head を、返ってこない shim に差し替えて打ち切りを起こす（5 秒掛かる）
+timeout_shim_dir="${work_dir}/timeout-shim"
+mkdir -p "${timeout_shim_dir}"
+printf '%s\n' '#!/bin/sh' 'exec sleep 30' > "${timeout_shim_dir}/head"
+chmod +x "${timeout_shim_dir}/head"
+make_detector "timeout" "${lock_ok}"
+new_repo; stage src/app.txt "hello"
+rc=0
+PATH="${timeout_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_bin}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: reading skills-lock.json timed out; aborting" "${work_dir}/out" \
+  && ! grep -qF "unreadable or has an unexpected shape" "${work_dir}/out"; then
+  pass "secret-scan: a read that does not finish in time exits 2 with its own message (not the parse rejection)"
+else
+  fail "secret-scan: a read that does not finish in time exits 2 with its own message (not the parse rejection)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
 # 窓の境目の総当たり: 先頭の空白を 0〜70 バイトずつずらし、次の字句（先頭が 985〜1055 バイト目）が 1024 バイトの境目をまたぐ位置をすべて通す。
 # 窓の大きさは変えず、入力の側をずらす。受理するはずのものは受理（0）、拒否するはずのものは固定の文言・終了コード 2 になること。
 # 1 件ごとに検出器を 1 回走らせるため、1 つの検出器と 1 つの repo を使い回し、結果は字句ごとに 1 件の試験にまとめる。
@@ -1516,7 +1553,7 @@ brute_total=0
 # brute_sweep <説明> <期待する終了コード> <種別: str|raw> <字句> <字句の後ろ>
 # str: "k":"<a を並べて字句を境目の付近に置く><字句><字句の後ろ>   raw: "k":<空白を並べて字句を境目の付近に置く><字句><字句の後ろ>
 brute_sweep() {
-  local desc="$1" want="$2" kind="$3" tok="$4" tail="$5" n rc fill_len bad="" cnt=0 lead body
+  local desc="$1" want="$2" kind="$3" tok="$4" tail="$5" n rc fill_len bad="" bad_out="" cnt=0 lead body
   for ((n = 0; n <= 70; n++)); do
     lead="$(rep_chars ' ' "${n}")"
     if [ "${kind}" = str ]; then
@@ -1533,8 +1570,10 @@ brute_sweep() {
     brute_total=$((brute_total + 1))
     if [ "${rc}" -ne "${want}" ]; then
       bad="${bad} ${n}"
+      [ -n "${bad_out}" ] || bad_out="exit ${rc}, output: $(cat "${work_dir}/out")"
     elif [ "${want}" -eq 2 ] && ! grep -qxF "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting" "${work_dir}/out"; then
       bad="${bad} ${n}"
+      [ -n "${bad_out}" ] || bad_out="exit ${rc}, output: $(cat "${work_dir}/out")"
     fi
   done
   # 試行の回数（0〜70 の 71 位置）が欠けていないことを確かめる（ループの誤りで黙って件数が減るのを防ぐ）。
@@ -1543,7 +1582,7 @@ brute_sweep() {
   elif [ -z "${bad}" ]; then
     pass "secret-scan: window boundary sweep (${cnt} offsets): ${desc}"
   else
-    fail "secret-scan: window boundary sweep: ${desc}" "expected exit ${want} at leading-space counts:${bad}"
+    fail "secret-scan: window boundary sweep: ${desc}" "expected exit ${want} at leading-space counts:${bad}" "first failure: ${bad_out}"
   fi
 }
 brute_start="${SECONDS}"

@@ -374,35 +374,56 @@ lock_fail() {
 # 解析の状態。js は全文で、解析は小さな窓 jb（jn: 窓の長さ・jp: 窓の中の位置）と未読の残り jrest だけを触る。
 # bash の ${var:i:n} は変数の長さに比例して遅く（全文への添字アクセスは入力の大きさのほぼ 2 乗になる）、
 # 窓を小さく保てば 1 回の添字アクセスは窓の長さだけで済む（#6011）。サブシェルを起こさず、失敗はその場で lock_fail で止める。
-js="" jn=0 jp=0 jb="" jrest="" str_raw="" str_esc=0 ws_rest="" ws_lead=""
+js="" jn=0 jp=0 jb="" jrest="" jmore=0 json_run_skip=0 json_flat_skip=0 str_raw="" str_esc=0 ws_rest="" ws_lead=""
 json_ws_pat=$'[! \t\n\r]*'
 # 早道の正規表現: エスケープ・制御文字を含まず、窓の中で閉じる文字列（U+0001〜U+001F・引用符・バックスラッシュ以外）。
 json_str_re=$'^"([^"\\\\\x01-\x1f]*)"'
 # 早道の正規表現: 値がすべて文字列・数・true・false・null の 1 段の object（入れ子・エスケープ・制御文字なし）。
 # 文法は逐次の読みと同じで、一致すれば逐次の読みと同じ位置まで進む（一致しなければ逐次の読みに任せる）。
 json_re_ws=$'[ \t\n\r]*'
+# 文字列（エスケープを含む。逐次の読みと同じ文法: 制御文字は不可・エスケープは \" \\ \/ \b \f \n \r \t \uXXXX）。
+json_re_str="\"([^\"\\\\"$'\x01-\x1f'"]|\\\\([\"\\\\/bfnrt]|u[0-9A-Fa-f]{4}))*\""
 json_re_num='-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?'
-json_re_val="(\"[^\"\\\\"$'\x01-\x1f'"]*\"|${json_re_num}|true|false|null)"
-json_re_mem="\"[^\"\\\\"$'\x01-\x1f'"]*\"${json_re_ws}:${json_re_ws}${json_re_val}"
+json_re_val="(${json_re_str}|${json_re_num}|true|false|null)"
+json_re_mem="${json_re_str}${json_re_ws}:${json_re_ws}${json_re_val}"
 json_re_obj="^\\{${json_re_ws}(\\}|${json_re_mem}(${json_re_ws},${json_re_ws}${json_re_mem})*${json_re_ws}\\})"
+json_re_arr="^\\[${json_re_ws}(\\]|${json_re_val}(${json_re_ws},${json_re_ws}${json_re_val})*${json_re_ws}\\])"
+# skills の 1 件（名前・コロン・値が 1 段の object）を 1 回の照合で読む。名前は規則に合うエスケープなしのもの（group 1）。
+json_re_skill="^${json_re_ws}\"([a-z0-9]([a-z0-9-]*[a-z0-9])?)\"${json_re_ws}:${json_re_ws}\\{${json_re_ws}(\\}|${json_re_mem}(${json_re_ws},${json_re_ws}${json_re_mem})*${json_re_ws}\\})"
+# 窓の中の連続する要素・メンバを 1 回の照合で読み飛ばす正規表現（完全な「値 + 空白 + カンマ」の単位だけに一致する。最後の要素・閉じ括弧・
+# 窓の終わりで切れた単位は一致しないため、従来の逐次の読みが続きを読む）。文字列の本体（エスケープを含む）の連続も同様。
+# 連続の単位の値は、スカラー・空の object・空の配列・値がそれらだけの 1 段の object・配列（深さは最大 2 段下がる。呼び出し側で上限を確かめる）。
+json_re_v1="(${json_re_val}|\\{${json_re_ws}\\}|\\[${json_re_ws}\\])"
+json_re_m1="${json_re_str}${json_re_ws}:${json_re_ws}${json_re_v1}"
+json_re_v2="(${json_re_v1}|\\{${json_re_ws}${json_re_m1}(${json_re_ws},${json_re_ws}${json_re_m1})*${json_re_ws}\\}|\\[${json_re_ws}${json_re_v1}(${json_re_ws},${json_re_ws}${json_re_v1})*${json_re_ws}\\])"
+json_re_m2="${json_re_str}${json_re_ws}:${json_re_ws}${json_re_v2}"
+json_re_arrrun="^(${json_re_ws}${json_re_v2}${json_re_ws},)+"
+json_re_objrun="^(${json_re_ws}${json_re_m2}${json_re_ws},)+"
+json_re_sbody="^(([^\"\\\\"$'\x01-\x1f'"])|(\\\\([\"\\\\/bfnrt]|u[0-9A-Fa-f]{4})))*"
 # json_refill: 読み終えた分を窓から捨て、未読の残りから 1024 バイトを窓へ足す（jp は 0 に戻る）。
 json_refill() {
   jb="${jb:jp}${jrest:0:1024}"
   jrest="${jrest:1024}"
+  # 未読が残るかは、変数を展開せずに済む旗で持つ（"${jrest}" の展開は残りの長さに比例して遅く、字句ごとに行うと 2 乗になる。#6011）。
+  if [ -n "${jrest}" ]; then
+    jmore=1
+  else
+    jmore=0
+  fi
   jn="${#jb}"
   jp=0
 }
 # json_fill: 窓に先読み 64 バイトが無く、未読が残っていれば足す。以降 64 バイト先までの添字は有効
 # （入力の終わりを除く）。窓を足すと jp が変わるため、呼び出しの前に読んだ位置を持ち越さない。
 json_fill() {
-  if [ $((jn - jp)) -lt 64 ] && [ -n "${jrest}" ]; then
+  if [ $((jn - jp)) -lt 64 ] && [ "${jmore}" -eq 1 ]; then
     json_refill
   fi
 }
 # json_ws: 空白（空白・タブ・改行・復帰）を読み飛ばす。空白が無い呼び出しは窓の先頭の 1 文字だけで戻る早道を置く
 # （命令数を減らす。#6011）。
 json_ws() {
-  if [ $((jn - jp)) -lt 64 ] && [ -n "${jrest}" ]; then
+  if [ $((jn - jp)) -lt 64 ] && [ "${jmore}" -eq 1 ]; then
     json_refill
   fi
   case "${jb:jp:1}" in
@@ -410,7 +431,7 @@ json_ws() {
     *) return 0 ;;
   esac
   while :; do
-    if [ $((jn - jp)) -lt 64 ] && [ -n "${jrest}" ]; then
+    if [ $((jn - jp)) -lt 64 ] && [ "${jmore}" -eq 1 ]; then
       json_refill
     fi
     ws_rest="${jb:jp}"
@@ -418,14 +439,16 @@ json_ws() {
     ws_lead="${ws_rest%%${json_ws_pat}}"
     jp=$((jp + ${#ws_lead}))
     # 空白以外の文字に当たったか、入力の終わりなら止める（窓の終わりまで空白なら続きを足して読む）。
-    if [ "${jp}" -lt "${jn}" ] || [ -z "${jrest}" ]; then
+    if [ "${jp}" -lt "${jn}" ] || [ "${jmore}" -eq 0 ]; then
       break
     fi
   done
 }
 # json_string: 位置の文字列を読み、引用符の中の生の文字列を str_raw（エスケープを含めば str_esc=1）に入れる。
+# 引数 skip のときは str_raw を組み立てない（値・入れ子のキーでは使わない。長い文字列で連結が 2 乗になるのを避ける）。
 json_string() {
-  local rest chunk c e hex
+  local rest chunk c e hex keep=1 m
+  [ "${1:-}" != skip ] || keep=0
   str_raw="" str_esc=0
   json_fill
   [ "${jb:jp:1}" = '"' ] || lock_fail
@@ -440,14 +463,28 @@ json_string() {
   while :; do
     json_fill
     rest="${jb:jp}"
+    # 窓の中の有効な文字・エスケープの連続は 1 回の照合で読む（残りは下の逐次の読みが判定する）。
+    if [[ "${rest}" =~ ${json_re_sbody} ]] && [ -n "${BASH_REMATCH[0]}" ]; then
+      m="${BASH_REMATCH[0]}"
+      if [ "${keep}" -eq 1 ]; then
+        str_raw="${str_raw}${m}"
+      fi
+      if [[ "${m}" == *\\* ]]; then
+        str_esc=1
+      fi
+      jp=$((jp + ${#m}))
+      rest="${jb:jp}"
+    fi
     chunk="${rest%%[\"\\]*}"
     # JSON でエスケープが必須なのは U+0001〜U+001F（NUL は読み取りの検査で拒否済み）。U+007F は有効な文字。
     [[ "${chunk}" != *[$'\x01'-$'\x1f']* ]] || lock_fail
-    str_raw="${str_raw}${chunk}"
+    if [ "${keep}" -eq 1 ]; then
+      str_raw="${str_raw}${chunk}"
+    fi
     jp=$((jp + ${#chunk}))
     if [ "${chunk}" = "${rest}" ]; then
       # 窓の中に終わりの引用符・バックスラッシュが無い。未読が残っていれば続きを足して読み、無ければ閉じていない文字列。
-      [ -n "${jrest}" ] || lock_fail
+      [ "${jmore}" -eq 1 ] || lock_fail
       json_refill
       continue
     fi
@@ -461,13 +498,17 @@ json_string() {
     e="${jb:$((jp + 1)):1}"
     case "${e}" in
       '"' | \\ | / | b | f | n | r | t)
-        str_raw="${str_raw}\\${e}"
+        if [ "${keep}" -eq 1 ]; then
+          str_raw="${str_raw}\\${e}"
+        fi
         jp=$((jp + 2))
         ;;
       u)
         hex="${jb:$((jp + 2)):4}"
         [[ "${hex}" =~ ^[0-9A-Fa-f]{4}$ ]] || lock_fail
-        str_raw="${str_raw}\\u${hex}"
+        if [ "${keep}" -eq 1 ]; then
+          str_raw="${str_raw}\\u${hex}"
+        fi
         jp=$((jp + 6))
         ;;
       *) lock_fail ;;
@@ -482,10 +523,21 @@ json_value() {
   c="${jb:jp:1}"
   case "${c}" in
     '{')
-      # 早道: 1 段の object が窓の中で閉じていれば 1 回の照合で読み飛ばす（深さの上限は逐次の読みと同じ: 値は深さ + 1）。
-      if [ "$1" -lt 32 ] && [[ "${jb:jp}" =~ ${json_re_obj} ]]; then
-        jp=$((jp + ${#BASH_REMATCH[0]}))
+      # 空の object は先頭 2 文字で読む（以降の照合は式の組み立てが重いため、字句ごとの呼び出しを減らす）。
+      if [ "${jb:jp:2}" = '{}' ]; then
+        jp=$((jp + 2))
         return 0
+      fi
+      # 早道: 1 段の object が窓の中で閉じていれば 1 回の照合で読み飛ばす（深さの上限は逐次の読みと同じ: 値は深さ + 1）。
+      # 一致しなかった後の 8 回は試さない（式の組み立てが重く、一致しない形が続くと逆に遅くなる）。
+      if [ "${json_flat_skip}" -gt 0 ]; then
+        json_flat_skip=$((json_flat_skip - 1))
+      elif [ "$1" -lt 32 ]; then
+        if [[ "${jb:jp}" =~ ${json_re_obj} ]]; then
+          jp=$((jp + ${#BASH_REMATCH[0]}))
+          return 0
+        fi
+        json_flat_skip=8
       fi
       jp=$((jp + 1))
       json_ws
@@ -494,8 +546,20 @@ json_value() {
         return 0
       fi
       while :; do
+        # 窓の中の連続するメンバ（キーと文字列・数・true・false・null の値）を 1 回の照合で読み飛ばす（値は深さ + 1）。
+        # 一致しなかった後の 8 回は（入れ子の中も含めて）試さない（式の組み立てが重く、一致しない形が続くと逆に遅くなる）。
+        if [ "${json_run_skip}" -gt 0 ]; then
+          json_run_skip=$((json_run_skip - 1))
+        elif [ "$1" -lt 31 ]; then
+          json_fill
+          if [[ "${jb:jp}" =~ ${json_re_objrun} ]]; then
+            jp=$((jp + ${#BASH_REMATCH[0]}))
+          else
+            json_run_skip=8
+          fi
+        fi
         json_ws
-        json_string
+        json_string skip
         json_ws
         [ "${jb:jp:1}" = ':' ] || lock_fail
         jp=$((jp + 1))
@@ -511,6 +575,20 @@ json_value() {
       done
       ;;
     '[')
+      if [ "${jb:jp:2}" = '[]' ]; then
+        jp=$((jp + 2))
+        return 0
+      fi
+      # 早道: 値がすべて文字列・数・true・false・null の 1 段の配列が窓の中で閉じていれば 1 回の照合で読み飛ばす。
+      if [ "${json_flat_skip}" -gt 0 ]; then
+        json_flat_skip=$((json_flat_skip - 1))
+      elif [ "$1" -lt 32 ]; then
+        if [[ "${jb:jp}" =~ ${json_re_arr} ]]; then
+          jp=$((jp + ${#BASH_REMATCH[0]}))
+          return 0
+        fi
+        json_flat_skip=8
+      fi
       jp=$((jp + 1))
       json_ws
       if [ "${jb:jp:1}" = ']' ]; then
@@ -518,6 +596,18 @@ json_value() {
         return 0
       fi
       while :; do
+        # 窓の中の連続する要素（文字列・数・true・false・null）を 1 回の照合で読み飛ばす（要素は深さ + 1）。
+        # 一致しなかった後の 8 回は（入れ子の中も含めて）試さない（式の組み立てが重く、一致しない形が続くと逆に遅くなる）。
+        if [ "${json_run_skip}" -gt 0 ]; then
+          json_run_skip=$((json_run_skip - 1))
+        elif [ "$1" -lt 31 ]; then
+          json_fill
+          if [[ "${jb:jp}" =~ ${json_re_arrrun} ]]; then
+            jp=$((jp + ${#BASH_REMATCH[0]}))
+          else
+            json_run_skip=8
+          fi
+        fi
         json_value $(($1 + 1))
         json_ws
         c="${jb:jp:1}"
@@ -529,14 +619,14 @@ json_value() {
         esac
       done
       ;;
-    '"') json_string ;;
+    '"') json_string skip ;;
     *)
       json_fill
       while :; do
         rest="${jb:jp}"
         if [[ "${rest}" =~ ^(-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?) ]] && [ -n "${BASH_REMATCH[1]}" ]; then
           # 窓の終わりに近い一致は、続きがあれば長くなり得る（数字の続き・指数部は最大 3 文字先まで）。足して読み直す。
-          if [ -n "${jrest}" ] && [ $((jp + ${#BASH_REMATCH[1]} + 3)) -gt "${jn}" ]; then
+          if [ $((jp + ${#BASH_REMATCH[1]} + 3)) -gt "${jn}" ] && [ "${jmore}" -eq 1 ]; then
             json_refill
             continue
           fi
@@ -553,9 +643,18 @@ json_value() {
       ;;
   esac
 }
+# json_seen_add: 名前（name）が既出なら lock_fail、初出なら記録する。名前は [a-z0-9-] だけ（'-' を '_' に直しても衝突しない:
+# 名前に '_' は現れない）。名前ごとの変数で持ち、既出の確認は名前の数に依らない（文字列に連ねて検索すると 2 乗になる。#6011）。
+# 変数名の接頭辞 JSEEN_ は大文字で、このスクリプトの他の変数（小文字）と名前空間が重ならない（名前 vars 等と衝突しない）。
+# 環境から継いだ JSEEN_* も含め、parse_lock の先頭で消す。
+json_seen_add() {
+  local sv="JSEEN_${name//-/_}"
+  [ -z "${!sv:-}" ] || lock_fail
+  printf -v "${sv}" '%s' 1
+}
 # parse_skills: skills の object を読み、検証した名前を parsed_names へ足す。
 parse_skills() {
-  local name seen=" " c
+  local name c
   json_ws
   [ "${jb:jp:1}" = '{' ] || lock_fail
   jp=$((jp + 1))
@@ -565,23 +664,31 @@ parse_skills() {
     return 0
   fi
   while :; do
-    json_ws
-    json_string
-    [ "${str_esc}" -eq 0 ] || lock_fail
-    name="${str_raw}"
-    [[ "${name}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || lock_fail
-    case "${seen}" in
-      *" ${name} "*) lock_fail ;;
-    esac
-    seen="${seen}${name} "
-    parsed_names+=("${name}")
-    parsed_count=$((parsed_count + 1))
-    json_ws
-    [ "${jb:jp:1}" = ':' ] || lock_fail
-    jp=$((jp + 1))
-    json_ws
-    [ "${jb:jp:1}" = '{' ] || lock_fail
-    json_value 2
+    json_fill
+    # 早道: 名前・コロン・1 段の object の値を 1 回の照合で読む。一致しなければ（エスケープ・規則外の名前・入れ子・窓をまたぐ等）
+    # 下の逐次の読みが同じ規則で判定する（名前の規則・重複・値の文法は同じ）。
+    if [[ "${jb:jp}" =~ ${json_re_skill} ]]; then
+      name="${BASH_REMATCH[1]}"
+      jp=$((jp + ${#BASH_REMATCH[0]}))
+      json_seen_add
+      parsed_names+=("${name}")
+      parsed_count=$((parsed_count + 1))
+    else
+      json_ws
+      json_string
+      [ "${str_esc}" -eq 0 ] || lock_fail
+      name="${str_raw}"
+      [[ "${name}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || lock_fail
+      json_seen_add
+      parsed_names+=("${name}")
+      parsed_count=$((parsed_count + 1))
+      json_ws
+      [ "${jb:jp:1}" = ':' ] || lock_fail
+      jp=$((jp + 1))
+      json_ws
+      [ "${jb:jp:1}" = '{' ] || lock_fail
+      json_value 2
+    fi
     json_ws
     c="${jb:jp:1}"
     jp=$((jp + 1))
@@ -608,6 +715,13 @@ parse_lock() {
   local size key c utf8_t seen_version=0 seen_skills=0 snap
   parsed_names=()
   parsed_count=0
+  # 名前ごとの変数（前の解析・環境から継いだものを含む）を消す。`${!JSEEN_@}` は接頭辞に一致する変数名の一覧で、
+  # 一致が無ければ空（set -u でも失敗しない）。compgen は programmable completion を外した bash に無く、黙って空になるため使わない。
+  for _jseen_name in ${!JSEEN_@}; do
+    unset "${_jseen_name}"
+  done
+  json_run_skip=0
+  json_flat_skip=0
   js=""
   # 読み取りとサイズの取得が同じパスを別々に開くと、間にファイルが差し替わり得る。一度だけ一時ファイルへ複写して固定し、
   # 以降の read・wc はその複写に対してだけ行う（一時ファイルは終了時に trap で消える）。
@@ -651,6 +765,11 @@ parse_lock() {
   # 解析は窓 jb と未読の残り jrest で行う（全文 js は添字アクセスしない）。
   jb=""
   jrest="${js}"
+  if [ -n "${jrest}" ]; then
+    jmore=1
+  else
+    jmore=0
+  fi
   jn=0
   jp=0
   json_ws
@@ -891,6 +1010,8 @@ load_skill_names() {
       _sleep_pid=$!
       trap 'kill "${_sleep_pid}" > /dev/null 2>&1 || true; wait "${_sleep_pid}" > /dev/null 2>&1 || true; exit 0' TERM
       wait "${_sleep_pid}" || true
+      # 打ち切りの印を先に残す（読み取りの失敗と区別して固定の診断を出すため。#6011）。
+      : > "${tmp_dir}/lock-timeout" 2> /dev/null || true
       kill "${lock_pid}" > /dev/null 2>&1 || true
     ) > /dev/null 2>&1 < /dev/null &
     lock_wd=$!
@@ -899,6 +1020,11 @@ load_skill_names() {
     kill "${lock_wd}" > /dev/null 2>&1 || true
     wait "${lock_wd}" > /dev/null 2>&1 || true
     if [ "${lock_rc}" -ne 0 ]; then
+      if [ -e "${tmp_dir}/lock-timeout" ]; then
+        # 読み取りの打ち切り（5 秒）。解析の拒否とは別の固定の診断で、検査不能（2）にする（値・パスは出さない）。
+        echo "secret-scan: reading skills-lock.json timed out; aborting" >&4
+        exit 2
+      fi
       lock_fail
     fi
     if [ -L "${detector_lock}" ] || [ ! -f "${detector_lock}" ]; then
