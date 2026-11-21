@@ -67,14 +67,14 @@ T 表は 1.2 節、重大は 4.1 節、中は 4.2 節、RFC 9700 の照合は 2 
 | T-1 | 候補 | PoC-8 手順 4・6、PoC-1 ADB-6・ADB-25 | `lifecycle.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
 | T-2 | 候補 | PoC-8 手順 4、PoC-3 手順 5・発見事項 10、PoC-12 手順 10、PoC-1 ADB-24、PoC-10 手順 7 | `rate-limit.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。判定と加算の単位が 1 文であることを `THRT-6`・`AUDB-27`（`db-contract.md`）まで辿る |
 | T-4 | 候補 | PoC-8 手順 3・4 | `api-session.md`・`lifecycle.md`・`rate-limit.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
-| T-6 | 原文指定 | PoC-2 手順 4・5、PoC-3 手順 5、PoC-9 手順 6・7 | `api-device-grant.md`（`DGRT-29` は Hub へ移管。末尾の表で確かめる） | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる。PoC の合否の範囲を、対応 ID の確定の範囲と照らす。対応 ID が全て Hub へ移管した行で、判定の書き方は未決（利用者が決める） |
+| T-6 | 原文指定 | PoC-2 手順 4・5、PoC-3 手順 5、PoC-9 手順 6・7 | `api-device-grant.md`（`DGRT-29` は Hub へ移管。末尾の表で確かめる） | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる。対応 ID の `DGRT-29` は Hub `ASCR-84` へ移管し、この repo のレビューの範囲外（`D-2026-11-21-20` の (4)(b)）。固定した commit の本体の spec には照らす行が無いため、この repo で確かめるのは移管先が移管表と合うことまで。Hub の要件の確認は Hub の側で行う（`D-2026-11-21-22` の (4)(c)）。対応 ID が全て Hub へ移管した行で、判定の書き方は未決（利用者が決める。`D-2026-11-21-20` の (5)(a)） |
 | T-7 | 候補 | PoC-8 手順 4・5・9、PoC-10 手順 4 | `api-session.md`・`lifecycle.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
 | T-10 | 原文指定 | PoC-3 手順 7、PoC-12 手順 5、PoC-4 手順 4、PoC-6 の足した機能 4 | `oidc-clients.md`（関連: `csrf-ssr.md`） | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる。Gate の例外が 1 パスだけである点は `.claude/rules/security.md` の CSRF の節と照らす |
 | T-13 | 候補 | PoC-5 手順 3・5、PoC-4 手順 5・9 | `agent-credential.md`・`oidc-clients.md`・`api-oidc-provider.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。トークン種別の区別は `token-signing.md` の `typ` の項と照らす |
 | T-16 | 原文指定 | PoC-9 手順 3・4・6 | `screen-device.md`・`ui-safety.md`（`DVUI-21` の本体側の移管先 `UISF-37`。`DVUI-20` は Hub へ移管） | C-1〜C-3、C-5。残りの各項目を C-2 で確かめる。`UISF-37` は範囲に残す |
 | T-17 | 候補 | PoC-9 手順 5・8・9、DPoP の検査 | `agent-credential.md` | C-1〜C-4。残りの各項目を C-2 で確かめる |
 | T-19 | 候補 | PoC-5 手順 2・6、PoC-10 手順 2・3・12、PoC-1 ADB-17・ADB-25 | `token-signing.md`・`ops-restore-runbook.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。`ORST-27` は Hub へ移管（この repo の範囲外） |
-| T-20 | 候補 | PoC-10 手順 4、PoC-1 ADB-18・ADB-19、PoC-8 の台帳 | `ops-restore-runbook.md`・`availability.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。R-2 と対応 ID が重なるため、R-2 の観点と合わせて確かめる。`ORST-18` は Hub へ移管（この repo の範囲外） |
+| T-20 | 候補 | PoC-10 手順 4、PoC-1 ADB-18・ADB-19、PoC-8 の台帳 | `ops-restore-runbook.md`・`availability.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。R-2 と対応 ID は重ならないが、どちらも PoC-10 手順 4 を引くため、R-2 の観点と合わせて確かめる（対応 ID は行ごとに照らす）。`ORST-18` は Hub へ移管（この repo の範囲外） |
 | T-21 | 候補 | PoC-10 手順 9、PoC-1 ADB-25、PoC-3・4・7・8・9・11 の走査 | `secret-handling.md`・`audit.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。秘密値の保存の形は `.claude/rules/secret-values.md` と照らす |
 | T-22 | 候補 | PoC-1 ADB-15・ADB-16、PoC-10 手順 5・6、PoC-8 | `db-contract.md`・`availability.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。`AUDB-35`・`AVLB-34` は Hub へ移管（この repo の範囲外） |
 | T-23 | 候補 | PoC-11 手順 3・4、PoC-7 手順 4・8、PoC-9 手順 7 | `agent-delegation.md` | C-1〜C-4。残りの各項目を C-2 で確かめる。PoC-11 手順 4 は R-1 と同じ手順を引くため、R-1 の観点と合わせて確かめる |
@@ -84,7 +84,7 @@ T 表は 1.2 節、重大は 4.1 節、中は 4.2 節、RFC 9700 の照合は 2 
 | 範囲の行 | 区分 | 所在 | 読む PoC の README と節 | `04-behavior/` のファイル | 関係する決定 ID | 確認の観点 |
 |---|---|---|---|---|---|---|
 | R-1 | 原文指定 | 4.1 節、6 節の判断 1 | PoC-11 手順 4 | `agent-delegation.md` | `D-2026-10-16-16` の (1)(2)。`ADLG-26` の持ち越しは `D-2026-10-17-2`・`D-2026-10-17-84` | C-1〜C-3、C-5。固定した基準を緩める読み替えの承認は利用者が持つ（AI が承認の有無を決めない）。`ADLG-26` が持ち越しで連動する点を原文で確かめる |
-| R-2 | 原文指定 | 4.1 節、6 節の判断 2 | PoC-10 手順 4 | `ops-restore-runbook.md`・`lifecycle.md`・`availability.md` | `D-2026-10-16-15` の (1)(2)(3)(5)(7) | C-1〜C-3、C-5。方針の各項目がどの ID の受け入れ条件になっているか。T-20 と ID が重なる点にも触れる。`ORST-23` は一部移管（Hub `AOPS-25`）。本体に残る部分は範囲に残し、Hub の部分は範囲外（`D-2026-11-21-22` の (4)(b)） |
+| R-2 | 原文指定 | 4.1 節、6 節の判断 2 | PoC-10 手順 4 | `ops-restore-runbook.md`・`lifecycle.md`・`availability.md` | `D-2026-10-16-15` の (1)(2)(3)(5)(7) | C-1〜C-3、C-5。方針の各項目がどの ID の受け入れ条件になっているか。T-20 と同じく PoC-10 手順 4 を引く点にも触れる（対応 ID は重ならないので、行ごとに照らす）。`ORST-23` は一部移管（Hub `AOPS-25`）。本体に残る部分は範囲に残し、Hub の部分は範囲外（`D-2026-11-21-22` の (4)(b)） |
 | R-3 | 原文指定 | 4.1 節、6 節の判断 5 | PoC-1 の README | `dependency-policy.md`・`agent-delegation.md` | `D-2026-10-16-16` の (4) | C-1〜C-3、C-5。検証を外す設定・feature を作らない要求（`.claude/rules/security.md` の A05。`DPOL-30`〜`DPOL-32`・`CSRF-7`）と照らす |
 | R-4 | 原文指定 | 4.1 節、6 節の判断 5 | PoC-8 の README | `human-approval.md`・`agent-delegation.md` | `D-2026-10-16-16` の (5) | C-1〜C-3、C-5。人の判定に自由文・LLM を通さない要求（`HAPR-1`・`SECR-28`）が `HAPR-9`・`HAPR-10` で受けられているか |
 | R-5 | 原文指定 | 4.2 節 | PoC-5 手順 5 | `token-signing.md`・`acceptance-retest.md` | なし（QP-1 の該当行で確かめる） | C-1〜C-3。`ACPT-12` の期待どおり、ビヘイビアへの反映（P4）が済んでいるか。下流（`fandhe-backend`）の値は写さず、`ACPT-45`・`SIGN-49`・`SIGN-50` と相手側の ID で引く |
