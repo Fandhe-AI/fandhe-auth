@@ -452,13 +452,13 @@ fi
 sc_jobs=8
 
 # 出力先（番号付きの .out）を開けないときは、bash が shellcheck を起動せずに返す 1 を「指摘あり」にせず、検査不能の 2 にする。
-# 偽の mktemp が、1 番目のバッチの出力先を存在しない場所へのリンクにした一時領域を返す（開けず、親の読み出しにも引っかからない）
+# 偽の mktemp が、1 番目のバッチの出力先を一時領域の中の存在しない相対パスへのリンクにした一時領域を返す（開けず、親の読み出しにも引っかからない）
 sc_mk_dir="${work_dir}/sc-mk-shim"
 mkdir -p "${sc_mk_dir}"
 cat > "${sc_mk_dir}/mktemp" <<'EOF'
 #!/bin/sh
 d="$("${SC_REAL_MKTEMP}" "$@")" || exit 1
-ln -s /nonexistent-dir/out "${d}/0.out"
+ln -s no-such-dir/out "${d}/0.out"
 printf '%s\n' "${d}"
 EOF
 chmod +x "${sc_mk_dir}/mktemp"
@@ -469,7 +469,7 @@ if SC_REAL_MKTEMP="${sc_real_mktemp}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_mk
 else
   sc_rc=$?
 fi
-if [ "${sc_rc}" -eq 2 ] && [ ! -s "${sc_log}" ]; then
+if [ "${sc_rc}" -eq 2 ] && [ ! -s "${sc_log}" ] && grep -qF "shellcheck could not check a.sh (exit 2)" "${work_dir}/out"; then
   pass "shellcheck-staged: an unopenable output file exits 2 (not treated as a finding)"
 else
   fail "shellcheck-staged: an unopenable output file exits 2 (not treated as a finding)" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
