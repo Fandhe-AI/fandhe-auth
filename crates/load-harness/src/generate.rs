@@ -144,19 +144,23 @@ pub(crate) fn install_quiet_hook() {
     });
 }
 
-/// 印を立て、スコープを抜けたとき（panic 後も）下ろす。
-pub(crate) struct QuietGuard;
+/// 印を立て、スコープを抜けたとき（panic 後も）入場時の値へ戻す。
+/// 入れ子で呼ばれても内側が外側の抑止を解かない（SECR-23）。
+pub(crate) struct QuietGuard {
+    prev: bool,
+}
 
 impl QuietGuard {
     pub(crate) fn new() -> Self {
-        IN_TARGET.with(|c| c.set(true));
-        Self
+        let prev = IN_TARGET.try_with(|c| c.replace(true)).unwrap_or(false);
+        Self { prev }
     }
 }
 
 impl Drop for QuietGuard {
     fn drop(&mut self) {
-        let _ = IN_TARGET.try_with(|c| c.set(false));
+        let prev = self.prev;
+        let _ = IN_TARGET.try_with(|c| c.set(prev));
     }
 }
 

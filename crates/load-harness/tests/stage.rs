@@ -327,7 +327,7 @@ fn error_display_is_fixed_english() {
 #[test]
 fn clock_factory_error_is_numbered_and_stops() {
     let plan = StagePlan::new(
-        vec![sc(1, 3, 0, 2), sc(1, 3, 0, 2)],
+        vec![sc(1, 3, 0, 3), sc(1, 3, 0, 2)],
         MetricKey::P99Ns,
         limits(),
         vocab(),
@@ -337,8 +337,8 @@ fn clock_factory_error_is_numbered_and_stops() {
     let calls = AtomicU64::new(0);
     let r = run_stages(
         || {
-            // 4 回目（段階 2 の 2 回目）の生成だけが誤りを返す。
-            if clocks.fetch_add(1, Ordering::SeqCst) + 1 == 4 {
+            // 2 回目（段階 1 の 2 回目）の生成だけが誤りを返す。後ろに同じ段階の回と次の段階がある。
+            if clocks.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
                 Err(MeterError::ClockOverflow)
             } else {
                 Ok(step_clock(10))
@@ -355,14 +355,14 @@ fn clock_factory_error_is_numbered_and_stops() {
     assert_eq!(
         e,
         StageError::Clock {
-            stage: 2,
+            stage: 1,
             run: 2,
             error: MeterError::ClockOverflow
         }
     );
     assert_eq!(e.to_string(), "clock error in stage");
-    assert_eq!(clocks.load(Ordering::SeqCst), 4);
-    assert_eq!(calls.load(Ordering::SeqCst), 9);
+    assert_eq!(clocks.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
 #[test]

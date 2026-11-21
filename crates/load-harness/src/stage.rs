@@ -320,12 +320,20 @@ where
             let run = ri.checked_add(1).ok_or(StageError::CounterOverflow)?;
             let made = {
                 let _quiet = QuietGuard::new();
-                catch_unwind(AssertUnwindSafe(&mut new_clock))
+                match catch_unwind(AssertUnwindSafe(&mut new_clock)) {
+                    Ok(v) => Some(v),
+                    Err(payload) => {
+                        // ペイロードの Drop も guard と catch_unwind の内側で走らせ、Drop 内の panic も
+                        // 文言を出さず ClockPanicked に畳む（SECR-23）。
+                        let _ = catch_unwind(AssertUnwindSafe(move || drop(payload)));
+                        None
+                    }
+                }
             };
             let clock = match made {
-                Err(_) => return Err(StageError::ClockPanicked { stage, run }),
-                Ok(Err(error)) => return Err(StageError::Clock { stage, run, error }),
-                Ok(Ok(clock)) => clock,
+                None => return Err(StageError::ClockPanicked { stage, run }),
+                Some(Err(error)) => return Err(StageError::Clock { stage, run, error }),
+                Some(Ok(clock)) => clock,
             };
             let r = run_target(clock, spec, &cfg.load, &call)
                 .map_err(|error| StageError::Target { stage, run, error })?;
