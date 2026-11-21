@@ -94,9 +94,9 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 ```bash
 # advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。使った DB の commit と取得日を記録する
-cargo deny fetch
-cargo audit --file Cargo.lock        # cargo-audit の DB の取得を兼ねる（QP-2 の手順）。脆弱性の検出で非 0 になるが、取得の成否とは別（下の記録の項）
-date -u +%FT%TZ                      # 取得日（ツールごとに、取得の成功を確かめた直後。git log より前に流す。上の %cI は DB の commit 日時で取得日ではない）
+cargo deny fetch; echo "deny fetch exit=$?"; date -u +%FT%TZ   # exit=0 を確かめた直後の日時が cargo-deny の取得日（失敗なら記録しない）
+cargo audit --file Cargo.lock; echo "audit exit=$?"; date -u +%FT%TZ   # cargo-audit の DB の取得を兼ねる（QP-2 の手順）。出力の取得の記録を確かめた場合だけ、直後の日時を取得日とする（下の記録の項）
+# 取得日は上の各 date の出力。git log の %cI（DB の commit 日時）は取得日ではない。
 git -C ~/.cargo/advisory-db log -1 --format='%H %cI'                  # cargo-audit の DB の commit と日時
 git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'  # cargo-deny の DB の commit と日時
 
@@ -116,8 +116,10 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 
 - advisory DB の「取得日」（DPOL-33）は、ツールごとに取得が成功したことを確かめた時点の日時で、`git log` の `%cI`（DB の commit の日時）とは別に記録する。
   取得の成否と監査結果の終了コードは分ける。`cargo deny fetch` は終了コード 0 を取得の成功とする。`cargo audit --file Cargo.lock` は脆弱性の検出でも非 0 で終わるため、
-  出力に DB の読み込みの記録（`Loaded <N> security advisories`）があり、取得の失敗の誤りが無いことで取得の成功を確かめる（検出による非 0 は監査結果として別に記録する）。
-  成功を確かめられなかったツールは、取得日を書かず、取得を確認できなかったと報告する。
+  出力に DB の取得の記録（`Fetching advisory database from` の行）があり、取得の失敗の誤り（fetch・network・git 等）が無いことで取得の成功を確かめる。
+  `Loaded <N> security advisories` はローカルの DB を読み込んだ表示で、取得の成功の証拠にならない（読み込みだけでは取得日を記録しない）。検出による非 0 は監査結果として別に記録する。
+  取得日は各ツールの成功を確かめた直後に `date -u +%FT%TZ` を流して得る（2 つのツールの実行の後に 1 回だけ流さない）。
+  成功を直接示す証拠（`cargo deny fetch` の終了コード 0、cargo-audit の取得の記録）を確かめられなかったツールは、取得日を書かず、「取得を確認できなかった」と報告する。
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。対象が `Cargo.lock` にあっても指定した依存の種類・feature のグラフに無いときは、終了コード 0 で `nothing to print` を出す。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
   「一致なし」と読むのは、stderr を取得でき、指定した `-i` の対象（例: `rsa`）についての `did not match any packages` の診断だけのとき、

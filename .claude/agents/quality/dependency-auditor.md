@@ -56,7 +56,7 @@ cargo audit --file Cargo.lock
 
 2 つ目は cargo-audit の DB の取得を兼ねる（QP-2 の手順）ため、DPOL-33 の取得と監査の分離を満たさない暫定の手順である（正式な手順と記録の様式は TASK-679。`../../rules/dependency-policy.md` の「依存を足す・更新するときの確認手順」と同じ）。
 取得はこの 1 回だけで、以後の実行は全て取得なしで流す。報告には「暫定の手順で、DPOL-34 の合格ではない」と書く。
-使った DB の commit と取得日を記録する（DPOL-33）。取得の成否と監査結果の終了コードは分けて読む。`cargo deny fetch` は終了コード 0 を取得の成功とする。`cargo audit --file Cargo.lock` は脆弱性を検出すると非 0 で終わるため、終了コードでは取得の成否を決めず、出力に DB の取得と読み込みの記録（`Loaded <N> security advisories`）があり、取得の失敗の誤り（fetch・network・git 等）が無いことで取得の成功を確かめる（検出による非 0 は取得の失敗ではなく、監査結果として別に記録する）。取得日は、ツールごとに取得の成功を確かめた直後に `date -u +%FT%TZ` を流して得た日時とし（commit を読む `git log` より前に流す）、下の `%cI`（DB の commit の日時）とは別に書く。取得の成功を確かめられなかったツールは取得日を書かず、「取得を確認できなかった」と報告する。commit は次で読む（`<hash>` は `ls ~/.cargo/advisory-dbs` で確かめる）。
+使った DB の commit と取得日を記録する（DPOL-33）。取得の成否と監査結果の終了コードは分けて読む。`cargo deny fetch` は終了コード 0 を取得の成功とする。`cargo audit --file Cargo.lock` は脆弱性を検出すると非 0 で終わるため、終了コードでは取得の成否を決めず、出力に DB の取得の記録（`Fetching advisory database from` の行）があり、取得の失敗の誤り（fetch・network・git 等）が無いことで取得の成功を確かめる。`Loaded <N> security advisories` はローカルの DB の読み込みの表示で、取得の成功の証拠にしない（読み込みだけしか確かめられないときは取得日を記録せず、「取得を確認できなかった」と報告する）（検出による非 0 は取得の失敗ではなく、監査結果として別に記録する）。取得日は、各コマンドの直後に成否を確かめ、成功したツールだけその場で `date -u +%FT%TZ` を流して得た日時とし（2 つの実行の後に 1 回だけ流さない）（commit を読む `git log` より前に流す）、下の `%cI`（DB の commit の日時）とは別に書く。取得の成功を確かめられなかったツールは取得日を書かず、「取得を確認できなかった」と報告する。commit は次で読む（`<hash>` は `ls ~/.cargo/advisory-dbs` で確かめる）。
 
 ```bash
 git -C ~/.cargo/advisory-db log -1 --format='%H %cI'
