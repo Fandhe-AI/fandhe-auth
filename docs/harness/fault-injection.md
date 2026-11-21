@@ -20,7 +20,7 @@ TASK-13 の設計の下書き。名前・形式の識別子・キー名・文言
 | ExternalStoreBlock | `external_store_block` | external_store | なし | 4/8 |
 | HubStubDelay | `hub_stub_delay` | hub_stub | `port`・`delay_ms` | 5/8（済） |
 | HubStubRefusal | `hub_stub_refusal` | hub_stub | `port`・`refusal` | 5/8（済） |
-| ClockSkew | `clock_skew` | instance（仮） | `skew_ms` | 6/8 |
+| ClockSkew | `clock_skew` | instance（仮） | `skew_ms` | 6/8（済） |
 
 根拠: AVLB-31（時計のずれ）・AVLB-33（`SIGTERM`・`SIGKILL`）・ORST-17（DB の外の保存先）。
 パラメータは作るときに検査し、0 の遅れ・0 のずれを拒否する。遅れ・ずれの値は試験用の仮の値で要件の値ではない（THRT-29・A-2026-10-28-1）。
@@ -146,6 +146,32 @@ hub-stub の実装をそのまま使い、作り直さない。
 - 記録の例: `injection: 1 applied hub_stub_refusal target=hub_stub at=... offset_ms=... port=jwks refusal=status_503 log_pos=0`。
 - 試験: `cargo test -p fandhe-auth-it-harness --test fault_hub_stub`（`make test` に含む）。
 
+## 時計のずれ（6/8）
+
+`crates/it-harness/src/fault/clock.rs` の `ClockSkewInjector`（制御側）と `SkewedClock`（読み取り側。仮称）。AVLB-31 の
+「1 つのインスタンスの時計を段階的にずらす」操作の道具で、`CLM-20`・`OCL-26`・`SESS-18`・`SESS-19` の判定そのものは確かめない（ACPT-7）。
+時計の差の測定と警報は Hub `AOPS-12`。
+
+- 対象の決め方（仮）: 試験対象が読む壁時計の源（`SkewedClock`）に差を足す。OS の時計・DB のホストの時計・単調時計・子プロセスの時計はずらさない。
+  LD_PRELOAD・環境変数・feature で切り替える経路は作らない（DPOL-30〜32）。
+- 入口: `ClockSkewInjector::new`・`with_base_clock`（基準の時計を渡す。決定的な試験用）・`clock`・`apply`・`release`・`step`・`finish`・`abandon`・`active_skew_ms`。
+  標準の終了手順は `ClockSkewInjector::finish(timeline, recorded_at)`（記録の確定と共有のずれの 0 への復帰を同時に行う。別の実行のタイムラインは `RunMismatch` で返し、何も変えない）。
+  Hub の stub の注入器も結んだ実行は `HubStubFaultInjector::finish_with_clock(&mut clock_injector, timeline, recorded_at)` で確定する。時計の注入器を結んだ実行の `FaultTimeline::finish` と、
+  どちらか片方だけの `finish` は拒否される（`ClockInjectorBound`・`InjectorBound`。AVLB-31）。`abandon` は記録を確定せず共有のずれだけを戻す用途（途中で実行を捨てる場合。以後その注入器の `apply` は `Abandoned`）。
+  `SkewedClock` は `now`・`unix_seconds`（切り捨て。stub の `now: u64` 用）・`skew_ms`。
+- 順序: 検査 → 二重の開始の確認 → 基準＋ずれが表せるかの確認（`OutOfRange`。何も記録しない）→ 記録 → 状態の変更。基準線・記録の拒否では状態を変えない（fail-closed。`step` の途中失敗は下記）。
+- `step` は `Released(旧)` → `Applied(新)` の順に記録する。同じ値・0 は `InvalidParam`。`Released` の記録が拒否されたときは状態を変えない。`Released` が成功して `Applied` の記録だけが拒否されたときは、
+  記録と一致させて「解除済み（ずれなし・適用中なし）」の状態で `Record` を返す（呼び出し側は誤りの後も旧いずれが有効とは見なさない）。
+- 「記録の拒否で状態を変えない」は `apply`・`release` と `step` の `Released` の拒否に当たる。`step` の途中失敗（`Applied` の拒否）は上のとおり解除済みへ進む。
+- 1 つの実行（`FaultTimeline`）に時計の注入器は 1 つ。同じ実行へ 2 つ目が適用すると `AlreadyBound`。時計の注入器を結んだ実行では、公開の `record_now`・`record_at` で時計の事象を積めない（`ClockSkewEventOutsideInjector`）。
+  直接記録した時計の事象がある実行へは注入器を結べない。
+- 解除は開始と同じ値で記録する。二重の開始は `AlreadyActive`、無い解除は `NotActive`。`Drop`・`abandon` は記録に触らず、配布済みの `SkewedClock` が共有するずれだけを 0 へ戻す
+  （実行単位で試験条件を保つ。基準線の実行へ持ち越さない。AVLB-31）。解除し忘れは `Released` が無いので `unreleased_count` に出る。
+- 記録の例: `injection: 1 applied clock_skew target=instance at=... offset_ms=... skew_ms=+1500`。記録の時刻は基準の時計のまま。
+- 誤り・`Debug` にずれの値・時刻を載せない（SECR-11・SECR-23）。ずれの上限は置かない（THRT-29・A-2026-10-28-1）。
+- Host への結線は `TODO(TASK-716)`。
+- 試験: `cargo test -p fandhe-auth-it-harness --test fault_clock`（`make test` に含む）。
+
 ## 記録の形式（`fandhe-auth-it-fault-record/2`）
 
 `RunRecord`（`fandhe-auth-it-run-record/1`）とは別のファイル。`run_started_at` で結ぶ。UTF-8・LF・1 行 1 項目の `key: value`。
@@ -169,14 +195,15 @@ note: ...
 ## 時計
 
 時刻はハーネスのプロセスの基準の時計で押す（壁時計 `at`〔秒〕と、実行開始からの単調時計の `offset_ms`）。
-試験対象に注入したずれた時計や stub の引数の `now` は使わない。hub-stub の `InjectionLog.at` は記録に入れず、`call_log()` で別に読む（5/8。事象の `log_pos` と呼び出しの順序で対応）。
+試験対象に注入したずれた時計（6/8 の `SkewedClock`）や stub の引数の `now` は使わない。ずらすのは試験対象が読む `SkewedClock` だけ。hub-stub の `InjectionLog.at` は記録に入れず、`call_log()` で別に読む（5/8。事象の `log_pos` と呼び出しの順序で対応）。
 
 ## 未決・人の確認待ち
 
 - 置き場を it-harness の module にしたこと
 - 型・種類・形式の識別子・キー名・文言・ファイル名の形（すべて仮置き）
 - 記録を `RunRecord` と別のファイルにし、`run_started_at` で結ぶこと
-- 時計のずれの対象（instance の時計か DB のホストの時計か）。6/8 で決める
+- 時計のずれ（6/8）: 対象を instance の壁時計の源（`SkewedClock`）にしたこと・DB のホストの時計と単調時計をずらさないこと・子プロセスのインスタンスへ注入しないこと・
+  記録にインスタンスの識別が無く複数同時にずらすと区別できないこと（入れるなら版を上げる）・`step` の記録の形と同値の拒否・型名と文言
 - インスタンスの停止を in-process の Host（TASK-716 待ち）にどう当てるか（3/8 はプロセスの子だけ）
 - DB の外の保存先の実体（ORST-2・Hub `ASTORE-38` の決定待ち）。4/8 では仮に TCP の経路の遮断にした。人の確認待ち
 - console stub の注入（TASK-8）を TASK-13 の一覧に入れるか（spec の列挙には無い）
