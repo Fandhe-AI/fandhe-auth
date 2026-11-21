@@ -42,7 +42,7 @@
 //! 名前・形・遮断の形（直ちに閉じる。受けて黙る形は入れていない）は仮置きで、人が確認する。
 
 use std::fmt;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -315,17 +315,16 @@ fn classify_exit(
     }
 }
 
-/// 上流への接続を行う関数の型。`None` は接続しなかった（停止の通知・接続の失敗）。
-type Dialer = fn(&SocketAddr, &Shared) -> Option<TcpStream>;
+/// 上流への接続の型（`TcpStream::connect_timeout` と同じ引数）。差し替えるのはこの 1 呼び出しだけ。
+type ConnectFn = fn(&Shared, &SocketAddr, Duration) -> io::Result<TcpStream>;
 
 /// 転送のスレッドと注入の入口で共有する状態。
 struct Shared {
     /// 上流への接続の直前の停止点（試験用。無ければ待たない）。
     stall: Option<UpstreamStall>,
-    /// 上流への接続を行う関数。停止点が無ければ本物の接続だけ、あれば停止点で待ってから本物の接続をする。
-    /// 停止点と本物の接続を 1 回の呼び出しにまとめるので、呼び出しを `conns` のロックで囲む回帰は
-    /// 試験中の待ちも囲み、`block()` が待たされて試験が落ちる（ORST-17）。
-    dialer: Dialer,
+    /// `TcpStream::connect_timeout` の呼び出しそのもの。停止点が無ければ本物の接続、あれば停止点で待ってから
+    /// 本物の `connect_timeout` を呼ぶ。計数・ロックまわりは `dial_upstream` の 1 か所で、本番と試験で共通（ORST-17）。
+    connect: ConnectFn,
     stop: AtomicBool,
     blocked: AtomicBool,
     delay_ms: AtomicU64,
@@ -335,7 +334,7 @@ struct Shared {
     block_gen: AtomicU64,
     accepted: AtomicU64,
     refused: AtomicU64,
-    /// 上流への connect を始めようとした回数（診断用。`connect_timeout` の直前（停止点を通過した後）に加算するので到達の確認には使わず、成否も表さない）。
+    /// 上流への connect を始めようとした回数（診断用。`connect_timeout` の直前（停止点の前）に加算するので到達の確認には使わず、成否も表さない）。
     upstream_attempts: AtomicU64,
     /// 上流への connect が成功した回数（`connect_timeout` が `Ok` を返した時点で数える）。
     upstream_connected: AtomicU64,
@@ -357,14 +356,14 @@ impl Shared {
     }
 
     fn with_stall(stall: Option<UpstreamStall>) -> Self {
-        let dialer: Dialer = if stall.is_some() {
-            dial_with_stall
+        let connect: ConnectFn = if stall.is_some() {
+            connect_after_stall
         } else {
-            dial_plain
+            connect_real
         };
         Self {
             stall,
-            dialer,
+            connect,
             stop: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             delay_ms: AtomicU64::new(0),
@@ -556,7 +555,7 @@ impl DbFaultProxy {
 
     /// 診断の計数が数える処理の段階（受け付け順）。
     /// 1. accept した接続（[`Self::refused_count`] の対象は、この後に直ちに閉じたもの）。
-    /// 2. 上流への connect の試行（[`Self::upstream_attempt_count`]。停止点の後、connect の直前に数える）。
+    /// 2. 上流への connect の試行（[`Self::upstream_attempt_count`]。connect の呼び出しの直前、停止点の前に数える）。
     /// 3. 上流への connect の成功（[`Self::upstream_connected_count`]）。
     /// 4. 世代の比較。外れれば client のバイトを送らずに拒否（[`Self::generation_refused_count`]）。
     /// 5. 中継の開始（[`Self::accepted_count`]）。
@@ -565,13 +564,13 @@ impl DbFaultProxy {
     /// `refused_count` と試行の計数に現れ、成功の計数には現れない。段階 3 の後でソケットの複製に失敗した接続は、
     /// `refused_count`・試行・成功の計数に現れ、世代の拒否の計数には現れない。接続の成否は 2 と 3 の差で、中継前の拒否は 4 で分ける。
     ///
-    /// 上流への connect の試行回数（診断用）。`connect_timeout` の直前（停止点を通過した後）に加算するので、停止点への到達の確認には使えない
+    /// 上流への connect の試行回数（診断用）。`connect_timeout` の呼び出しの直前（停止点の前）に加算するので、停止点への到達の確認には使えない
     /// （到達は [`UpstreamStall::wait_entered`] で待つ）。成否は表さない。
     pub fn upstream_attempt_count(&self) -> u64 {
         self.shared.upstream_attempts.load(Ordering::SeqCst)
     }
 
-    /// 上流への connect が成功した回数。接続の失敗・停止点での打ち切りは数えない。
+    /// 上流への connect が成功した回数。接続の失敗・停止点での打ち切りは数えない（試行の計数には入る）。
     /// 成功した後に世代の不一致で拒否された接続も数える（受理済みの [`Self::accepted_count`] とは別）。
     /// 転送器全体の数。接続を 1 本に限った試験でだけ、接続ごとの証拠になる。
     pub fn upstream_connected_count(&self) -> u64 {
@@ -901,34 +900,35 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
     })
 }
 
-/// 上流への接続の呼び出し口。`shared.dialer` を呼ぶ 1 か所だけで、ここを `conns` のロックの下で呼ばない。
+/// 上流への接続の呼び出し口。計数と `shared.connect` の呼び出しはここ 1 か所で、本番と試験で同じコードを通る。
+/// ここを `conns` のロックの下で呼ばない（試験の停止点は `shared.connect` の中にあるので、ロックで囲む回帰は
+/// 試験中の待ちも囲み、`block()` が待たされて試験が落ちる。ORST-17）。
 fn dial_upstream(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
-    (shared.dialer)(addr, shared)
+    shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
+    let up = (shared.connect)(shared, addr, UPSTREAM_CONNECT_TIMEOUT).ok()?;
+    shared.upstream_connected.fetch_add(1, Ordering::SeqCst);
+    Some(up)
 }
 
-/// 停止点が無い場合の接続。
-fn dial_plain(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
-    connect_counted(addr, shared)
+/// 本番の接続。`TcpStream::connect_timeout` そのもの。
+fn connect_real(_: &Shared, addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+    TcpStream::connect_timeout(addr, timeout)
 }
 
-/// 試験用の停止点で待ってから、本物の接続をする。停止の通知で戻った場合は上流へつながず `None`
-/// （`stop()`・`Drop` を `connect_timeout` で待たせない）。
-fn dial_with_stall(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
+/// 試験用の接続。停止点で待ってから本物の `connect_timeout` を呼ぶ。停止の通知で戻った場合は上流へつながず
+/// `Err`（`stop()`・`Drop` を `connect_timeout` で待たせない）。
+fn connect_after_stall(
+    shared: &Shared,
+    addr: &SocketAddr,
+    timeout: Duration,
+) -> io::Result<TcpStream> {
     if let Some(stall) = &shared.stall {
         stall.hold(&shared.stop);
         if shared.stop.load(Ordering::SeqCst) {
-            return None;
+            return Err(io::ErrorKind::Interrupted.into());
         }
     }
-    connect_counted(addr, shared)
-}
-
-/// 本物の接続。停止判定を通過し、実際に接続を試みる直前で数える（停止点で閉じた接続は数えない）。
-fn connect_counted(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
-    shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
-    let up = TcpStream::connect_timeout(addr, UPSTREAM_CONNECT_TIMEOUT).ok()?;
-    shared.upstream_connected.fetch_add(1, Ordering::SeqCst);
-    Some(up)
+    TcpStream::connect_timeout(addr, timeout)
 }
 
 /// 中継を始める段。上流側の複製を登録し、世代を確かめてから転送のスレッドを起こす。
