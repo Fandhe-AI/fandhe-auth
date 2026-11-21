@@ -92,7 +92,7 @@ cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確か�
 ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（参考結果。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 は未評価）と、例外を足したならその理由を PR 本文に書く。
 
 ```bash
-# advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。取得日・DB の版は記録しない（下の記録の項。TASK-679 で決める）
+# advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。取得日・DB の版は記録しない（下の記録の項。TASK-679 で決める）。失敗の扱いは下の取得の失敗の項
 cargo deny fetch
 cargo audit --file Cargo.lock   # cargo-audit の DB の取得を兼ねる（QP-2 の手順）
 
@@ -111,6 +111,7 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 ```
 
 - advisory DB の記録（DPOL-33）: DPOL-33 は Should で、使った DB の commit と取得日の両方の記録を求めるが、今は記録していない。取得日も DB の版も「未記録（TASK-679 で決める）」と書く。取得の開始ログ（`Fetching advisory database from` 等）・終了コード・DB の HEAD・取得元との照合（`ls-remote` 等）は、どれも取得や DB の版の根拠にしない。記録の手順は TASK-679 で決める。
+- advisory DB の取得の失敗（DPOL-33）: `cargo deny fetch` が非 0 で終わったら、取得の失敗を PR 本文に書き、cargo deny の advisories の結果を「実行失敗」とする（手元に残った DB で得た「検出なし」を参考結果に入れない）。`cargo audit --file Cargo.lock` は取得と監査を兼ね、advisory の検出でも非 0 で終わるため、終了コードだけで取得の失敗と読まない。出力に DB の取得の誤りがあるとき、または取得の誤りか検出かを読み分けられないときに取得の失敗とし、cargo-audit の結果を「実行失敗」とする。非 0 は失敗の記録にだけ使い、終了コード 0 や失敗の表示が無いことは取得の成功や DB の版の根拠にしない（上の記録の項。`dependency-auditor` Agent の Step 2 と同じ扱い）。
 - cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、すべて参考結果とする。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 の判定は未評価とする。読まれ得る設定ファイルの名前は未確認の例として、`deny.toml`・`.deny.toml`・`.cargo/deny.toml`・`audit.toml` がある（確かめ方は決めていない。親ディレクトリの設定を探すかも未確認）。
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。対象が `Cargo.lock` にあっても指定した依存の種類・feature のグラフに無いときは、終了コード 0 で `nothing to print` を出す。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
