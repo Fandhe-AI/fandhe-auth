@@ -201,7 +201,13 @@ fn it_record_started_line(r: &fandhe_auth_it_harness::RunRecord) -> String {
     r.started_at().to_string()
 }
 
-// ---- AAUD-30・SECR-23: 登録簿の値を 4 つの形で記録のファイルに掛ける照合 ----
+// ---- 照合の試験 ----
+//
+// AAUD-30・AAUD-31 の方法（登録簿の各値を生・base64・base64url・16 進の形で出力に掛け、一致の件数を数える）を
+// ハーネスの出力に当てはめたもので、AAUD-30・AAUD-31 を満たしたものではない（実環境の走査は Hub〔`AOPS-73`〕）。
+// 対象は「stub の設定の 3 欄から負荷の記録・it-run の記録へ値が流れないこと」の回帰の検出まで。
+// 署名鍵（`AssertionSigningKey`）の秘密値は登録簿に入れておらず対象外（AAUD-30 の確定の範囲が
+// 既知の欠けとする「keys 段の秘密値が外れている」と同じ）。
 
 /// 実行時に乱数から作る 16 バイトの値（固定の値をソースに置かない）。`RandomState` は実行ごとに種が変わる。
 fn random_value() -> Vec<u8> {
@@ -263,6 +269,38 @@ fn forms(v: &[u8]) -> Vec<Vec<u8>> {
     ]
 }
 
+/// 符号化の既知の入力と出力の対（RFC 4648 の 10 節の例・16 進・`+`/`/` を含む入力）。
+/// 符号化が誤っていると、照合が何も見つけないまま「0 件」になるため、対で確かめる。
+#[test]
+fn encoders_match_rfc4648_vectors() {
+    let b64 = [
+        ("", ""),
+        ("f", "Zg=="),
+        ("fo", "Zm8="),
+        ("foo", "Zm9v"),
+        ("foob", "Zm9vYg=="),
+        ("fooba", "Zm9vYmE="),
+        ("foobar", "Zm9vYmFy"),
+    ];
+    for (i, o) in b64 {
+        assert_eq!(base64_with(i.as_bytes(), B64, true), o);
+        assert_eq!(
+            base64_with(i.as_bytes(), B64, false),
+            o.trim_end_matches('=')
+        );
+        assert_eq!(
+            base64_with(i.as_bytes(), B64URL, false),
+            o.trim_end_matches('=')
+        );
+    }
+    // 62・63 番目の文字: 標準は `+` `/`、URL 安全は `-` `_`。
+    assert_eq!(base64_with(&[0xfb, 0xff], B64, true), "+/8=");
+    assert_eq!(base64_with(&[0xfb, 0xff], B64URL, false), "-_8");
+    assert_eq!(hex(b"foobar", false), "666f6f626172");
+    assert_eq!(hex(&[0xab, 0xcd], true), "ABCD");
+    assert_eq!(hex(&[0xab, 0xcd], false), "abcd");
+}
+
 /// 登録簿の全値・全形が `haystack` に現れる件数だけを返す（値は返さない）。
 fn count_matches(registry: &[Vec<u8>], haystack: &[u8]) -> usize {
     registry
@@ -277,8 +315,26 @@ fn count_matches(registry: &[Vec<u8>], haystack: &[u8]) -> usize {
         .sum()
 }
 
-/// 負荷の記録を作って書く（呼び出し元の入力は `cfg`。`hub_config` と同じ組み立て）。
-fn write_record_for(cfg: HubStubConfig) -> std::path::PathBuf {
+/// JWT の形（`eyJ` で始まる区画が 2 つ以上ある 3 区画以上の語）の件数。語は英数字・`-`・`_`・`.` の連なり。
+fn count_jwt_like(haystack: &[u8]) -> usize {
+    haystack
+        .split(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
+        .filter(|tok| {
+            let segs: Vec<&[u8]> = tok.split(|b| *b == b'.').collect();
+            segs.len() >= 3 && segs[0].starts_with(b"eyJ") && segs[1].starts_with(b"eyJ")
+        })
+        .count()
+}
+
+/// 書き出した 2 つのファイルの全文。
+struct Written {
+    load: Vec<u8>,
+    it_run: Vec<u8>,
+}
+
+/// 負荷の記録を作って書く（呼び出し元の入力は `cfg`。`hub_config` と同じ組み立て）。`interval` は測る区間の名前で、
+/// 記録の `interval=` に出る。負荷の記録と it-run の記録の全文を読み、消してから返す。
+fn write_record_for(cfg: HubStubConfig, interval: &str) -> Written {
     let hub = HubStubComponent::new(cfg);
     let handle = hub.handle();
     let running = Harness::start(HarnessConfig::new().with(Box::new(hub))).unwrap();
@@ -301,13 +357,13 @@ fn write_record_for(cfg: HubStubConfig) -> std::path::PathBuf {
     .unwrap();
     let spec = TargetSpec::new(
         TargetName::new("hub_stub_jwks").unwrap(),
-        IntervalName::new("stub_jwks").unwrap(),
+        IntervalName::new(interval).unwrap(),
     );
     let plan = StagePlan::new(
         vec![StageConfig::new(LoadConfig::new(1, 5, 1).unwrap(), 1).unwrap()],
         MetricKey::P99Ns,
         StageLimits::new(8, 8, 1_000, 10_000).unwrap(),
-        vec![IntervalName::new("stub_jwks").unwrap()],
+        vec![IntervalName::new(interval).unwrap()],
     )
     .unwrap();
     let call = || match handle.with(|s| s.jwks.serve(T0)) {
@@ -329,46 +385,62 @@ fn write_record_for(cfg: HubStubConfig) -> std::path::PathBuf {
     let record = LoadRecord::new(&evidence, recorded_at, Vec::new()).unwrap();
     let path = record.write_new(&dir).unwrap();
     running.stop().unwrap();
+    let out = Written {
+        load: std::fs::read(&path).unwrap(),
+        it_run: std::fs::read(&it_path).unwrap(),
+    };
+    std::fs::remove_file(&path).unwrap();
     std::fs::remove_file(&it_path).unwrap();
-    path
+    out
 }
 
-/// 登録簿（実行時に作る 3 値）と、その値を呼び出し元の入力（接続の設定）へ入れた構成。
+/// 登録簿と、その値を呼び出し元の入力（接続の設定の 3 欄）へ入れた構成。
+/// 登録簿は、乱数の 3 値（設定には 16 進で入る）と、3 欄に入れた文字列そのものの全文 3 件の計 6 件。
 fn canary_registry_and_config() -> (Vec<Vec<u8>>, HubStubConfig) {
-    let registry: Vec<Vec<u8>> = (0..3).map(|_| random_value()).collect();
+    let raw: Vec<Vec<u8>> = (0..3).map(|_| random_value()).collect();
+    let client_id = hex(&raw[0], false);
+    let public_host = format!("{}.example.test", hex(&raw[1], false));
+    let jwks_uri = format!("https://{}/jwks", hex(&raw[2], false));
+    let mut registry = raw;
+    registry.extend([
+        client_id.clone().into_bytes(),
+        public_host.clone().into_bytes(),
+        jwks_uri.clone().into_bytes(),
+    ]);
     let mut cfg = hub_config();
-    cfg.client_id = StubValue::test(hex(&registry[0], false));
-    cfg.public_host = StubValue::test(format!("{}.example.test", hex(&registry[1], false)));
-    cfg.jwks_uri = StubValue::test(format!("https://{}/jwks", hex(&registry[2], false)));
+    cfg.client_id = StubValue::test(client_id);
+    cfg.public_host = StubValue::test(public_host);
+    cfg.jwks_uri = StubValue::test(jwks_uri);
     (registry, cfg)
 }
 
-/// AAUD-30・SECR-23: 呼び出し元の入力に入れた登録簿の値が、書き出した記録の全文に、
-/// 生・base64・base64url・16 進のどの形でも現れない（一致の件数が 0）。
+/// AAUD-30・SECR-23（方法を当てはめたもの）: stub の設定の 3 欄に入れた登録簿の値（乱数の値と欄の全文）が、
+/// 負荷の記録と it-run の記録の全文に、生・base64・base64url・16 進のどの形でも現れない（一致の件数が 0）。
+/// JWT の形の語も 0 件。
 #[test]
-fn written_record_has_no_registered_secret_in_any_form() {
+fn written_records_have_no_registered_secret_in_any_form() {
     let (registry, cfg) = canary_registry_and_config();
-    let path = write_record_for(cfg);
-    let bytes = std::fs::read(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
-    assert!(!bytes.is_empty());
-    let n = count_matches(&registry, &bytes);
-    assert_eq!(n, 0, "registered values found in the record: {n} match(es)");
+    let w = write_record_for(cfg, "stub_jwks");
+    assert!(!w.load.is_empty() && !w.it_run.is_empty());
+    for (what, bytes) in [("load record", &w.load), ("it-run record", &w.it_run)] {
+        let n = count_matches(&registry, bytes);
+        assert_eq!(n, 0, "registered values found in the {what}: {n} match(es)");
+        let j = count_jwt_like(bytes);
+        assert_eq!(j, 0, "JWT-like words found in the {what}: {j}");
+    }
 }
 
-/// 陽性対照（AAUD-31 の趣旨）: 登録簿の値を記録に混ぜると、照合は形ごとに検出する。
-/// 16 進 32 文字・base64 系の語は 64 バイト以下の英数字で、形の網（`is_fixed_shape`）の内側に収まる値である。
-/// これが検出できなければ、上の「0 件」は空振りの可能性がある。
+/// 陽性対照 1（照合の検出力）: 登録簿の全値・全形（生・`+` を含む base64 も含む）を出力に混ぜると、
+/// 照合は形ごとに検出する。JWT の形の語も数える。生のバイトと `+` を含む base64 は形の網の外にあり、
+/// `write_new` を通らない（その経路は次の試験）。ここは照合そのものの検出力を見る。
 #[test]
-fn matcher_detects_registered_secret_mixed_into_record() {
+fn matcher_detects_every_form_mixed_into_output() {
     let (registry, cfg) = canary_registry_and_config();
-    let path = write_record_for(cfg);
-    let base = std::fs::read(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
-    assert_eq!(count_matches(&registry, &base), 0);
+    let w = write_record_for(cfg, "stub_jwks");
+    assert_eq!(count_matches(&registry, &w.load), 0);
     for (vi, v) in registry.iter().enumerate() {
         for (fi, f) in forms(v).iter().enumerate() {
-            let mut mixed = base.clone();
+            let mut mixed = w.load.clone();
             mixed.extend_from_slice(b"note: ");
             mixed.extend_from_slice(f);
             mixed.push(b'\n');
@@ -376,4 +448,32 @@ fn matcher_detects_registered_secret_mixed_into_record() {
             assert!(n >= 1, "form {fi} of value {vi} was not detected");
         }
     }
+    let mut jwt = w.load.clone();
+    jwt.extend_from_slice(
+        format!(
+            "note: eyJ{}.eyJ{}.{}\n",
+            "a".repeat(20),
+            "b".repeat(20),
+            "c".repeat(20)
+        )
+        .as_bytes(),
+    );
+    assert_eq!(count_jwt_like(&jwt), 1);
+}
+
+/// 陽性対照 2（`write_new` を通る経路）: 登録簿の 16 進の値を測る区間の名前に入れて書き出すと、
+/// 負荷の記録のファイルに現れ、照合が 1 件以上を見つける。形の網の内側に収まる値（16 進 32 文字）が
+/// 網では止まらず、見つけるのは照合であること（網は秘密値を止めない）を確かめる。
+#[test]
+fn matcher_detects_registered_hex_written_through_write_new() {
+    let (mut registry, cfg) = canary_registry_and_config();
+    let value = random_value();
+    let interval = hex(&value, false);
+    registry.push(value);
+    let w = write_record_for(cfg, &interval);
+    let n = count_matches(&registry, &w.load);
+    assert!(
+        n >= 1,
+        "registered hex value written via write_new not detected"
+    );
 }

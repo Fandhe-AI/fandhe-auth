@@ -189,9 +189,13 @@ fn is_ref_shape(s: &str) -> bool {
 /// `secret-scan` の対象に入らないため、書く前に中身を限る）。通すのは ASCII の英数字と ` _-.:=,/`・LF だけで、
 /// 1 行 1024 バイト・1 語（空白・`=`・`,` 区切り）64 バイト・全体 1 MiB まで。
 ///
-/// この検査が止めるのは、記号・非 ASCII・長い値が後から入る回帰だけである。64 バイト以下の英数字・base64url・
-/// 16 進の秘密値は形では止められない。実際に止めているのは各欄の語彙・列挙・整数の検査で、漏れは
-/// 照合の試験（`tests/trial_run.rs`。登録簿の値の 4 つの形の件数が 0）で確かめる。
+/// この検査が止めるのは、許可文字の外（記号・非 ASCII・制御文字）と、区切り（空白・`=`・`,`）を含まず 64 バイトを超える語、
+/// 長すぎる行・全体の回帰だけである。次は通る: `key=<64 バイト以下>`、区切りで連ねた値、`+` を含まない base64、
+/// ホスト名・`IP:port`・パス、libpq の `key=value` 形式、全体が 64 バイト以下の語になる JWT の形（`.` は区切りでないため、通常の長さの JWT は語の上限で止まる）。
+/// 64 バイト以下の英数字・base64url・16 進の秘密値は形では止められない。実際に止めているのは各欄の語彙・
+/// 列挙・整数の検査である。漏れは照合の試験（`tests/trial_run.rs`）で確かめる。これは AAUD-30・AAUD-31 の方法を
+/// ハーネスの出力に当てはめたもので、満たしたものではない（実環境の走査は Hub の `AOPS-73`）。対象は stub の設定の
+/// 3 欄から記録へ値が流れないことの回帰の検出までで、署名鍵の秘密値は対象外。
 fn is_fixed_shape(text: &str) -> bool {
     text.len() <= MAX_RECORD_BYTES
         && text.bytes().all(|b| {
@@ -926,6 +930,11 @@ mod tests {
         assert_eq!(total.len(), MAX_RECORD_BYTES);
         assert!(is_fixed_shape(&total));
         assert!(!is_fixed_shape(&format!("{total}\n")));
+        // JWT の形: 語（`.` は区切りでない）が 64 バイト以下なら網を通る（網は止めない。照合の試験が 0 件を数える）。
+        // 64 バイトを超えれば止まる。
+        let jwt = |n: usize| format!("note: eyJ{0}.eyJ{0}.{0}\n", "a".repeat(n));
+        assert!(is_fixed_shape(&jwt(15)));
+        assert!(!is_fixed_shape(&jwt(30)));
         // 許可文字の外（記号・非 ASCII・制御文字）。
         for bad in [
             "x: a\\b\n",
