@@ -450,14 +450,16 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
         "release waited for the stalled accept: {released_in:?}"
     );
     // 上流への接続が成立したこと（遮断前の接続の中継を拒む分岐に届いたこと）を確かめる。
-    // `last_exit` は `hold()` の終わりに記録され、上流への connect と世代不一致での切断はその後に起きる。
-    // accept の時点で、握手済みの接続がすでに相手に閉じられていることがある（カーネルの待ち行列に残った接続が
-    // `ConnectionAborted`・`ConnectionReset` で返る。特に macOS）。その場合も接続は成立しており、
-    // バイトは上流へ届き得ないので、成立の証拠として扱う（成立の有無は上流への試行の計数でも確かめる）。
+    // macOS だけの緩和: `last_exit` は `hold()` の終わりに記録され、上流への connect と世代不一致での切断はその後に
+    // 起きる。macOS（Darwin）は、握手済みで相手に閉じられた接続が待ち行列に残っていると accept が
+    // `ConnectionAborted`・`ConnectionReset` を返す。その場合も接続は成立しており、バイトは上流へ届き得ないので、
+    // 成立の証拠として上流への試行の計数で確かめる。Linux ではこの分岐を作らず、accept の `Ok` と読み取りの確認を必須にする
+    // （確かめる範囲の狭い分岐で合格させない。AUDB-6）。
     let deadline = Instant::now() + Duration::from_secs(5);
     let upstream_conn = loop {
         match up.accept() {
             Ok((c, _)) => break Some(c),
+            #[cfg(target_os = "macos")]
             Err(e)
                 if matches!(
                     e.kind(),

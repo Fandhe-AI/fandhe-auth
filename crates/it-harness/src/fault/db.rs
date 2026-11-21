@@ -117,6 +117,9 @@ impl Upstream {
 
 /// 上流への接続の直前に置く停止点（試験の注入用。ORST-17）。
 /// 試験が「接続中で止まる」状態を同期で作るための同期点だけを持つ。宛先の決定と実際の接続は転送器が行い、
+/// 転送器 1 つにつき 1 つ使う（複数の転送器へ複製して共有しない。`stopped_at` は転送器ごとの停止の時刻で、
+/// 再利用した場合は保持の開始より前の記録を無視して `Expired` と分類する）。
+///
 /// この値は接続先も接続の結果も決めない（ループバック・指定ポートの制約を外さない）。
 /// 待ちは解放・転送器の停止・上限（[`UpstreamStall::MAX_HOLD`]）のどれかで必ず解ける（`stop()`・`Drop` を固めない）。
 #[derive(Clone, Default)]
@@ -138,6 +141,8 @@ struct StallState {
     released_at: Option<Instant>,
     /// 転送器の停止が通知された時刻（`note_stop` が同じロックの下で記録する。期限までに停止で解かれたかの判定に使う）。
     stopped_at: Option<Instant>,
+    /// 直近の `hold` の開始時刻。これより前の `stopped_at` は別の転送器の停止の名残として無視する。
+    hold_started: Option<Instant>,
     /// 直近に停止点を離れた理由。試験が「期限切れで抜けたのを合格にしない」ために見る（ORST-17）。
     last_exit: Option<StallExit>,
 }
@@ -226,7 +231,13 @@ impl UpstreamStall {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if g.stopped_at.is_none() {
+        // 現在の保持より前の記録（再利用された別の転送器の停止）は上書きする。同じ停止の 2 回目は上書きしない。
+        let stale = match (g.stopped_at, g.hold_started) {
+            (None, _) => true,
+            (Some(t), Some(h)) => t < h,
+            (Some(_), None) => false,
+        };
+        if stale {
             g.stopped_at = Some(Instant::now());
         }
         self.inner.cv.notify_all();
@@ -234,12 +245,14 @@ impl UpstreamStall {
 
     /// 転送器の accept のスレッドが呼ぶ。解放・転送器の停止・上限のどれかで戻る。
     fn hold(&self, stop: &AtomicBool) {
-        let deadline = Instant::now() + Self::MAX_HOLD;
+        let started = Instant::now();
+        let deadline = started + Self::MAX_HOLD;
         let mut g = self
             .inner
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        g.hold_started = Some(started);
         g.entered += 1;
         self.inner.cv.notify_all();
         while !g.released && !stop.load(Ordering::SeqCst) {
@@ -254,7 +267,9 @@ impl UpstreamStall {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
-        g.last_exit = Some(classify_exit(g.released_at, g.stopped_at, deadline));
+        // 保持の開始より前の停止の記録は、この保持を解いたものではない。
+        let stopped_at = g.stopped_at.filter(|t| *t >= started);
+        g.last_exit = Some(classify_exit(g.released_at, stopped_at, deadline));
     }
 }
 
@@ -1458,6 +1473,34 @@ mod tests {
         assert!(r.is_ok());
         assert_eq!(observed, Some(true), "must still be blocked at record time");
         assert!(!p.shared.blocked.load(Ordering::SeqCst));
+    }
+
+    /// 再利用された停止点の古い停止の記録は、新しい保持を解いたものと読まない（ORST-17・AUDB-6）。
+    #[test]
+    fn stale_stop_from_previous_use_is_expired() {
+        let stall = UpstreamStall::new();
+        stall.note_stop();
+        thread::sleep(Duration::from_millis(5));
+        // 別の転送器の停止フラグが立っている状況（保持はすぐ戻る）。
+        let stop = AtomicBool::new(true);
+        stall.hold(&stop);
+        assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
+    }
+
+    /// 保持の開始後の停止は、古い記録があっても `Stopped` になる。
+    #[test]
+    fn fresh_stop_after_stale_one_is_stopped() {
+        let stall = UpstreamStall::new();
+        stall.note_stop();
+        thread::sleep(Duration::from_millis(5));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (s2, stop2) = (stall.clone(), Arc::clone(&stop));
+        let h = thread::spawn(move || s2.hold(&stop2));
+        assert!(stall.wait_entered(Duration::from_secs(5)));
+        stall.note_stop();
+        stop.store(true, Ordering::SeqCst);
+        h.join().unwrap();
+        assert_eq!(stall.exit_reason(), Some(StallExit::Stopped));
     }
 
     /// 期限の後の解除・停止は `Released`・`Stopped` にならない（ORST-17・AUDB-6）。
