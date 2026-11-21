@@ -2068,6 +2068,17 @@ else
   fail "scan-canary: a broken skills-lock.json in the repository does not affect the canary" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# 検出器の実行ビットが無ければ、陰性対照は 2 で終わる（CI の本走査は検出器を直接起動する。#6011）
+chmod -x "${canary_root}/scripts/hooks/secret-scan.sh"
+rc=0
+(cd "${canary_root}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF "scan-canary: the scanner is not executable" "${work_dir}/out"; then
+  pass "scan-canary: a scanner without the execute bit makes the canary exit 2"
+else
+  fail "scan-canary: a scanner without the execute bit makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
+
 # secret-scan-canary.sh: 元のリポジトリの hooks（post-index-change）を起動しない
 hook_dir="${work_dir}/hooks"
 mkdir -p "${hook_dir}"
@@ -2341,8 +2352,16 @@ check_scan "(bash3.2) no-argument staged path reaches diff scan" 0
 
 # ---------------------------------------------------------------- secret-scan: 検査エラー（fail-closed）
 # (e) git の失敗を「対象なし」として合格させない
+# ファイル名の一覧の取得（--name-only と --diff-filter=ACMR の両方を持つ呼び出し）だけを失敗させる。
+# --name-only だけでは、先に index を固定する処理（index_listing）の呼び出しに当たってしまい、この段階の失敗の扱いを試せない（#6011）
 new_repo; stage .env "A=1"
-PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=--name-only check_scan "(e) failure listing staged files" 2
+rc=0
+PATH="${shim_dir}:${PATH}" FAIL_GIT_BOTH1=--name-only FAIL_GIT_BOTH2=--diff-filter=ACMR LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: failed to list files; aborting" "${work_dir}/out"; then
+  pass "secret-scan: (e) failure listing staged files exits 2 with the stage-specific message"
+else
+  fail "secret-scan: (e) failure listing staged files exits 2 with the stage-specific message" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
 
 new_repo; stage app.txt "x = ${token}"
 PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=-U0 check_scan "(e) failure reading staged diff" 2

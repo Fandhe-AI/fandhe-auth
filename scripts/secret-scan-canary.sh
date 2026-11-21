@@ -109,13 +109,15 @@ plant "${canary_dir}/.env" "canary placeholder"
 # （一覧が無ければ除外は 0 件で、ダミーは必ず走査される）。複製は同じバイト列であることを確かめ、検出器そのものを試す。
 detector_dir="${work_dir}/detector"
 mkdir -p "${detector_dir}/scripts/hooks" 2> /dev/null || die "mkdir failed"
-cp -- "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" 2> /dev/null || die "failed to copy the scanner"
+# CI の本走査は検出器を直接起動する。実行ビットが無ければ、複製を別のインタープリタ経由で動かして通さず、ここで 2 にする。
+[ -x "${ROOT_DIR}/scripts/hooks/secret-scan.sh" ] || die "the scanner is not executable"
+cp -p -- "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" 2> /dev/null || die "failed to copy the scanner"
 copy_rc=0
 cmp -s "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" || copy_rc=$?
 [ "${copy_rc}" -eq 0 ] || die "the copied scanner differs from the original"
 
 rc=0
-"${BASH}" "${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+"${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
 
 fail() {
   echo "scan-canary: FAILED: $1" >&2
