@@ -132,10 +132,12 @@ static HOOK_ONCE: Once = Once::new();
 /// 対象の閉包の実行中だけ panic のメッセージとソース位置を出さない hook を、直前の hook を包んで 1 度だけ入れる。
 /// 段階の実行の時計の生成（`stage::run_stages`）でも使う。
 /// 抑止はスレッドローカルの印で絞るので、他のスレッドの panic は直前の hook に渡す（SECR-23）。
-pub(crate) fn install_quiet_hook() {
+///
+/// hook が入っていれば `true`。アンワインド中の初回で入れられなかったときは `false`（SECR-23）。
+pub(crate) fn install_quiet_hook() -> bool {
     // アンワインド中は `take_hook` が panic する（二重 panic）ので入れない。
     if std::thread::panicking() {
-        return;
+        return HOOK_ONCE.is_completed();
     }
     HOOK_ONCE.call_once(|| {
         let prev = std::panic::take_hook();
@@ -146,6 +148,7 @@ pub(crate) fn install_quiet_hook() {
             prev(info);
         }));
     });
+    true
 }
 
 /// 印を立て、スコープを抜けたとき（panic 後も）入場時の値へ戻す。

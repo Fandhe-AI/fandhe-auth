@@ -90,6 +90,9 @@ pub enum StageError {
     ClockPanicked { stage: u64, run: u64 },
     /// 全回が終わった後に、時計を作る関数が所有する値の破棄が panic した。panic の文言は載せない。
     ClockDropPanicked,
+    /// 抑止の hook を入れられなかった（アンワインド中のスレッドからの初回の呼び出し）。
+    /// 時計の生成も対象の呼び出しもしていない。
+    HookUnavailable,
     /// 番号の計算が溢れた。
     CounterOverflow,
 }
@@ -103,6 +106,7 @@ impl fmt::Display for StageError {
             Self::Clock { .. } => "clock error in stage",
             Self::ClockPanicked { .. } => "clock panicked in stage",
             Self::ClockDropPanicked => "clock drop panicked after stages",
+            Self::HookUnavailable => "quiet hook unavailable",
             Self::CounterOverflow => "counter overflow",
         };
         f.write_str(msg)
@@ -296,6 +300,7 @@ impl StagedRun {
 /// 呼び出し元は初回の後に `std::panic::set_hook` で hook を差し替えない（差し替えると抑止の印が参照されず、
 /// 時計の生成・生成関数の破棄の panic 文言が出得る）。差し替えるなら、直前の hook を包んで呼ぶ形にする。
 /// アンワインド中のスレッドから初めて呼ぶ場合、hook は入らない（`take_hook` が panic するため）。
+/// その場合は生成関数を呼ばず・破棄もせず（所有する値は `forget` で漏らす）、[`StageError::HookUnavailable`] を返す（SECR-23）。
 /// 先に通常の文脈から 1 度呼んで hook を入れておく。各回の時計は `new_clock` で作る（回ごとに新しい計測を始めるため）。
 ///
 /// `new_clock` は回ごとに `run_target` の直前に 1 度、計画の順に呼ばれる。`Err` は [`StageError::Clock`]、
@@ -306,6 +311,8 @@ impl StagedRun {
 /// # Errors
 /// 計画の不正・時計の生成の誤りまたは panic・回の誤り・集計の誤り。最初の誤りで止め、終わった段階の結果は返さない。
 /// 全回が成功しても生成関数の破棄で panic したときは [`StageError::ClockDropPanicked`] を返す。
+/// 返せるのは捕捉できるアンワインドだけである。生成関数が所有する複数の値の Drop が、先の panic のアンワインド中に
+/// 続けて panic すると二重 panic でプロセスが中断し、誤りを返せない（`panic = "abort"` の設定でも同じ）。
 /// 実行中の誤りが先にあれば、破棄の panic の有無に関わらずその誤りを返す。
 pub fn run_stages<C, F>(
     mut new_clock: C,
@@ -318,8 +325,12 @@ where
     F: Fn() -> CallResult + Sync,
 {
     // 不正な計画の拒否（InvalidPlan）でも生成関数の破棄の文言を出さないため、早期リターンより前に hook を入れる（SECR-23）。
-    // アンワインド中は `take_hook` が panic するので入れない（`install_quiet_hook` が判定し、InvalidPlan は返せる）。
-    install_quiet_hook();
+    // アンワインド中の初回は `take_hook` が panic するので入れられない。その場合は生成関数を実行も破棄もせず誤りで返す。
+    // 破棄の panic 文言が既定の hook に出ないよう、所有する値は漏らす（SECR-23）。
+    if !install_quiet_hook() {
+        std::mem::forget(new_clock);
+        return Err(StageError::HookUnavailable);
+    }
     let result = run_stages_inner(&mut new_clock, spec, plan, &call);
     // 時計を作る関数（クロージャ）の破棄も抑止と捕捉の内側で行う。所有する値の Drop が panic しても文言を hook に渡さない。
     // 実行の誤りがあればその最初の誤りを保ち、実行が成功して破棄だけが失敗したときは専用の誤りを返す（fail-closed。SECR-23）。

@@ -771,3 +771,11 @@ fn invalid_plan_path_does_not_write_drop_panic_to_stderr() {
     assert!(!stderr.contains(CHILD_DROP_CANARY));
     assert!(!stdout.contains(CHILD_DROP_CANARY));
 }
+
+#[test]
+fn hook_unavailable_has_fixed_message() {
+    assert_eq!(
+        StageError::HookUnavailable.to_string(),
+        "quiet hook unavailable"
+    );
+}
