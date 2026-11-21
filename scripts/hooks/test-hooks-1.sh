@@ -359,6 +359,14 @@ else
   fail "shellcheck-staged: a check that dies before writing its result exits 1 and names the file" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# 空のファイル名（名前が子に渡らない形）は検査を始めず、成功にもしない
+sc_run ""
+if [ "${sc_rc}" -eq 1 ] && [ ! -s "${sc_log}" ] && grep -qF "no valid result for" "${work_dir}/out"; then
+  pass "shellcheck-staged: an empty file name is never reported as a pass"
+else
+  fail "shellcheck-staged: an empty file name is never reported as a pass" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
+fi
+
 # 件数が並列数の上限を超えても、全件が 1 回ずつ検査される
 sc_many=()
 for sc_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do

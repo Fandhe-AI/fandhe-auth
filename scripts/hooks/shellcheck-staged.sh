@@ -45,6 +45,7 @@ trap 'exit 1' INT TERM
 
 # 重複を除いた引数を files に集める（名前の完全一致。引数は高々数百件で、二重の走査で足りる）
 files=()
+total=0
 for file in "$@"; do
   duplicate=0
   for prev in ${files[@]+"${files[@]}"}; do
@@ -54,10 +55,10 @@ for file in "$@"; do
     fi
   done
   if [ "${duplicate}" -eq 0 ]; then
-    files[${#files[@]}]="${file}"
+    files[total]="${file}"
+    total=$((total + 1))
   fi
 done
-total=${#files[@]}
 
 # 大きいファイルから先に起動する（検査時間はほぼ大きさに比例し、最後に起動した大きなファイルが全体の時間を決めるため）。
 # 並べ替えの入力は番号だけにし、ファイル名を使わない。出力は引数の順（番号順）のまま。
@@ -72,25 +73,39 @@ while [ "${i}" -lt "${total}" ]; do
   i=$((i + 1))
 done | sort -rn -k1,1 -k2,2n > "${tmp_dir}/order"
 
-# 起動は xargs に任せる（-0 -n 2 -P は GNU・BSD とも使える。空いた枠からすぐ次を起動し、先頭の遅いファイルが列を止めない）。
-# 入力は「番号 NUL ファイル名 NUL」の列で、子は番号ごとの .out と .rc を tmp_dir に書く（$0 = tmp_dir、$1 = 番号、$2 = ファイル名）。
-# 子は検査の結果にかかわらず 0 で終わり、xargs の終了コードには頼らない。結果は下で .rc から読む。
-# shellcheck disable=SC2016 # 子の bash に渡す固定のコード（親では展開させない）
+# check_one <番号> <ファイル>: 出力と終了コードを番号付きの一時ファイルへ書く。番号は親が持ち、子には引数で渡す。
+# ファイル名が空なら何も書かずに戻る（結果が無いものは下で失敗になる。名前の無いまま検査が 0 で終わる経路を作らない）。
+check_one() {
+  local rc
+  if [ -z "$2" ]; then
+    return 0
+  fi
+  if shellcheck -- "$2" > "${tmp_dir}/$1.out" 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+  echo "${rc}" > "${tmp_dir}/$1.rc"
+}
+
+# bash だけでジョブを回す（xargs は BSD と GNU で引数の扱いが違い、macOS で子にファイル名が渡らなかった）。
+# 上限まで起動したら最も古いものを待つ（wait -n は bash 3.2 に無い）。結果は wait の戻り値ではなく .rc から読む。
+pids=()
+launched=0
+reaped=0
 while read -r _size idx; do
-  printf '%s\0%s\0' "${idx}" "${files[idx]}"
-done < "${tmp_dir}/order" \
-  | xargs -0 -x -n 2 -P "${max_jobs}" bash -c '
-    # 番号は数字だけを受ける（違えば何も書かずに終わり、結果は下で失敗になる）
-    case "$1" in
-      "" | *[!0-9]*) exit 0 ;;
-    esac
-    if shellcheck -- "$2" > "$0/$1.out" 2>&1; then
-      rc=0
-    else
-      rc=$?
-    fi
-    echo "${rc}" > "$0/$1.rc"
-  ' "${tmp_dir}" || true
+  check_one "${idx}" "${files[idx]}" &
+  pids[launched]=$!
+  launched=$((launched + 1))
+  if [ $((launched - reaped)) -ge "${max_jobs}" ]; then
+    wait "${pids[reaped]}" || true
+    reaped=$((reaped + 1))
+  fi
+done < "${tmp_dir}/order"
+while [ "${reaped}" -lt "${launched}" ]; do
+  wait "${pids[reaped]}" || true
+  reaped=$((reaped + 1))
+done
 
 status=0
 i=0
