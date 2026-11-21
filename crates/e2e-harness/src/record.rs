@@ -225,6 +225,12 @@ impl E2eRunRecord {
         if self.runs.len() >= MAX_RUNS {
             return Err(RecordError::TooManyRuns);
         }
+        // ハーネス固有の名前をブラウザ由来の拒否として記録できないよう、追加時に専用の結果へ正規化する。
+        let result = match result {
+            RunResult::Rejected(WebAuthnErrorName::OriginMismatch) => RunResult::PreflightFailed,
+            RunResult::Rejected(WebAuthnErrorName::HarnessTimeout) => RunResult::HarnessTimedOut,
+            other => other,
+        };
         self.runs.push((op, result));
         Ok(())
     }
@@ -259,13 +265,20 @@ impl E2eRunRecord {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         );
-        let path = dir.join(name);
+        self.write_new_at(&dir.join(name))
+    }
+
+    /// 最終パスを指定して新しいファイルとして書く。既存のファイルがあれば `WriteFailed` で、その内容は変えない。
+    pub fn write_new_at(&self, path: &Path) -> Result<PathBuf, RecordError> {
+        let dir = path.parent().ok_or(RecordError::WriteFailed)?;
+        let path = path.to_path_buf();
         // 書き込み中の不完全なファイルが集計対象（`e2e-run-*.txt`）に残らないよう、別名で書いてから上書きなしで公開する。
         let partial = dir.join(format!(
-            ".{}.partial",
+            ".{}.{}.partial",
             path.file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("e2e-run")
+                .unwrap_or("e2e-run"),
+            std::process::id()
         ));
         // 自分で新規に作れた partial だけを後片付けする（既存のファイルは他の書き手のもので、消さない）。
         let mut f = OpenOptions::new()
@@ -405,6 +418,31 @@ mod tests {
             RunResult::HarnessTimedOut
         );
         assert_eq!(RunResult::classify(false, None), RunResult::CheckFailed);
+    }
+
+    #[test]
+    fn record_normalizes_harness_names() {
+        use WebAuthnErrorName as N;
+        let mut r = E2eRunRecord::new(
+            Browser::Chrome,
+            BrowserVersion::Unknown,
+            AuthenticatorKind::WebDriverVirtual,
+            PasskeyOperation::Registration,
+        );
+        r.record(
+            PasskeyOperation::Registration,
+            RunResult::Rejected(N::OriginMismatch),
+        )
+        .unwrap();
+        r.record(
+            PasskeyOperation::Registration,
+            RunResult::Rejected(N::HarnessTimeout),
+        )
+        .unwrap();
+        let t = r.to_string();
+        assert!(t.contains("run: 1 Registration preflight_failed\n"));
+        assert!(t.contains("run: 2 Registration harness_timeout\n"));
+        assert!(t.contains("rejected=0"));
     }
 
     #[test]

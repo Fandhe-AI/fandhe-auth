@@ -110,6 +110,20 @@ fn write_new_never_overwrites_and_errors_carry_no_path() {
     let _ = std::fs::remove_file(&a);
     let _ = std::fs::remove_file(&b);
 
+    // 同じ最終パスへの 2 回目は衝突して失敗し、既存のファイルの内容は変わらない。
+    let fixed = dir.join("collide.txt");
+    std::fs::write(&fixed, b"existing").unwrap();
+    assert_eq!(r.write_new_at(&fixed), Err(RecordError::WriteFailed));
+    assert_eq!(std::fs::read(&fixed).unwrap(), b"existing");
+    let p1 = dir.join("once.txt");
+    assert_eq!(r.write_new_at(&p1).unwrap(), p1);
+    let mut r2 = rec(Browser::Firefox);
+    r2.mark_completed();
+    assert_eq!(r2.write_new_at(&p1), Err(RecordError::WriteFailed));
+    assert_eq!(std::fs::read_to_string(&p1).unwrap(), r.to_string());
+    let _ = std::fs::remove_file(&fixed);
+    let _ = std::fs::remove_file(&p1);
+
     // 出力先がファイルのときは失敗し、誤りの表示にパスが出ない。
     let file = base.join("not-a-dir");
     std::fs::write(&file, b"x").unwrap();
