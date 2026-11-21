@@ -7,7 +7,9 @@
 //! RFC 3339 の整形は it-harness の `UtcTimestamp` と同じ civil 変換をここに重複して持つ）。
 //!
 //! 安全: 記録に入る文字列は作る時点で文字種・長さ・語彙を検査し、自由文の欄を作らない。違反は誤りにする
-//! （fail-closed。黙って `undecided` に落とさない。DPOL-32）。区分に既定値を置かず、測定値を要件の値へ上げる経路を作らない。
+//! （fail-closed。黙って `undecided` に落とさない。DPOL-32）。区分に既定値を置かず、ハーネスの中に測定値を要件の値へ上げる経路を作らない
+//! （要件の値・初期値は承認一覧との完全一致で限る。一覧の真正性は検査しないため、承認は人がレビューで担保する。[`ApprovedValues`] の信頼の境界）。
+//! 段階の結果は [`RunSession::run`] の中でだけ作り、実行の文脈に結び付ける（型で塞げない部分は [`RunSession`] の信頼の境界）。
 //! `judgment:` は常に空で、ハーネスは合否を書かない（ACPT-7）。ファイル名は整数だけで作り、既存ファイルを上書きしない。
 //! 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない（SECR-11・SECR-23・SECR-26）。`Debug` は中身を出さない。
 //! 他所有者の値は `external` で値なし・出典必須（D-2026-10-15-21）。誤りの文言は英語（D-2026-11-20-13）。
@@ -20,7 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::condition::{ComponentState, ConditionComponent, MeasurementConditions};
-use crate::stage::StagedRun;
+use crate::meter::MonotonicClock;
+use crate::stage::{StageError, StagePlan, StagedRun, run_stages};
+use crate::target::{CallResult, TargetSpec};
 
 /// 形式の識別子。形式を変えたら末尾の版を上げる。
 pub const LOAD_RECORD_FORMAT: &str = "fandhe-auth-load-record/1";
@@ -52,6 +56,8 @@ pub enum LoadRecordError {
     ClockOrder,
     Format,
     WriteFailed,
+    /// 段階の実行の誤り（[`RunSession::run`] の中の [`run_stages`] の誤り。種類と整数の番号だけを持つ）。
+    Stage(StageError),
 }
 
 impl fmt::Display for LoadRecordError {
@@ -75,6 +81,7 @@ impl fmt::Display for LoadRecordError {
             Self::ClockOrder => f.write_str("load record error: recorded_at before run_started_at"),
             Self::Format => f.write_str("load record error: format failed"),
             Self::WriteFailed => f.write_str("load record error: write failed"),
+            Self::Stage(_) => f.write_str("load record error: stage run failed"),
         }
     }
 }
@@ -89,7 +96,8 @@ pub enum InvalidValueReason {
     ValueRequired,
     ValueForbidden,
     ClassNotAllowed,
-    NotApproved,
+    /// 承認一覧（[`ApprovedValues`]）のどの行とも完全一致しない。一覧の行が人の承認を経たかは見ていない。
+    NotInApprovedList,
 }
 
 impl InvalidValueReason {
@@ -100,7 +108,7 @@ impl InvalidValueReason {
             Self::ValueRequired => "value_required",
             Self::ValueForbidden => "value_forbidden",
             Self::ClassNotAllowed => "class_not_allowed",
-            Self::NotApproved => "not_approved",
+            Self::NotInApprovedList => "not_in_approved_list",
         }
     }
 }
@@ -266,9 +274,9 @@ impl fmt::Debug for RunRecordFile {
     }
 }
 
-/// 人が承認した「項目・区分・数値・単位・出典」の組（`load.md` の「値の区別」規則 4。ACPT-7）。
+/// 承認一覧の 1 行（「項目・区分・数値・単位・出典」の組。`load.md` の「値の区別」規則 4）。
 /// 要件の値・初期値は、この組と完全に一致するときだけ記録に出せる。フィールドは非公開で、
-/// 呼び出し元がその場で組み立てる口はない（[`ApprovedValues::load`] だけが作る）。
+/// 作るのは [`ApprovedValues::load`] の書式の解析だけ（行が人の承認を経たかは見ない。[`ApprovedValues`] の信頼の境界）。
 #[derive(Clone, PartialEq, Eq)]
 struct ApprovedValue {
     name: String,
@@ -278,11 +286,15 @@ struct ApprovedValue {
     refs: BTreeSet<String>,
 }
 
-/// 人の承認を経た一覧。記録の候補（[`ComparisonValue::new`] の引数）とは独立した経路で読み込み、
-/// 候補をこの一覧に照合する（ACPT-7・規則 4）。記録の候補から一覧を作る経路はない。
+/// 承認一覧のファイルを読んだ結果。要件の値・初期値の候補（[`ComparisonValue::new`] の引数）を、
+/// この一覧の行との完全一致で限る（規則 4）。作る口はファイルから読む [`ApprovedValues::load`] と、
+/// 空の一覧（[`Default`]。どの要件の値・初期値も通さない）だけで、本文の文字列から作る公開の口はない。
 ///
-/// 入力は人が承認した記録ファイルの読み込み専用の口（[`ApprovedValues::load`]）だけで、本文の文字列から
-/// 作る公開の口はない（書式の解析は非公開）。
+/// 信頼の境界: この型が検査するのは形式（ファイルの種類・大きさ・UTF-8・書式、候補との完全一致）だけで、
+/// 一覧の行を人が承認したこと（真正性）は検査しない。ライブラリの中では、ファイルを書いたのが人か、
+/// 記録の候補を持つ同じ呼び出し元かを区別できない（呼び出し元が候補から書いたファイルを渡せば、その値は通る）。
+/// 真正性は、承認一覧を repo に commit し、人がレビューで承認することで担保する（値の決定・承認は人が行う。ACPT-7）。
+/// 一覧のファイルの置き場と形は未定で、人が決める（`docs/harness/load.md` の「未決・人の確認待ち」）。
 ///
 /// 書式（仮置き）: 1 行 1 件 `項目|区分|数値|単位|出典,出典`。区分は `requirement`・`initial` だけ。
 /// 単位は `ns`・`count`・`per_s`。空行と `#` で始まる行は読み飛ばす。
@@ -298,9 +310,13 @@ impl fmt::Debug for ApprovedValues {
 }
 
 impl ApprovedValues {
-    /// 人が承認した記録ファイルから読む（読み込み専用）。通常のファイルだけを受け、大きさに上限を置く。
-    /// ファイルは人が承認した信頼できる経路のものだけを渡す。記録の候補から作ったファイルを渡してはならない
-    /// （ACPT-7・load.md 規則 4。ファイルの出所は型では防げないため、呼び出し側の契約）。
+    /// 承認一覧のファイルを読み込み専用で開き、形式を検査して読む。検査は形式だけで、承認の真正性は見ない
+    /// （型の doc の信頼の境界）。渡すのは repo に commit され人がレビューで承認したファイルに限る。記録の候補から
+    /// 書いたファイルを渡すと、その値が要件の値・初期値として通る（ACPT-7・load.md 規則 4。呼び出し側の契約）。
+    ///
+    /// 開くときに止まらない: Unix では `O_NONBLOCK` を付けて開くため、書き手のいない FIFO を指しても `open` で
+    /// 待たず、開いたハンドルの種別の検査で拒否する。種別と大きさは開いたハンドルで見る（パスの差し替えに依らない）。
+    /// `O_NONBLOCK` の値を確かめていない対象では、開く前にパスの種別も見る（検査と `open` の間の差し替えは防げない）。
     ///
     /// # Errors
     /// 読めない・通常のファイルでない・大きすぎる・UTF-8 でないとき [`LoadRecordError::ApprovedFile`]。
@@ -308,7 +324,7 @@ impl ApprovedValues {
     /// （入力の値・パスを誤りに載せない）。
     pub fn load(path: &Path) -> Result<Self, LoadRecordError> {
         let bad = LoadRecordError::ApprovedFile;
-        let file = std::fs::File::open(path).map_err(|_| bad)?;
+        let file = open_without_blocking(path).map_err(|_| bad)?;
         let meta = file.metadata().map_err(|_| bad)?;
         if !meta.is_file() || meta.len() > MAX_APPROVED_FILE_BYTES {
             return Err(bad);
@@ -323,7 +339,7 @@ impl ApprovedValues {
         Self::parse_text(&text)
     }
 
-    /// 本文の書式を解析する。非公開（本文を呼び出し元が渡す口にしない）。
+    /// 本文の書式を解析する。非公開（本文の文字列を呼び出し元が渡す口にしない）。
     fn parse_text(text: &str) -> Result<Self, LoadRecordError> {
         let bad = LoadRecordError::Format;
         let mut out = Vec::new();
@@ -389,6 +405,67 @@ impl ApprovedValues {
     }
 }
 
+/// 開くときに止まらない `O_NONBLOCK` の値。libc の定義と突き合わせた対象だけに置く
+/// （通常の依存を 0 に保つため libc に依存しない）。ここに無い対象は `None` で、開く前にパスの種別を見る。
+#[cfg(unix)]
+#[allow(unreachable_code)]
+const fn nonblock_flag() -> Option<i32> {
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "riscv32",
+            target_arch = "riscv64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "s390x",
+            target_arch = "loongarch64"
+        )
+    ))]
+    return Some(0o4000);
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "mips", target_arch = "mips64")
+    ))]
+    return Some(0o200);
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "sparc", target_arch = "sparc64")
+    ))]
+    return Some(0x4000);
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    return Some(0x4);
+    None
+}
+
+/// 読み込み専用で、開くときに止まらないように開く（書き手のいない FIFO で `open` が待たないため）。
+/// 種別と大きさの検査は呼び出し元が開いたハンドルで行う。
+fn open_without_blocking(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    if let Some(flag) = nonblock_flag() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.custom_flags(flag);
+        return opts.open(path);
+    }
+    // 値を確かめていない対象: 開く前にパスの種別を見て、通常のファイル以外を開かない
+    // （検査と open の間の差し替えは防げない。開いた後のハンドルの検査は呼び出し元が行う）。
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    opts.open(path)
+}
+
 /// 比べる値の 1 行。区分ごとの規則は作る時点で検査する（`load.md` の 2）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct ComparisonValue {
@@ -400,8 +477,9 @@ pub struct ComparisonValue {
 }
 
 impl ComparisonValue {
-    /// 要件の値・初期値は、`approved`（人が承認した一覧）の 1 件と項目・区分・数値・単位・出典が
-    /// 完全一致するときだけ作る（一致しなければ `NotApproved`。ACPT-7）。他の区分は `approved` を見ない。
+    /// 要件の値・初期値は、`approved`（承認一覧のファイルを読んだ結果）の 1 行と項目・区分・数値・単位・出典が
+    /// 完全一致するときだけ作る（一致しなければ `NotInApprovedList`。規則 4）。他の区分は `approved` を見ない。
+    /// 一致の検査は形式の検査で、一覧の行が人の承認を経たかは見ない（[`ApprovedValues`] の信頼の境界。ACPT-7）。
     ///
     /// # Errors
     /// 区分の規則に反するとき [`LoadRecordError::InvalidValue`]、出典が 9 件以上のとき
@@ -416,7 +494,7 @@ impl ComparisonValue {
     ) -> Result<Self, LoadRecordError> {
         let bad = LoadRecordError::InvalidValue;
         use InvalidValueReason::{
-            ClassNotAllowed, NotApproved, RefsForbidden, RefsRequired, ValueForbidden,
+            ClassNotAllowed, NotInApprovedList, RefsForbidden, RefsRequired, ValueForbidden,
             ValueRequired,
         };
         if refs.len() > MAX_REFS {
@@ -442,7 +520,7 @@ impl ComparisonValue {
                     return Err(bad(ValueRequired));
                 };
                 if !approved.contains(name.0.as_str(), class, v, unit, &refs) {
-                    return Err(bad(NotApproved));
+                    return Err(bad(NotInApprovedList));
                 }
             }
             ValueClass::Undecided => {
@@ -533,30 +611,42 @@ fn rfc3339(secs: u64) -> String {
     )
 }
 
-/// 1 回の実行から得た値のまとめ（実行の記録への参照・起動時刻・測定の条件・段階の結果。`load.md` の 1・5）。
-/// 別々の実行の値を組み合わせて記録を作れないよう、作る時点で整合を検査する（fail-closed）:
-/// ファイル名の起動秒と起動時刻の一致、および実際に呼び出した構成要素（`exercised`）がすべて
-/// 測定の条件で起動済みであること（stub を呼んだのに構成に載っていない組み合わせを作らない。
-/// stub の起動を `note:` に出すのは条件の `Display`）。
-#[derive(Clone, PartialEq, Eq)]
-pub struct RunEvidence {
+/// 1 回の実行の文脈（実行の記録への参照・起動時刻・測定の条件。`load.md` の 1・5）。
+/// [`RunSession::run`] で段階をその場で回すと [`RunEvidence`] になる。
+///
+/// 型で塞いだもの: 段階の結果（[`StagedRun`]）を後から渡して [`RunEvidence`] を作る口は無い。段階の結果は
+/// [`RunSession::run`] の中でだけ作られ、同じ文脈（実行の記録・測定の条件）と、呼び出しの前に申告した構成要素
+/// （`exercised`）に結び付いたまま [`RunEvidence`] になる。別の実行の段階の結果を組み合わせる経路と、
+/// 回した後で構成要素を申告し直す経路は無い。申告した構成要素が測定の条件で起動していなければ、対象を 1 回も
+/// 呼ばずに拒否する。stub の種類は [`crate::ComponentConditions::new`] が実物として載せられない（`StubMismatch`）ため、
+/// stub を申告した実行の記録には stub の起動と `note:` が必ず出る（`A-2026-10-28-9`・ACPT-7。`note:` は条件の `Display`）。
+///
+/// 信頼の境界（塞げないもの。呼び出し側の契約）: (1) 閉包 `call` が実際に呼ぶ構成要素と `exercised` の一致
+/// （閉包の中身は見えない）。(2) `conditions` が実際に起動した構成要素と一致すること（呼び出し元が it-harness の
+/// 起動済みの構成から写す）。(3) `run_record_file` が同じ実行の記録であること（見るのは起動秒の一致だけで、
+/// 名前の文字列は誰でも作れるため、結び付けの証明ではない）。(1)〜(3) は、この crate が通常の依存で
+/// it-harness を持たない（どの crate にも依存しない）ため確かめられない。stub の結果を実物の結果として申告しない
+/// ことは呼び出し元の試験とレビューで担保する（〔仮想〕〔モック〕の合格を〔実機〕扱いしない。ACPT-7）。
+pub struct RunSession {
     run_record_file: RunRecordFile,
     run_started_at: u64,
     conditions: MeasurementConditions,
-    staged: StagedRun,
 }
 
-impl RunEvidence {
+impl fmt::Debug for RunSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RunSession(..)")
+    }
+}
+
+impl RunSession {
     /// # Errors
     /// 時刻が範囲外のとき [`LoadRecordError::TimeOutOfRange`]、ファイル名の起動秒と違うとき
-    /// [`LoadRecordError::RunStartMismatch`]、`exercised` が空、または起動していない要素を含むとき
-    /// [`LoadRecordError::InvalidRunEvidence`]。
+    /// [`LoadRecordError::RunStartMismatch`]。
     pub fn new(
         run_record_file: RunRecordFile,
         run_started_at_unix_secs: u64,
         conditions: MeasurementConditions,
-        staged: StagedRun,
-        exercised: &[ConditionComponent],
     ) -> Result<Self, LoadRecordError> {
         if run_started_at_unix_secs > MAX_UNIX_SECS {
             return Err(LoadRecordError::TimeOutOfRange);
@@ -564,20 +654,56 @@ impl RunEvidence {
         if run_record_file.started_unix_secs() != run_started_at_unix_secs {
             return Err(LoadRecordError::RunStartMismatch);
         }
-        if exercised.is_empty()
-            || exercised
-                .iter()
-                .any(|k| conditions.components.state(*k) == ComponentState::NotStarted)
-        {
-            return Err(LoadRecordError::InvalidRunEvidence);
-        }
         Ok(Self {
             run_record_file,
             run_started_at: run_started_at_unix_secs,
             conditions,
+        })
+    }
+
+    /// `exercised`（閉包 `call` が呼ぶ構成要素。呼ぶ前に申告する）を検査してから、[`run_stages`] で段階を回し、
+    /// 結果をこの文脈に結び付けた [`RunEvidence`] を返す。文脈は消費する（同じ文脈から 2 つ目の記録を作らない）。
+    ///
+    /// # Errors
+    /// `exercised` が空、または測定の条件で起動していない要素を含むとき [`LoadRecordError::InvalidRunEvidence`]
+    /// （対象を 1 回も呼ばない）。段階の実行の誤りは [`LoadRecordError::Stage`]（終わった段階の結果も返さない）。
+    pub fn run<C, F>(
+        self,
+        exercised: &[ConditionComponent],
+        new_clock: C,
+        spec: &TargetSpec,
+        plan: &StagePlan,
+        call: F,
+    ) -> Result<RunEvidence, LoadRecordError>
+    where
+        C: FnMut() -> Box<dyn MonotonicClock>,
+        F: Fn() -> CallResult + Sync,
+    {
+        if exercised.is_empty()
+            || exercised
+                .iter()
+                .any(|k| self.conditions.components.state(*k) == ComponentState::NotStarted)
+        {
+            return Err(LoadRecordError::InvalidRunEvidence);
+        }
+        let staged = run_stages(new_clock, spec, plan, call).map_err(LoadRecordError::Stage)?;
+        Ok(RunEvidence {
+            run_record_file: self.run_record_file,
+            run_started_at: self.run_started_at,
+            conditions: self.conditions,
             staged,
         })
     }
+}
+
+/// 1 回の実行から得た値のまとめ（実行の記録への参照・起動時刻・測定の条件・段階の結果。`load.md` の 1・5）。
+/// 作る口は [`RunSession::run`] だけで、段階の結果を後から渡す公開の口は無い（結び付けと信頼の境界は [`RunSession`]）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct RunEvidence {
+    run_record_file: RunRecordFile,
+    run_started_at: u64,
+    conditions: MeasurementConditions,
+    staged: StagedRun,
 }
 
 impl fmt::Debug for RunEvidence {

@@ -1,13 +1,52 @@
 //! 記録のファイル全体の単体試験（TASK-12 9/10）。偽の値・合成の時刻（epoch 付近）だけを使い、
 //! PoC の数値・要件の値を置かない（ACPT-7）。
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use fandhe_auth_load_harness::{
     ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
-    IntervalName, InvalidValueReason, LOAD_RECORD_FORMAT, LoadConfig, LoadRecord, LoadRecordError,
-    LoopModel, MeasurementConditions, MetricKey, RefId, RunEvidence, RunRecordFile, StageConfig,
-    StageLimits, StagePlan, StagedRun, StdMonotonicClock, TargetName, TargetSpec, ValueClass,
-    ValueName, ValueUnit, run_stages,
+    ConditionError, IntervalName, InvalidValueReason, LOAD_RECORD_FORMAT, LoadConfig, LoadRecord,
+    LoadRecordError, LoopModel, MeasurementConditions, MetricKey, RefId, RunEvidence,
+    RunRecordFile, RunSession, StageConfig, StageError, StageLimits, StagePlan, StdMonotonicClock,
+    TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
 };
+
+/// 排他的に新規作成したディレクトリ。既存のもの（中断した試験の残り・PID の再利用で重なる名前）は
+/// 消さず、自分が作ったものだけを Drop で片付ける。
+struct TestDir(PathBuf);
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl TestDir {
+    fn new(name: &str) -> Self {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        std::fs::create_dir_all(base).unwrap();
+        for _ in 0..100 {
+            let d = base.join(format!(
+                "{name}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            // create_dir は既存なら失敗する。別の名前で作り直し、既存を消さない。
+            match std::fs::create_dir(&d) {
+                Ok(()) => return Self(d),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("create test dir: {e}"),
+            }
+        }
+        panic!("no free test dir name");
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
 
 /// 試験用の語彙。入れた名前だけが通る。
 fn vname(n: &str) -> ValueName {
@@ -46,19 +85,22 @@ fn approval(
     )
 }
 
-/// 承認済みの記録ファイルを読み込み専用の口（`load`）で読む。本文は試験の固定の文言で、候補から組み立てない（ACPT-7）。
+/// 承認一覧の書式の試験用に、固定の本文を一時ファイルへ書いて `load` で読む。本文は試験の固定の文言で、
+/// 候補から組み立てない。ここで書くファイルは書式の検査の入力で、人の承認ではない（ACPT-7）。
+/// ファイルは排他的に作ったディレクトリの中に `create_new` で作り、ディレクトリごと Drop で消す
+/// （他の試験のファイルを切り詰め・削除しない）。
 fn try_list(text: &str) -> Result<ApprovedValues, LoadRecordError> {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "approved-{}-{}.txt",
-        std::process::id(),
-        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, text).unwrap();
-    let r = ApprovedValues::load(&path);
-    std::fs::remove_file(&path).unwrap();
-    r
+    use std::io::Write as _;
+    let dir = TestDir::new("approved");
+    let path = dir.path().join("approved.txt");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    f.write_all(text.as_bytes()).unwrap();
+    drop(f);
+    ApprovedValues::load(&path)
 }
 
 fn list(text: &str) -> ApprovedValues {
@@ -71,7 +113,7 @@ fn approval_must_match_name_class_value_unit_refs() {
     use ValueClass::*;
     let ok = list("v|initial|5|ns|A-1\n");
     assert!(approval(Initial, 5, &["A-1"], &ok).is_ok());
-    let na = LoadRecordError::InvalidValue(InvalidValueReason::NotApproved);
+    let na = LoadRecordError::InvalidValue(InvalidValueReason::NotInApprovedList);
     assert_eq!(
         approval(Initial, 5, &["A-1"], &ApprovedValues::default()).unwrap_err(),
         na
@@ -112,18 +154,52 @@ fn approved_list_parse_is_strict() {
 /// 読み込み専用の口: 存在しない・ディレクトリ・大きすぎるものは `ApprovedFile`。
 #[test]
 fn approved_load_rejects_non_files_and_oversize() {
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let missing = dir.join("approved-missing-none.txt");
+    let td = TestDir::new("approved-nonfile");
+    let missing = td.path().join("missing.txt");
     assert_eq!(
         ApprovedValues::load(&missing).err(),
         Some(LoadRecordError::ApprovedFile)
     );
     assert_eq!(
-        ApprovedValues::load(dir).err(),
+        ApprovedValues::load(td.path()).err(),
         Some(LoadRecordError::ApprovedFile)
     );
     let big = "#".repeat(70_000);
     assert_eq!(try_list(&big).err(), Some(LoadRecordError::ApprovedFile));
+}
+
+/// 書き手のいない FIFO を指しても `open` で止まらず、開いたハンドルの種別の検査で `ApprovedFile` になる。
+/// 止まったら（回帰）待ちを打ち切って失敗させ、書き手側を開いて残ったスレッドをほどく。
+#[cfg(unix)]
+#[test]
+fn approved_load_does_not_block_on_fifo() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let td = TestDir::new("approved-fifo");
+    let fifo = td.path().join("approved.fifo");
+    // mkfifo が無い・失敗した環境では黙って通さず、試験を失敗させる。
+    let st = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(st.success(), "mkfifo failed");
+    let (tx, rx) = mpsc::channel();
+    let p = fifo.clone();
+    let h = std::thread::spawn(move || {
+        let _ = tx.send(ApprovedValues::load(&p));
+    });
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(r) => {
+            assert_eq!(r.err(), Some(LoadRecordError::ApprovedFile));
+            h.join().unwrap();
+        }
+        Err(_) => {
+            // 読み手が open で待っている。書き手として開いて待ちをほどいてから失敗させる。
+            let _w = std::fs::OpenOptions::new().write(true).open(&fifo);
+            let _ = h.join();
+            panic!("ApprovedValues::load blocked on a FIFO");
+        }
+    }
 }
 
 fn invalid(r: Result<ComparisonValue, LoadRecordError>) -> bool {
@@ -136,10 +212,10 @@ fn class_rules_fail_closed() {
     for c in [Requirement, Initial] {
         assert!(invalid(val("v", c, Some(1), &[])));
         assert!(invalid(val("v", c, None, &["X-1"])));
-        // 独立した承認済みの一覧に無いため、区分の規則を通った後に NotApproved になる。
+        // 独立した承認一覧に無いため、区分の規則を通った後に NotInApprovedList になる。
         assert_eq!(
             val("v", c, Some(1), &["X-1"]).unwrap_err(),
-            LoadRecordError::InvalidValue(InvalidValueReason::NotApproved)
+            LoadRecordError::InvalidValue(InvalidValueReason::NotInApprovedList)
         );
     }
     // 規則 5: PoC の数値は比べる値として置かない。
@@ -170,7 +246,7 @@ fn refs_limits() {
     );
     assert_eq!(
         val("v", ValueClass::Initial, Some(1), &nine[..8]).unwrap_err(),
-        LoadRecordError::InvalidValue(InvalidValueReason::NotApproved)
+        LoadRecordError::InvalidValue(InvalidValueReason::NotInApprovedList)
     );
     assert_eq!(
         val("v", ValueClass::Initial, Some(1), &["A", "A"]).unwrap_err(),
@@ -264,42 +340,61 @@ fn value_line_shapes() {
     );
 }
 
-fn staged() -> StagedRun {
-    let spec = TargetSpec::new(
+fn spec() -> TargetSpec {
+    TargetSpec::new(
         TargetName::new("route_a").unwrap(),
         IntervalName::new("op").unwrap(),
-    );
-    let plan = StagePlan::new(
+    )
+}
+
+fn plan_with(interval: &str) -> StagePlan {
+    StagePlan::new(
         vec![StageConfig::new(LoadConfig::new(1, 3, 0).unwrap(), 1).unwrap()],
         MetricKey::P99Ns,
         StageLimits::new(4, 4, 100, 100).unwrap(),
-        vec![IntervalName::new("op").unwrap()],
-    )
-    .unwrap();
-    run_stages(
-        || Box::new(StdMonotonicClock::new()),
-        &spec,
-        &plan,
-        || CallResult::Ok,
+        vec![IntervalName::new(interval).unwrap()],
     )
     .unwrap()
 }
 
-fn conditions() -> MeasurementConditions {
+fn conditions_of(started: &[(ConditionComponent, bool)]) -> MeasurementConditions {
     MeasurementConditions::detect(
-        ComponentConditions::new(&[(ConditionComponent::HubStub, true)]).unwrap(),
+        ComponentConditions::new(started).unwrap(),
         LoopModel::Closed,
     )
     .unwrap()
 }
 
+fn conditions() -> MeasurementConditions {
+    conditions_of(&[(ConditionComponent::HubStub, true)])
+}
+
+/// 文脈 `session` で段階を回す。呼び出しの回数を `calls` に数える。
+fn run_in(
+    session: RunSession,
+    exercised: &[ConditionComponent],
+    plan: &StagePlan,
+    calls: &AtomicU64,
+) -> Result<RunEvidence, LoadRecordError> {
+    session.run(
+        exercised,
+        || Box::new(StdMonotonicClock::new()),
+        &spec(),
+        plan,
+        || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            CallResult::Ok
+        },
+    )
+}
+
 fn evidence(s: u64) -> Result<RunEvidence, LoadRecordError> {
-    RunEvidence::new(
-        file_at(s),
-        s,
-        conditions(),
-        staged(),
+    let calls = AtomicU64::new(0);
+    run_in(
+        RunSession::new(file_at(s), s, conditions())?,
         &[ConditionComponent::HubStub],
+        &plan_with("op"),
+        &calls,
     )
 }
 
@@ -350,13 +445,7 @@ fn rfc3339_known_values() {
 
 #[test]
 fn run_start_mismatch_and_time_range() {
-    let m = RunEvidence::new(
-        file_at(5),
-        6,
-        conditions(),
-        staged(),
-        &[ConditionComponent::HubStub],
-    );
+    let m = RunSession::new(file_at(5), 6, conditions());
     assert_eq!(m.unwrap_err(), LoadRecordError::RunStartMismatch);
     const MAX: u64 = 253_402_300_799;
     let t = build(MAX, MAX, vec![]).unwrap().to_string();
@@ -366,35 +455,74 @@ fn run_start_mismatch_and_time_range() {
         LoadRecordError::TimeOutOfRange
     );
     assert_eq!(
-        RunEvidence::new(
-            file_at(0),
-            MAX + 1,
-            conditions(),
-            staged(),
-            &[ConditionComponent::HubStub],
-        )
-        .unwrap_err(),
+        RunSession::new(file_at(0), MAX + 1, conditions()).unwrap_err(),
         LoadRecordError::TimeOutOfRange
     );
 }
 
-/// 実行の整合: 呼び出した構成要素が起動していない・空の組は作れない。stub を呼んだ記録は `note:` を出す。
+/// 実行の整合（A-2026-10-28-9・ACPT-7）: 呼び出す構成要素が空・測定の条件で起動していない組は、対象を
+/// 1 回も呼ばずに拒否する。stub を申告した記録は stub の起動と `note:` を必ず出す。
+/// 段階の結果を後から渡す口（別の実行の結果・後からの申告）は型に無いため、実行時の否定の試験は置けない。
 #[test]
-fn run_evidence_binds_exercised_components_to_conditions() {
-    let bad = |exercised: &[ConditionComponent]| {
-        RunEvidence::new(file_at(0), 0, conditions(), staged(), exercised).unwrap_err()
+fn run_session_binds_exercised_components_to_conditions() {
+    let bad = |c: MeasurementConditions, exercised: &[ConditionComponent]| {
+        let calls = AtomicU64::new(0);
+        let e = run_in(
+            RunSession::new(file_at(0), 0, c).unwrap(),
+            exercised,
+            &plan_with("op"),
+            &calls,
+        )
+        .unwrap_err();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "target called before rejection"
+        );
+        e
     };
-    assert_eq!(bad(&[]), LoadRecordError::InvalidRunEvidence);
+    assert_eq!(bad(conditions(), &[]), LoadRecordError::InvalidRunEvidence);
     assert_eq!(
-        bad(&[ConditionComponent::ConsoleStub]),
+        bad(conditions(), &[ConditionComponent::ConsoleStub]),
         LoadRecordError::InvalidRunEvidence
     );
     assert_eq!(
-        bad(&[ConditionComponent::HubStub, ConditionComponent::Host]),
+        bad(
+            conditions(),
+            &[ConditionComponent::HubStub, ConditionComponent::Host]
+        ),
         LoadRecordError::InvalidRunEvidence
+    );
+    // 実物だけの構成で stub を申告した実行は作れない（note: を欠いた stub の記録を作らない）。
+    let real_only = conditions_of(&[(ConditionComponent::Database, false)]);
+    assert_eq!(
+        bad(real_only, &[ConditionComponent::HubStub]),
+        LoadRecordError::InvalidRunEvidence
+    );
+    // stub の種類を実物として構成に載せる道も無い。
+    assert_eq!(
+        ComponentConditions::new(&[(ConditionComponent::HubStub, false)]).unwrap_err(),
+        ConditionError::StubMismatch
     );
     let t = build(0, 0, vec![]).unwrap().to_string();
+    assert!(t.contains("condition_component: HubStub started stub "));
     assert!(t.contains("note: stub results are not counted as real results\n"));
+}
+
+/// 段階の実行の誤りは `Stage` で返し、記録の元を作らない（区間名が語彙外なら最初の回の前に拒否）。
+#[test]
+fn run_session_stage_error_is_reported() {
+    let calls = AtomicU64::new(0);
+    let e = run_in(
+        RunSession::new(file_at(0), 0, conditions()).unwrap(),
+        &[ConditionComponent::HubStub],
+        &plan_with("other"),
+        &calls,
+    )
+    .unwrap_err();
+    assert_eq!(e, LoadRecordError::Stage(StageError::InvalidPlan));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(e.to_string(), "load record error: stage run failed");
 }
 
 #[test]

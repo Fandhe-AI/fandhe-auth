@@ -365,19 +365,31 @@ judgment:
 `TASK-12` の 9/10（#120）。`crates/load-harness` の `record` に、`fandhe-auth-load-record/1` のファイル全体を組んで新規ファイルへ書き出す部品を置いた。
 名前・語・上限はすべて仮置きで、人が確認する。合否は付けない（`ACPT-7`）。
 
-- API: `RunEvidence::new`（実行の記録のファイル名・起動時刻・機材と構成・段階の結果・実際に呼び出した構成要素を 1 つにまとめ、作る時点で整合を検査する）、`LoadRecord::new`（`RunEvidence`・記録時刻・比べる値を受ける）、`LoadRecord::write_new(dir)`、
-  `ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`LoadRecordError`。
+- API: `RunSession::new`（実行の記録のファイル名・起動時刻・機材と構成を受け、作る時点で整合を検査する）、`RunSession::run`（呼び出す構成要素を呼ぶ前に申告し、その場で `run_stages` を回して `RunEvidence` を返す。文脈は消費する）、`LoadRecord::new`（`RunEvidence`・記録時刻・比べる値を受ける）、`LoadRecord::write_new(dir)`、
+  `ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`ApprovedValues`・`LoadRecordError`。`RunEvidence` を段階の結果から作る公開の口は無い（下の「信頼の境界」）。
 - 行の順: `format:` → `run_record_file:` → `run_started_at:` → `recorded_at:` → 条件 → 段階 → `value:` → `judgment:`（形式の 7 の見本どおり）。`judgment:` は常に空で、ハーネスは書かない。
-- 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial` は出典と整数の値が必須で、さらに人が承認した「項目・区分・数値・単位・出典」の一覧（`ApprovedValues`。フィールドは非公開で、`ApprovedValues::load(path)` が人の承認した記録ファイル〔1 行 `項目|区分|数値|単位|出典,出典`。通常のファイルだけ・64 KiB まで〕を読む。本文の文字列から作る公開の口はなく〔書式の解析は非公開〕、記録の候補から一覧を組み立てる口もない。ファイルの出所は人が承認したものに限る〔呼び出し側の契約。型では防げない〕。読めなければ `ApprovedFile`。出典 ID は `RefId::new` と同じ形・予約語の検査を読み込み時に通し、満たさない行は `Format`）の 1 件と完全一致しなければ `NotApproved` で拒否する（規則 4・`ACPT-7`。出典 ID が信頼済み一覧にあるだけでは足りない）。`poc_parameter` は比べる値として置かない（規則 5）ため `ClassNotAllowed` で拒否する、`undecided` は値なし、`external` は値なし・出典必須、
+- 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial` は出典と整数の値が必須で、さらに承認一覧の「項目・区分・数値・単位・出典」の行（`ApprovedValues`。フィールドは非公開で、`ApprovedValues::load(path)` が承認一覧のファイル〔1 行 `項目|区分|数値|単位|出典,出典`。通常のファイルだけ・64 KiB まで〕を読む。作る口はこの `load` と空の一覧〔`Default`〕だけで、本文の文字列から作る公開の口はない〔書式の解析は非公開〕。検査は形式だけで、行を人が承認したかは見ない〔下の「信頼の境界」〕。読めなければ `ApprovedFile`。出典 ID は `RefId::new` と同じ形・予約語の検査を読み込み時に通し、満たさない行は `Format`）の 1 件と完全一致しなければ `NotInApprovedList` で拒否する（規則 4。出典 ID が信頼済み一覧にあるだけでは足りない）。`poc_parameter` は比べる値として置かない（規則 5）ため `ClassNotAllowed` で拒否する、`undecided` は値なし、`external` は値なし・出典必須、
   `test_condition`・`measured` は整数の値が必須で出典を受けず、行には固定の印（`harness_config`・`measured`）を出す。出典は 1 行 8 件まで・重複は誤り。
-  測定値・既定値を要件の値へ上げる経路は作らない。
+  ハーネスの中に測定値・既定値を要件の値へ上げる経路は作らない（承認一覧の真正性は検査しない。下の「信頼の境界」）。
 - 書き出し: `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。無ければ `dir` を作る。隠し名の一時ファイルへ書ききってから、上書きなしの `hard_link` で最終名へ公開する
   （途中の失敗で不完全なファイルを完成品の名前で残さない。一時ファイルは作れたときだけ消しにいくが、削除の失敗は無視するため、失敗時は残りうる。名前が衝突して作れなかったときは既存のファイルを消さない）。乱数・環境変数・設定ファイルを使わない。出力先のファイルシステムはハードリンクに対応している必要がある（非対応だと `WriteFailed`）。
 - 入力の検査（仮置き）: `ValueName::new` は呼び出し元が渡す承認済みの語彙に含まれる名前だけを受ける。`RefId::new` は呼び出し元が渡す信頼済みの出典の一覧（spec の ID 等）に完全一致するものだけを受け、予約語（`none`・`harness_config`・`measured`）を拒否する。
   `p99_target` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する（`AUDP-29`）。`RunRecordFile` は生成元と同じ整数型で解析し、再整形した名前と一致しない名前（先頭ゼロ等）を拒否する。
-  `RunRecordFile` の起動秒と `run_started_at` が違えば `RunEvidence::new` が `RunStartMismatch`。呼び出した構成要素が空、または測定の条件で起動していなければ `InvalidRunEvidence`（stub を呼んだ結果に stub の起動を載せない構成が付く組を作らない。stub の `note:` は条件の `Display`）。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
+  `RunRecordFile` の起動秒と `run_started_at` が違えば `RunSession::new` が `RunStartMismatch`。申告した構成要素が空、または測定の条件で起動していなければ、`RunSession::run` が対象を 1 回も呼ばずに `InvalidRunEvidence`（stub を申告した実行に stub の起動を載せない構成が付く組を作らない。stub の `note:` は条件の `Display`）。段階の実行の誤りは `Stage`。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
   値の行の違反の理由は固定の列挙 `InvalidValueReason` で持つ（`&'static str` を公開しない）。
 - 時刻の RFC 3339 の整形は、通常の依存を 0 に保つため it-harness の `UtcTimestamp` と同じ変換を `record` に重複して持つ。
+- 承認一覧の読み込みは止まらない: Unix では `O_NONBLOCK` を付けて開き（値は libc の定義と突き合わせた対象だけに置く。libc には依存しない）、書き手のいない FIFO でも `open` で待たずに、開いたハンドルの種別と大きさの検査で `ApprovedFile` にする。
+  値を置いていない対象では開く前にパスの種別も見る（検査と `open` の間の差し替えは防げない）。
+- 信頼の境界（ライブラリの中で証明できないもの。`ACPT-7` は検討中で、ここでは規則として扱う）:
+  - 承認一覧: `ApprovedValues` が検査するのは形式（ファイルの種類・大きさ・UTF-8・書式、候補との完全一致）だけで、行を人が承認したこと（真正性）は検査しない。
+    ライブラリの中では、ファイルを書いたのが人か、記録の候補を持つ同じ呼び出し元かを区別できない（呼び出し元が候補から書いたファイルを渡せば、その値は `requirement`・`initial` として通る）。
+    真正性は、承認一覧を repo に commit し、人がレビューで承認することで担保する（値の決定・承認は人が行う。`ACPT-7`・規則 4）。一覧のファイルの置き場と形は未定で、人が決める（下の「未決・人の確認待ち」）。
+    試験（`tests/record.rs`）が書く一時ファイルは書式の検査の入力で、承認ではない。
+  - 段階の結果と実行の結び付け（型で塞いだもの）: 段階の結果は `RunSession::run` の中でだけ作られ、同じ文脈（実行の記録・測定の条件）と、呼ぶ前に申告した構成要素に結び付いたまま `RunEvidence` になる。
+    別の実行の段階の結果を組み合わせる口と、回した後で構成要素を申告し直す口は無い。stub の種類は `ComponentConditions::new` が実物として載せられない（`StubMismatch`）ため、stub を申告した実行の記録には stub の起動と `note:` が必ず出る（`A-2026-10-28-9`）。
+  - 段階の結果と実行の結び付け（塞げないもの。呼び出し側の契約）: (1) 閉包が実際に呼ぶ構成要素と申告の一致（閉包の中身は見えない）、(2) 測定の条件の構成が実際に起動した構成要素と一致すること（呼び出し元が it-harness の起動済みの構成から写す）、
+    (3) `run_record_file` が同じ実行の記録であること（見るのは起動秒の一致だけで、名前の文字列は誰でも作れるため結び付けの証明ではない）。`load-harness` は通常の依存で it-harness を持たないため、(1)〜(3) を確かめられない。
+    stub の結果を実物の結果として申告しないことは、呼び出し元の試験とレビューで担保する（〔仮想〕〔モック〕の合格を〔実機〕扱いしない。`ACPT-7`）。試し実行は stub 側の呼び出しの件数で (1) を確かめている。
 - 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない。`Debug` は中身を出さない固定文字列にした（`SECR-23`・`SECR-26`）。
 - 試し実行（`tests/trial_run.rs`。Docker・ネットワークなし。`make test` で流れる）: it-harness の上で Hub の stub に 2 段階（並行数 1・2）の負荷をかけ、
   実行の記録（`it-run-…`）と負荷の記録を同じ出力先へ書く。見た点は、記録のファイルが出ること・名前の形・`run_record_file` と `run_started_at` が実行の記録と結ばれること・
@@ -416,3 +428,5 @@ judgment:
   値の行の上限（64）と出典の上限（8）、`load-run-…` の名前を `run_started_at` の秒で作ること、時刻の整形を it-harness と別に持つこと、
   API の名前（`record`・`LoadRecord`・`ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`LoadRecordError`）
 - 「小さな試し実行が終わり記録が出る」の読み: `make test` の中の試験でファイルが出ること（人が確認する。受け入れ条件を満たしたかの判定も人）
+- 承認一覧のファイルの置き場・形・承認の手順（repo に commit し人がレビューで承認する、という担保の具体）: 未定。人が決める。現時点で repo に承認一覧のファイルは無い（性能の目標値は持ち越し。`AUDP-29`）
+- 9/10 の追加の仮置き: `RunSession`（文脈を作ってから段階を回す形）、`InvalidValueReason::NotInApprovedList` の名前、`O_NONBLOCK` を置く対象の範囲と、置かない対象での開く前の種別の検査
