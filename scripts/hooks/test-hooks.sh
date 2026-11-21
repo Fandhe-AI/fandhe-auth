@@ -354,6 +354,9 @@ SCAN_BIN="${det_ok}" check_scan "an intent-to-add skills-lock.json is treated as
 # intent-to-add の判定は固定した index だけで行い、作業ツリーに依らない（add -N の後に作業ツリーから消しても未登録のまま。#6011）
 new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add -N skills-lock.json; rm skills-lock.json
 SCAN_BIN="${det_ok}" check_scan "an intent-to-add skills-lock.json removed from the working tree is treated as unregistered" 0
+# 判定の出力の形を環境に依らせない（GIT_PRINT_SHA1_ELLIPSIS=yes は省略した oid の後に ... を付ける。--no-abbrev で固定する。#6011）
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add -N skills-lock.json
+GIT_PRINT_SHA1_ELLIPSIS=yes SCAN_BIN="${det_ok}" check_scan "an intent-to-add skills-lock.json is treated as unregistered with GIT_PRINT_SHA1_ELLIPSIS=yes" 0
 new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add skills-lock.json; rm skills-lock.json
 SCAN_BIN="${det_ok}" check_scan "a really staged empty skills-lock.json removed from the working tree is still rejected" 2
 new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add skills-lock.json
@@ -957,14 +960,14 @@ for sub in "ls-tree" "cat-file" "diff"; do
     mv "${work_dir}/gitlog-sub2" "${work_dir}/gitlog-sub"
   fi
   # index の比較・intent-to-add の判定の diff（--ita-*-in-index）は HEAD ではなく空の tree と比べる。空の tree の ID を
-  # 渡していることを確かめてから、HEAD の ID の照合（走査の diff）から外す
+  # 渡していることを確かめてから、HEAD の ID の照合（走査の diff）から外す。index の比較は固定時と走査後の 2 回ある
   if [ "${sub}" = diff ]; then
     empty_sha="$(git hash-object -t tree /dev/null)"
     grep -E -- "--ita-(in)?visible-in-index" "${work_dir}/gitlog-sub" > "${work_dir}/gitlog-ita" || true
     ita_total="$(wc -l < "${work_dir}/gitlog-ita")"
     ita_total="${ita_total//[[:space:]]/}"
     ita_with_empty="$(grep -c "${empty_sha}" "${work_dir}/gitlog-ita" || true)"
-    if [ "${ita_total}" -lt 1 ] || [ "${ita_total}" -ne "${ita_with_empty}" ]; then
+    if [ "${ita_total}" -lt 2 ] || [ "${ita_total}" -ne "${ita_with_empty}" ]; then
       pin_ok=0
     fi
     grep -vE -- "--ita-(in)?visible-in-index" "${work_dir}/gitlog-sub" > "${work_dir}/gitlog-sub2" || true

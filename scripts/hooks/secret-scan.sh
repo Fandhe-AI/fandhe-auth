@@ -676,12 +676,12 @@ load_index_lock() {
   # 両者の結果が食い違う（どちらにも現れない等）ときは検査不能（2）にする。
   if [ "${oid}" = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" ] \
     || [ "${oid}" = "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813" ]; then
-    if ! g diff --cached --raw -z --no-renames --ita-invisible-in-index "${empty_tree}" -- skills-lock.json > "${tmp_dir}/index-ita"; then
+    if ! g diff --cached --raw -z --no-abbrev --no-renames --ita-invisible-in-index "${empty_tree}" -- skills-lock.json > "${tmp_dir}/index-ita"; then
       echo "secret-scan: cannot read the staged skills-lock.json; aborting" >&4
       exit 2
     fi
     if [ ! -s "${tmp_dir}/index-ita" ]; then
-      if ! g diff --cached --raw -z --no-renames --ita-visible-in-index "${empty_tree}" -- skills-lock.json > "${tmp_dir}/index-ita"; then
+      if ! g diff --cached --raw -z --no-abbrev --no-renames --ita-visible-in-index "${empty_tree}" -- skills-lock.json > "${tmp_dir}/index-ita"; then
         echo "secret-scan: cannot read the staged skills-lock.json; aborting" >&4
         exit 2
       fi
@@ -693,7 +693,8 @@ load_index_lock() {
         IFS= read -r -d '' ita_path || true
         IFS= read -r -d '' ita_more || true
       } < "${tmp_dir}/index-ita"
-      ita_re='^:000000 100(644|755) 0+ [0-9a-f]+ A$'
+      # --no-abbrev で oid を全桁に固定する（core.abbrev・GIT_PRINT_SHA1_ELLIPSIS で出力の形を変えない）。
+      ita_re='^:000000 100(644|755) 0{40}(0{24})? [0-9a-f]{40}([0-9a-f]{24})? A$'
       if [[ "${ita_head}" =~ ${ita_re} ]] \
         && [ "${ita_path}" = skills-lock.json ] && [ -z "${ita_more}" ]; then
         return 0
