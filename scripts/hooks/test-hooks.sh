@@ -2045,6 +2045,29 @@ else
   fail "scan-canary: scanner exit 2 makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# secret-scan-canary.sh: 陰性対照の結果はリポジトリの内容に依らない。作業ツリー・HEAD の skills-lock.json が壊れていても、
+# 検出器の複製を一覧の無い場所から動かすため、ダミーの検出（終了コード 0）を確かめられる（#6011）。
+# 検出器とスクリプトの複製を一時 repo に置き、壊れた一覧をコミットした上で作業ツリーも壊す
+canary_root="${work_dir}/canary-root"
+mkdir -p "${canary_root}/scripts/hooks"
+cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${canary_root}/scripts/"
+cp "${SECRET_SCAN}" "${canary_root}/scripts/hooks/secret-scan.sh"
+(
+  cd "${canary_root}"
+  git -c init.defaultBranch=main init -q
+  printf '%s\n' '{ "version": 2, "skills": {' > skills-lock.json
+  git add -A
+  git commit -q -m "chore: broken lock"
+  printf '%s\n' 'not json' > skills-lock.json
+)
+rc=0
+(cd "${canary_root}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "scan-canary: a broken skills-lock.json in the repository does not affect the canary"
+else
+  fail "scan-canary: a broken skills-lock.json in the repository does not affect the canary" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 # secret-scan-canary.sh: 元のリポジトリの hooks（post-index-change）を起動しない
 hook_dir="${work_dir}/hooks"
 mkdir -p "${hook_dir}"
@@ -2236,8 +2259,8 @@ for missing in git mktemp grep rm; do
   fi
 done
 unset run_arg
-for missing in git mktemp mkdir rm sort cmp grep; do
-  run_without_cmd "${missing}" "${HOOKS_DIR}/../secret-scan-canary.sh" git mktemp mkdir rm sort cmp grep
+for missing in git mktemp mkdir rm sort cmp grep cp; do
+  run_without_cmd "${missing}" "${HOOKS_DIR}/../secret-scan-canary.sh" git mktemp mkdir rm sort cmp grep cp
   # 依存の確認より前に、確認していない外部コマンド（basename 等）を呼ばない（command not found が出ないこと）
   if [ "${rc}" -eq 2 ] && grep -q "required command not found on PATH: ${missing}" "${work_dir}/out" \
     && ! grep -q "command not found$" "${work_dir}/out"; then

@@ -47,7 +47,7 @@ done
 unset _v env_names
 export GIT_NO_REPLACE_OBJECTS=1
 # 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
-for _c in git mktemp mkdir rm sort cmp grep; do
+for _c in git mktemp mkdir rm sort cmp grep cp; do
   require_cmd "${_c}" || exit 2
 done
 unset _c
@@ -104,8 +104,18 @@ canary_dir="secret-scan-canary"
 plant "${canary_dir}/dummy.txt" "${key_line}"
 plant "${canary_dir}/.env" "canary placeholder"
 
+# 検出器は、自身の場所の skills-lock.json（と同じ checkout なら HEAD の一覧）から本文の除外を読み、壊れていれば検査不能（2）にする（#6000）。
+# 陰性対照の結果はリポジトリの内容に依らない契約のため、検出器の複製を一時領域へ置き、一覧の無い場所から動かす
+# （一覧が無ければ除外は 0 件で、ダミーは必ず走査される）。複製は同じバイト列であることを確かめ、検出器そのものを試す。
+detector_dir="${work_dir}/detector"
+mkdir -p "${detector_dir}/scripts/hooks" 2> /dev/null || die "mkdir failed"
+cp -- "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" 2> /dev/null || die "failed to copy the scanner"
+copy_rc=0
+cmp -s "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" || copy_rc=$?
+[ "${copy_rc}" -eq 0 ] || die "the copied scanner differs from the original"
+
 rc=0
-"${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+"${BASH}" "${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
 
 fail() {
   echo "scan-canary: FAILED: $1" >&2
