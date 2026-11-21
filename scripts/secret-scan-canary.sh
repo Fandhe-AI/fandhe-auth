@@ -115,15 +115,27 @@ mkdir -p "${detector_dir}/scripts/hooks" 2> /dev/null || die "mkdir failed"
 # CI の本走査は検出器を直接起動する。元の検出器に実行ビットが無ければ、陰性対照だけ通さずここで 2 にする。
 # 複製は一時領域に置くため、PATH の bash に読み込ませて起動する（一時領域が noexec のマウントでも動かす。
 # 検出器の shebang は `/usr/bin/env bash` で、直接起動と同じ PATH の bash を使う）。
-# `command` で起動し、環境から取り込まれた同名の関数（BASH_FUNC_bash%%）による差し替えを飛ばす。
+# PATH の bash は `type -P` でパスに解決し、そのパスで起動する。`/` を含む語は関数の探索に掛からないため、
+# 環境から取り込まれた同名の関数（BASH_FUNC_bash%%）による差し替えを飛ばす。
+# `command bash … || rc=$?` は使わない。bash 3.2（macOS の /bin/bash）は `command` の中の失敗を `||` の左辺でも
+# set -e で止め（errexit を外す対象が eval だけ。4.0 で command・source に広がった）、検出（1）が ERR trap の 2 になる。
 [ -x "${ROOT_DIR}/scripts/hooks/secret-scan.sh" ] || die "the scanner is not executable"
 cp -p -- "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" 2> /dev/null || die "failed to copy the scanner"
 copy_rc=0
 cmp -s "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" || copy_rc=$?
 [ "${copy_rc}" -eq 0 ] || die "the copied scanner differs from the original"
 
+# 起動の直前・同じ作業ディレクトリで解決する（PATH に相対の要素があっても、解決と起動が同じものを指す）。
+# 見つからない・`/` を含まない（起動時に再び関数の探索に掛かる）結果は検査不能（2）。
+if ! scanner_bash="$(type -P bash)" || [ -z "${scanner_bash}" ]; then
+  die "bash not found on PATH"
+fi
+case "${scanner_bash}" in
+  */*) ;;
+  *) die "bash did not resolve to a path" ;;
+esac
 rc=0
-command bash "${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+"${scanner_bash}" "${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
 
 fail() {
   echo "scan-canary: FAILED: $1" >&2

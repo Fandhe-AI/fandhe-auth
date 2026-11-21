@@ -2190,7 +2190,7 @@ else
     "shim mark: $(cat "${noexec_mark}" 2> /dev/null || echo none)" "output: $(cat "${work_dir}/out")"
 fi
 
-# 陰性対照は検出器の複製を `command bash` で起動し、環境から取り込まれた関数 bash（BASH_FUNC_bash%%）に差し替えられない（#6011）。
+# 陰性対照は検出器の複製を PATH の bash のパス（`type -P`）で起動し、環境から取り込まれた関数 bash（BASH_FUNC_bash%%）に差し替えられない（#6011）。
 # 関数は印を残して 0 で返す（関数が使われれば、陰性対照は検出の欠落として 1 で終わる）
 bash_fn_mark="${work_dir}/bash-fn-mark"
 rm -f "${bash_fn_mark}"
