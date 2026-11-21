@@ -456,16 +456,16 @@ selftest() {
   # F11c: .cargo/config の include（Cargo が受ける形（配列・テーブルの配列）に加え、受けない形も安全側に止める）は読み込み先を追わず検査不能（2）。include が無ければ従来どおり（0 件）
   local ic
   mkdir -p "${f}/i1/.cargo" "${f}/i2/.cargo" "${f}/i3/.cargo" "${f}/i4/.cargo" "${f}/i5/.cargo" "${f}/i6/.cargo" 2>/dev/null || { log "error: cannot write fixture (f11c); cannot inspect"; exit 2; }
-  if ! printf 'include = "extra.toml"\n' >"${f}/i1/.cargo/config.toml" 2>/dev/null ||
-    ! printf 'include = ["a.toml", "b.toml"]\n' >"${f}/i2/.cargo/config.toml" 2>/dev/null ||
-    ! printf '[[include]]\npath = "a.toml"\noptional = true\n' >"${f}/i3/.cargo/config.toml" 2>/dev/null ||
-    ! printf '[include]\npath = "a.toml"\n' >"${f}/i4/.cargo/config" 2>/dev/null ||
-    ! printf 'include = [{ path = "a.toml" }]\n' >"${f}/i5/.cargo/config.toml" 2>/dev/null ||
-    ! printf '[env]\nOTHER = "1"\n' >"${f}/i6/.cargo/config.toml" 2>/dev/null ||
+  if ! printf 'include = "extra.toml"\n' 2>/dev/null >"${f}/i1/.cargo/config.toml" ||
+    ! printf 'include = ["a.toml", "b.toml"]\n' 2>/dev/null >"${f}/i2/.cargo/config.toml" ||
+    ! printf '[[include]]\npath = "a.toml"\noptional = true\n' 2>/dev/null >"${f}/i3/.cargo/config.toml" ||
+    ! printf '[include]\npath = "a.toml"\n' 2>/dev/null >"${f}/i4/.cargo/config" ||
+    ! printf 'include = [{ path = "a.toml" }]\n' 2>/dev/null >"${f}/i5/.cargo/config.toml" ||
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/i6/.cargo/config.toml" ||
     ! mkdir -p "${f}/i7/.cargo" "${f}/i8/.cargo" "${f}/i9/.cargo" 2>/dev/null ||
-    ! printf '"include" = ["a.toml"]\n' >"${f}/i7/.cargo/config.toml" 2>/dev/null ||
-    ! printf 'include.path = "a.toml"\n' >"${f}/i8/.cargo/config.toml" 2>/dev/null ||
-    ! printf '"incl\\u0075de" = ["a.toml"]\n' >"${f}/i9/.cargo/config.toml" 2>/dev/null; then
+    ! printf '"include" = ["a.toml"]\n' 2>/dev/null >"${f}/i7/.cargo/config.toml" ||
+    ! printf 'include.path = "a.toml"\n' 2>/dev/null >"${f}/i8/.cargo/config.toml" ||
+    ! printf '"incl\\u0075de" = ["a.toml"]\n' 2>/dev/null >"${f}/i9/.cargo/config.toml"; then
     log "error: cannot write fixture (f11c); cannot inspect"
     exit 2
   fi
