@@ -483,9 +483,14 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
 /// 停止点で止まったままでも `stop()` は戻る（停止の信号で停止点の待ちが解ける）。
 #[test]
 fn stop_returns_while_accept_is_held_at_stall_point() {
-    let up = echo_upstream();
+    let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    up.set_nonblocking(true).unwrap();
     let stall = UpstreamStall::new();
-    let p = ExternalStoreFaultProxy::start_to_port_with_stall(up.port(), stall.clone()).unwrap();
+    let p = ExternalStoreFaultProxy::start_to_port_with_stall(
+        up.local_addr().unwrap().port(),
+        stall.clone(),
+    )
+    .unwrap();
     let _c = connect(p.listen_port());
     assert!(stall.wait_entered(Duration::from_secs(5)));
     let started = Instant::now();
@@ -498,6 +503,12 @@ fn stop_returns_while_accept_is_held_at_stall_point() {
     // 期限切れではなく、停止の通知で待ちが解けたこと。
     assert!(wait_until(|| stall.exit_reason().is_some()));
     assert_eq!(stall.exit_reason(), Some(StallExit::Stopped));
+    // 停止後に上流へ接続していない（専用の上流リスナーに接続が届いていない。ORST-17）。
+    assert_eq!(
+        up.accept().map(|_| ()).unwrap_err().kind(),
+        ErrorKind::WouldBlock,
+        "stop() connected to the upstream"
+    );
 }
 
 /// 接続の試行が続いていても `block()` は期限の中で戻る（Cursor Bugbot の指摘の回帰防止。

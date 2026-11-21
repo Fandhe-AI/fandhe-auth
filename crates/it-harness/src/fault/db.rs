@@ -134,6 +134,8 @@ struct StallInner {
 struct StallState {
     entered: u64,
     released: bool,
+    /// `release` が呼ばれた時刻（同じロックの下で記録する。保持の期限までに解かれたかの判定に使う）。
+    released_at: Option<Instant>,
     /// 直近に停止点を離れた理由。試験が「期限切れで抜けたのを合格にしない」ために見る（ORST-17）。
     last_exit: Option<StallExit>,
 }
@@ -207,7 +209,10 @@ impl UpstreamStall {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        g.released = true;
+        if !g.released {
+            g.released = true;
+            g.released_at = Some(Instant::now());
+        }
         self.inner.cv.notify_all();
     }
 
@@ -233,13 +238,22 @@ impl UpstreamStall {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
-        g.last_exit = Some(if g.released {
-            StallExit::Released
-        } else if stop.load(Ordering::SeqCst) {
-            StallExit::Stopped
-        } else {
-            StallExit::Expired
-        });
+        g.last_exit = Some(classify_exit(
+            g.released_at,
+            deadline,
+            stop.load(Ordering::SeqCst),
+        ));
+    }
+}
+
+/// 停止点を離れた理由の決定。期限の後に解かれた場合は期限切れ（明示の解除まで保持された、と読ませない）。
+fn classify_exit(released_at: Option<Instant>, deadline: Instant, stopped: bool) -> StallExit {
+    if released_at.is_some_and(|t| t <= deadline) {
+        StallExit::Released
+    } else if stopped {
+        StallExit::Stopped
+    } else {
+        StallExit::Expired
     }
 }
 
@@ -754,18 +768,9 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
         return None;
     };
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    if let Some(stall) = &shared.stall {
-        stall.hold(&shared.stop);
-        // 停止の通知で戻った場合は、上流へつながず閉じる（`stop()`・`Drop` を `connect_timeout` で待たせない）。
-        if shared.stop.load(Ordering::SeqCst) {
-            shared.sever_conn(id);
-            refuse(&accepted.client, shared);
-            return None;
-        }
-    }
-    // 停止判定を通過し、実際に接続を試みる直前で数える（停止点で閉じた接続は数えない）。
-    shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
-    let Ok(up) = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT) else {
+    // 停止点は実際の接続の代わりの待ちで、接続と同じ段（呼び出しの境界）の内側に置く。
+    // この段をロックの下で呼ぶ回帰が入ると、停止点の待ちが `block()` を待たせて試験が落ちる（ORST-17）。
+    let Some(up) = dial_upstream(&addr, shared) else {
         shared.sever_conn(id);
         refuse(&accepted.client, shared);
         return None;
@@ -781,6 +786,20 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
         u_write,
         u_kill,
     })
+}
+
+/// 上流への実際の接続。試験用の停止点があれば、接続の代わりにそこで待つ。
+/// 停止の通知で戻った場合は、上流へつながず `None`（`stop()`・`Drop` を `connect_timeout` で待たせない）。
+fn dial_upstream(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
+    if let Some(stall) = &shared.stall {
+        stall.hold(&shared.stop);
+        if shared.stop.load(Ordering::SeqCst) {
+            return None;
+        }
+    }
+    // 停止判定を通過し、実際に接続を試みる直前で数える（停止点で閉じた接続は数えない）。
+    shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
+    TcpStream::connect_timeout(addr, UPSTREAM_CONNECT_TIMEOUT).ok()
 }
 
 /// 中継を始める段。上流側の複製を登録し、世代を確かめてから転送のスレッドを起こす。
@@ -1419,5 +1438,23 @@ mod tests {
         assert!(r.is_ok());
         assert_eq!(observed, Some(true), "must still be blocked at record time");
         assert!(!p.shared.blocked.load(Ordering::SeqCst));
+    }
+
+    /// 期限の後の解除は `Released` にならない（ORST-17・AUDB-6）。
+    #[test]
+    fn classify_exit_distinguishes_late_release() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let early = deadline - Duration::from_millis(10);
+        let late = deadline + Duration::from_millis(10);
+        assert_eq!(
+            classify_exit(Some(early), deadline, false),
+            StallExit::Released
+        );
+        assert_eq!(
+            classify_exit(Some(late), deadline, false),
+            StallExit::Expired
+        );
+        assert_eq!(classify_exit(None, deadline, false), StallExit::Expired);
+        assert_eq!(classify_exit(None, deadline, true), StallExit::Stopped);
     }
 }
