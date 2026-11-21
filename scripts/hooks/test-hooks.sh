@@ -2165,6 +2165,30 @@ else
 fi
 chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
 
+# 検出器の 1 行目が `#!/usr/bin/env bash` に完全一致しなければ、実行ビットがあっても陰性対照は 2 で終わる
+# （CI の本走査と make secret-scan は検出器を直接起動し、shebang が壊れていると起動できない。陰性対照は複製を bash に
+# 読み込ませるため shebang に依らず、確かめないと通ってしまう。#6011）。
+# 壊し方は bash として読めば動くもの（解釈系の名前の誤り・CR の付加・別の解釈系のパス）にし、確かめなければ 0 で通る形にする。
+# 判定は固定の診断と、ERR trap（同じく 2）ではないことの両方で行う
+for broken_shebang in '#!/usr/bin/env bsah' "#!/usr/bin/env bash"$'\r' '#!/bin/bash'; do
+  {
+    printf '%s\n' "${broken_shebang}"
+    tail -n +2 "${SECRET_SCAN}"
+  } > "${canary_root}/scripts/hooks/secret-scan.sh"
+  chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
+  rc=0
+  (cd "${canary_root}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh) > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qF "scan-canary: the scanner's first line is not the expected shebang" "${work_dir}/out" \
+    && ! grep -qF "internal error" "${work_dir}/out"; then
+    pass "scan-canary: a scanner with a broken shebang ($(printf '%q' "${broken_shebang}")) makes the canary exit 2"
+  else
+    fail "scan-canary: a scanner with a broken shebang ($(printf '%q' "${broken_shebang}")) makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+done
+unset broken_shebang
+cp "${SECRET_SCAN}" "${canary_root}/scripts/hooks/secret-scan.sh"
+chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
+
 # 一時領域が noexec のマウントでも、陰性対照は検出器の複製を起動できる（複製は bash に読み込ませる。#6011）。
 # noexec を mount なしで再現するため、複製先の実行ビットを落とす cp の shim を使う（直接起動なら同じく EACCES で起動できない）。
 # shim は実行ビットを落とした後に、複製先に実行ビットが無いことを確かめてそのパスを印のファイルへ書く。
@@ -2342,11 +2366,12 @@ rm -rf "${leak_tmp}"
 
 # 検出器が 0 を返しても、走査完了の集計行（検出 0 件）がちょうど 1 行で、ほかの許可行が無いことを合格の条件にする。
 # 検出器を差し替えた複製（scripts/ だけ）で、出力と終了状態を固定の検出器から返す。
+# 差し替えの 1 行目は検出器の起動の契約（`#!/usr/bin/env bash`）に合わせる（陰性対照が 1 行目を確かめるため。#6011）。
 stub_root="${work_dir}/stub-root"
 mkdir -p "${stub_root}/scripts/hooks"
 cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${stub_root}/scripts/"
 cat > "${stub_root}/scripts/hooks/secret-scan.sh" <<'EOF'
-#!/bin/sh
+#!/usr/bin/env bash
 if [ -n "${STUB_OUT:-}" ]; then
   printf '%s\n' "${STUB_OUT}"
 fi

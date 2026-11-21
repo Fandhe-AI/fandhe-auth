@@ -112,14 +112,22 @@ plant "${canary_dir}/.env" "canary placeholder"
 # （一覧が無ければ除外は 0 件で、ダミーは必ず走査される）。複製は同じバイト列であることを確かめ、検出器そのものを試す。
 detector_dir="${work_dir}/detector"
 mkdir -p "${detector_dir}/scripts/hooks" 2> /dev/null || die "mkdir failed"
-# CI の本走査は検出器を直接起動する。元の検出器に実行ビットが無ければ、陰性対照だけ通さずここで 2 にする。
+# CI の本走査（scripts/secret-scan-ci.sh）と make secret-scan は検出器を直接起動する。直接起動の契約は
+# 「実行ビットがある」と「1 行目が `#!/usr/bin/env bash` に完全一致する」の 2 つで、どちらかが欠ければ
+# 陰性対照だけ通さずここで 2 にする（複製を bash に読み込ませる下の起動は、どちらにも依らないため）。
 # 複製は一時領域に置くため、PATH の bash に読み込ませて起動する（一時領域が noexec のマウントでも動かす。
-# 検出器の shebang は `/usr/bin/env bash` で、直接起動と同じ PATH の bash を使う）。
+# 1 行目の確認により、直接起動と同じ PATH の bash を使うことになる）。
 # PATH の bash は `type -P` でパスに解決し、そのパスで起動する。`/` を含む語は関数の探索に掛からないため、
 # 環境から取り込まれた同名の関数（BASH_FUNC_bash%%）による差し替えを飛ばす。
 # `command bash … || rc=$?` は使わない。bash 3.2（macOS の /bin/bash）は `command` の中の失敗を `||` の左辺でも
 # set -e で止め（errexit を外す対象が eval だけ。4.0 で command・source に広がった）、検出（1）が ERR trap の 2 になる。
 [ -x "${ROOT_DIR}/scripts/hooks/secret-scan.sh" ] || die "the scanner is not executable"
+# 1 行目は組み込みの read で読む（外部コマンドを足さない）。-r で CR などを残し、行全体を文字列で比べる。
+# read の失敗（末尾の改行が無い・読めない）は値の比較で不一致として扱う（`|| true` で受け、ERR trap にしない）。
+# 読めないときの生の診断はパスを含むため捨てる。
+scanner_shebang=""
+{ IFS= read -r scanner_shebang < "${ROOT_DIR}/scripts/hooks/secret-scan.sh"; } 2> /dev/null || true
+[ "${scanner_shebang}" = '#!/usr/bin/env bash' ] || die "the scanner's first line is not the expected shebang"
 cp -p -- "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" 2> /dev/null || die "failed to copy the scanner"
 copy_rc=0
 cmp -s "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" || copy_rc=$?
