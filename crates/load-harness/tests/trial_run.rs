@@ -200,3 +200,180 @@ fn small_trial_run_writes_record_without_requirement_values() {
 fn it_record_started_line(r: &fandhe_auth_it_harness::RunRecord) -> String {
     r.started_at().to_string()
 }
+
+// ---- AAUD-30・SECR-23: 登録簿の値を 4 つの形で記録のファイルに掛ける照合 ----
+
+/// 実行時に乱数から作る 16 バイトの値（固定の値をソースに置かない）。`RandomState` は実行ごとに種が変わる。
+fn random_value() -> Vec<u8> {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher as _, Hasher as _};
+    let state = RandomState::new();
+    let mut out = Vec::with_capacity(16);
+    for i in 0..2u64 {
+        let mut h = state.build_hasher();
+        h.write_u64(i);
+        out.extend_from_slice(&h.finish().to_be_bytes());
+    }
+    out
+}
+
+fn hex(v: &[u8], upper: bool) -> String {
+    v.iter()
+        .map(|b| {
+            if upper {
+                format!("{b:02X}")
+            } else {
+                format!("{b:02x}")
+            }
+        })
+        .collect()
+}
+
+fn base64_with(v: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
+    let mut out = String::new();
+    for c in v.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        let take = c.len() + 1;
+        for i in 0..4 {
+            if i < take {
+                out.push(char::from(alphabet[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else if pad {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// 値ごとの照合の形: 生・base64（パディングあり・なし）・base64url（なし）・16 進（小文字・大文字）。
+/// 生のバイト列は UTF-8 とは限らないためバイト列で探す。
+fn forms(v: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        v.to_vec(),
+        base64_with(v, B64, true).into_bytes(),
+        base64_with(v, B64, false).into_bytes(),
+        base64_with(v, B64URL, false).into_bytes(),
+        hex(v, false).into_bytes(),
+        hex(v, true).into_bytes(),
+    ]
+}
+
+/// 登録簿の全値・全形が `haystack` に現れる件数だけを返す（値は返さない）。
+fn count_matches(registry: &[Vec<u8>], haystack: &[u8]) -> usize {
+    registry
+        .iter()
+        .flat_map(|v| forms(v))
+        .map(|f| {
+            haystack
+                .windows(f.len())
+                .filter(|w| *w == f.as_slice())
+                .count()
+        })
+        .sum()
+}
+
+/// 負荷の記録を作って書く（呼び出し元の入力は `cfg`。`hub_config` と同じ組み立て）。
+fn write_record_for(cfg: HubStubConfig) -> std::path::PathBuf {
+    let hub = HubStubComponent::new(cfg);
+    let handle = hub.handle();
+    let running = Harness::start(HarnessConfig::new().with(Box::new(hub))).unwrap();
+    let key = AssertionSigningKey::generate("kid-load-trial.test").unwrap();
+    handle.with(|s| s.jwks.publish(&key)).unwrap();
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("load-trial-canary");
+    let it_record = running.run_record(VersionInfo::detect().unwrap()).unwrap();
+    let it_path = it_record.write_new(&dir).unwrap();
+    let it_name = it_path.file_name().unwrap().to_str().unwrap().to_owned();
+    let started_kinds: Vec<(ConditionComponent, bool)> = running
+        .composition_record()
+        .entries
+        .iter()
+        .map(|e| (to_condition(e.kind), e.stub))
+        .collect();
+    let conditions = MeasurementConditions::detect(
+        ComponentConditions::new(&started_kinds).unwrap(),
+        LoopModel::Closed,
+    )
+    .unwrap();
+    let spec = TargetSpec::new(
+        TargetName::new("hub_stub_jwks").unwrap(),
+        IntervalName::new("stub_jwks").unwrap(),
+    );
+    let plan = StagePlan::new(
+        vec![StageConfig::new(LoadConfig::new(1, 5, 1).unwrap(), 1).unwrap()],
+        MetricKey::P99Ns,
+        StageLimits::new(8, 8, 1_000, 10_000).unwrap(),
+        vec![IntervalName::new("stub_jwks").unwrap()],
+    )
+    .unwrap();
+    let call = || match handle.with(|s| s.jwks.serve(T0)) {
+        Some(r) if r.status == 200 => CallResult::Ok,
+        _ => CallResult::Unavailable,
+    };
+    let evidence = RunSession::new(
+        RunRecordFile::new(&it_name).unwrap(),
+        it_record.started_at().unix_seconds(),
+        conditions,
+    )
+    .unwrap()
+    .run(&[ConditionComponent::HubStub], &spec, &plan, call)
+    .unwrap();
+    let recorded_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let record = LoadRecord::new(&evidence, recorded_at, Vec::new()).unwrap();
+    let path = record.write_new(&dir).unwrap();
+    running.stop().unwrap();
+    std::fs::remove_file(&it_path).unwrap();
+    path
+}
+
+/// 登録簿（実行時に作る 3 値）と、その値を呼び出し元の入力（接続の設定）へ入れた構成。
+fn canary_registry_and_config() -> (Vec<Vec<u8>>, HubStubConfig) {
+    let registry: Vec<Vec<u8>> = (0..3).map(|_| random_value()).collect();
+    let mut cfg = hub_config();
+    cfg.client_id = StubValue::test(hex(&registry[0], false));
+    cfg.public_host = StubValue::test(format!("{}.example.test", hex(&registry[1], false)));
+    cfg.jwks_uri = StubValue::test(format!("https://{}/jwks", hex(&registry[2], false)));
+    (registry, cfg)
+}
+
+/// AAUD-30・SECR-23: 呼び出し元の入力に入れた登録簿の値が、書き出した記録の全文に、
+/// 生・base64・base64url・16 進のどの形でも現れない（一致の件数が 0）。
+#[test]
+fn written_record_has_no_registered_secret_in_any_form() {
+    let (registry, cfg) = canary_registry_and_config();
+    let path = write_record_for(cfg);
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(!bytes.is_empty());
+    let n = count_matches(&registry, &bytes);
+    assert_eq!(n, 0, "registered values found in the record: {n} match(es)");
+}
+
+/// 陽性対照（AAUD-31 の趣旨）: 登録簿の値を記録に混ぜると、照合は形ごとに検出する。
+/// 16 進 32 文字・base64 系の語は 64 バイト以下の英数字で、形の網（`is_fixed_shape`）の内側に収まる値である。
+/// これが検出できなければ、上の「0 件」は空振りの可能性がある。
+#[test]
+fn matcher_detects_registered_secret_mixed_into_record() {
+    let (registry, cfg) = canary_registry_and_config();
+    let path = write_record_for(cfg);
+    let base = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(count_matches(&registry, &base), 0);
+    for (vi, v) in registry.iter().enumerate() {
+        for (fi, f) in forms(v).iter().enumerate() {
+            let mut mixed = base.clone();
+            mixed.extend_from_slice(b"note: ");
+            mixed.extend_from_slice(f);
+            mixed.push(b'\n');
+            let n = count_matches(&registry, &mixed);
+            assert!(n >= 1, "form {fi} of value {vi} was not detected");
+        }
+    }
+}

@@ -312,7 +312,7 @@ fn error_display_is_fixed_english() {
 
 #[test]
 fn staged_run_debug_hides_target_name() {
-    // SECR-23・SECR-26: 対象名に目印を渡し、Debug の出力に含まれないことを確かめる。
+    // SECR-23: 対象名に目印を渡し、Debug の出力に含まれないことを確かめる。
     let canary = "canary_target_zq";
     let spec = TargetSpec::new(
         TargetName::new(canary).unwrap(),
@@ -327,7 +327,7 @@ fn staged_run_debug_hides_target_name() {
 
 #[test]
 fn plan_and_result_debug_hide_interval_names() {
-    // SECR-23・SECR-26: 区間名に目印を渡し、計画・結果（回の集計のキーを含む）の Debug に含まれないことを確かめる。
+    // SECR-23: 区間名に目印を渡し、計画・結果（回の集計のキーを含む）の Debug に含まれないことを確かめる。
     let canary = "canary_interval_zq";
     let name = IntervalName::new(canary).unwrap();
     let spec = TargetSpec::new(TargetName::new("op_target").unwrap(), name.clone());

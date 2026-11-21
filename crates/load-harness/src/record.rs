@@ -12,7 +12,7 @@
 //! （要件の値・初期値は承認一覧との完全一致で限る。一覧の真正性は検査しないため、承認は人がレビューで担保する。[`ApprovedValues`] の信頼の境界）。
 //! 段階の結果は [`RunSession::run`] の中でだけ作り、実行の文脈に結び付ける（型で塞げない部分は [`RunSession`] の信頼の境界）。
 //! `judgment:` は常に空で、ハーネスは合否を書かない（ACPT-7）。ファイル名は整数だけで作り、既存ファイルを上書きしない。
-//! 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない（SECR-11・SECR-23・SECR-26）。`Debug` は中身を出さない。
+//! 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない（SECR-11・SECR-23）。`Debug` は中身を出さない。
 //! 他所有者の値は `external` で値なし・出典必須（D-2026-10-15-21）。誤りの文言は英語（D-2026-11-20-13）。
 
 use std::collections::BTreeSet;
@@ -37,12 +37,15 @@ const MAX_APPROVED_FILE_BYTES: u64 = 64 * 1024;
 pub const MAX_VALUES: usize = 64;
 /// 時刻（UNIX 秒）の上限。9999-12-31T23:59:59Z。RFC 3339 の 4 桁年に収める（仮置き）。
 pub const MAX_UNIX_SECS: u64 = 253_402_300_799;
-/// `refs` 欄で出力側が使う語。出典の ID には使わせない（出典なし・自動取得の印と取り違えない）。
 /// 記録の全体・1 行・1 語の長さの上限（仮置き。`is_fixed_shape`）。
-const MAX_RECORD_BYTES: usize = 64 * 1024;
-const MAX_LINE_BYTES: usize = 512;
+/// 1 行の最大は値の行で、名前 64 + 固定の語 + 出典 8 件（各 64 バイトと区切り 7）で 700 バイト前後のため、1024 に置く。
+/// 全体の上限は段階の数 × 繰り返し × 区間・失敗の種類の数の行の合計で、`StageLimits` の上限と区間の宣言の数で決まる
+/// （1 行 300 バイト前後。超える計画は `Format` で拒否し、呼び出し元が計画を小さくする。fail-closed）。
+const MAX_RECORD_BYTES: usize = 1024 * 1024;
+const MAX_LINE_BYTES: usize = 1024;
 const MAX_WORD_BYTES: usize = 64;
 
+/// `refs` 欄で出力側が使う語。出典の ID には使わせない（出典なし・自動取得の印と取り違えない）。
 const RESERVED_REFS: [&str; 3] = ["none", "harness_config", "measured"];
 
 /// 記録の誤り。種類だけを持ち、入力の値・パス・元の誤りの文言は載せない。
@@ -94,7 +97,7 @@ impl fmt::Display for LoadRecordError {
 
 impl std::error::Error for LoadRecordError {}
 
-/// 値の行が区分の規則に反した理由。固定の列挙で、入力の値を載せない（SECR-23・SECR-26）。
+/// 値の行が区分の規則に反した理由。固定の列挙で、入力の値を載せない（SECR-23）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvalidValueReason {
     RefsRequired,
@@ -182,10 +185,13 @@ fn is_ref_shape(s: &str) -> bool {
         && !RESERVED_REFS.contains(&s)
 }
 
-/// 記録の本文が固定の形だけかを見る（SECR-23・SECR-26。`write_new` の出力先は追跡ツリーの外で
-/// `secret-scan` の対象に入らないため、書く前に中身を許可した文字・長さに限る）。通すのは ASCII の英数字と
-/// ` _-.:=,/`・LF だけで、1 行 512 バイト・1 語（空白区切り）64 バイト・全体 64 KiB まで。
-/// JWT・鍵・接続文字列のような長い値や、記号・非 ASCII を含む値は書かずに拒否する。
+/// 記録の本文が許可した文字・長さだけかを見る（SECR-23・AAUD-30。`write_new` の出力先は追跡ツリーの外で
+/// `secret-scan` の対象に入らないため、書く前に中身を限る）。通すのは ASCII の英数字と ` _-.:=,/`・LF だけで、
+/// 1 行 1024 バイト・1 語（空白・`=`・`,` 区切り）64 バイト・全体 1 MiB まで。
+///
+/// この検査が止めるのは、記号・非 ASCII・長い値が後から入る回帰だけである。64 バイト以下の英数字・base64url・
+/// 16 進の秘密値は形では止められない。実際に止めているのは各欄の語彙・列挙・整数の検査で、漏れは
+/// 照合の試験（`tests/trial_run.rs`。登録簿の値の 4 つの形の件数が 0）で確かめる。
 fn is_fixed_shape(text: &str) -> bool {
     text.len() <= MAX_RECORD_BYTES
         && text.bytes().all(|b| {
@@ -195,9 +201,9 @@ fn is_fixed_shape(text: &str) -> bool {
                     b' ' | b'_' | b'-' | b'.' | b':' | b'=' | b',' | b'/' | b'\n'
                 )
         })
-        && text
-            .split('\n')
-            .all(|l| l.len() <= MAX_LINE_BYTES && l.split(' ').all(|w| w.len() <= MAX_WORD_BYTES))
+        && text.split('\n').all(|l| {
+            l.len() <= MAX_LINE_BYTES && l.split([' ', '=', ',']).all(|w| w.len() <= MAX_WORD_BYTES)
+        })
 }
 
 /// 値の名前（`[a-z0-9_]`・1〜64 文字で、呼び出し元が渡す承認済みの語彙に含まれるもの）。
@@ -205,7 +211,7 @@ fn is_fixed_shape(text: &str) -> bool {
 pub struct ValueName(String);
 
 impl ValueName {
-    /// 記録に出してよい名前だけを作る。語彙の外は誤りにする（自由な名前を出さない。SECR-23・SECR-26）。
+    /// 記録に出してよい名前だけを作る。語彙の外は誤りにする（自由な名前を出さない。SECR-23）。
     ///
     /// # Errors
     /// 文字種・長さの規則を満たさないか、`vocabulary` に無いとき [`LoadRecordError::InvalidName`]。
@@ -218,7 +224,7 @@ impl ValueName {
     }
 }
 
-/// SECR-23・SECR-26: 中身を出さない。
+/// SECR-23: 中身を出さない。
 impl fmt::Debug for ValueName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ValueName(..)")
@@ -230,7 +236,7 @@ impl fmt::Debug for ValueName {
 pub struct RefId(String);
 
 impl RefId {
-    /// 信頼済みの一覧（spec の ID 等）と完全一致するものだけを受ける。任意の文字列を出典として出さない（SECR-23・SECR-26）。
+    /// 信頼済みの一覧（spec の ID 等）と完全一致するものだけを受ける。任意の文字列を出典として出さない（SECR-23）。
     ///
     /// # Errors
     /// 規則を満たさない・予約語（`none`・`harness_config`・`measured`）・`trusted` に無いとき [`LoadRecordError::InvalidRef`]。
@@ -326,7 +332,7 @@ struct ApprovedValue {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ApprovedValues(Vec<ApprovedValue>);
 
-/// SECR-23・SECR-26: 中身を出さない。
+/// SECR-23: 中身を出さない。
 impl fmt::Debug for ApprovedValues {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ApprovedValues(..)")
@@ -899,31 +905,45 @@ mod tests {
         panic!("no free test dir name");
     }
 
-    /// SECR-23・SECR-26: 固定の形の外（JWT の形・記号・非 ASCII・長い語・長い行）の本文は、
-    /// ファイルも作らず Format で拒否する。見本の本文は通る。
+    /// 許可文字・長さの網。境界の値（64/65・1024/1025・1 MiB/+1）で、通る側と止まる側の両方を確かめる。
     #[test]
-    fn write_new_rejects_text_outside_fixed_shape() {
+    fn fixed_shape_boundaries() {
         assert!(is_fixed_shape("format: fandhe-auth-load-record/1\n"));
         assert!(is_fixed_shape(
             "run: 1.1 class=measured refs=measured n=100\njudgment:\n"
         ));
-        let jwt_like = format!(
-            "note: {}.{}.{}\n",
-            "eyJ".to_owned() + &"a".repeat(30),
-            "b".repeat(30),
-            "c".repeat(30)
-        );
+        // 語 64 / 65（区切りは空白・`=`・`,`）。
+        for sep in [" ", "=", ","] {
+            assert!(is_fixed_shape(&format!("x:{sep}{}\n", "a".repeat(64))));
+            assert!(!is_fixed_shape(&format!("x:{sep}{}\n", "a".repeat(65))));
+        }
+        // 1 行 1024 / 1025（語は 64 以下に保つ）。
+        let line = |n: usize| format!("{} ", "a".repeat(63)).repeat(n / 64 + 1)[..n].to_owned();
+        assert!(is_fixed_shape(&format!("{}\n", line(1024))));
+        assert!(!is_fixed_shape(&format!("{}\n", line(1025))));
+        // 全体 1 MiB / +1（各行 64 バイト）。
+        let total = format!("{}\n", "a".repeat(63)).repeat(MAX_RECORD_BYTES / 64);
+        assert_eq!(total.len(), MAX_RECORD_BYTES);
+        assert!(is_fixed_shape(&total));
+        assert!(!is_fixed_shape(&format!("{total}\n")));
+        // 許可文字の外（記号・非 ASCII・制御文字）。
         for bad in [
-            jwt_like,
-            format!("x: {}\n", "a".repeat(65)),
-            format!("x: {}\n", "a ".repeat(300)),
-            "x: a\\b\n".to_owned(),
-            "x: p@ss\n".to_owned(),
-            "x: \u{3042}\n".to_owned(),
-            "x: a\tb\n".to_owned(),
-            "x: a\rb\n".to_owned(),
-            "x\n".repeat(40_000),
+            "x: a\\b\n",
+            "x: p@ss\n",
+            "x: \u{3042}\n",
+            "x: a\tb\n",
+            "x: a\rb\n",
+            "x: a+b\n",
+            "x: a;b\n",
         ] {
+            assert!(!is_fixed_shape(bad));
+        }
+    }
+
+    /// 網の外の本文は、ファイルも作らず Format で拒否する。
+    #[test]
+    fn write_new_rejects_text_outside_shape() {
+        for bad in [format!("x: {}\n", "a".repeat(65)), "x: p@ss\n".to_owned()] {
             let td = dir("load-shape");
             let r = LoadRecord {
                 run_started_at: 0,

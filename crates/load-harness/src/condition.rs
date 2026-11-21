@@ -8,7 +8,7 @@
 //!
 //! 取得: 機材は [`MachineProbe`] から取る。[`StdMachineProbe`] は std と Linux の `/proc/meminfo`（固定パス・
 //! 上限付き・整数 1 つだけ取り出す）だけを読む。ホスト名・機材の名前・利用者名・パス・アドレスは取得も記録もしない
-//! （SECR-11・SECR-23・SECR-26、04-behavior/README.md の (d)）。`arch`・`os_family` は固定の許可語彙だけを受け、
+//! （SECR-11・SECR-23、04-behavior/README.md の (d)）。`arch`・`os_family` は固定の許可語彙だけを受け、
 //! 語彙の外の値（識別情報・制御文字入りを含む）は記録を作らずエラーで返す。取れない（`None`）値だけが `unknown` になる。
 //! 構成は呼び出し元が「起動したもの」を明示で渡す。既定値は置かない。
 //!

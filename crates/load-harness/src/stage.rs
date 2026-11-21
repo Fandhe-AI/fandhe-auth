@@ -130,7 +130,7 @@ pub struct StagePlan {
     allowed_intervals: Vec<IntervalName>,
 }
 
-/// SECR-23・SECR-26: 区間名の語彙を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
+/// SECR-23: 区間名の語彙を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
 impl fmt::Debug for StagePlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("StagePlan(..)")
@@ -142,7 +142,7 @@ impl StagePlan {
     ///
     /// `allowed_intervals` は記録に出してよい区間名の語彙で、呼び出し元が承認済みの名前だけを渡す（既定値なし）。
     /// [`run_stages`] は対象の区間名がこの語彙に無ければ、最初の回の前に拒否する
-    /// （`load.md` の 6・SECR-23・SECR-26）。
+    /// （`load.md` の 6・SECR-23）。
     ///
     /// # Errors
     /// 段階が 0 件または `limits` の段階数超、繰り返しが `limits` 超、全体の試行数の計算が溢れる、
@@ -212,7 +212,7 @@ pub struct StageResult {
     worst_run: Option<u64>,
 }
 
-/// SECR-23・SECR-26: 回の集計の指標のキー（区間名）を出さない固定文字列にする。
+/// SECR-23: 回の集計の指標のキー（区間名）を出さない固定文字列にする。
 impl fmt::Debug for StageResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("StageResult(..)")
@@ -250,7 +250,7 @@ pub struct StagedRun {
     stages: Vec<StageResult>,
 }
 
-/// SECR-23・SECR-26: 対象名・区間名・段階の中身を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
+/// SECR-23: 対象名・区間名・段階の中身を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
 impl fmt::Debug for StagedRun {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("StagedRun(..)")

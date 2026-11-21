@@ -298,7 +298,7 @@ fn input_validation() {
             LoadRecordError::InvalidRef
         );
     }
-    // 信頼済みの一覧に無い出典は、文字種が正しくても拒否する（SECR-23・SECR-26）。
+    // 信頼済みの一覧に無い出典は、文字種が正しくても拒否する（SECR-23）。
     assert_eq!(
         RefId::new("CONFIG-SECRET-1", &["AUDP-29"]).unwrap_err(),
         LoadRecordError::InvalidRef
@@ -613,4 +613,35 @@ fn p99_target_only_undecided() {
         LoadRecordError::InvalidValue(InvalidValueReason::ClassNotAllowed)
     );
     assert!(val("p99_target", ValueClass::Undecided, None, &["AUDP-29"]).is_ok());
+}
+
+/// 正当な最大の入力（出典 8 件が各 64 バイト・名前 64 バイト・区間名 64 バイト）で、
+/// 形の網（語・行の上限）に当たらず `LoadRecord::new` が通る（SECR-23・AAUD-30。網は正当な入力を拒否しない）。
+#[test]
+fn record_with_max_length_refs_and_names_is_accepted() {
+    let ids: Vec<String> = (0..8).map(|i| format!("{i}{}", "r".repeat(63))).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let name = "n".repeat(64);
+    let v = val(&name, ValueClass::External, None, &ids).unwrap();
+    let interval = "i".repeat(64);
+    let spec = TargetSpec::new(
+        TargetName::new("route_a").unwrap(),
+        IntervalName::new(&interval).unwrap(),
+    );
+    let ev = RunSession::new(file_at(0), 0, conditions())
+        .unwrap()
+        .run(
+            &[ConditionComponent::HubStub],
+            &spec,
+            &plan_with(&interval),
+            || CallResult::Ok,
+        )
+        .unwrap();
+    let rec = LoadRecord::new(&ev, 1, vec![v]).unwrap();
+    let text = rec.to_string();
+    assert!(
+        text.lines()
+            .any(|l| l.matches(&"r".repeat(63)).count() == 8)
+    );
+    assert!(text.contains(&format!("interval={interval}")));
 }
