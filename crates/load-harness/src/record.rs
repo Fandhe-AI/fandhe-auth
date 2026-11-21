@@ -81,6 +81,7 @@ pub enum InvalidValueReason {
     ValueRequired,
     ValueForbidden,
     ClassNotAllowed,
+    NotApproved,
 }
 
 impl InvalidValueReason {
@@ -91,6 +92,7 @@ impl InvalidValueReason {
             Self::ValueRequired => "value_required",
             Self::ValueForbidden => "value_forbidden",
             Self::ClassNotAllowed => "class_not_allowed",
+            Self::NotApproved => "not_approved",
         }
     }
 }
@@ -251,6 +253,45 @@ impl fmt::Debug for RunRecordFile {
     }
 }
 
+/// 人が承認した「項目・区分・数値・単位・出典」の組（`load.md` の「値の区別」規則 4。ACPT-7）。
+/// 要件の値・初期値・PoC のパラメータは、この組と完全に一致するときだけ記録に出せる。
+/// 組の中身は呼び出し元が人の承認を経て渡し、ハーネスは作らない。
+#[derive(Clone, Copy)]
+pub struct ApprovedValue<'a> {
+    pub name: &'a str,
+    pub class: ValueClass,
+    pub value: u64,
+    pub unit: ValueUnit,
+    /// 出典の ID（順序を問わず集合として比べる）。
+    pub refs: &'a [&'a str],
+}
+
+/// SECR-23・SECR-26: 中身を出さない。
+impl fmt::Debug for ApprovedValue<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ApprovedValue(..)")
+    }
+}
+
+impl ApprovedValue<'_> {
+    fn matches(
+        &self,
+        name: &str,
+        class: ValueClass,
+        value: u64,
+        unit: ValueUnit,
+        refs: &[RefId],
+    ) -> bool {
+        let want: BTreeSet<&str> = self.refs.iter().copied().collect();
+        let got: BTreeSet<&str> = refs.iter().map(|r| r.0.as_str()).collect();
+        self.name == name
+            && self.class == class
+            && self.value == value
+            && self.unit == unit
+            && want == got
+    }
+}
+
 /// 比べる値の 1 行。区分ごとの規則は作る時点で検査する（`load.md` の 2）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct ComparisonValue {
@@ -262,6 +303,9 @@ pub struct ComparisonValue {
 }
 
 impl ComparisonValue {
+    /// 要件の値・初期値・PoC のパラメータは、`approved`（人が承認した組）の 1 件と項目・区分・数値・単位・出典が
+    /// 完全一致するときだけ作る（一致しなければ `NotApproved`。ACPT-7）。他の区分は `approved` を見ない。
+    ///
     /// # Errors
     /// 区分の規則に反するとき [`LoadRecordError::InvalidValue`]、出典が 9 件以上のとき
     /// [`LoadRecordError::TooManyRefs`]、重複のとき [`LoadRecordError::InvalidRef`]。
@@ -271,10 +315,12 @@ impl ComparisonValue {
         value: Option<u64>,
         unit: ValueUnit,
         refs: Vec<RefId>,
+        approved: &[ApprovedValue<'_>],
     ) -> Result<Self, LoadRecordError> {
         let bad = LoadRecordError::InvalidValue;
         use InvalidValueReason::{
-            ClassNotAllowed, RefsForbidden, RefsRequired, ValueForbidden, ValueRequired,
+            ClassNotAllowed, NotApproved, RefsForbidden, RefsRequired, ValueForbidden,
+            ValueRequired,
         };
         if refs.len() > MAX_REFS {
             return Err(LoadRecordError::TooManyRefs);
@@ -293,8 +339,14 @@ impl ComparisonValue {
                 if refs.is_empty() {
                     return Err(bad(RefsRequired));
                 }
-                if value.is_none() {
+                let Some(v) = value else {
                     return Err(bad(ValueRequired));
+                };
+                if !approved
+                    .iter()
+                    .any(|a| a.matches(name.0.as_str(), class, v, unit, &refs))
+                {
+                    return Err(bad(NotApproved));
                 }
             }
             ValueClass::Undecided => {
@@ -448,7 +500,11 @@ impl LoadRecord {
     pub fn write_new(&self, dir: &Path) -> Result<PathBuf, LoadRecordError> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         std::fs::create_dir_all(dir).map_err(|_| LoadRecordError::WriteFailed)?;
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        self.write_numbered(dir, SEQ.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// 通し番号を指定して書き出す本体。名前の衝突を決定的に試験するため分けてある。
+    fn write_numbered(&self, dir: &Path, n: u64) -> Result<PathBuf, LoadRecordError> {
         let path = dir.join(format!(
             "load-run-{}-{}-{n}.txt",
             self.run_started_at,
@@ -490,5 +546,54 @@ impl fmt::Debug for LoadRecord {
 impl fmt::Display for LoadRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec() -> LoadRecord {
+        LoadRecord {
+            run_started_at: 0,
+            text: "new\n".to_owned(),
+        }
+    }
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// 一時名が衝突したら WriteFailed。既存の内容を消さず、最終名も作らない。
+    #[test]
+    fn tmp_name_collision_fails_and_keeps_existing() {
+        let d = dir("load-collision-tmp");
+        let pid = std::process::id();
+        let tmp = d.join(format!(".tmp-load-run-0-{pid}-7"));
+        std::fs::write(&tmp, b"keep").unwrap();
+        assert_eq!(
+            rec().write_numbered(&d, 7),
+            Err(LoadRecordError::WriteFailed)
+        );
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"keep");
+        assert!(!d.join(format!("load-run-0-{pid}-7.txt")).exists());
+    }
+
+    /// 最終名が衝突したら WriteFailed。既存の内容は保たれ、一時ファイルは残らない。
+    #[test]
+    fn final_name_collision_fails_and_keeps_existing() {
+        let d = dir("load-collision-final");
+        let pid = std::process::id();
+        let fin = d.join(format!("load-run-0-{pid}-9.txt"));
+        std::fs::write(&fin, b"keep").unwrap();
+        assert_eq!(
+            rec().write_numbered(&d, 9),
+            Err(LoadRecordError::WriteFailed)
+        );
+        assert_eq!(std::fs::read(&fin).unwrap(), b"keep");
+        assert!(!d.join(format!(".tmp-load-run-0-{pid}-9")).exists());
     }
 }

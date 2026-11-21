@@ -2,10 +2,11 @@
 //! PoC の数値・要件の値を置かない（ACPT-7）。
 
 use fandhe_auth_load_harness::{
-    CallResult, ComparisonValue, ComponentConditions, IntervalName, InvalidValueReason,
-    LOAD_RECORD_FORMAT, LoadConfig, LoadRecord, LoadRecordError, LoopModel, MeasurementConditions,
-    MetricKey, RefId, RunRecordFile, StageConfig, StageLimits, StagePlan, StagedRun,
-    StdMonotonicClock, TargetName, TargetSpec, ValueClass, ValueName, ValueUnit, run_stages,
+    ApprovedValue, CallResult, ComparisonValue, ComponentConditions, IntervalName,
+    InvalidValueReason, LOAD_RECORD_FORMAT, LoadConfig, LoadRecord, LoadRecordError, LoopModel,
+    MeasurementConditions, MetricKey, RefId, RunRecordFile, StageConfig, StageLimits, StagePlan,
+    StagedRun, StdMonotonicClock, TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
+    run_stages,
 };
 
 /// 試験用の語彙。入れた名前だけが通る。
@@ -23,7 +24,68 @@ fn val(
     v: Option<u64>,
     ids: &[&str],
 ) -> Result<ComparisonValue, LoadRecordError> {
-    ComparisonValue::new(vname(name), class, v, ValueUnit::Ns, refs(ids))
+    // 承認済みの組は引数と同じ内容で用意する（一致の検査そのものは approval_* の試験で確かめる）。
+    let approved: Vec<ApprovedValue<'_>> = v
+        .map(|value| ApprovedValue {
+            name,
+            class,
+            value,
+            unit: ValueUnit::Ns,
+            refs: ids,
+        })
+        .into_iter()
+        .collect();
+    ComparisonValue::new(vname(name), class, v, ValueUnit::Ns, refs(ids), &approved)
+}
+
+fn approval(
+    class: ValueClass,
+    v: u64,
+    ids: &[&str],
+    approved: &[ApprovedValue<'_>],
+) -> Result<ComparisonValue, LoadRecordError> {
+    ComparisonValue::new(
+        vname("v"),
+        class,
+        Some(v),
+        ValueUnit::Ns,
+        refs(ids),
+        approved,
+    )
+}
+
+/// ACPT-7・load.md 規則 4: 承認済みの組と一致しない値は、無関係な承認済み ID を添えても出せない。
+#[test]
+fn approval_must_match_name_class_value_unit_refs() {
+    use ValueClass::*;
+    let ok = ApprovedValue {
+        name: "v",
+        class: Initial,
+        value: 5,
+        unit: ValueUnit::Ns,
+        refs: &["A-1"],
+    };
+    assert!(approval(Initial, 5, &["A-1"], &[ok]).is_ok());
+    let na = LoadRecordError::InvalidValue(InvalidValueReason::NotApproved);
+    assert_eq!(approval(Initial, 5, &["A-1"], &[]).unwrap_err(), na);
+    // 数値・区分・出典・単位・項目のどれか 1 つが違っても出せない。
+    assert_eq!(approval(Initial, 6, &["A-1"], &[ok]).err(), Some(na));
+    assert_eq!(approval(Requirement, 5, &["A-1"], &[ok]).err(), Some(na));
+    assert_eq!(approval(Initial, 5, &["B-2"], &[ok]).err(), Some(na));
+    assert_eq!(approval(Initial, 5, &["A-1", "B-2"], &[ok]).err(), Some(na));
+    let other_unit = ApprovedValue {
+        unit: ValueUnit::Count,
+        ..ok
+    };
+    assert_eq!(
+        approval(Initial, 5, &["A-1"], &[other_unit]).err(),
+        Some(na)
+    );
+    let other_name = ApprovedValue { name: "w", ..ok };
+    assert_eq!(
+        approval(Initial, 5, &["A-1"], &[other_name]).err(),
+        Some(na)
+    );
 }
 
 fn invalid(r: Result<ComparisonValue, LoadRecordError>) -> bool {
@@ -319,28 +381,4 @@ fn p99_target_only_undecided_or_external() {
         );
     }
     assert!(val("p99_target", ValueClass::Undecided, None, &["AUDP-29"]).is_ok());
-}
-
-#[test]
-fn write_new_collision_keeps_existing_file() {
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("load-collision");
-    std::fs::create_dir_all(&dir).unwrap();
-    let rec = build(0, 1, vec![]).unwrap();
-    // 通し番号はこのプロセスで共有されるため、衝突しうる一時ファイル名を範囲で先に置く。
-    let pid = std::process::id();
-    let canaries: Vec<_> = (0..64)
-        .map(|n| dir.join(format!(".tmp-load-run-0-{pid}-{n}")))
-        .collect();
-    for c in &canaries {
-        std::fs::write(c, b"keep").unwrap();
-    }
-    let r = rec.write_new(&dir);
-    for c in &canaries {
-        assert_eq!(std::fs::read(c).unwrap(), b"keep");
-        std::fs::remove_file(c).unwrap();
-    }
-    // 衝突した場合は WriteFailed、しなかった場合は書けている。どちらでも既存は残る。
-    if let Ok(p) = r {
-        std::fs::remove_file(p).unwrap();
-    }
 }

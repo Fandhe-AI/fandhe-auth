@@ -115,6 +115,7 @@ fn small_trial_run_writes_record_without_requirement_values() {
         None,
         ValueUnit::Ns,
         vec![RefId::new("AUDP-29", &["AUDP-29"]).unwrap()],
+        &[],
     )
     .unwrap();
     // 記録を組み立てる時点の実測時刻。逆行していれば LoadRecord が ClockOrder で拒否する（補正しない）。

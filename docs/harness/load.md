@@ -368,11 +368,11 @@ judgment:
 - API: `LoadRecord::new`（実行の記録のファイル名・起動時刻・記録時刻・機材と構成・段階の結果・比べる値を受ける）、`LoadRecord::write_new(dir)`、
   `ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`LoadRecordError`。
 - 行の順: `format:` → `run_record_file:` → `run_started_at:` → `recorded_at:` → 条件 → 段階 → `value:` → `judgment:`（形式の 7 の見本どおり）。`judgment:` は常に空で、ハーネスは書かない。
-- 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial`・`poc_parameter` は出典と整数の値が必須、`undecided` は値なし、`external` は値なし・出典必須、
+- 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial`・`poc_parameter` は出典と整数の値が必須で、さらに人が承認した「項目・区分・数値・単位・出典」の組（`ApprovedValue`）の 1 件と完全一致しなければ `NotApproved` で拒否する（規則 4・`ACPT-7`。出典 ID が信頼済み一覧にあるだけでは足りない）、`undecided` は値なし、`external` は値なし・出典必須、
   `test_condition`・`measured` は整数の値が必須で出典を受けず、行には固定の印（`harness_config`・`measured`）を出す。出典は 1 行 8 件まで・重複は誤り。
   測定値・既定値を要件の値へ上げる経路は作らない。
 - 書き出し: `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。無ければ `dir` を作る。隠し名の一時ファイルへ書ききってから、上書きなしの `hard_link` で最終名へ公開する
-  （途中の失敗で不完全なファイルを完成品の名前で残さない。一時ファイルは常に消す）。乱数・環境変数・設定ファイルを使わない。
+  （途中の失敗で不完全なファイルを完成品の名前で残さない。一時ファイルは作れたときだけ消しにいくが、削除の失敗は無視するため、失敗時は残りうる。名前が衝突して作れなかったときは既存のファイルを消さない）。乱数・環境変数・設定ファイルを使わない。
 - 入力の検査（仮置き）: `ValueName::new` は呼び出し元が渡す承認済みの語彙に含まれる名前だけを受ける。`RefId::new` は呼び出し元が渡す信頼済みの出典の一覧（spec の ID 等）に完全一致するものだけを受け、予約語（`none`・`harness_config`・`measured`）を拒否する。
   `p99_target` は `undecided`・`external` 以外の区分を `ClassNotAllowed` で拒否する（`AUDP-29`）。`RunRecordFile` は生成元と同じ整数型で解析し、再整形した名前と一致しない名前（先頭ゼロ等）を拒否する。
   `RunRecordFile` の起動秒と `run_started_at` が違えば `RunStartMismatch`。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
