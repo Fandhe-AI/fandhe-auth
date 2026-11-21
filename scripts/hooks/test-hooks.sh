@@ -798,6 +798,44 @@ stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a HEAD whose commit object is missing exits 2" 2
 expect_out "same checkout: an unresolvable HEAD reports a fixed message" "secret-scan: cannot read HEAD; aborting"
 
+# 壊れた参照（内容が不正）は未作成ブランチと区別し、検査不能（2）にする（show-ref の終了コード 1 は両方で返る。#6011）
+same_checkout_repo "${lock_ok}"
+git symbolic-ref HEAD refs/heads/broken
+printf '%s\n' 'not-a-valid-object-id' > .git/refs/heads/broken
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a broken loose ref is not treated as an unborn branch" 2
+expect_out "same checkout: a broken ref reports a fixed message" "secret-scan: cannot read HEAD; aborting"
+
+# 他のブランチが packed-refs にあっても、HEAD の指す参照が無ければ未作成ブランチとして除外なしで走査する
+same_checkout_repo "${lock_ok}"
+git pack-refs --all
+git symbolic-ref HEAD refs/heads/unborn-packed
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: an unborn branch next to packed refs excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
+
+# 空の skills は、同じ checkout の HEAD の一覧でも固定の診断文で 2 にする（Bash 3.2 の空配列に依らない）
+same_checkout_repo '{"version":2,"skills":{}}'
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${same_bin}" check_scan "same checkout: a committed list with an empty skills map exits 2" 2
+expect_out "same checkout: an empty committed skills map reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# 実装の形の確認（macOS の bash 3.2 が無い環境向け）: 空になり得る配列の長さ参照・素の展開を使わない。
+# 一覧の読み取りは一時ファイルへの複写 1 回だけにし、元のパスを read・wc で別々に開かない
+bad_forms="$(grep -nE '[$]\{#parsed_names\[@\]\}|[^+]"[$]\{(parsed_names|work_names)\[@\]\}"' "${SECRET_SCAN}" | grep -v '^[0-9]*:[[:space:]]*#' | grep -vF '[@]+' || true)"
+if [ -z "${bad_forms}" ]; then
+  pass "secret-scan: no length reference or bare expansion of possibly-empty arrays (bash 3.2 set -u)"
+else
+  fail "secret-scan: no length reference or bare expansion of possibly-empty arrays (bash 3.2 set -u)" "found: ${bad_forms}"
+fi
+snap_reads="$(grep -cE '(js|wc -c) < "[$]1"' "${SECRET_SCAN}" || true)"
+# shellcheck disable=SC2016 # 検索する文字列そのもの（展開しない）
+snap_copies="$(grep -cF 'cat -- "$1" > "${snap}"' "${SECRET_SCAN}" || true)"
+if [ "${snap_reads}" = 0 ] && [ "${snap_copies}" = 1 ]; then
+  pass "secret-scan: the list is read from a single snapshot"
+else
+  fail "secret-scan: the list is read from a single snapshot" "direct reads: ${snap_reads}, copies: ${snap_copies}"
+fi
+
 # HEAD のコミット ID は最初に 1 回だけ確定し、ls-tree・cat-file・staged の差分の基準に同じ ID を渡す（#6011）。
 # git の呼び出しの引数を記録し、`HEAD` の名前が残らず、3 つとも同じ ID であることを確かめる
 same_checkout_repo "${lock_ok}"

@@ -41,7 +41,9 @@
 #   HEAD の一覧を検証する（壊れている・通常ファイルでないときは 2。有効なら除外なしで走査する）。(3) 未作成ブランチ・
 #   HEAD に一覧が無いときは除外なし。一覧があるときは、ファイル全体を（正しい UTF-8 かを確かめてから）JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
 #   検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のときは、作業ツリー・index の一覧ではなく
-#   コミット済み（HEAD）の一覧にある名前だけを使う（未コミットの編集で除外を足せない）。HEAD にまだ無い名前は、
+#   コミット済み（HEAD）の一覧にある名前だけを使う（未コミットの編集で除外を足せない）。同じ checkout では、
+#   HEAD と作業ツリーの双方に登録された名前（共通部分）だけが除外に使われる。片方にしか無い名前は除外しない。
+#   HEAD にまだ無い名前は、
 #   コミットされるまで走査される（PR では CI が保護された main の検出器で改めて走査する）。
 #   残る限界（TASK-6・#6000 で追跡。解消は人が方式を決める）: 除外はディレクトリ単位のため、登録済みの skill のディレクトリでは
 #   既存ファイルへの値の追記・新しく置いたファイル・他のパスからのリネームによる移動のいずれも、本文の走査から外れる。
@@ -365,6 +367,7 @@ parse_skills() {
     esac
     seen="${seen}${name} "
     parsed_names+=("${name}")
+    parsed_count=$((parsed_count + 1))
     json_ws
     [ "${js:jp:1}" = ':' ] || lock_fail
     jp=$((jp + 1))
@@ -383,13 +386,21 @@ parse_skills() {
 }
 # parse_lock <ファイル>: 全体を解析し、検証した名前を parsed_names に入れる。不正は lock_fail（終了コード 2）。
 parsed_names=()
+parsed_count=0
 parse_lock() {
-  local size key c utf8_t seen_version=0 seen_skills=0
+  local size key c utf8_t seen_version=0 seen_skills=0 snap
   parsed_names=()
+  parsed_count=0
   js=""
-  IFS= read -r -d '' js < "$1" || true
+  # 読み取りとサイズの取得が同じパスを別々に開くと、間にファイルが差し替わり得る。一度だけ一時ファイルへ複写して固定し、
+  # 以降の read・wc はその複写に対してだけ行う（一時ファイルは終了時に trap で消える）。
+  snap="${tmp_dir}/lock-snap"
+  if ! cat -- "$1" > "${snap}"; then
+    lock_fail
+  fi
+  IFS= read -r -d '' js < "${snap}" || true
   # NUL を含むと bash の読み取りがそこで止まり、後ろが未検証になる。読めたバイト数とサイズを突き合わせる。
-  size="$(wc -c < "$1")"
+  size="$(wc -c < "${snap}")"
   size="${size//[[:space:]]/}"
   [ "${#js}" -eq "${size}" ] || lock_fail
   # 構文解析の前に、入力全体が正しい UTF-8 であることを確かめる（C ロケールのバイト単位の照合。iconv 等に依存しない）。
@@ -442,7 +453,7 @@ parse_lock() {
   done
   json_ws
   [ "${jp}" -eq "${jn}" ] || lock_fail
-  if [ "${seen_version}" -ne 1 ] || [ "${seen_skills}" -ne 1 ] || [ "${#parsed_names[@]}" -eq 0 ]; then
+  if [ "${seen_version}" -ne 1 ] || [ "${seen_skills}" -ne 1 ] || [ "${parsed_count}" -eq 0 ]; then
     lock_fail
   fi
 }
@@ -453,7 +464,7 @@ parse_lock() {
 head_id=""
 head_resolved=0
 resolve_head() {
-  local rc head_ref
+  local rc head_ref ref_line ref_found
   head_resolved=1
   if head_id="$(g rev-parse -q --verify 'HEAD^{commit}' 2> /dev/null)" && [[ "${head_id}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
     return 0
@@ -464,8 +475,25 @@ resolve_head() {
   if [ "${rc}" -eq 0 ] && [ -n "${head_ref}" ]; then
     rc=0
     g show-ref --verify -q "${head_ref}" > /dev/null 2>&1 || rc=$?
+    # show-ref の終了コード 1 は、参照が無い場合と壊れた参照（内容が不正）の両方で返り得る。
+    # for-each-ref（packed-refs も見る）で、一致する参照が 0 件・警告なし・読み取りの成功を確かめたときだけ
+    # 未作成ブランチとして扱う。壊れた参照は警告（標準エラー）か完全一致の行として現れ、検査不能（2）にする。
+    case "${head_ref}" in
+      refs/*) ;;
+      *) rc=2 ;;
+    esac
     if [ "${rc}" -eq 1 ]; then
-      return 0
+      ref_found=0
+      if g for-each-ref --format='%(refname)' "${head_ref}" > "${tmp_dir}/ref-list" 2> "${tmp_dir}/ref-err" && [ ! -s "${tmp_dir}/ref-err" ]; then
+        while IFS= read -r ref_line || [ -n "${ref_line}" ]; do
+          if [ "${ref_line}" = "${head_ref}" ]; then
+            ref_found=1
+          fi
+        done < "${tmp_dir}/ref-list"
+        if [ "${ref_found}" -eq 0 ]; then
+          return 0
+        fi
+      fi
     fi
   fi
   echo "secret-scan: cannot read HEAD; aborting" >&4
@@ -482,7 +510,7 @@ load_skill_names() {
       lock_fail
     fi
     parse_lock "${detector_lock}"
-    work_names=("${parsed_names[@]}")
+    work_names=(${parsed_names[@]+"${parsed_names[@]}"})
     work_present=1
   fi
   # 検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のとき、作業ツリーの
@@ -499,7 +527,7 @@ load_skill_names() {
   repo_real="${repo_real%$'\n'}"
   if [ "${repo_real}" != "${detector_root}" ]; then
     if [ "${work_present}" -eq 1 ]; then
-      skill_names=("${work_names[@]}")
+      skill_names=(${work_names[@]+"${work_names[@]}"})
     fi
     return 0
   fi
@@ -531,11 +559,11 @@ load_skill_names() {
   if [ "${work_present}" -eq 0 ]; then
     return 0
   fi
-  for n in "${parsed_names[@]}"; do
+  for n in ${parsed_names[@]+"${parsed_names[@]}"}; do
     head_names="${head_names}${n} "
   done
   skill_names=()
-  for name in "${work_names[@]}"; do
+  for name in ${work_names[@]+"${work_names[@]}"}; do
     keep=0
     case "${head_names}" in
       *" ${name} "*) keep=1 ;;
