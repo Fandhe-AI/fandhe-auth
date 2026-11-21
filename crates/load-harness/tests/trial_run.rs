@@ -16,8 +16,8 @@ use fandhe_auth_it_harness::{
 use fandhe_auth_load_harness::{
     ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
     IntervalName, LoadConfig, LoadRecord, LoopModel, MeasurementConditions, MetricKey, RefId,
-    RunRecordFile, RunSession, StageConfig, StageLimits, StagePlan, StdMonotonicClock, TargetName,
-    TargetSpec, ValueClass, ValueName, ValueUnit,
+    RunRecordFile, RunSession, StageConfig, StageLimits, StagePlan, TargetName, TargetSpec,
+    ValueClass, ValueName, ValueUnit,
 };
 
 const T0: u64 = 1_000;
@@ -108,13 +108,7 @@ fn small_trial_run_writes_record_without_requirement_values() {
     // 閉包が実際に Hub の stub を呼ぶことは、この試験が stub 側の呼び出しの件数で確かめる（下の assert）。
     let evidence = RunSession::new(run_file, started, conditions)
         .unwrap()
-        .run(
-            &[ConditionComponent::HubStub],
-            || Box::new(StdMonotonicClock::new()),
-            &spec,
-            &plan,
-            call,
-        )
+        .run(&[ConditionComponent::HubStub], &spec, &plan, call)
         .unwrap();
     // 経路を実際に呼んだ証拠: 暖機を含む全試行数（11 x 1 + 22 x 2）。
     assert_eq!(handle.with(|s| s.jwks.records().len()), Some(55));

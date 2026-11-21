@@ -8,8 +8,8 @@ use fandhe_auth_load_harness::{
     ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
     ConditionError, IntervalName, InvalidValueReason, LOAD_RECORD_FORMAT, LoadConfig, LoadRecord,
     LoadRecordError, LoopModel, MeasurementConditions, MetricKey, RefId, RunEvidence,
-    RunRecordFile, RunSession, StageConfig, StageError, StageLimits, StagePlan, StdMonotonicClock,
-    TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
+    RunRecordFile, RunSession, StageConfig, StageError, StageLimits, StagePlan, TargetName,
+    TargetSpec, ValueClass, ValueName, ValueUnit,
 };
 
 /// 排他的に新規作成したディレクトリ。既存のもの（中断した試験の残り・PID の再利用で重なる名前）は
@@ -376,16 +376,10 @@ fn run_in(
     plan: &StagePlan,
     calls: &AtomicU64,
 ) -> Result<RunEvidence, LoadRecordError> {
-    session.run(
-        exercised,
-        || Box::new(StdMonotonicClock::new()),
-        &spec(),
-        plan,
-        || {
-            calls.fetch_add(1, Ordering::Relaxed);
-            CallResult::Ok
-        },
-    )
+    session.run(exercised, &spec(), plan, || {
+        calls.fetch_add(1, Ordering::Relaxed);
+        CallResult::Ok
+    })
 }
 
 fn evidence(s: u64) -> Result<RunEvidence, LoadRecordError> {

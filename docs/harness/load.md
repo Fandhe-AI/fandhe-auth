@@ -365,7 +365,7 @@ judgment:
 `TASK-12` の 9/10（#120）。`crates/load-harness` の `record` に、`fandhe-auth-load-record/1` のファイル全体を組んで新規ファイルへ書き出す部品を置いた。
 名前・語・上限はすべて仮置きで、人が確認する。合否は付けない（`ACPT-7`）。
 
-- API: `RunSession::new`（実行の記録のファイル名・起動時刻・機材と構成を受け、作る時点で整合を検査する）、`RunSession::run`（呼び出す構成要素を呼ぶ前に申告し、その場で `run_stages` を回して `RunEvidence` を返す。文脈は消費する）、`LoadRecord::new`（`RunEvidence`・記録時刻・比べる値を受ける）、`LoadRecord::write_new(dir)`、
+- API: `RunSession::new`（実行の記録のファイル名・起動時刻・機材と構成を受け、作る時点で整合を検査する）、`RunSession::run`（呼び出す構成要素を呼ぶ前に申告させて検査し、その場で `run_stages` を回して `RunEvidence` を返す。申告そのものは記録に残さない。時計は中で標準の単調な時計を作り、引数で受けない。文脈は消費する）、`LoadRecord::new`（`RunEvidence`・記録時刻・比べる値を受ける）、`LoadRecord::write_new(dir)`、
   `ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`ApprovedValues`・`LoadRecordError`。`RunEvidence` を段階の結果から作る公開の口は無い（下の「信頼の境界」）。
 - 行の順: `format:` → `run_record_file:` → `run_started_at:` → `recorded_at:` → 条件 → 段階 → `value:` → `judgment:`（形式の 7 の見本どおり）。`judgment:` は常に空で、ハーネスは書かない。
 - 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial` は出典と整数の値が必須で、さらに承認一覧の「項目・区分・数値・単位・出典」の行（`ApprovedValues`。フィールドは非公開で、`ApprovedValues::load(path)` が承認一覧のファイル〔1 行 `項目|区分|数値|単位|出典,出典`。通常のファイルだけ・64 KiB まで〕を読む。作る口はこの `load` と空の一覧〔`Default`〕だけで、本文の文字列から作る公開の口はない〔書式の解析は非公開〕。検査は形式だけで、行を人が承認したかは見ない〔下の「信頼の境界」〕。読めなければ `ApprovedFile`。出典 ID は `RefId::new` と同じ形・予約語の検査を読み込み時に通し、満たさない行は `Format`）の 1 件と完全一致しなければ `NotInApprovedList` で拒否する（規則 4。出典 ID が信頼済み一覧にあるだけでは足りない）。`poc_parameter` は比べる値として置かない（規則 5）ため `ClassNotAllowed` で拒否する、`undecided` は値なし、`external` は値なし・出典必須、
@@ -378,17 +378,20 @@ judgment:
   `RunRecordFile` の起動秒と `run_started_at` が違えば `RunSession::new` が `RunStartMismatch`。申告した構成要素が空、または測定の条件で起動していなければ、`RunSession::run` が対象を 1 回も呼ばずに `InvalidRunEvidence`（stub を申告した実行に stub の起動を載せない構成が付く組を作らない。stub の `note:` は条件の `Display`）。段階の実行の誤りは `Stage`。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
   値の行の違反の理由は固定の列挙 `InvalidValueReason` で持つ（`&'static str` を公開しない）。
 - 時刻の RFC 3339 の整形は、通常の依存を 0 に保つため it-harness の `UtcTimestamp` と同じ変換を `record` に重複して持つ。
-- 承認一覧の読み込みは止まらない: Unix では `O_NONBLOCK` を付けて開き（値は libc の定義と突き合わせた対象だけに置く。libc には依存しない）、書き手のいない FIFO でも `open` で待たずに、開いたハンドルの種別と大きさの検査で `ApprovedFile` にする。
+- 承認一覧の読み込みは止まらない: Unix では `O_NONBLOCK` を付けて開き（値は libc 0.2.191 の定義と突き合わせた対象だけに置く。libc には依存しない。CI で実地に確かめているのは Linux x86_64 の値だけで、他の対象は定義との突き合わせだけ）、書き手のいない FIFO でも `open` で待たずに、開いたハンドルの種別と大きさの検査で `ApprovedFile` にする。
   値を置いていない対象では開く前にパスの種別も見る（検査と `open` の間の差し替えは防げない）。
 - 信頼の境界（ライブラリの中で証明できないもの。`ACPT-7` は検討中で、ここでは規則として扱う）:
   - 承認一覧: `ApprovedValues` が検査するのは形式（ファイルの種類・大きさ・UTF-8・書式、候補との完全一致）だけで、行を人が承認したこと（真正性）は検査しない。
     ライブラリの中では、ファイルを書いたのが人か、記録の候補を持つ同じ呼び出し元かを区別できない（呼び出し元が候補から書いたファイルを渡せば、その値は `requirement`・`initial` として通る）。
     真正性は、承認一覧を repo に commit し、人がレビューで承認することで担保する（値の決定・承認は人が行う。`ACPT-7`・規則 4）。一覧のファイルの置き場と形は未定で、人が決める（下の「未決・人の確認待ち」）。
     試験（`tests/record.rs`）が書く一時ファイルは書式の検査の入力で、承認ではない。
-  - 段階の結果と実行の結び付け（型で塞いだもの）: 段階の結果は `RunSession::run` の中でだけ作られ、同じ文脈（実行の記録・測定の条件）と、呼ぶ前に申告した構成要素に結び付いたまま `RunEvidence` になる。
-    別の実行の段階の結果を組み合わせる口と、回した後で構成要素を申告し直す口は無い。stub の種類は `ComponentConditions::new` が実物として載せられない（`StubMismatch`）ため、stub を申告した実行の記録には stub の起動と `note:` が必ず出る（`A-2026-10-28-9`）。
+  - 段階の結果と実行の結び付け（型で塞いだもの）: 段階の結果は `RunSession::run` の中でだけ作られ、同じ文脈（実行の記録・測定の条件）とまとめて `RunEvidence` になる。
+    別の実行の段階の結果を組み合わせる口は無い。呼ぶ構成要素は回す前に申告させ、起動していなければ対象を呼ばずに拒否する（申告を検査してから回す。申告そのものは記録に残さない）。
+    時計は `RunSession::run` の中で標準の単調な時計を作り、引数で受けない（偽の時計で `class=measured` の時間を作る経路を作らない。決定的な時計が要る試験は `run_stages` を直接使い、その結果からは `RunEvidence` を作れない）。stub の種類は `ComponentConditions::new` が実物として載せられない（`StubMismatch`）ため、stub を申告した実行の記録には stub の起動と `note:` が必ず出る（`A-2026-10-28-9`）。
   - 段階の結果と実行の結び付け（塞げないもの。呼び出し側の契約）: (1) 閉包が実際に呼ぶ構成要素と申告の一致（閉包の中身は見えない）、(2) 測定の条件の構成が実際に起動した構成要素と一致すること（呼び出し元が it-harness の起動済みの構成から写す）、
-    (3) `run_record_file` が同じ実行の記録であること（見るのは起動秒の一致だけで、名前の文字列は誰でも作れるため結び付けの証明ではない）。`load-harness` は通常の依存で it-harness を持たないため、(1)〜(3) を確かめられない。
+    (3) `run_record_file` が同じ実行の記録であること（見るのは起動秒の一致だけで、名前の文字列は誰でも作れるため結び付けの証明ではない）、
+    (4) 機材の条件が実際の機材と一致すること（`MachineCondition::new` や独自の `MachineProbe` で `virtualization`・`build_profile` 等を呼び出し元が自由に申告できる）。
+    `load-harness` は通常の依存で it-harness を持たないため、(1)〜(3) を確かめられない。(4) は呼び出し元が明示する値を受ける設計で、申告の正しさは確かめない。
     stub の結果を実物の結果として申告しないことは、呼び出し元の試験とレビューで担保する（〔仮想〕〔モック〕の合格を〔実機〕扱いしない。`ACPT-7`）。試し実行は stub 側の呼び出しの件数で (1) を確かめている。
 - 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない。`Debug` は中身を出さない固定文字列にした（`SECR-23`・`SECR-26`）。
 - 試し実行（`tests/trial_run.rs`。Docker・ネットワークなし。`make test` で流れる）: it-harness の上で Hub の stub に 2 段階（並行数 1・2）の負荷をかけ、

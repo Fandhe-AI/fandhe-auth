@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::condition::{ComponentState, ConditionComponent, MeasurementConditions};
-use crate::meter::MonotonicClock;
+use crate::meter::{MonotonicClock, StdMonotonicClock};
 use crate::stage::{StageError, StagePlan, StagedRun, run_stages};
 use crate::target::{CallResult, TargetSpec};
 
@@ -406,8 +406,10 @@ impl ApprovedValues {
     }
 }
 
-/// 開くときに止まらない `O_NONBLOCK` の値。libc の定義と突き合わせた対象だけに置く
+/// 開くときに止まらない `O_NONBLOCK` の値。libc 0.2.191 の定義（`src/unix/` の各対象）と突き合わせた対象だけに置く
 /// （通常の依存を 0 に保つため libc に依存しない）。ここに無い対象は `None` で、開く前にパスの種別を見る。
+/// CI で実地に確かめているのは Linux x86_64 の値だけで、他の対象の値は libc の定義との突き合わせだけ
+/// （その対象でのビルド・実行はしていない）。
 #[cfg(unix)]
 #[allow(unreachable_code)]
 const fn nonblock_flag() -> Option<i32> {
@@ -616,17 +618,21 @@ fn rfc3339(secs: u64) -> String {
 /// [`RunSession::run`] で段階をその場で回すと [`RunEvidence`] になる。
 ///
 /// 型で塞いだもの: 段階の結果（[`StagedRun`]）を後から渡して [`RunEvidence`] を作る口は無い。段階の結果は
-/// [`RunSession::run`] の中でだけ作られ、同じ文脈（実行の記録・測定の条件）と、呼び出しの前に申告した構成要素
-/// （`exercised`）に結び付いたまま [`RunEvidence`] になる。別の実行の段階の結果を組み合わせる経路と、
-/// 回した後で構成要素を申告し直す経路は無い。申告した構成要素が測定の条件で起動していなければ、対象を 1 回も
-/// 呼ばずに拒否する。stub の種類は [`crate::ComponentConditions::new`] が実物として載せられない（`StubMismatch`）ため、
+/// [`RunSession::run`] の中でだけ作られ、同じ文脈（実行の記録・測定の条件）とまとめて [`RunEvidence`] になる。
+/// 別の実行の段階の結果を組み合わせる経路は無い。呼び出す構成要素（`exercised`）は回す前に申告させ、測定の条件で
+/// 起動していなければ対象を 1 回も呼ばずに拒否する（申告を検査してから回す。申告そのものは記録に残さない）。
+/// 時計は [`RunSession::run`] の中で標準の単調な時計（[`StdMonotonicClock`]）を作り、引数で受けない
+/// （偽の時計で `class=measured` の時間を作る経路を作らない。決定的な時計が要る試験は [`run_stages`] を直接使い、
+/// その結果からは [`RunEvidence`] を作れない）。stub の種類は [`crate::ComponentConditions::new`] が実物として載せられない（`StubMismatch`）ため、
 /// stub を申告した実行の記録には stub の起動と `note:` が必ず出る（`A-2026-10-28-9`・ACPT-7。`note:` は条件の `Display`）。
 ///
 /// 信頼の境界（塞げないもの。呼び出し側の契約）: (1) 閉包 `call` が実際に呼ぶ構成要素と `exercised` の一致
 /// （閉包の中身は見えない）。(2) `conditions` が実際に起動した構成要素と一致すること（呼び出し元が it-harness の
 /// 起動済みの構成から写す）。(3) `run_record_file` が同じ実行の記録であること（見るのは起動秒の一致だけで、
-/// 名前の文字列は誰でも作れるため、結び付けの証明ではない）。(1)〜(3) は、この crate が通常の依存で
-/// it-harness を持たない（どの crate にも依存しない）ため確かめられない。stub の結果を実物の結果として申告しない
+/// 名前の文字列は誰でも作れるため、結び付けの証明ではない）。(4) `conditions` の機材の条件が実際の機材と一致すること
+/// （[`crate::MachineCondition::new`] や独自の [`crate::MachineProbe`] で `virtualization`・`build_profile` 等を
+/// 呼び出し元が自由に申告できる）。(1)〜(3) は、この crate が通常の依存で it-harness を持たない（どの crate にも
+/// 依存しない）ため確かめられない。(4) は呼び出し元が明示する値を受ける設計で、申告の正しさは確かめない。stub の結果を実物の結果として申告しない
 /// ことは呼び出し元の試験とレビューで担保する（〔仮想〕〔モック〕の合格を〔実機〕扱いしない。ACPT-7）。
 pub struct RunSession {
     run_record_file: RunRecordFile,
@@ -663,22 +669,21 @@ impl RunSession {
     }
 
     /// `exercised`（閉包 `call` が呼ぶ構成要素。呼ぶ前に申告する）を検査してから、[`run_stages`] で段階を回し、
-    /// 結果をこの文脈に結び付けた [`RunEvidence`] を返す。文脈の値は消費し、1 つの値で段階を回すのは 1 回だけ
+    /// 結果をこの文脈とまとめた [`RunEvidence`] を返す（申告そのものは記録に残さない）。各回の時計はここで
+    /// [`StdMonotonicClock`] を作る（時計は引数で受けない）。文脈の値は消費し、1 つの値で段階を回すのは 1 回だけ
     /// （同じ実行の記録の名前で別の文脈を作ること・作った [`RunEvidence`] の複製は止めない）。
     ///
     /// # Errors
     /// `exercised` が空、または測定の条件で起動していない要素を含むとき [`LoadRecordError::InvalidRunEvidence`]
     /// （対象を 1 回も呼ばない）。段階の実行の誤りは [`LoadRecordError::Stage`]（終わった段階の結果も返さない）。
-    pub fn run<C, F>(
+    pub fn run<F>(
         self,
         exercised: &[ConditionComponent],
-        new_clock: C,
         spec: &TargetSpec,
         plan: &StagePlan,
         call: F,
     ) -> Result<RunEvidence, LoadRecordError>
     where
-        C: FnMut() -> Box<dyn MonotonicClock>,
         F: Fn() -> CallResult + Sync,
     {
         if exercised.is_empty()
@@ -688,6 +693,7 @@ impl RunSession {
         {
             return Err(LoadRecordError::InvalidRunEvidence);
         }
+        let new_clock = || -> Box<dyn MonotonicClock> { Box::new(StdMonotonicClock::new()) };
         let staged = run_stages(new_clock, spec, plan, call).map_err(LoadRecordError::Stage)?;
         Ok(RunEvidence {
             run_record_file: self.run_record_file,
