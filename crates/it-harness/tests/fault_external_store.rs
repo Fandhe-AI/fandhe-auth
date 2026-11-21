@@ -460,6 +460,8 @@ fn read_failure_before_eof_is_unverifiable_not_zero_bytes() {
         ErrorKind::BrokenPipe,
         ErrorKind::UnexpectedEof,
         ErrorKind::TimedOut,
+        ErrorKind::WouldBlock,
+        ErrorKind::Interrupted,
     ] {
         let obs = read_until_eof(&mut Script(vec![Err(kind.into())]));
         assert_eq!(obs, UpstreamObservation::Unverifiable(kind));
