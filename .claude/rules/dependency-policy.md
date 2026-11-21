@@ -91,7 +91,8 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 先頭の 2 変数は子シェルへ渡す値で、例の右辺は `"${PROD_FEATURES:-}"` のとおり呼び出し元の値を引き継ぎ、未設定なら空のままにする（呼び出し元で設定済みの値を上書きしない）。
 空のまま流すと固定の文言で止まるので、自分の変更に合わせて右辺を実際の feature 一覧に書き換える（または呼び出し元で設定しておく）。本番の feature が無いときは、空にせず `PROD_FEATURES=none SERVER_FEATURES=none` と明示の語で渡す
 （空文字・未設定は止める。`none` は「無い」という主張なので、`Cargo.toml` の feature と照らして選ぶ）。中で `none` は空に読み替える。
-子シェルは外の変数を引き継がないので、既定の空に落とすと、本番の feature でだけ入る `rsa`・`reqwest` 等を見ないまま合格しうる。そのため既定は置かない。
+例の右辺は呼び出し元の値（export 済みの値）を引き継ぐので、呼び出し元の値を使うときは、手順の最後（177 行目付近）に出る `PROD_FEATURES`・`SERVER_FEATURES` の値を `Cargo.toml` の feature と照らして確かめる。
+本番の feature が空のまま、または食い違ったまま流すと、本番の feature でだけ入る `rsa`・`reqwest` 等を見ないまま合格しうる。そのため空には既定を置かず、空なら止める。
 上の 2 変数のほかに手で書き換える値は無い（取得先の置き場は `mktemp -d` で毎回新しく作り、終了時に消す）。
 暫定の手順で、cargo-audit の DB の取得と記録の正式な手順は TASK-679 で決める（未定。`./github-actions.md` の契約 3）。
 この手順の cargo-deny は、DB の場所だけを指定した暫定の設定で `advisories` だけを流す。DPOL-34 の 4 検査（advisories・bans・licenses・sources）の合格ではない。
@@ -108,7 +109,7 @@ set -euo pipefail
 # 下の cargo deny は -c で一時の設定を使い、cwd の deny.toml を読まない。deny.toml（TASK-668）ができたら、
 # 4 検査が規則なしで走らないよう、止めて -c を deny.toml に替え、advisories への絞りも外す（TASK-679）
 if [ -e deny.toml ]; then echo "error: deny.toml exists; switch -c to deny.toml (TASK-679)" >&2; exit 2; fi
-# 子シェルは外の変数を引き継がない。空・未設定は渡し忘れとして止め、feature が無いことは none で明示させる
+# 例の右辺で呼び出し元の値を引き継ぐ。空・未設定は渡し忘れとして止め、feature が無いことは none で明示させる
 : "${PROD_FEATURES:?pass PROD_FEATURES (none if no feature)}"
 : "${SERVER_FEATURES:?pass SERVER_FEATURES (none if no feature)}"
 if [ "$PROD_FEATURES" = none ]; then PROD_FEATURES=""; fi
@@ -180,7 +181,8 @@ echo "advisories (root + fuzz): passed. provisional: NOT the DPOL-34 4-check pas
 # 以下の cargo tree -i は、終了コードだけでは合否を決められない（-e の絞り込み後に逆依存が空でも 0 で終わり得る。一致なしは非 0）。
 # stdout（木）と stderr（診断）を分けて受け、次の 3 つに分類する。全項目を流した後に合否を返す。
 #   終了 0 かつ stdout に木の行あり → present（対象範囲に禁止依存がある。不合格）
-#   終了 0 かつ stdout が空 → absent（対象なし。合格）
+#   終了 0 かつ stdout が空かつ stderr に「nothing to print」→ filtered（lock にはあるが本番の木に無い。合格だが no match とは区別して出す）
+#   終了 0 かつ stdout が空で stderr に「nothing to print」が無い → error（理由の分からない空。不合格）
 #   非 0 かつ stderr に「did not match any packages」→ absent（対象なし。合格）
 #   それ以外の非 0 → error（実行の誤り。feature 名の誤り等。不合格）
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する。--all-features は使わない
@@ -193,7 +195,9 @@ run_tree() {   # 引数: cargo tree のコマンド。結果を TREE_STATE・TRE
   TREE_OUT="$("$@" 2>"$WORK/tree.err" </dev/null)"; rc=$?
   TREE_ERR="$(cat "$WORK/tree.err")"
   if [ "$rc" -eq 0 ]; then
-    if [ -n "${TREE_OUT//[[:space:]]/}" ]; then TREE_STATE=present; else TREE_STATE=absent; fi
+    if [ -n "${TREE_OUT//[[:space:]]/}" ]; then TREE_STATE=present
+    elif grep -q 'nothing to print' <<<"$TREE_ERR"; then TREE_STATE=filtered
+    else TREE_STATE=error; fi
   elif grep -q 'did not match any packages' <<<"$TREE_ERR"; then   # パイプにしない（pipefail の下の SIGPIPE で誤分類しない）
     TREE_STATE=absent
   else
@@ -206,6 +210,7 @@ check_absent() {   # 引数: 表示名、cargo tree のコマンド
   run_tree "$@"
   case "$TREE_STATE" in
     absent)  echo "ok: $name no match" ;;
+    filtered) echo "ok: $name not in production tree (present in Cargo.lock; verify PROD_FEATURES)" ;;
     present) echo "FAIL: $name matched (a forbidden dependency is present):"; echo "$TREE_OUT"; TREE_BAD=1 ;;
     *)       echo "ERROR: cargo tree for $name failed (execution error, not a verdict; fix the command):"; echo "$TREE_ERR"; TREE_BAD=1 ;;
   esac
@@ -223,6 +228,7 @@ run_tree cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i openssl
 case "$TREE_STATE" in
   present) echo "$TREE_OUT" ;;
   absent)  echo "openssl: no match" ;;
+  filtered) echo "openssl: not in production tree (present in Cargo.lock; verify PROD_FEATURES)" ;;
   *)       echo "ERROR: cargo tree for openssl failed (execution error, not a verdict; fix the command):"; echo "$TREE_ERR"; TREE_BAD=1 ;;
 esac
 if [ "$TREE_BAD" -ne 0 ]; then echo "cargo tree: FAILED (match or execution error above)"; exit 1; fi
@@ -235,7 +241,7 @@ EOF
 
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。一方、`-e` の絞り込み後に逆依存が空でも 0 で終わり得るので、手順は stdout と stderr を分けて受け、
-  終了 0 のときは stdout の木の行の有無で判定する。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、stderr の文言で「対象なし」と実行の誤りを分ける。
+  終了 0 のときは stdout の木の行の有無で判定し、空なら stderr の `nothing to print`（lock にはあるが本番の木に無い。`ok: ... not in production tree` と出し、no match と区別する）を条件にする。無ければ実行エラーにする。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、stderr の文言で「対象なし」と実行の誤りを分ける。
 - `-e normal` だけでは build-dependencies が抜けるので `-e normal,build` で見る。dev-dependencies は除く。試験だけで使う依存の
   監査は `-e dev` を足して別に見る。
 - `--all-features` は DPOL-31 の変異スイッチなど試験用の feature も有効にし、本番のビルドの木と変わるので使わない。
