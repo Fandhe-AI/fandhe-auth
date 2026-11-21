@@ -266,12 +266,23 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 # 別々に index を開くと、間に index が書き換わったとき、登録の確認とパス一覧・本文が別の内容を見る（#6000）。
 # 走査の後に、元の index の内容（git ls-files -s と intent-to-add の印。下の index_listing）が固定時と同じことを確かめ、違えば検査不能（2）にする
 # （stat 情報だけの更新では差が出ない）。index が無い（空）ときは存在しない複写のパスを指し、git は空として扱う。
-if [ -n "${GIT_INDEX_FILE:-}" ]; then
-  orig_index="${GIT_INDEX_FILE}"
-elif ! orig_index="$(g rev-parse --path-format=absolute --git-path index 2> /dev/null)" || [ -z "${orig_index}" ]; then
+# 元の index のパスは、GIT_INDEX_FILE の有無にかかわらず git 自身の解決（rev-parse --git-path index）で絶対パスにして受ける。
+# git は相対パスの GIT_INDEX_FILE を、起動時の作業ディレクトリではなく作業ツリーのルートを基準に読む（git が先にルートへ移るため）。
+# 自前で基準を決めると、git が読む index と別のファイルを固定し得る（無ければ空として 0 を返す fail-open。#6011）。
+# `$(...)` は末尾の改行を落とすため、番兵（x）を付けて受けてから外す。
+if ! orig_index="$(g rev-parse --path-format=absolute --git-path index && printf x)"; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
 fi
+orig_index="${orig_index%x}"
+orig_index="${orig_index%$'\n'}"
+case "${orig_index}" in
+  /*) ;;
+  *)
+    echo "secret-scan: cannot snapshot the index; aborting" >&4
+    exit 2
+    ;;
+esac
 snap_index="${tmp_dir}/index-snap"
 if [ -e "${orig_index}" ]; then
   if ! cp -- "${orig_index}" "${snap_index}" 2> /dev/null; then

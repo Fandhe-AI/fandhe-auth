@@ -91,6 +91,16 @@ if [ -n "${MOVE_HEAD_ON_ARG:-}" ] && [ ! -e "${MOVE_HEAD_FLAG:-/nonexistent}" ];
     fi
   done
 fi
+# DELETE_INDEX_ON_ARG を含む呼び出しの前に一度だけ、DELETE_INDEX_PATH（元の index）を消す（走査中に index が消える場合の再現用）
+if [ -n "${DELETE_INDEX_ON_ARG:-}" ] && [ ! -e "${DELETE_INDEX_FLAG:-/nonexistent}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "${DELETE_INDEX_ON_ARG}" ]; then
+      : > "${DELETE_INDEX_FLAG}"
+      rm -f -- "${DELETE_INDEX_PATH}"
+      break
+    fi
+  done
+fi
 # MUTATE_INDEX_ON_ARG を含む呼び出しの前に一度だけ、元の index へ MUTATE_INDEX_ADD のパスを git add する（走査中の index の変化の再現用）。
 # 検出器は固定した複写を GIT_INDEX_FILE で指して git を呼ぶため、それを外して既定の index を書き換える。
 if [ -n "${MUTATE_INDEX_ON_ARG:-}" ] && [ ! -e "${MUTATE_INDEX_FLAG:-/nonexistent}" ]; then
@@ -1053,10 +1063,14 @@ run_index_mutation "an intent-to-add file really staged during the scan is a sca
 # 走査後の比較は、元の index を 1 回だけ複写し、ls-files -s と intent-to-add の印の 2 つの一覧を同じ複写から取る（#6011）。
 # 元の index を別々に開くと、2 つの呼び出しの間の更新で一覧が別の版を見る。本文の diff（-U0）より後の 2 つの呼び出しが、
 # 同じ index のファイルを読み、それが元の index でも固定時の複写（本文の diff が読むもの）でもないことを確かめる
+# 検出器の一時ディレクトリの親（TMPDIR）を既知の場所にし、パスは実パス（pwd -P）に直して比べる（macOS の /var と /private/var）
 new_repo; stage src/app.txt "hello"
+scan_tmp="${work_dir}/scan-tmp"
+mkdir -p "${scan_tmp}"
+scan_tmp_real="$(cd "${scan_tmp}" && pwd -P)"
+orig_idx="$(cd "$(git rev-parse --absolute-git-dir)" && pwd -P)/index"
 : > "${work_dir}/gitindex"
-LOG_GIT_INDEX="${work_dir}/gitindex" PATH="${shim_dir}:${PATH}" check_scan "the post-scan index comparison runs on a fresh copy" 0
-orig_idx="$(git rev-parse --path-format=absolute --git-path index)"
+TMPDIR="${scan_tmp}" LOG_GIT_INDEX="${work_dir}/gitindex" PATH="${shim_dir}:${PATH}" check_scan "the post-scan index comparison runs on a fresh copy" 0
 body_idx=""
 after_ls=""
 after_ita=""
@@ -1076,12 +1090,79 @@ while IFS=$'\t' read -r idx args; do
     *" --ita-invisible-in-index "*) after_ita="${after_ita}${idx}"$'\n' ;;
   esac
 done < "${work_dir}/gitindex"
+# 記録したパスの TMPDIR の部分を実パスに置き換える（一時ディレクトリは走査の後に消えるため、親だけを正規化する）
+after_one="${after_ls%$'\n'}"
+after_real="${after_one}"
+case "${after_one}" in
+  "${scan_tmp}"/*) after_real="${scan_tmp_real}/${after_one#"${scan_tmp}"/}" ;;
+esac
+body_dir="${body_idx%/*}"
 if [ -n "${body_idx}" ] && [ "${after_ls}" = "${after_ita}" ] && [ "$(printf '%s' "${after_ls}" | wc -l | tr -d ' ')" = 1 ] \
-  && [ "${after_ls}" != "${orig_idx}"$'\n' ] && [ "${after_ls}" != "${body_idx}"$'\n' ] && [ "${after_ls}" != "-"$'\n' ]; then
+  && [ "${body_idx}" = "${body_dir}/index-snap" ] && [ "${after_one}" = "${body_dir}/index-after" ] \
+  && [[ "${after_real}" == "${scan_tmp_real}"/secret-scan.*/index-after ]] \
+  && [ "${after_real}" != "${orig_idx}" ] && [ "${after_one}" != "${body_idx}" ]; then
   pass "secret-scan: both post-scan listings read the same fresh copy of the index"
 else
   fail "secret-scan: both post-scan listings read the same fresh copy of the index" "git calls: $(cat "${work_dir}/gitindex")"
 fi
+
+# 固定時にあった元の index が走査中に消えたら、終了時の一覧が空になり固定時と違うため 2（#6011）
+new_repo; stage src/app.txt "hello"
+rm -f "${work_dir}/deleted"
+rc=0
+DELETE_INDEX_ON_ARG=-U0 DELETE_INDEX_PATH="$(git rev-parse --path-format=absolute --git-path index)" DELETE_INDEX_FLAG="${work_dir}/deleted" \
+  PATH="${shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/deleted" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: the index removed during the scan is a scan failure (2)"
+else
+  fail "secret-scan: the index removed during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 終了時の元の index の複写（index-after への cp）が失敗したら 2。固定時の複写（index-snap）は通す（#6011）
+cp_shim_dir="${work_dir}/cp-shim"
+mkdir -p "${cp_shim_dir}"
+REAL_CP="$(command -v cp)"
+export REAL_CP
+cat > "${cp_shim_dir}/cp" <<'EOF2'
+#!/bin/sh
+for last in "$@"; do :; done
+case "${last}" in
+  */index-after) : > "${CP_SHIM_FLAG}"; exit 1 ;;
+esac
+exec "${REAL_CP}" "$@"
+EOF2
+chmod +x "${cp_shim_dir}/cp"
+new_repo; stage src/app.txt "hello"
+rm -f "${work_dir}/cp-failed"
+rc=0
+CP_SHIM_FLAG="${work_dir}/cp-failed" PATH="${cp_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/cp-failed" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a failure to copy the index at the end of the scan is a scan failure (2)"
+else
+  fail "secret-scan: a failure to copy the index at the end of the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 相対パスの GIT_INDEX_FILE は、git と同じく作業ツリーのルートを基準に読む（起動時の作業ディレクトリではない。#6011）。
+# サブディレクトリから GIT_INDEX_FILE=sub/alt で起動すると、git は <root>/sub/alt を読む。起動時の作業ディレクトリを基準にした
+# <root>/sub/sub/alt には秘密値の無い index を置き、取り違えると 0 になる形にする
+new_repo; stage src/app.txt "hello"; git commit -q -m "chore: base"
+mkdir -p sub/sub
+cp "$(git rev-parse --path-format=absolute --git-path index)" sub/sub/alt
+cp "$(git rev-parse --path-format=absolute --git-path index)" sub/alt
+printf '%s\n' "x = ${token}" > leak.txt
+GIT_INDEX_FILE="${repo}/sub/alt" git add leak.txt
+rm -f leak.txt
+cd sub
+git_view="$(GIT_INDEX_FILE=sub/alt git diff --cached --name-only HEAD)"
+if [ "${git_view}" = "leak.txt" ]; then
+  pass "secret-scan: git reads a relative GIT_INDEX_FILE from the work tree root"
+else
+  fail "secret-scan: git reads a relative GIT_INDEX_FILE from the work tree root" "git sees: ${git_view}"
+fi
+GIT_INDEX_FILE=sub/alt check_scan "a relative GIT_INDEX_FILE from a subdirectory pins the index git uses" 1 leak.txt
+cd "${repo}"
 
 # 一覧の大きさの上限（作業ツリー側・HEAD 側・境界）。上限は検出器の lock_max_bytes（暫定 64 KiB）
 lock_max="$(sed -n 's/^lock_max_bytes=\([0-9][0-9]*\)$/\1/p' "${SECRET_SCAN}")"
