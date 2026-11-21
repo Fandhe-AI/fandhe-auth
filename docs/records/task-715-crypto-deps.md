@@ -189,7 +189,41 @@
 - `untrusted`・`getrandom`・`rand_core`・`rand_xorshift`・`chacha20` の spec 上の個別の記録: 確かめた範囲では見つからない（他の crate の依存先として現れるだけ）。
 - `getrandom` 0.2 系の最新の版: `cargo search` は最新の 1 件（0.4.3）しか返さず確かめていない。
 - `cargo deny` の結果（ライセンス・bans・sources）: 未実行（`deny.toml` 未作成。`TASK-668`）。
+- 最新安定版の照合（K11）と、3 候補の採用版・lock の checksum: 未確認（6a・6c）。
 - 「検証済み」の基準そのもの: 未定。
+
+### 6a. 未導入の 3 候補の公開元（版ごと。事実のみ）
+
+`cargo info <名前>`（終了コード 0。crates.io の index を読む）が返した版と公開元。これは検索で返った版の記録で、採用版ではない。
+採用版と `Cargo.lock` の `checksum` は未確定（lock に無いため測れない。導入時に別に決める。`D-2026-11-21-2`）。
+`.crate` の取得物の sha256 と lock の突き合わせも、導入前のため未実施。
+
+| crate | 検索で返った版 | crates.io の配布ページ | 上流リポジトリ | license | `rust-version` |
+|---|---|---|---|---|---|
+| `aws-lc-rs` | 1.19.0 | `https://crates.io/crates/aws-lc-rs/1.19.0` | `https://github.com/aws/aws-lc-rs` | ISC AND (Apache-2.0 OR ISC) | 1.71.0 |
+| `jsonwebtoken` | 12.0.0 | `https://crates.io/crates/jsonwebtoken/12.0.0` | `https://github.com/Keats/jsonwebtoken` | MIT | 1.88.0 |
+| `webauthn-rs` | 0.6.2 | `https://crates.io/crates/webauthn-rs/0.6.2` | `https://github.com/kanidm/webauthn-rs` | MPL-2.0 | 1.89 |
+
+### 6b. 2/4 の記録時点の再計測（HEAD `98ab1c3`、`origin/main` `ce28b5a`）
+
+レビュー指摘への対応として、本節の記録後に同じコマンドを再実行した（cargo 1.100.0）。終了コードを併記し、一致 0 件とコマンド失敗を区別する。
+
+| コマンド | 終了コード | 出力の抜粋 |
+|---|---|---|
+| `cargo metadata --format-version 1 --locked` | 0 | `core`・`secret`・`db-tests`・`client` の `dependencies[]` はいずれも 0 件 |
+| `cargo tree --locked -p fandhe-auth-<名前> -e normal,build --depth 1 --target all`（4 crate） | 0（4 件とも） | 4 件とも出力 1 行 |
+| `cargo tree --locked --workspace -e normal,build,dev --target all -i <名前>`（`ring`・`untrusted`・`rand`・`getrandom@0.2.17`・`getrandom@0.4.3`） | 0（5 件とも） | 1 行目はそれぞれ `ring v0.17.14`・`untrusted v0.9.0`・`rand v0.10.4`・`getrandom v0.2.17`・`getrandom v0.4.3` |
+| 同上 `-i openssl` | 101 | ``error: package ID specification `openssl` did not match any packages``（lock に無い。実行失敗ではない） |
+| `grep -c '^name = "<名前>"' Cargo.lock`（`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken`） | 1（5 名とも） | 標準出力 `0`（一致 0 件。grep は一致 0 件で 1 を返す。2 以上のコマンド失敗ではない） |
+| `grep -c '^name = ' Cargo.lock` | 0 | `69` |
+| `cargo info aws-lc-rs`・`cargo info jsonwebtoken`・`cargo info webauthn-rs` | 0 | 6a の表のとおり |
+
+結果は結果 1 と同じ（lock は動いていない）。
+
+### 6c. 最新安定版の確認状況（K11）
+
+- 結果 1・2 の「最新」「同版」は、`cargo search <名前> --limit 1` が返した版との一致を示す記録である。安定版（プレリリースでない版）かの区別は付けておらず、K11 が求める最新安定版の照合は未実施。
+- 未確認事項: 各 crate の最新安定版、yanked の有無、`getrandom` 0.2 系の最新の版。導入時に crates.io の公式の一覧で確かめる（人が行う）。
 
 ### 7. 人が決めること
 
