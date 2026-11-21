@@ -223,9 +223,10 @@ impl UpstreamStall {
         self.inner.cv.notify_all();
     }
 
-    /// 転送器の停止を通知する。停止フラグを立てる前に呼び、時刻を記録して待ちを起こす。
-    /// 期限の後の停止を `Stopped` と読ませない（`classify_exit`。ORST-17・AUDB-6）。
-    fn note_stop(&self) {
+    /// 転送器の停止を通知する。停止の時刻の記録と停止フラグの公開を同じロックの下で行ってから待ちを起こす。
+    /// 期限の後の停止を `Stopped` と読ませず、`hold` が `Stopped` を返したときは呼び出し側も必ずフラグを true と読む
+    /// （ORST-17・AUDB-6）。ロックは入れ子にしない（ここで持つのはこの状態のロックだけ）。
+    fn note_stop(&self, stop: &AtomicBool) {
         let mut g = self
             .inner
             .state
@@ -240,6 +241,7 @@ impl UpstreamStall {
         if stale {
             g.stopped_at = Some(Instant::now());
         }
+        stop.store(true, Ordering::SeqCst);
         self.inner.cv.notify_all();
     }
 
@@ -303,6 +305,10 @@ struct Shared {
     refused: AtomicU64,
     /// 上流への connect を始めようとした回数（診断用。`connect_timeout` の直前（停止点を通過した後）に加算するので到達の確認には使わず、成否も表さない）。
     upstream_attempts: AtomicU64,
+    /// 上流への connect が成功した回数（`connect_timeout` が `Ok` を返した時点で数える）。
+    upstream_connected: AtomicU64,
+    /// 中継を始める段の世代の検査で外れ、遮断前の接続として拒否した回数。実際に拒否した箇所（`start_relay`）でだけ数える。
+    generation_refused: AtomicU64,
     /// 両側を切るための複製（接続 ID と組）。両方向の転送が終わった接続の分は外す。
     /// accept・遮断の状態の確認・ここへの登録は、このロックの下で一度に行う。`block` の状態変更と切断も
     /// 同じロックの下で行うので、受理した接続が遮断から漏れない（ORST-17）。
@@ -328,6 +334,8 @@ impl Shared {
             accepted: AtomicU64::new(0),
             refused: AtomicU64::new(0),
             upstream_attempts: AtomicU64::new(0),
+            upstream_connected: AtomicU64::new(0),
+            generation_refused: AtomicU64::new(0),
             conns: Mutex::new(Vec::new()),
             next_conn_id: AtomicU64::new(0),
             workers: Mutex::new(Vec::new()),
@@ -510,6 +518,18 @@ impl DbFaultProxy {
         self.shared.upstream_attempts.load(Ordering::SeqCst)
     }
 
+    /// 上流への connect が成功した回数。接続の失敗・停止点での打ち切りは数えない。
+    /// 成功した後に世代の不一致で拒否された接続も数える（受理済みの [`Self::accepted_count`] とは別）。
+    pub fn upstream_connected_count(&self) -> u64 {
+        self.shared.upstream_connected.load(Ordering::SeqCst)
+    }
+
+    /// 中継を始める段で遮断の世代が合わず、client のバイトを上流へ送らずに拒否した回数（ORST-17）。
+    /// 接続の失敗・ソケットの複製の失敗・遮断中の accept での拒否は数えない（それらは [`Self::refused_count`] にだけ出る）。
+    pub fn generation_refused_count(&self) -> u64 {
+        self.shared.generation_refused.load(Ordering::SeqCst)
+    }
+
     /// 転送器が accept した後に直ちに閉じた接続の数（遮断中に accept して切ったもの・上流なし・上流への接続の失敗・
     /// 確立中の遮断・解除のときに待ち行列から排出して切ったもの）。遮断中でカーネルの待ち行列にあってまだ
     /// accept していない接続は、解除の排出までは数えない。
@@ -642,7 +662,7 @@ impl DbFaultProxy {
     fn shutdown_all(&mut self) {
         // 停止の時刻を先に記録する（停止フラグを見た待ちが、時刻の無い停止を読まない）。
         if let Some(stall) = &self.shared.stall {
-            stall.note_stop();
+            stall.note_stop(&self.shared.stop);
         }
         self.shared.stop.store(true, Ordering::SeqCst);
         if let Some(h) = self.accept.take() {
@@ -834,7 +854,9 @@ fn dial_upstream(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
     }
     // 停止判定を通過し、実際に接続を試みる直前で数える（停止点で閉じた接続は数えない）。
     shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
-    TcpStream::connect_timeout(addr, UPSTREAM_CONNECT_TIMEOUT).ok()
+    let up = TcpStream::connect_timeout(addr, UPSTREAM_CONNECT_TIMEOUT).ok()?;
+    shared.upstream_connected.fetch_add(1, Ordering::SeqCst);
+    Some(up)
 }
 
 /// 中継を始める段。上流側の複製を登録し、世代を確かめてから転送のスレッドを起こす。
@@ -860,6 +882,7 @@ fn start_relay(connected: Connected, shared: &Arc<Shared>) {
     if shared.halted() || shared.block_gen.load(Ordering::SeqCst) != block_gen {
         let _ = up.shutdown(Shutdown::Both);
         shared.sever_conn(id);
+        shared.generation_refused.fetch_add(1, Ordering::SeqCst);
         return refuse(&client, shared);
     }
     // 両方向の転送が終わった側が複製を外す（半閉じの間は遮断で切れるよう残す）。
@@ -868,6 +891,7 @@ fn start_relay(connected: Connected, shared: &Arc<Shared>) {
     // 登録の間に遮断が入った場合に取りこぼさない。
     if shared.halted() || shared.block_gen.load(Ordering::SeqCst) != block_gen {
         shared.sever_conn(id);
+        shared.generation_refused.fetch_add(1, Ordering::SeqCst);
         return refuse(&client, shared);
     }
     let s1 = Arc::clone(shared);
@@ -1475,13 +1499,35 @@ mod tests {
         assert!(!p.shared.blocked.load(Ordering::SeqCst));
     }
 
+    /// 停止の時刻が見える時点で、停止フラグも必ず true と読める（同じロックの下で公開する。ORST-17）。
+    /// 時刻の記録とフラグの公開が別々になると、`hold` が `Stopped` を返した後に `dial_upstream` が false を読み得る。
+    /// 競合の再現は確率的で、毎回は落ちない（スケジューラ依存）。多数回の繰り返しで検出の機会を増やす。
+    #[test]
+    fn stop_flag_is_visible_whenever_stop_time_is() {
+        for _ in 0..2000 {
+            let stall = UpstreamStall::new();
+            let stop = Arc::new(AtomicBool::new(false));
+            let (s2, stop2) = (stall.clone(), Arc::clone(&stop));
+            let reader = thread::spawn(move || {
+                loop {
+                    let g = s2.inner.state.lock().unwrap();
+                    if g.stopped_at.is_some() {
+                        return stop2.load(Ordering::SeqCst);
+                    }
+                }
+            });
+            stall.note_stop(&stop);
+            assert!(reader.join().unwrap(), "stop time visible before the flag");
+        }
+    }
+
     /// 再利用された停止点の古い停止の記録は、新しい保持を解いたものと読まない（ORST-17・AUDB-6）。
     #[test]
     fn stale_stop_from_previous_use_is_expired() {
         let stall = UpstreamStall::new();
-        stall.note_stop();
+        // 別の転送器の停止（時刻と、立ったままのフラグ）が残っている状況。保持はすぐ戻る。
+        stall.note_stop(&AtomicBool::new(false));
         thread::sleep(Duration::from_millis(5));
-        // 別の転送器の停止フラグが立っている状況（保持はすぐ戻る）。
         let stop = AtomicBool::new(true);
         stall.hold(&stop);
         assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
@@ -1491,14 +1537,13 @@ mod tests {
     #[test]
     fn fresh_stop_after_stale_one_is_stopped() {
         let stall = UpstreamStall::new();
-        stall.note_stop();
+        stall.note_stop(&AtomicBool::new(false));
         thread::sleep(Duration::from_millis(5));
         let stop = Arc::new(AtomicBool::new(false));
         let (s2, stop2) = (stall.clone(), Arc::clone(&stop));
         let h = thread::spawn(move || s2.hold(&stop2));
         assert!(stall.wait_entered(Duration::from_secs(5)));
-        stall.note_stop();
-        stop.store(true, Ordering::SeqCst);
+        stall.note_stop(&stop);
         h.join().unwrap();
         assert_eq!(stall.exit_reason(), Some(StallExit::Stopped));
     }

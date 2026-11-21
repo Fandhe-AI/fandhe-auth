@@ -450,10 +450,18 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
         "release waited for the stalled accept: {released_in:?}"
     );
     // 上流への接続が成立したこと（遮断前の接続の中継を拒む分岐に届いたこと）を確かめる。
+    // 対象の接続について、上流への接続の成功と世代の不一致による拒否を、専用の計数で同期的に確かめる
+    // （どちらの分岐でも。接続の試行数・拒否の合計では、接続の失敗や複製の失敗でも増えるため代わりにならない。ORST-17・AUDB-6）。
+    assert!(
+        wait_until(|| p.upstream_connected_count() == 1 && p.generation_refused_count() == 1),
+        "expected 1 upstream connect and 1 generation refusal, got {} and {}",
+        p.upstream_connected_count(),
+        p.generation_refused_count()
+    );
     // macOS だけの緩和: `last_exit` は `hold()` の終わりに記録され、上流への connect と世代不一致での切断はその後に
     // 起きる。macOS（Darwin）は、握手済みで相手に閉じられた接続が待ち行列に残っていると accept が
     // `ConnectionAborted`・`ConnectionReset` を返す。その場合も接続は成立しており、バイトは上流へ届き得ないので、
-    // 成立の証拠として上流への試行の計数で確かめる。Linux ではこの分岐を作らず、accept の `Ok` と読み取りの確認を必須にする
+    // 成立の証拠とする（成立の確認は上の専用の計数）。Linux ではこの分岐を作らず、accept の `Ok` と読み取りの確認を必須にする
     // （確かめる範囲の狭い分岐で合格させない。AUDB-6）。
     let deadline = Instant::now() + Duration::from_secs(5);
     let upstream_conn = loop {
@@ -474,8 +482,8 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
             Err(e) => panic!("upstream connect never established: {:?}", e.kind()),
         }
     };
-    match upstream_conn {
-        Some(mut upstream_conn) => {
+    if let Some(mut upstream_conn) = upstream_conn {
+        {
             upstream_conn.set_nonblocking(false).unwrap();
             upstream_conn
                 .set_read_timeout(Some(Duration::from_secs(5)))
@@ -496,10 +504,6 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
                 Ok(n) => panic!("bytes from the severed conn reached upstream: {n}"),
             }
         }
-        None => assert!(
-            wait_until(|| p.upstream_attempt_count() >= 1),
-            "accept reported a reset connection but no upstream attempt was counted"
-        ),
     }
     assert!(wait_until(|| p.refused_count() >= 1));
     assert_eq!(p.accepted_count(), 0, "stalled conn was relayed");
