@@ -50,7 +50,7 @@ done
 unset _v env_names
 export GIT_NO_REPLACE_OBJECTS=1
 # 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
-for _c in git mktemp mkdir rm sort cmp grep cp; do
+for _c in git mktemp mkdir rm sort cmp grep cp bash; do
   require_cmd "${_c}" || exit 2
 done
 unset _c
@@ -112,7 +112,10 @@ plant "${canary_dir}/.env" "canary placeholder"
 # （一覧が無ければ除外は 0 件で、ダミーは必ず走査される）。複製は同じバイト列であることを確かめ、検出器そのものを試す。
 detector_dir="${work_dir}/detector"
 mkdir -p "${detector_dir}/scripts/hooks" 2> /dev/null || die "mkdir failed"
-# CI の本走査は検出器を直接起動する。実行ビットが無ければ、複製を別のインタープリタ経由で動かして通さず、ここで 2 にする。
+# CI の本走査は検出器を直接起動する。元の検出器に実行ビットが無ければ、陰性対照だけ通さずここで 2 にする。
+# 複製は一時領域に置くため、PATH の bash に読み込ませて起動する（一時領域が noexec のマウントでも動かす。
+# 検出器の shebang は `/usr/bin/env bash` で、直接起動と同じ PATH の bash を使う）。
+# `command` で起動し、環境から取り込まれた同名の関数（BASH_FUNC_bash%%）による差し替えを飛ばす。
 [ -x "${ROOT_DIR}/scripts/hooks/secret-scan.sh" ] || die "the scanner is not executable"
 cp -p -- "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" 2> /dev/null || die "failed to copy the scanner"
 copy_rc=0
@@ -120,7 +123,7 @@ cmp -s "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks
 [ "${copy_rc}" -eq 0 ] || die "the copied scanner differs from the original"
 
 rc=0
-"${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+command bash "${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
 
 fail() {
   echo "scan-canary: FAILED: $1" >&2

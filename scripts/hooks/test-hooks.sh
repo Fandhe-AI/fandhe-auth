@@ -886,7 +886,10 @@ stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a list absent from HEAD excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
 
 # 作業ツリーに一覧が無くても、同じ checkout では HEAD の一覧を検証する（壊れていれば 2。#6011）
+# 拒否の原因を HEAD に限るため、index には有効な一覧を登録してから作業ツリーの一覧を消す（index の検証が先に拒否しない形）
 same_checkout_repo '{ "version": 2, "skills": {'
+printf '%s\n' "${lock_ok}" > skills-lock.json
+git add skills-lock.json
 rm -f skills-lock.json
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a broken committed list is rejected even without a working-tree list" 2
@@ -917,9 +920,28 @@ git add -A
 git commit -q -m "chore: add detector with a symlinked list"
 rm -f skills-lock.json
 printf '%s\n' "${lock_ok}" > skills-lock.json
+# index も通常ファイルの有効な一覧にして、拒否の原因を HEAD の種類に限る
+git add skills-lock.json
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a committed list that is a symlink is rejected" 2
 expect_out "same checkout: a symlinked committed list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
+
+# index の一覧がシンボリックリンク（mode 120000）なら、作業ツリーと HEAD が通常ファイルの有効な一覧でも拒否する。
+# リンク先の文字列そのものを有効な一覧にして、blob の中身の構文検査だけでは拒否されない形にする（拒否の原因を index の種類に限る）
+same_checkout_repo "${lock_ok}"
+rm -f skills-lock.json
+ln -s '{"version":2,"skills":{"vendored-a":{}}}' skills-lock.json
+git add skills-lock.json
+rm -f skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+if [ "$(git ls-files -s -- skills-lock.json | cut -d' ' -f1)" = 120000 ]; then
+  pass "secret-scan: same checkout: the staged list is a symlink entry in the test setup"
+else
+  fail "secret-scan: same checkout: the staged list is a symlink entry in the test setup" "index: $(git ls-files -s -- skills-lock.json)"
+fi
+SCAN_BIN="${same_bin}" check_scan "same checkout: a staged list that is a symlink is rejected" 2
+expect_out "same checkout: a symlinked staged list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
 
 # 検出器の一覧がシンボリックリンク（リンク先は有効）なら拒否する
 bad_n=$((bad_n + 1))
@@ -958,6 +980,9 @@ SCAN_BIN="${same_bin}" check_scan "same checkout: an unborn branch next to packe
 
 # 空の skills は、同じ checkout の HEAD の一覧でも固定の診断文で 2 にする（Bash 3.2 の空配列に依らない）
 same_checkout_repo '{"version":2,"skills":{}}'
+# 作業ツリーと index は有効な一覧にして、拒否の原因を HEAD に限る
+printf '%s\n' "${lock_ok}" > skills-lock.json
+git add skills-lock.json
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a committed list with an empty skills map exits 2" 2
 expect_out "same checkout: an empty committed skills map reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
@@ -977,6 +1002,26 @@ if [ "${snap_reads}" = 0 ] && [ "${snap_copies}" = 1 ]; then
   pass "secret-scan: the list is read from a single snapshot"
 else
   fail "secret-scan: the list is read from a single snapshot" "direct reads: ${snap_reads}, copies: ${snap_copies}"
+fi
+# 読み取りの監視（TERM で止める子シェル）は、EXIT の trap（一時ディレクトリの削除）を外した状態で fork し、fork の直後に戻す。
+# 起動直後の子に TERM が届くと、子が親の EXIT の trap を実行して走査中の一時ディレクトリを消し、有効な一覧が 2 になる（#6011）。
+# 競合は負荷に依って稀にしか起きず実行では安定して再現できないため、形で確かめる（外す → fork → 戻すの順で各 1 か所）。
+# 外す行の次の行は子の開き `(` の行に限る（子の中で外す形では、外す前の子が TERM を受けて親の trap を実行し得る）
+wd_clear="$(grep -nxE '[[:space:]]*trap - EXIT' "${SECRET_SCAN}" | cut -d: -f1 | tr '\n' ' ' || true)"
+wd_open=""
+if [[ "${wd_clear}" =~ ^[0-9]+\ $ ]]; then
+  wd_open="$(sed -n "$((${wd_clear% } + 1))p" "${SECRET_SCAN}")"
+fi
+wd_fork="$(grep -nxF '    ) > /dev/null 2>&1 < /dev/null &' "${SECRET_SCAN}" | cut -d: -f1 | tr '\n' ' ' || true)"
+wd_restore="$(grep -nxF '    trap cleanup_tmp EXIT' "${SECRET_SCAN}" | cut -d: -f1 | tr '\n' ' ' || true)"
+wd_pid="$(grep -nxF '    lock_wd=$!' "${SECRET_SCAN}" | cut -d: -f1 | tr '\n' ' ' || true)"
+if [[ "${wd_clear}" =~ ^[0-9]+\ $ ]] && [[ "${wd_fork}" =~ ^[0-9]+\ $ ]] && [[ "${wd_restore}" =~ ^[0-9]+\ $ ]] \
+  && [[ "${wd_pid}" =~ ^[0-9]+\ $ ]] && [ "${wd_open}" = "    (" ] && [ "${wd_clear% }" -lt "${wd_fork% }" ] \
+  && [ "$((${wd_fork% } + 1))" -eq "${wd_pid% }" ] && [ "$((${wd_pid% } + 1))" -eq "${wd_restore% }" ]; then
+  pass "secret-scan: the read watchdog is forked without the EXIT trap and the trap is restored right after"
+else
+  fail "secret-scan: the read watchdog is forked without the EXIT trap and the trap is restored right after" \
+    "clear: ${wd_clear}, next: ${wd_open}, fork: ${wd_fork}, pid: ${wd_pid}, restore: ${wd_restore}"
 fi
 
 # HEAD のコミット ID は最初に 1 回だけ確定し、ls-tree・cat-file・staged の差分の基準に同じ ID を渡す（#6011）。
@@ -1718,7 +1763,9 @@ SCAN_BIN="${det_ok}" check_scan "an env file under a registered skill is still r
 
 # 同じ checkout で HEAD の一覧が壊れている・読めないときは検査不能（2）。固定の文言だけを出す
 same_checkout_repo '{ "version": 2, "skills": {'
+# 作業ツリーと index は有効な一覧にして、拒否の原因を HEAD に限る
 printf '%s\n' "${lock_ok}" > skills-lock.json
+git add skills-lock.json
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a broken committed list is rejected" 2
 expect_out "same checkout: a broken committed list reports a fixed message" "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting"
@@ -2117,6 +2164,50 @@ else
   fail "scan-canary: a scanner without the execute bit makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
+
+# 一時領域が noexec のマウントでも、陰性対照は検出器の複製を起動できる（複製は bash に読み込ませる。#6011）。
+# noexec を mount なしで再現するため、複製先の実行ビットを落とす cp の shim を使う（直接起動なら同じく EACCES で起動できない）。
+# shim は実行ビットを落とした後に、複製先に実行ビットが無いことを確かめてそのパスを印のファイルへ書く。
+# 印で shim が実際に呼ばれ、検出器の複製の実行ビットが落ちた状態で起動されたことを確かめる（shim が効かずに通る形を防ぐ）
+noexec_shim_dir="${work_dir}/noexec-cp-shim"
+mkdir -p "${noexec_shim_dir}"
+real_cp="$(command -v cp)"
+# shellcheck disable=SC2016 # 展開させない固定のコード
+printf '%s\n' '#!/usr/bin/env bash' \
+  '"${REAL_CP}" "$@" || exit $?' \
+  'for _last in "$@"; do :; done' \
+  'chmod a-x -- "${_last}"' \
+  'if [ ! -x "${_last}" ]; then printf "%s\n" "${_last}" >> "${NOEXEC_MARK}"; fi' > "${noexec_shim_dir}/cp"
+chmod +x "${noexec_shim_dir}/cp"
+noexec_mark="${work_dir}/noexec-mark"
+rm -f "${noexec_mark}"
+rc=0
+(cd "${canary_root}" && NOEXEC_MARK="${noexec_mark}" REAL_CP="${real_cp}" PATH="${noexec_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ] && [ -f "${noexec_mark}" ] && grep -qE '/scripts/hooks/secret-scan[.]sh$' "${noexec_mark}"; then
+  pass "scan-canary: a copy of the scanner without the execute bit (noexec temp) still runs"
+else
+  fail "scan-canary: a copy of the scanner without the execute bit (noexec temp) still runs" "exit ${rc}" \
+    "shim mark: $(cat "${noexec_mark}" 2> /dev/null || echo none)" "output: $(cat "${work_dir}/out")"
+fi
+
+# 陰性対照は検出器の複製を `command bash` で起動し、環境から取り込まれた関数 bash（BASH_FUNC_bash%%）に差し替えられない（#6011）。
+# 関数は印を残して 0 で返す（関数が使われれば、陰性対照は検出の欠落として 1 で終わる）
+bash_fn_mark="${work_dir}/bash-fn-mark"
+rm -f "${bash_fn_mark}"
+rc=0
+(
+  cd "${canary_root}"
+  # shellcheck disable=SC2329,SC2153 # 子の陰性対照が呼び得る関数（ここでは呼ばない）。印のパスは呼び出し時の環境で渡す
+  bash() { : > "${BASH_FN_MARK}"; return 0; }
+  export -f bash
+  BASH_FN_MARK="${bash_fn_mark}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh
+) > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ] && [ ! -e "${bash_fn_mark}" ]; then
+  pass "scan-canary: an exported bash function does not replace the scanner run"
+else
+  fail "scan-canary: an exported bash function does not replace the scanner run" "exit ${rc}" \
+    "function ran: $([ -e "${bash_fn_mark}" ] && echo yes || echo no)" "output: $(cat "${work_dir}/out")"
+fi
 
 # secret-scan-canary.sh: 元のリポジトリの hooks（post-index-change）を起動しない
 hook_dir="${work_dir}/hooks"

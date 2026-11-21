@@ -275,7 +275,12 @@ if ! tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")" || [ -z "${tmp_
   echo "secret-scan: mktemp failed; aborting" >&4
   exit 2
 fi
-trap 'rm -rf "${tmp_dir}"' EXIT
+# EXIT の trap から呼ぶ（読み取りの監視を fork する間だけ外して戻すため、関数名 1 つで張り直せる形にする）
+# shellcheck disable=SC2329 # trap からの間接の呼び出し
+cleanup_tmp() {
+  rm -rf "${tmp_dir}"
+}
+trap cleanup_tmp EXIT
 
 # index を 1 回だけ複写して固定し、以降の登録の確認・パス一覧・本文の走査はすべてその複写（GIT_INDEX_FILE）に対して行う。
 # 別々に index を開くと、間に index が書き換わったとき、登録の確認とパス一覧・本文が別の内容を見る（#6000）。
@@ -1004,6 +1009,10 @@ load_skill_names() {
     head -c $((lock_max_bytes + 1)) 2> /dev/null < "${detector_lock}" > "${tmp_dir}/work-lock" &
     lock_pid=$!
     # 監視は TERM を受けたら起動済みの sleep も終わらせて抜ける（読み終えた後に sleep が最大 5 秒残らないようにする）。
+    # 監視の起動の間だけ EXIT の trap（一時ディレクトリの削除）を外す。起動直後（子が trap を整える前）に TERM が届くと、
+    # 子は親から継いだ EXIT の trap を実行し、走査中の一時ディレクトリを消す（有効な一覧が検査不能（2）になる。#6011）。
+    # 子の側で外すのでは間に合わない（子のコードが動く前に届き得る）ため、fork の前に親で外し、fork の直後に戻す。
+    trap - EXIT
     (
       trap - ERR
       sleep 5 &
@@ -1015,6 +1024,7 @@ load_skill_names() {
       kill "${lock_pid}" > /dev/null 2>&1 || true
     ) > /dev/null 2>&1 < /dev/null &
     lock_wd=$!
+    trap cleanup_tmp EXIT
     lock_rc=0
     wait "${lock_pid}" 2> /dev/null || lock_rc=$?
     kill "${lock_wd}" > /dev/null 2>&1 || true
