@@ -132,7 +132,7 @@ hub-stub の実装をそのまま使い、作り直さない。
 - 「TASK-7 の設定の仕組み」は `HubFaultConfig`・`FaultRule`・`CallWindow` と `set_faults` と読む。`HubStubConfig` には欄を足さない。
 - 開始は `CallWindow { first: 1, last: None }`（以降すべて）の規則を入れた設定の差し替え、解除はその規則を除いた設定の差し替え。
 - 同じ口の遅れと拒否（各最大 1 件）は 1 つの規則に合成する。hub-stub は最初に当たった 1 件だけを使うため、分けると片方が落ちる。
-- 記録（`Applied`・`Released`）が先、設定の差し替えが後。基準線・記録の拒否では状態を変えない（fail-closed）。
+- 記録（`Applied`・`Released`）が先、設定の差し替えが後。基準線・記録の拒否では状態を変えない（fail-closed。`step` の途中失敗は下記）。
 - 事象に呼び出しの記録の件数（`log_pos`）を添える。呼び出し `i` は `log_pos <= i` の事象より後・次の事象より前に起きたと読み、同じ障害を二度適用・解除しても期間と呼び出しを順序で照合できる。
 - 1 つの実行に結べる注入器は 1 つ（2 つ目の `new` は `AlreadyBound`）。`FaultTimeline` は `Clone` しない。公開の直接記録（`record_now`・`record_at`）は、結合の有無によらず Hub の stub の事象を常に拒否する（`HubStubEventOutsideInjector`）。注入器を結んだ実行の `FaultTimeline::finish` も拒否し（`InjectorBound`）、確定は `HubStubFaultInjector::finish` だけが行う。`log_pos` を付ける入口は注入器の内部だけ（`pub(crate)`）で、Hub の stub の事象は `log_pos` を必須にし（無ければ `LogPosRequired`）、Hub の stub 以外は受けず、位置の逆行は拒否する。形式の試験が要る人工の事象は、crate 内の単体試験（`#[cfg(test)]`）で組む。
 - 注入器は実行をまたいで使わない。基準線・次の実行には新しい注入器を作る（有効な規則と呼び出しの記録を持ち越さない。fail-closed）。
@@ -154,11 +154,14 @@ hub-stub の実装をそのまま使い、作り直さない。
 
 - 対象の決め方（仮）: 試験対象が読む壁時計の源（`SkewedClock`）に差を足す。OS の時計・DB のホストの時計・単調時計・子プロセスの時計はずらさない。
   LD_PRELOAD・環境変数・feature で切り替える経路は作らない（DPOL-30〜32）。
-- 入口: `ClockSkewInjector::new`・`with_base_clock`（基準の時計を渡す。決定的な試験用）・`clock`・`apply`・`release`・`step`・`active_skew_ms`。
+- 入口: `ClockSkewInjector::new`・`with_base_clock`（基準の時計を渡す。決定的な試験用）・`clock`・`apply`・`release`・`step`・`abandon`・`active_skew_ms`。
   `SkewedClock` は `now`・`unix_seconds`（切り捨て。stub の `now: u64` 用）・`skew_ms`。
-- 順序: 検査 → 二重の開始の確認 → 基準＋ずれが表せるかの確認（`OutOfRange`。何も記録しない）→ 記録 → 状態の変更。基準線・記録の拒否では状態を変えない（fail-closed）。
-- `step` は `Released(旧)` → `Applied(新)` の順に記録する。同じ値・0 は `InvalidParam`。`Applied` の記録だけが拒否されたときは「解除済み」の状態で `Record` を返す。
-- 解除は開始と同じ値で記録する。二重の開始は `AlreadyActive`、無い解除は `NotActive`。`Drop` は記録に触らず、解除し忘れは `unreleased_count` に出る。
+- 順序: 検査 → 二重の開始の確認 → 基準＋ずれが表せるかの確認（`OutOfRange`。何も記録しない）→ 記録 → 状態の変更。基準線・記録の拒否では状態を変えない（fail-closed。`step` の途中失敗は下記）。
+- `step` は `Released(旧)` → `Applied(新)` の順に記録する。同じ値・0 は `InvalidParam`。`Released` の記録が拒否されたときは状態を変えない。`Released` が成功して `Applied` の記録だけが拒否されたときは、
+  記録と一致させて「解除済み（ずれなし・適用中なし）」の状態で `Record` を返す（呼び出し側は誤りの後も旧いずれが有効とは見なさない）。
+- 「記録の拒否で状態を変えない」は `apply`・`release` と `step` の `Released` の拒否に当たる。`step` の途中失敗（`Applied` の拒否）は上のとおり解除済みへ進む。
+- 解除は開始と同じ値で記録する。二重の開始は `AlreadyActive`、無い解除は `NotActive`。`Drop`・`abandon` は記録に触らず、配布済みの `SkewedClock` が共有するずれだけを 0 へ戻す
+  （実行単位で試験条件を保つ。基準線の実行へ持ち越さない。AVLB-31）。解除し忘れは `Released` が無いので `unreleased_count` に出る。
 - 記録の例: `injection: 1 applied clock_skew target=instance at=... offset_ms=... skew_ms=+1500`。記録の時刻は基準の時計のまま。
 - 誤り・`Debug` にずれの値・時刻を載せない（SECR-11・SECR-23）。ずれの上限は置かない（THRT-29・A-2026-10-28-1）。
 - Host への結線は `TODO(TASK-716)`。

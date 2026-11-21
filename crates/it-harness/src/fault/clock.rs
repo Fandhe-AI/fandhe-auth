@@ -128,8 +128,9 @@ impl SkewedClock {
     }
 }
 
-/// 1 つのインスタンスの時計のずれの制御側。`Clone` しない。`Drop` では記録に触らない
-/// （解除していない注入は `FaultTimeline::finish` の `unreleased_count` に出る）。
+/// 1 つのインスタンスの時計のずれの制御側。`Clone` しない。`Drop` では記録に触らず、配布済みの [`SkewedClock`] が
+/// 共有するずれだけを 0 へ戻す（AVLB-31 の試験条件を実行単位で保つ。基準線の実行へ前の障害を持ち越さない）。
+/// 解除していない注入は `Released` が記録に無いので、`FaultTimeline::finish` の `unreleased_count` に出る。
 pub struct ClockSkewInjector {
     skew_ms: Arc<AtomicI64>,
     base: BaseClock,
@@ -174,6 +175,14 @@ impl ClockSkewInjector {
             skew_ms: Arc::clone(&self.skew_ms),
             base: Arc::clone(&self.base),
         }
+    }
+
+    /// 実行の終了時に、解除の記録なしで共有のずれを 0 へ戻す。`FaultTimeline::finish` の前後どちらでも呼べる。
+    /// 記録には触らないので、未解除だった事実は `unreleased_count` に残る。適用中でなければ何もしない。
+    pub fn abandon(&mut self) {
+        self.skew_ms.store(0, Ordering::SeqCst);
+        self.active = None;
+        self.run_id = None;
     }
 
     /// 適用中のずれ（ミリ秒）。
@@ -279,6 +288,13 @@ impl ClockSkewInjector {
         self.active = Some(new);
         self.run_id = Some(timeline.run_id());
         Ok(())
+    }
+}
+
+impl Drop for ClockSkewInjector {
+    /// 記録には触らず、共有のずれだけを戻す（解除し忘れは `unreleased_count` に出る）。
+    fn drop(&mut self) {
+        self.abandon();
     }
 }
 

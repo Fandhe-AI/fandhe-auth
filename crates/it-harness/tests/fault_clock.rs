@@ -177,3 +177,32 @@ fn debug_and_error_do_not_leak_values() {
         assert!(format!("{e}").starts_with("clock skew fault error: "));
     }
 }
+
+#[test]
+fn drop_after_finish_clears_shared_skew_and_keeps_unreleased_fact() {
+    // AVLB-31: 実行の終了後に、配布済みの時計がずれたまま次の実行（基準線）へ残らない。
+    let mut inj = injector();
+    let mut tl = timeline();
+    let clock = inj.clock();
+    inj.apply(&mut tl, 1_000).unwrap();
+    let r = finish(tl);
+    assert_eq!(r.unreleased_count(), 1);
+    assert_eq!(clock.skew_ms(), 1_000);
+    drop(inj);
+    assert_eq!(clock.skew_ms(), 0);
+}
+
+#[test]
+fn abandon_clears_shared_skew_without_recording_release() {
+    let mut inj = injector();
+    let mut tl = timeline();
+    let clock = inj.clock();
+    inj.apply(&mut tl, -2_000).unwrap();
+    inj.abandon();
+    assert_eq!(clock.skew_ms(), 0);
+    assert_eq!(inj.active_skew_ms(), None);
+    assert_eq!(inj.release(&mut tl), Err(ClockSkewError::NotActive));
+    let r = finish(tl);
+    assert_eq!(r.unreleased_count(), 1);
+    assert_eq!(injection_lines(&r).len(), 1);
+}
