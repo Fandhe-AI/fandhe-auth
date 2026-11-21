@@ -88,23 +88,38 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（合否と、例外を足したならその理由）を PR 本文に書く。
 
 次のブロックは、先頭の `PROD_FEATURES=… SERVER_FEATURES=… bash -s <<'EOF'` から末尾の `EOF` までを、そのままコピーして実行する（zsh から流してもよい。中身は bash で動く）。
-先頭の 2 変数は子シェルへ渡す値で、自分の変更に合わせて右辺を書き換える（本番の feature が無いときは `PROD_FEATURES= SERVER_FEATURES=` と空を明示する。渡し忘れると止まる）。
-子シェルは外の変数を引き継がないので、渡さずに既定の空へ落とすと、本番の feature でだけ入る `rsa`・`reqwest` 等を見ないまま合格しうる。そのため既定は置かない。
-途中で `exit 2` や `set -e` で止まったとき、残りの行がシェルへ流れて実行されないよう、全体を引用符付きの heredoc で包んでいる。
+先頭の 2 変数は子シェルへ渡す値で、自分の変更に合わせて右辺を書き換える。本番の feature が無いときは、空にせず `PROD_FEATURES=none SERVER_FEATURES=none` と明示の語で渡す
+（空文字・未設定は止める。`none` は「無い」という主張なので、`Cargo.toml` の feature と照らして選ぶ）。中で `none` は空に読み替える。
+子シェルは外の変数を引き継がないので、既定の空に落とすと、本番の feature でだけ入る `rsa`・`reqwest` 等を見ないまま合格しうる。そのため既定は置かない。
 上の 2 変数のほかに手で書き換える値は無い（取得先の置き場は `mktemp -d` で毎回新しく作り、終了時に消す）。
 暫定の手順で、cargo-audit の DB の取得と記録の正式な手順は TASK-679 で決める（未定。`./github-actions.md` の契約 3）。
+この手順の cargo-deny は、DB の場所だけを指定した暫定の設定で `advisories` だけを流す。DPOL-34 の 4 検査（advisories・bans・licenses・sources）の合格ではない。
+licenses・bans・sources は、`deny.toml`（TASK-668）ができるまで、このファイルの規則の基準（許可リスト・bans の表・sources は crates.io だけ）と人が照合する。
+対象はルートの `Cargo.lock` と、別 workspace の `crates/trial-deps/fuzz/Cargo.lock`（ルートの `exclude`）の両方で、合否に両方を含める（`crates/trial-deps/README.md` の「依存の監査」と同じ。DPOL-33・DPOL-34）。
+PR 本文には結果の行（ok・FAIL・ERROR と crate 名、commit・取得日時・feature の値）だけを書き、cargo の誤り・warning の行（絶対パスを含む）は写さない。
 
 ```bash
-PROD_FEATURES= SERVER_FEATURES= bash -s <<'EOF'
+PROD_FEATURES=none SERVER_FEATURES=none bash -s <<'EOF'
 # 取得と監査を分ける。取得の段では監査を流さない（`cargo audit` を --no-fetch なしで流すと取得と監査が同時に走り、
 # 記録した DB の版と監査に使った版がずれうる）。
 # 失敗は後続へ素通りさせない。取得・commit の読み取り・日時の記録のどれが失敗しても、その場で止めて監査へ進まない。
 set -euo pipefail
 # 下の cargo deny は -c で一時の設定を使い、cwd の deny.toml を読まない。deny.toml（TASK-668）ができたら、
-# bans・licenses・sources が規則なしで走らないよう、止めて -c を deny.toml に替える（TASK-679）
+# 4 検査が規則なしで走らないよう、止めて -c を deny.toml に替え、advisories への絞りも外す（TASK-679）
 if [ -e deny.toml ]; then echo "error: deny.toml exists; switch -c to deny.toml (TASK-679)" >&2; exit 2; fi
-: "${PROD_FEATURES?pass PROD_FEATURES (empty string if none)}"       # 渡し忘れたら止める（空は空文字で明示する）
-: "${SERVER_FEATURES?pass SERVER_FEATURES (empty string if none)}"
+# 子シェルは外の変数を引き継がない。空・未設定は渡し忘れとして止め、feature が無いことは none で明示させる
+: "${PROD_FEATURES:?pass PROD_FEATURES (none if no feature)}"
+: "${SERVER_FEATURES:?pass SERVER_FEATURES (none if no feature)}"
+if [ "$PROD_FEATURES" = none ]; then PROD_FEATURES=""; fi
+if [ "$SERVER_FEATURES" = none ]; then SERVER_FEATURES=""; fi
+ROOT_LOCK=Cargo.lock
+FUZZ_DIR=crates/trial-deps/fuzz
+FUZZ_LOCK="$FUZZ_DIR/Cargo.lock"
+if [ ! -f "$ROOT_LOCK" ] || [ ! -f "$FUZZ_LOCK" ]; then echo "error: Cargo.lock missing (root or fuzz)" >&2; exit 2; fi
+# Cargo.lock の書き換えの確認は、監査の前後の内容の比較で行う。監査の前から未ステージの差分があっても止まらない（git diff は使わない）
+lock_hash() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+ROOT_LOCK_BEFORE="$(lock_hash "$ROOT_LOCK")"
+FUZZ_LOCK_BEFORE="$(lock_hash "$FUZZ_LOCK")"
 
 # 置き場は実行ごとの新しい空のディレクトリ。既定の ~/.cargo/advisory-db や前回の残りを使わない（古い DB で成功する経路を残さない）
 WORK="$(mktemp -d)"
@@ -141,32 +156,60 @@ AUDIT_DB_COMMIT="$(git -C "$AUDIT_DB" log -1 --format='%H')"
 if [ -z "$DENY_DB_COMMIT" ] || [ -z "$AUDIT_DB_COMMIT" ]; then
   echo "error: db commit not recorded" >&2; exit 2
 fi
-# 記録: DENY_FETCHED_AT・AUDIT_FETCHED_AT と、2 つの commit（DPOL-33）。PR 本文に書く
+# 記録: DENY_FETCHED_AT・AUDIT_FETCHED_AT と、2 つの commit（DPOL-33）。trap で DB を消すため、記録に残るのはこの出力だけ。PR 本文に書く
 printf 'deny db: %s (fetched %s)\naudit db: %s (fetched %s)\n' "$DENY_DB_COMMIT" "$DENY_FETCHED_AT" "$AUDIT_DB_COMMIT" "$AUDIT_FETCHED_AT"
 # 2 つのツールが同じ DB のスナップショットを共有できるかは未確認。両方の commit を記録し、食い違えば人が判断する（共有できると断定しない）
 
-# 取得なしで流す（DPOL-33・DPOL-34）。上で記録した DB だけを使い、ここでは取得しない
-cargo deny --locked check -c "$DENY_CONFIG" --disable-fetch </dev/null   # advisories・bans・licenses・sources（DB は上の設定で固定した 1 つ）
-cargo audit --no-fetch --db "$AUDIT_DB" --file Cargo.lock </dev/null   # 直前に取得した DB を明示して渡す。cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
-git --no-pager diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換えが無いこと（依存を足した変更では差分を目視で確かめる）
+# 取得なしで流す（DPOL-33・DPOL-34）。上で記録した DB だけを使い、ここでは取得しない。ルートと fuzz 側の両方（どちらかが失敗すれば set -e で止まる）
+# cargo-deny は暫定の設定なので advisories だけ。licenses・bans・sources は流さない（人が基準と照合する。上の前置き）
+cargo deny --locked check -c "$DENY_CONFIG" --disable-fetch advisories </dev/null
+cargo deny --locked --manifest-path "$FUZZ_DIR/Cargo.toml" check -c "$DENY_CONFIG" --disable-fetch advisories </dev/null
+# 直前に取得した DB を明示して渡す。cargo-audit 0.22.2 には --locked が無いため、下で lock の内容の比較をする
+cargo audit --no-fetch --db "$AUDIT_DB" --file "$ROOT_LOCK" </dev/null
+cargo audit --no-fetch --db "$AUDIT_DB" --file "$FUZZ_LOCK" </dev/null
+# 監査の前後で Cargo.lock の内容が同じこと（依存を足した変更の未ステージの差分は、前の時点から同じなら問題にしない）
+if [ "$(lock_hash "$ROOT_LOCK")" != "$ROOT_LOCK_BEFORE" ] || [ "$(lock_hash "$FUZZ_LOCK")" != "$FUZZ_LOCK_BEFORE" ]; then
+  echo "error: Cargo.lock was modified during the audit" >&2; exit 2
+fi
 
-# 実際に使った値と、ここまでの合格を出す。PR 本文に残す（trap で DB を消すため、記録に残るのは上の commit・取得日時とこの出力だけ）
-printf 'PROD_FEATURES=%s\nSERVER_FEATURES=%s\n' "$PROD_FEATURES" "$SERVER_FEATURES"
-echo "fetch+deny+audit: passed"
+# 実際に使った値と、ここまでの結果を出す。PR 本文に残す
+printf 'PROD_FEATURES=%s\nSERVER_FEATURES=%s\n' "${PROD_FEATURES:-none}" "${SERVER_FEATURES:-none}"
+echo "advisories (root + fuzz): passed. provisional: NOT the DPOL-34 4-check pass; licenses/bans/sources need deny.toml (TASK-668)"
 
-# 以下の cargo tree -i は「一致なし」で非 0 を返すのが合格の場合があるため、終了コードではなく出力の文言で判定する（下の注）
+# 以下の cargo tree -i は「一致なし」で非 0 を返すのが合格のため、終了コードではなく出力で分類し、全項目を流した後に合否を返す。
+# 分類: 出力に「did not match any packages」→ 一致なし（合格）／終了コード 0 → 一致あり（不合格）／それ以外の失敗 → 実行の誤り（feature 名の誤り等。不合格）
+# PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する。--all-features は使わない
+# SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形）
 set +e
-
-# PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空。実行の先頭で明示して渡す）。--all-features は使わない
-# SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形。無ければ空）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa </dev/null         # 合格: 「did not match any packages」（一致なし）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls </dev/null  # 合格: 同上
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl </dev/null     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
-cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys </dev/null      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest </dev/null     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
-exit 0   # 上の cargo tree の非 0 を終了コードにしない。合否は出力の文言と、上の passed の印で見る
+TREE_BAD=0
+check_absent() {   # 引数: 表示名、cargo tree のコマンド
+  local name="$1" out rc
+  shift
+  out="$("$@" 2>&1 </dev/null)"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "FAIL: $name matched (a forbidden dependency is present):"; echo "$out"; TREE_BAD=1
+  elif grep -q 'did not match any packages' <<<"$out"; then   # パイプにしない（pipefail の下の SIGPIPE で誤分類しない）
+    echo "ok: $name no match"
+  else
+    echo "ERROR: cargo tree for $name failed (execution error, not a verdict; fix the command):"; echo "$out"; TREE_BAD=1
+  fi
+}
+TREE_ARGS=(tree --locked --workspace -e normal,build --target all)
+check_absent rsa        cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i rsa
+check_absent native-tls cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i native-tls
+# web-sys は fandhe-auth-webauthn-wasm を除く（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
+check_absent web-sys    cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys
+check_absent reqwest    cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i reqwest   # HOST-7・HOST-9。名前は reqwest だけ（上の「feature」の限界）
+# openssl は人が逆依存の根を見る項目。出力だけ出し、合否に含めない（根が webauthn-rs 系だけなら可。DPOL-10・DPOL-11）
+echo "--- openssl (human review of reverse-dependency roots; not part of the verdict)"
+cargo "${TREE_ARGS[@]}" --features "$PROD_FEATURES" -i openssl </dev/null 2>&1
+if [ "$TREE_BAD" -ne 0 ]; then echo "cargo tree: FAILED (match or execution error above)"; exit 1; fi
+echo "cargo tree: rsa, native-tls, web-sys, reqwest: no match. openssl: human review"
+exit 0
 EOF
 ```
+
+- 暫定の設定で流すのは `advisories` だけなので、手順の最後の合格の印は「DPOL-34 の合格」ではない。PR 本文には、印の文言のまま「暫定。4 検査の合格ではない」と書き、licenses・bans・sources の人の照合の結果を別に書く。
 
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
@@ -176,7 +219,7 @@ EOF
   feature を明示しないと既定の feature だけを見る。
 - 本番のビルドで有効にする非既定 feature を足す変更では、同じ変更で `PROD_FEATURES` も更新する。更新しないと、その feature が引く経路（例: `openssl-sys/vendored`）が合否の検査（`make no-vendored`・DPOL-13）から外れる。
   `scripts/check-openssl-vendored.sh` は環境変数 `PROD_FEATURES` を同じ形式で受け、合否の走査に含める。
-- `web-sys` の確認は、`fandhe-auth-webauthn-wasm` を `--exclude` で除いた workspace 全体に `--target all` を付けて行う（crate ごとの `-p` は使わない）。`--exclude` の crate が workspace に無い間（段階 2 の前）は `--exclude` を外して流す。Hub の本番のバイナリでの確認は Hub が持つ（`ARUN-16`）。
+- `web-sys` の確認は、`fandhe-auth-webauthn-wasm` を `--exclude` で除いた workspace 全体に `--target all` を付けて行う（crate ごとの `-p` は使わない）。`--exclude` の crate が workspace に無い間（段階 2 の前）は warning が出るが判定に影響しない。Hub の本番のバイナリでの確認は Hub が持つ（`ARUN-16`）。
 - TASK-4 の選定基準は K1〜K12（`D-2026-11-20-7`）。K7: 試験の道具は dev 依存か別の workspace に置き、本番の依存の木に入れない。K11（推移依存の少なさ・保守）は、数の閾値を置かず、次の 4 つで見る（利用者の決定。`D-2026-11-20-14` の (4)(d)）:
   最新の安定版・既知の advisory 0 件・feature は必要最小・依存の `rust-version` が MSRV 以下（MSRV は `D-2026-11-20-12`）。新しい crate を足すときも同じ 4 つで確かめる。
 - 選定の結果（`D-2026-11-20-6`〜`10`・`14`）。版は spec の記録時点のもので、版の固定の手順は spec に記録が無く未定:

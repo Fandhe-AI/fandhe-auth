@@ -38,9 +38,9 @@ TASK-680 が結線するときの契約は次のとおり。値は spec の ID �
 
 1. ジョブ ID `deps-audit` を変えず、`ci-complete` の `needs` から外さない。`if:` による skip・`continue-on-error`・`paths` フィルタを付けない（DPOL-34）。
 2. 処理は TASK-679 の監査の実行スクリプト（`scripts/`）と make ターゲット（名前は未定）を呼ぶ。`ci.yml` に検査のロジックを書かない。
-3. advisory DB は実行の前に 1 回だけ取得し、以後の全ての実行に取得なしの指定（cargo deny は `--disable-fetch`、cargo audit は `--no-fetch`）を付ける。`Cargo.lock` を書き換えない確かめは、cargo deny は `--locked`、cargo-audit 0.22.2 は `--locked` を受け付けないため `--file Cargo.lock` で既存の lock を入力にして、どちらも実行後に `Cargo.lock` に変更が無いことを確かめる（コマンド例は `./dependency-policy.md`）。取得と監査は分け、取得の段で監査を流さない。cargo-audit 0.22.2 に取得だけの口は無く、両ツールが同じ DB を共有できるかも未確認のため、cargo-audit 用の取得の手順は TASK-679 で決める（未定）。cargo-audit には監査の直前に取得した DB を `--db` で明示して渡し、既定の置き場や前回の残りを使わない。両ツールについて、取得が成功した UTC 日時と使う DB の commit を記録してから、取得なしで全検査を流す。使った DB の commit と取得日を記録する（DPOL-33・TASK-679）。
+3. advisory DB は実行の前に 1 回だけ取得し、以後の全ての実行に取得なしの指定（cargo deny は `--disable-fetch`、cargo audit は `--no-fetch`）を付ける。`Cargo.lock` を書き換えない確かめは、cargo deny は `--locked`、cargo-audit 0.22.2 は `--locked` を受け付けないため `--file Cargo.lock` で既存の lock を入力にして、どちらも実行後に `Cargo.lock` に変更が無いことを確かめる（コマンド例は `./dependency-policy.md`）。取得と監査は分け、取得の段で監査を流さない。cargo-audit 0.22.2 に取得だけの口は無く、両ツールが同じ DB を共有できるかも未確認のため、cargo-audit 用の取得の手順は TASK-679 で決める（未定）。cargo-audit には監査の直前に取得した DB を `--db` で明示して渡し、既定の置き場や前回の残りを使わない。両ツールについて、取得が成功した UTC 日時と使う DB の commit を記録してから、取得なしで全検査を流す。対象はルートの `Cargo.lock` と、別 workspace の `crates/trial-deps/fuzz/Cargo.lock`（ルートの `exclude`。`crates/trial-deps/README.md` の「依存の監査」と同じ扱い）の両方で、cargo deny・cargo-audit ともに両方を流し、合否に両方を含める（DPOL-33・DPOL-34）。`Cargo.lock` の書き換えの確かめは、監査の前後の内容（ハッシュ）の比較で行い、監査の前からある未ステージの差分で止めない。使った DB の commit と取得日を記録する（DPOL-33・TASK-679）。
 4. 設定は `deny.toml` の厳格版（TASK-668）だけを使う。例外（`ignore`・`skip`・許可の追加）を足すかは人が決め、足すときは理由・期限・範囲を同じ場所に書く（DPOL-20・DPOL-35）。
-5. 4 検査と cargo-audit の 5 つがすべて成功したときだけ緑にする（DPOL-34）。結線したらジョブ名から「frame」を外す（必須チェックは `ci-complete` だけなので影響しない）。
+5. 4 検査と cargo-audit の 5 つがすべて成功したときだけ緑にする（DPOL-34）。`./dependency-policy.md` の暫定の手順は DB の場所だけの設定で `advisories` だけを流すので、これを流して 4 検査の合格とは扱わない（4 検査は `deny.toml` の厳格版ができてから）。結線したらジョブ名から「frame」を外す（必須チェックは `ci-complete` だけなので影響しない）。
 6. 同じ入口を定期の実行（#54・TASK-681）からも呼べる形に保つ（DPOL-35）。
 7. 道具の版は `env` の版と SHA256 を同時に更新する。版を変えるときは TASK-668 の版の確かめを流し直す。現在の版は暫定で、人が確定する。
 8. 公開ログには版・件数・advisory ID 程度だけを出し、秘密値は出さない（SECR-23）。
