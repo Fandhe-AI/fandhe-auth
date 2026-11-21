@@ -66,13 +66,14 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | [editorconfig-checker](https://github.com/editorconfig-checker/editorconfig-checker) | `.editorconfig` 準拠チェック | ✓ |
 | [ShellCheck](https://www.shellcheck.net/) | シェルスクリプトの lint | ✓ |
 | Rust toolchain（cargo・rustfmt・clippy） | `make fmt`・`make lint`（stable の 1.100 以上が要る。`D-2026-11-20-12`） | ✓ |
+| [Python](https://www.python.org/) 3.11 以上（`python3`・標準の `tomllib`） | `make no-vendored`・`make lint`（`scripts/check-openssl-vendored.sh` が `.cargo/config*` の TOML の解析に使う。無い・3.11 未満だと検査不能で失敗する） | ✓ |
 | [direnv](https://direnv.net/) | `.env` の自動読み込み | 任意 |
 | Docker・Docker Compose v2 以降・openssl | 開発・検証用 PostgreSQL 、`make pg-check`・`make it-db`（[dev/postgres/README.md](./dev/postgres/README.md)） | 任意 |
 
 macOS（Homebrew）の例:
 
 ```bash
-brew install lefthook editorconfig-checker shellcheck direnv
+brew install lefthook editorconfig-checker shellcheck direnv python@3.12
 ```
 
 `make doctor` で導入状況を確認できます（読み取りのみで、何も導入・変更しません）。

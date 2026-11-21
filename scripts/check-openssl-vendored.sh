@@ -44,7 +44,7 @@ source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 # 使う外部コマンドは作業ディレクトリの作成前にすべて確かめる（EXIT トラップの rm の不足で 127 にしない）。
-for c in cargo mktemp mkdir rm grep dirname basename sort python3; do
+for c in cargo mktemp mkdir rm grep dirname basename python3; do
   require_cmd "${c}" || exit 2
 done
 # TOML は構造として読む（引用キーの Unicode エスケープを文字列検索では見落とすため）。tomllib（3.11 以上）が無ければ検査不能（2）。
@@ -428,6 +428,13 @@ selftest
 total=0
 check_member_classification
 tree="$(prod_tree "${ROOT_DIR}" locked "${PROD_FEATURES:-}")" || exit 2
+# 版の記録との対応（参考。合否に入れない）。違反（R1〜R4）で終了する場合でも件数と案内が出るよう、本番の木の取得直後に出す。crate の版は OpenSSL の版ではないため出さない。
+sys_n="$(count_openssl_sys "${tree}")"
+if [ "${sys_n}" -ge 1 ]; then
+  log "info: openssl-sys in production tree: ${sys_n} (dependency tree only; confirm version record and final binary link mode in Hub AOPS-2)"
+else
+  log "info: openssl-sys in production tree: 0 (nothing to record in Hub AOPS-2 from this tree; final binary link mode is confirmed in Hub AOPS-2)"
+fi
 for r in R1 R2 R3; do
   n="$(count_rule "${r}" "${tree}")" || exit 2
   log "scan A ${r}: ${n}"
@@ -449,14 +456,6 @@ if [ $((s_env + s_cfg)) -ne 0 ]; then
   log "FAIL: static OpenSSL link forced (DPOL-13)"
   exit 1
 fi
-# 版の記録との対応（参考。合否に入れない）。crate の版は OpenSSL の版ではないため出さない。
-sys_n="$(count_openssl_sys "${tree}")"
-if [ "${sys_n}" -ge 1 ]; then
-  log "info: openssl-sys in production tree: ${sys_n} (dependency tree only; confirm version record and final binary link mode in Hub AOPS-2)"
-else
-  log "info: openssl-sys in production tree: 0 (nothing to record in Hub AOPS-2 from this tree; final binary link mode is confirmed in Hub AOPS-2)"
-fi
-
 # scan_info <ラベル> <追加引数...>: 参考の走査。失敗しても終了コードに影響させず警告だけ出す（A の合否を上書きしない）。
 scan_info() {
   local label="$1" t r n
