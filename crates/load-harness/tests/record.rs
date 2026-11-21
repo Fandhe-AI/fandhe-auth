@@ -183,7 +183,8 @@ fn approved_load_rejects_non_files_and_oversize() {
 }
 
 /// 書き手のいない FIFO を指しても `open` で止まらず、開いたハンドルの種別の検査で `ApprovedFile` になる。
-/// 止まったら（回帰）待ちを打ち切って失敗させ、書き手側を開いて残ったスレッドをほどく。
+/// 止まったら（回帰）待ちを打ち切って失敗させる。残ったスレッドをほどくのは Linux だけ（後処理の open が
+/// 止まらないと fifo(7) で確かめられる対象に限る）。他の対象ではほどかずに失敗させる。
 #[cfg(unix)]
 #[test]
 fn approved_load_does_not_block_on_fifo() {
@@ -213,14 +214,17 @@ fn approved_load_does_not_block_on_fifo() {
             panic!("reader thread ended without a result");
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            // 読み手が open で待っている。読み書きで開く（Linux の FIFO では相手がいなくても止まらない）と
-            // 待ちがほどける。この open 自体は止まらないので、試験が無期限に待つことはない。
-            // 読み手のスレッドは join せず（FIFO の読みで待ち得るため）、書き手を閉じてから失敗させる。
-            let w = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&fifo);
-            drop(w);
+            // 読み手が open で待っている。FIFO を読み書きで開く挙動は POSIX では未定義で、止まらないと
+            // 保証されるのは Linux だけ（fifo(7)）。Linux では読み書きで開いて待ちをほどき、書き手を閉じる。
+            // 他の対象では FIFO を開かない（後処理で試験のスレッド自身が止まらないため）。
+            // どちらでも読み手のスレッドは join せず（FIFO の読みで待ち得るため）、そのまま失敗させる。
+            if cfg!(target_os = "linux") {
+                let w = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&fifo);
+                drop(w);
+            }
             panic!("ApprovedValues::load blocked on a FIFO");
         }
     }
