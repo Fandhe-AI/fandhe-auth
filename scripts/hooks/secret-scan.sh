@@ -53,6 +53,9 @@
 #   一覧は大きさに上限を設け（暫定。超えたら 2）、走査の結果を返す前に HEAD を取り直して固定した ID と違えば 2 にする。
 #   index は最初に 1 回だけ複写して固定し、登録の確認・パス一覧・本文の走査はすべてその複写から行う。走査の後に元の
 #   index の内容が固定時と違えば 2 にする（登録の確認と本文が別の index を見る経路を作らない）。
+#   固定時にあった index が終了時に無いときも 2（登録 0 件でも）。index がシンボリックリンクなら、開始時も終了時も辿らず 2。
+#   複写の前に通常ファイルであることを確かめる（FIFO 等は複写せず 2。確認と cp の間の差し替えは窓を狭めるだけで、止まり得る。0 は返さない）。
+#   外部コマンド（git・readlink・mktemp・rm・cp・head・wc・sleep・tr・cmp）は使う前に確かめ、欠けていれば 2。
 # 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
 # 本文のバイト列は照合するが、圧縮・エンコードの展開と、複数行に分かれた値の復元はしない。
 # 保守的なヒューリスティックであり網羅的なスキャナの代替ではない。AAUD-30 の実行時の登録簿による走査とも別物。
@@ -104,6 +107,18 @@ esac
 if [ "${summary}" -eq 1 ]; then
   exec 2> /dev/null
 fi
+
+# 外部コマンドは使う前にすべて確かめる（makefile.md の契約。欠けていれば検査不能（2）。fail-closed）。
+# 確認より前に外部コマンドを呼ばない（`command -v` はシェルの組み込み）。lib.sh は検出器の複製だけで動くよう読み込まない。
+# 欠けたコマンドは「失敗の吸収」になり得る（例: 監視の sleep を起動できず、待ち時間なしで読み取りを打ち切る）。
+# 固定の文言は fd 4 へ出す（--summary でも出る）。使うコマンドを足したら、この一覧にも足す（試験が踏む経路の漏れを検出する。踏まない経路は検出できない）。
+for _c in git readlink mktemp rm cp head wc sleep tr cmp; do
+  if ! command -v "${_c}" > /dev/null 2>&1; then
+    echo "secret-scan: required command not found on PATH: ${_c}; aborting" >&4
+    exit 2
+  fi
+done
+unset _c
 
 # 除外の一覧の読み元は、このスクリプト自身の実体の場所から決める（走査対象の repo ではない）。
 # cd は既定で `..` を論理的（シンボリックリンクを辿らず文字列として）に処理するため、scripts や hooks がリンクだと
@@ -284,7 +299,37 @@ case "${orig_index}" in
     ;;
 esac
 snap_index="${tmp_dir}/index-snap"
+# index のパスがシンボリックリンクなら、辿らずに検査不能（2）で止める。--path-format=absolute は git がリンクを実体へ解いた
+# パスを返し、実体で固定すると走査中のリンクの付け替えに気づけない。解く前のパス（--path-format の指定なし。作業ツリーの
+# ルートで呼ぶため、相対パスはルート基準で、git が読む場所と同じ）を -L で見る。通常の運用で index はリンクにならない。
+# 開始時と終了時の両方で同じ形で確かめる（index_is_link）。パスを出力しない。
+if ! raw_index="$(g rev-parse --git-path index && printf x)"; then
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
+fi
+raw_index="${raw_index%x}"
+raw_index="${raw_index%$'\n'}"
+if [ -z "${raw_index}" ]; then
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
+fi
+index_is_link() {
+  [ -L "${raw_index}" ] || [ -L "${orig_index}" ]
+}
+if index_is_link; then
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
+fi
+# 固定時に index があったか（終了時に無ければ、登録が 0 件でも検査不能（2）。固定時の有無が実装と規約の一致の要）。
+# リンクは上で止めている。通常ファイルでない（FIFO・デバイス等）ものは cp が読み手の到着待ちで止まり得るため、複写せず検査不能（2）にする。
+# 確認と cp の間に差し替えられる窓は残る（窓を狭めるだけで、止まり得る。0 は返さない。監視付きの複写にはしない）。
+index_pinned=0
 if [ -e "${orig_index}" ]; then
+  if [ ! -f "${orig_index}" ]; then
+    echo "secret-scan: cannot snapshot the index; aborting" >&4
+    exit 2
+  fi
+  index_pinned=1
   if ! cp -- "${orig_index}" "${snap_index}" 2> /dev/null; then
     echo "secret-scan: cannot snapshot the index; aborting" >&4
     exit 2
@@ -633,19 +678,26 @@ resolve_head() {
   echo "secret-scan: cannot read HEAD; aborting" >&4
   exit 2
 }
-# parse_git_lock <オブジェクト指定> <複写先>: git のオブジェクトの skills-lock.json を大きさの確認後に複写して解析する。
-# 取得の失敗・非数値・上限超過は検査不能（2）。解析結果は parsed_names に入る。
+# parse_git_lock <head|index> <オブジェクト指定> <複写先>: git のオブジェクトの skills-lock.json を大きさの確認後に複写して解析する。
+# 第 1 引数は読み取り元（HEAD のコミット済みの一覧か、固定した index の一覧か）で、失敗の文言だけを切り替える
+# （固定の文言。オブジェクト指定・パスは出さない）。取得の失敗・非数値・上限超過は検査不能（2）。解析結果は parsed_names に入る。
 parse_git_lock() {
-  local size
+  local size side="$1" what
+  shift
+  case "${side}" in
+    head) what="committed" ;;
+    index) what="staged" ;;
+    *) lock_fail ;;
+  esac
   if ! size="$(g cat-file -s "$1" 2> /dev/null)" || [[ ! "${size}" =~ ^[0-9]+$ ]]; then
-    echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
+    echo "secret-scan: cannot read the ${what} skills-lock.json; aborting" >&4
     exit 2
   fi
   if [ "${size}" -gt "${lock_max_bytes}" ]; then
     lock_too_large
   fi
   if ! g cat-file blob "$1" > "$2" 2> /dev/null; then
-    echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
+    echo "secret-scan: cannot read the ${what} skills-lock.json; aborting" >&4
     exit 2
   fi
   parse_lock "$2"
@@ -716,7 +768,7 @@ load_index_lock() {
   idx_re='^[0-9a-f]{40}([0-9a-f]{24})?[[:space:]]0'
   idx_re="${idx_re}"$'\t''skills-lock\.json$'
   [[ "${rest}" =~ ${idx_re} ]] || lock_fail
-  parse_git_lock "${oid}" "${tmp_dir}/index-lock"
+  parse_git_lock index "${oid}" "${tmp_dir}/index-lock"
   local n
   for n in ${parsed_names[@]+"${parsed_names[@]}"}; do
     index_names="${index_names}${n} "
@@ -815,7 +867,7 @@ load_skill_names() {
     100644 | 100755) ;;
     *) lock_fail ;;
   esac
-  parse_git_lock "${head_id}:skills-lock.json" "${tmp_dir}/head-lock"
+  parse_git_lock head "${head_id}:skills-lock.json" "${tmp_dir}/head-lock"
   if [ "${work_present}" -eq 0 ]; then
     return 0
   fi
@@ -1023,13 +1075,28 @@ fi
 # 終了時も元の index を固定時と同じ方法で 1 回だけ複写し、2 つの一覧（ls-files -s と intent-to-add の印）を同じ複写から取る。
 # 元の index を一覧ごとに開くと、2 つの呼び出しの間の更新で 2 つの一覧が別の版を見て、どちらの版とも違う組で一致し得る（#6011）。
 # git は index を lock ファイルの rename で置き換えるため、cp は 1 つの版を読む。元の index が無いときは存在しない複写のパスを
-# 指し（空として扱う）、固定時にあった index が消えていれば一覧が違って 2 になる。複写の失敗は 2。
+# 指し（空として扱う）。固定時にあった index が終了時に無ければ、一覧の差とは別に有無の記録（index_pinned）で 2 にする
+# （登録 0 件の index は一覧が空のままのため）。複写の失敗は 2。固定したパスが終了時に通常ファイルでなく（FIFO・リンク等に）
+# 替わっていれば、複写せず 2。リンクは開始時も終了時も辿らず 2（解く前のパスで判定する）。
 after_index="${tmp_dir}/index-after"
+if index_is_link; then
+  # 走査中にリンクへ替わった（固定時はリンクでなかった）。辿らず 2。
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
+fi
 if [ -e "${orig_index}" ]; then
+  if [ ! -f "${orig_index}" ]; then
+    echo "secret-scan: cannot snapshot the index; aborting" >&4
+    exit 2
+  fi
   if ! cp -- "${orig_index}" "${after_index}" 2> /dev/null; then
     echo "secret-scan: cannot snapshot the index; aborting" >&4
     exit 2
   fi
+elif [ "${index_pinned}" -eq 1 ]; then
+  # 固定時にあった index が無い。登録 0 件の index は一覧が空のまま変わらないため、有無そのものを見て止める。
+  echo "secret-scan: the index changed during the scan; aborting" >&4
+  exit 2
 fi
 if ! GIT_INDEX_FILE="${after_index}" index_listing "${tmp_dir}/index-listing-after" 2> /dev/null; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4

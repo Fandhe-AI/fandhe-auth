@@ -97,6 +97,14 @@ if [ -n "${DELETE_INDEX_ON_ARG:-}" ] && [ ! -e "${DELETE_INDEX_FLAG:-/nonexisten
     if [ "${arg}" = "${DELETE_INDEX_ON_ARG}" ]; then
       : > "${DELETE_INDEX_FLAG}"
       rm -f -- "${DELETE_INDEX_PATH}"
+      # DELETE_INDEX_MKFIFO があれば、消した後の同じパスに FIFO を置く（走査中の通常ファイル以外への差し替えの再現用）
+      if [ -n "${DELETE_INDEX_MKFIFO:-}" ]; then
+        mkfifo "${DELETE_INDEX_PATH}"
+      fi
+      # DELETE_INDEX_SYMLINK_TO があれば、消した後の同じパスにそのパスへのリンクを置く（走査中のリンクへの付け替えの再現用）
+      if [ -n "${DELETE_INDEX_SYMLINK_TO:-}" ]; then
+        ln -s "${DELETE_INDEX_SYMLINK_TO}" "${DELETE_INDEX_PATH}"
+      fi
       break
     fi
   done
@@ -111,6 +119,19 @@ if [ -n "${MUTATE_INDEX_ON_ARG:-}" ] && [ ! -e "${MUTATE_INDEX_FLAG:-/nonexisten
       break
     fi
   done
+fi
+# FAIL_GIT_BOTH1・FAIL_GIT_BOTH2 の両方を引数に含む呼び出しだけを失敗させる（cat-file -s は通し cat-file blob だけを失敗させる再現用）
+if [ -n "${FAIL_GIT_BOTH1:-}" ]; then
+  both1=0
+  both2=0
+  for arg in "$@"; do
+    [ "${arg}" = "${FAIL_GIT_BOTH1}" ] && both1=1
+    [ "${arg}" = "${FAIL_GIT_BOTH2:-}" ] && both2=1
+  done
+  if [ "${both1}" -eq 1 ] && [ "${both2}" -eq 1 ]; then
+    echo "git shim: forced failure on a pair" >&2
+    exit 128
+  fi
 fi
 for arg in "$@"; do
   if [ "${arg}" = "${FAIL_GIT_ARG:-}" ]; then
@@ -1106,7 +1127,7 @@ else
   fail "secret-scan: both post-scan listings read the same fresh copy of the index" "git calls: $(cat "${work_dir}/gitindex")"
 fi
 
-# 固定時にあった元の index が走査中に消えたら、終了時の一覧が空になり固定時と違うため 2（#6011）
+# 固定時にあった元の index が走査中に消えたら、一覧の差か有無の記録（index_pinned）のどちらでも 2（#6011）
 new_repo; stage src/app.txt "hello"
 rm -f "${work_dir}/deleted"
 rc=0
@@ -1143,6 +1164,193 @@ if [ -e "${work_dir}/cp-failed" ] && [ "${rc}" -eq 2 ] \
 else
   fail "secret-scan: a failure to copy the index at the end of the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
+
+# 登録 0 件の index でも、固定時にあった index が終了時に無ければ 2（一覧の差だけで判定すると空のまま変わらず 0 になる。#6011）
+new_repo
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+if [ -f "${idx_path}" ] && [ -z "$(git ls-files)" ]; then
+  pass "secret-scan: precondition: the index exists and registers no file"
+else
+  fail "secret-scan: precondition: the index exists and registers no file"
+fi
+rm -f "${work_dir}/deleted"
+rc=0
+DELETE_INDEX_ON_ARG=-U0 DELETE_INDEX_PATH="${idx_path}" DELETE_INDEX_FLAG="${work_dir}/deleted" \
+  PATH="${shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/deleted" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index with no registrations removed during the scan is a scan failure (2)"
+else
+  fail "secret-scan: an index with no registrations removed during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# index が通常ファイルでない（FIFO）ときは、複写せず（cp が読み手の到着待ちで止まらない）2。開始時・走査中の差し替えの両方。
+# 退行すると止まり続けるため、背景で実行して 10 秒で打ち切り、打ち切りは失敗にする
+# run_bounded <コマンド...>: 出力は ${work_dir}/out に残し、終了コードを返す（打ち切りは 99）
+run_bounded() {
+  local pid i
+  "$@" > "${work_dir}/out" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 100; i++)); do
+    kill -0 "${pid}" 2> /dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "${pid}" 2> /dev/null; then
+    # 子プロセス（FIFO の open で止まった cp 等）も止める。pkill が無い環境では親だけ（残りは終了時に手で確認する）
+    if command -v pkill > /dev/null 2>&1; then
+      pkill -KILL -P "${pid}" 2> /dev/null || true
+    fi
+    kill -9 "${pid}" 2> /dev/null || true
+    wait "${pid}" 2> /dev/null || true
+    return 99
+  fi
+  wait "${pid}"
+}
+new_repo; stage src/app.txt "hello"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+rm -f -- "${idx_path}"
+mkfifo "${idx_path}"
+rc=0
+LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index that is a FIFO at the start is a scan failure (2) without blocking"
+else
+  fail "secret-scan: an index that is a FIFO at the start is a scan failure (2) without blocking" "got ${rc} (99 = timed out)" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}"
+
+# 開始時の index がシンボリックリンクなら、辿らず 2（実体に解いて固定すると、走査中のリンクの付け替えに気づけない）。
+# 以前は「実体が通常ファイルなら走査する（秘密値があれば 1）」を期待していた。リンクなら 2 へ強める向きの変更（AUDB-6 に当たらない）
+new_repo; stage leak.txt "x = ${token}"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+mv -- "${idx_path}" "${idx_path}.real"
+ln -s "${idx_path}.real" "${idx_path}"
+rc=0
+LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index that is a symlink (to a regular file) at the start is a scan failure (2)"
+else
+  fail "secret-scan: an index that is a symlink (to a regular file) at the start is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}" "${idx_path}.real"
+# サブディレクトリから起動しても同じ（解く前のパスは作業ツリーのルート基準で見る）
+new_repo; stage leak.txt "x = ${token}"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+mv -- "${idx_path}" "${idx_path}.real"
+ln -s "${idx_path}.real" "${idx_path}"
+mkdir -p sub
+rc=0
+(cd sub && LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}") || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index that is a symlink is a scan failure (2) from a subdirectory too"
+else
+  fail "secret-scan: an index that is a symlink is a scan failure (2) from a subdirectory too" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}" "${idx_path}.real"
+# 走査中にリンクへ替わった場合も 2（終了時の確認）
+new_repo; stage src/app.txt "hello"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+cp -- "${idx_path}" "${work_dir}/swap-target-index"
+rm -f "${work_dir}/deleted"
+rc=0
+DELETE_INDEX_SYMLINK_TO="${work_dir}/swap-target-index" DELETE_INDEX_ON_ARG=-U0 DELETE_INDEX_PATH="${idx_path}" DELETE_INDEX_FLAG="${work_dir}/deleted" \
+  PATH="${shim_dir}:${PATH}" LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ -e "${work_dir}/deleted" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index replaced by a symlink during the scan is a scan failure (2)"
+else
+  fail "secret-scan: an index replaced by a symlink during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}"
+new_repo; stage src/app.txt "hello"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+rm -f -- "${idx_path}"
+mkfifo "${idx_path}.fifo"
+ln -s "${idx_path}.fifo" "${idx_path}"
+rc=0
+LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index that is a symlink to a FIFO is a scan failure (2) without blocking"
+else
+  fail "secret-scan: an index that is a symlink to a FIFO is a scan failure (2) without blocking" "got ${rc} (99 = timed out)" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}" "${idx_path}.fifo"
+
+new_repo; stage src/app.txt "hello"
+idx_path="$(git rev-parse --path-format=absolute --git-path index)"
+rm -f "${work_dir}/deleted"
+rc=0
+DELETE_INDEX_MKFIFO=1 DELETE_INDEX_ON_ARG=-U0 DELETE_INDEX_PATH="${idx_path}" DELETE_INDEX_FLAG="${work_dir}/deleted" \
+  PATH="${shim_dir}:${PATH}" LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+if [ -e "${work_dir}/deleted" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index replaced by a FIFO during the scan is a scan failure (2) without blocking"
+else
+  fail "secret-scan: an index replaced by a FIFO during the scan is a scan failure (2) without blocking" "got ${rc} (99 = timed out)" "output: $(cat "${work_dir}/out")"
+fi
+rm -f -- "${idx_path}"
+
+# 外部コマンドは使う前に確かめ、欠けていれば 2（固定の診断文）。使うコマンドの一覧は検出器の確認ループと同じ。
+# 一覧にあるコマンドだけを置いた PATH で通常の走査が通る（= 一覧に漏れが無い。同じ checkout・リンク経由の起動で readlink・head・sleep も踏む）
+req_cmds="git readlink mktemp rm cp head wc sleep tr cmp"
+# make_minpath <ディレクトリ> [置かないコマンド]
+make_minpath() {
+  local c
+  mkdir -p "$1"
+  for c in ${req_cmds}; do
+    [ "${c}" = "${2:-}" ] || ln -s "$(command -v "${c}")" "$1/${c}"
+  done
+}
+same_checkout_repo "${lock_ok}"; stage src/app.txt "hello"
+ln -s scripts/hooks/secret-scan.sh sslink-min
+make_minpath "${work_dir}/minpath-all"
+rc=0
+PATH="${work_dir}/minpath-all" LC_ALL="${utf8_locale}" "${HOOK_BASH}" sslink-min > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: a PATH holding only the required commands passes a scan (the list is complete)"
+else
+  fail "secret-scan: a PATH holding only the required commands passes a scan (the list is complete)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+for missing_cmd in ${req_cmds}; do
+  make_minpath "${work_dir}/minpath-no-${missing_cmd}" "${missing_cmd}"
+  rc=0
+  PATH="${work_dir}/minpath-no-${missing_cmd}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" sslink-min > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: required command not found on PATH: ${missing_cmd}; aborting" "${work_dir}/out"; then
+    pass "secret-scan: a missing ${missing_cmd} is a scan failure (2) with a fixed message"
+  else
+    fail "secret-scan: a missing ${missing_cmd} is a scan failure (2) with a fixed message" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+done
+# --summary でも診断は出る（fd 4）
+rc=0
+PATH="${work_dir}/minpath-no-sleep" LC_ALL="${utf8_locale}" "${HOOK_BASH}" sslink-min --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: required command not found on PATH: sleep; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a missing command is reported under --summary"
+else
+  fail "secret-scan: a missing command is reported under --summary" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 一覧の読み取りの失敗は、どちらの一覧かで固定の文言を分ける（パス・オブジェクト指定は出さない）。
+# index 側は blob の oid だけを渡して cat-file を失敗させ、HEAD 側は `<コミット>:skills-lock.json` の形で失敗させる
+new_repo; stage_lock
+lock_oid="$(git hash-object skills-lock.json)"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG="${lock_oid}" SCAN_BIN="${det_ok}" check_scan "a failure to read the staged list exits 2" 2
+expect_out "a staged-list read failure reports the staged message" "secret-scan: cannot read the staged skills-lock.json; aborting"
+if [[ "${last_out}" == *committed* ]]; then
+  fail "secret-scan: a staged-list read failure does not mention the committed list" "output: ${last_out}"
+else
+  pass "secret-scan: a staged-list read failure does not mention the committed list"
+fi
+# cat-file blob（本文の取得）の失敗も、同じく側ごとの文言にする（大きさの取得 cat-file -s は通す）
+new_repo; stage_lock
+PATH="${shim_dir}:${PATH}" FAIL_GIT_BOTH1=blob FAIL_GIT_BOTH2="${lock_oid}" SCAN_BIN="${det_ok}" check_scan "a failure to fetch the staged list body exits 2" 2
+expect_out "a staged-list body failure reports the staged message" "secret-scan: cannot read the staged skills-lock.json; aborting"
+same_checkout_repo "${lock_ok}"; stage src/app.txt "hello"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_BOTH1=blob FAIL_GIT_BOTH2="$(git rev-parse HEAD):skills-lock.json" SCAN_BIN="${same_bin}" check_scan "a failure to fetch the committed list body exits 2" 2
+expect_out "a committed-list body failure reports the committed message" "secret-scan: cannot read the committed skills-lock.json; aborting"
+same_checkout_repo "${lock_ok}"; stage src/app.txt "hello"
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG="$(git rev-parse HEAD):skills-lock.json" SCAN_BIN="${same_bin}" check_scan "a failure to read the committed list exits 2" 2
+expect_out "a committed-list read failure reports the committed message" "secret-scan: cannot read the committed skills-lock.json; aborting"
 
 # 相対パスの GIT_INDEX_FILE は、git と同じく作業ツリーのルートを基準に読む（起動時の作業ディレクトリではない。#6011）。
 # サブディレクトリから GIT_INDEX_FILE=sub/alt で起動すると、git は <root>/sub/alt を読む。起動時の作業ディレクトリを基準にした
@@ -1270,8 +1478,9 @@ same_checkout_repo "${lock_ok}"
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=ls-tree SCAN_BIN="${same_bin}" check_scan "same checkout: a failure to look up the committed list exits 2" 2
 expect_out "same checkout: a failed lookup reports a fixed message" "secret-scan: cannot read the committed skills-lock.json; aborting"
-PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=cat-file SCAN_BIN="${same_bin}" check_scan "same checkout: a failure to read the committed list exits 2" 2
-expect_out "same checkout: a failed read reports a fixed message" "secret-scan: cannot read the committed skills-lock.json; aborting"
+# 固定した index の一覧が先に読まれるため、cat-file をすべて失敗させると最初に失敗するのは index 側（staged の文言。HEAD 側の文言は下の試験で確かめる）
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=cat-file SCAN_BIN="${same_bin}" check_scan "same checkout: a failure to read the lists exits 2" 2
+expect_out "same checkout: a failed read of the staged list reports a fixed message" "secret-scan: cannot read the staged skills-lock.json; aborting"
 
 new_repo; stage leaked.txt "$(printf '%s\n%s' "keep" "x = ${token}")"; git commit -q -m "chore: leak"
 printf '%s\n' "keep" > leaked.txt; git add leaked.txt
