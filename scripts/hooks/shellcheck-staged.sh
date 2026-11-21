@@ -14,7 +14,7 @@
 #   - 出力はバッチごとに一時ファイルへ受け、終わってからバッチの番号順に出す（並列の出力が混ざらない。順は引数の順ではない）。
 #   - 設定は .shellcheckrc（source-path・external-sources）に従う。ファイル名は引数のまま `--` の後ろで渡す。
 #
-# 目的は pre-commit の時間予算（.claude/rules/git-hooks.md。TASK-6）。macOS 標準の bash 3.2 でも動くように、
+# 目的は pre-commit の時間を縮めること（時間予算は .claude/rules/git-hooks.md。--all-files では予算に未達で、残りは #6056。TASK-6）。macOS 標準の bash 3.2 でも動くように、
 # mapfile・wait -n・空の配列の展開・`cmd || rc=$?` を使わない。
 # 回帰テストは scripts/hooks/test-hooks-1.sh（偽の shellcheck を PATH に置いて確かめる）。
 set -euo pipefail
@@ -188,6 +188,12 @@ run_batch() {
     args[n]="${files[idx]}"
     n=$((n + 1))
   done
+  # 出力先を先に作る。開けないと bash は shellcheck を起動せずに 1 を返し、「指摘あり」と取り違えるため、
+  # 検査不能（2）を書いて戻る。.rc の書き込みまで失敗したときは、親が「結果が無い」として 2 にする。
+  if ! : > "${tmp_dir}/$1.out"; then
+    echo 2 > "${tmp_dir}/$1.rc"
+    return 0
+  fi
   if shellcheck -- "${args[@]}" > "${tmp_dir}/$1.out" 2>&1; then
     rc=0
   else
