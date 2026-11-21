@@ -1402,7 +1402,18 @@ new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${det_bin}" check_scan "skills-lock.json exactly at the size limit is accepted" 0
 # 解析は小さな窓を足しながら読むため、窓（1024 バイト）をまたぐ長い文字列・数・空白・エスケープを受理・拒否することを確かめる（#6011）
 # rep_chars <文字> <個数>: 指定の文字を個数だけ並べる
+# 個数 0 は何も出さない（BSD の head は `-c 0` を "illegal byte count" で拒否する。macOS の CI で落ちた。#6011）。
+# 負の個数・数字以外は、計算の誤りを見逃さないよう診断を出して終了コード 2 で戻す（呼び出しは代入のため set -e で止まる）。
 rep_chars() {
+  case "$2" in
+    '' | *[!0-9]*)
+      echo "test-hooks: rep_chars: invalid count: $2" >&2
+      return 2
+      ;;
+  esac
+  if [ "$2" -eq 0 ]; then
+    return 0
+  fi
   head -c "$2" /dev/zero | tr '\000' "$1"
 }
 long_a="$(rep_chars a 3000)"
@@ -1451,7 +1462,10 @@ brute_sweep() {
       bad="${bad} ${n}"
     fi
   done
-  if [ -z "${bad}" ]; then
+  # 試行の回数（0〜70 の 71 位置）が欠けていないことを確かめる（ループの誤りで黙って件数が減るのを防ぐ）。
+  if [ "${cnt}" -ne 71 ]; then
+    fail "secret-scan: window boundary sweep: ${desc}" "expected 71 offsets, ran ${cnt}"
+  elif [ -z "${bad}" ]; then
     pass "secret-scan: window boundary sweep (${cnt} offsets): ${desc}"
   else
     fail "secret-scan: window boundary sweep: ${desc}" "expected exit ${want} at leading-space counts:${bad}"
@@ -1470,6 +1484,10 @@ brute_sweep "a short unicode escape is rejected" 2 str '\u12' '"'
 brute_sweep "a bare exponent is rejected" 2 raw '1e+' ''
 brute_sweep "a fraction without digits is rejected" 2 raw '1.' ''
 brute_sweep "a truncated literal is rejected" 2 raw 'tru' ''
+# 総当たり全体の回数（12 字句 × 71 位置）も確かめる（字句の行が黙って欠けるのを防ぐ）。
+if [ "${brute_total}" -ne 852 ]; then
+  fail "secret-scan: window boundary sweep total" "expected 852 detector runs, ran ${brute_total}"
+fi
 printf '# window boundary sweep: %s detector runs, %s seconds\n' "${brute_total}" "$((SECONDS - brute_start))"
 # 深さの上限: 配列で入れ子にした先の {"k":1} の深さが 31 なら受理、32 なら拒否（値は深さ + 1 で読むため。1 段の object の早道も同じ上限）
 depth_lock() {
