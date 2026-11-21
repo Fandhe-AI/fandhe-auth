@@ -1,10 +1,10 @@
 # TASK-715 暗号の基本処理の検査の記録
 
 `TASK-715`（親 Issue #5166）の記録の置き場。根拠は `LIB-21`（`DPOL-4`・`DPOL-47` を緩めない）。
-1/4（Issue #5167）の節だけを埋め、2/4〜4/4 は見出しだけ置く。
+1/4（Issue #5167）・2/4（Issue #5168）の節を埋め、3/4〜4/4 は見出しだけ置く。
 
 この文書は実行したコマンドと出力の事実だけを書く。判定・「確定」への変更・例外の承認は人が行う（`ACPT-7`）。
-「検証済み」とは書かない（確認は 2/4 の範囲）。判定の欄は空けてある。spec の本文は転記せず ID で引く。
+「検証済み」とは書かない（確認の材料集めは 2/4 の範囲で、判定は人が行う）。判定の欄は空けてある。spec の本文は転記せず ID で引く。
 
 ## 1/4 本体の直接の依存から暗号に関わる部品を洗い出す（#5167）
 
@@ -116,7 +116,91 @@
 
 ## 2/4 各部品が検証済みの既存実装かの確認（#5168）
 
-未記入。
+### 1. 目的と範囲
+
+- 受入基準は 3 点: (a) 一覧の各部品に出所の記録がある、(b) 出所や検証の記録を確かめられない部品が一覧になっている、(c) 「検証済みか」の判定は人が行う段として分けてある（`ACPT-7`）。根拠は `LIB-21`・`DPOL-4`・`DPOL-47`。
+- 本節は 1/4 の結果 2・3 の「検証済みかの確認」欄に対応する節。1/4 の節は記録した時点の事実として書き換えず、その欄も空のまま残す。
+- 「検証済み」の基準は spec に数で測れる形では定まっていない（`DPOL-47` は「保守されている既存 crate」と書く）。新しい crate を足すときの観点は K11（`D-2026-11-20-14` の (4)(d)）、版の選び方は `D-2026-11-21-2`。本節は基準を決めず、観点に沿った事実を集めるだけにとどめる。基準そのものは未定（人が決める）。
+- 本体の 4 crate の直接の依存は 0 件（1/4）。確かめる対象は「lock にあり本体の外から引かれる暗号の crate（参考）」と「5 区分の候補（未導入）」の 2 種類になる。
+- 出力中の絶対パスは `<repo>` に置き換え、registry cache のパスは書かない。
+
+### 2. 基準
+
+- 実行時の base: `origin/main` の `2d38a7e`。
+- spec の pin: `2f25a1f54ceefe8c2a10b2b9834364b3828bfa0d`（`docs/spec`。この時点の `origin/main` が指す値）。
+- ツールの版: cargo 1.100.0 (3acc79c0c 2026-11-05)、rustc 1.100.0 (0ef1bc386 2026-11-09)、cargo-audit 0.22.2、cargo-deny 0.19.8（1/4 の記録時は cargo・rustc 1.99.1）。
+- advisory DB: 取得後の commit `f291af9b1cc0d21dfcea1709d6b037963cef262b`（commit 日時 2026-11-20T13:47:55+01:00）。取得は 2026-11-21、1555 件を読み込んだ。
+
+### 3. 測り方
+
+1. 1/4 の測り方を再実行し、lock が動いていないことを確かめた（`cargo metadata --format-version 1 --locked`、`cargo tree --locked --workspace -e normal,build,dev --target all -i <名前>`、`grep -c '^name = "<名前>"' Cargo.lock`）。結果は 1/4 と同じ: 4 crate の `dependencies[]` は 0 件、lock は 69 crate、`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken` は 0 件、逆依存の根も 1/4 の結果 3 と同じ。
+2. `cargo metadata --format-version 1 --locked --offline` の `packages[]` から `source`・`license`・`repository`・`rust_version` を取った。
+3. `Cargo.lock` の `checksum` と、cargo の registry cache にある `<名前>-<版>.crate` の `sha256sum` を比べた。
+4. `cargo search <名前> --limit 1` で crates.io の最新の版を得た（読み取りのみ。安定版かの区別は検索結果からは付けていない）。
+5. `cargo audit --file Cargo.lock`（advisory DB を取得して実行。`DPOL-33`・`DPOL-34`）。
+6. `cargo deny` は流していない（`deny.toml` が未作成のため。`TASK-668`）。
+
+| コマンド | 終了コード | 出力の抜粋 |
+|---|---|---|
+| `cargo metadata --format-version 1 --locked --offline` | 0 | 対象 8 件の `source` はすべて crates.io の registry |
+| `sha256sum <名前>-<版>.crate`（8 件） | 0 | 8 件とも lock の `checksum` と一致 |
+| `cargo search <名前> --limit 1`（10 名） | 0 | 結果 1・2 の「最新」欄のとおり |
+| `cargo audit --file Cargo.lock` | 0 | `Loaded 1555 security advisories`、`Scanning Cargo.lock for vulnerabilities (69 crate dependencies)`。警告・脆弱性の出力なし（該当 0 件） |
+| 実行後の作業ツリーの状態確認（`status --porcelain`） | 0 | 出力なし（`Cargo.lock` に変更なし） |
+
+### 4. 結果 1: lock にある暗号の crate の出所（事実のみ）
+
+すべて `source` は crates.io の registry（`DPOL-25`）。`checksum` は lock と cache の `.crate` の sha256 が一致した。`cargo audit` の該当は 8 件とも 0 件。
+逆依存の根は 1/4 の結果 3 と同じ（`ring`・`untrusted`・`getrandom 0.2.17` は `hub-stub` 経由の各 harness、他は `trial-deps` の dev 依存 `proptest`）。
+
+| crate・版 | license | repository | `rust-version` | 最新（`cargo search`） | spec にある記録の ID | 検証済みかの判定 |
+|---|---|---|---|---|---|---|
+| `ring` 0.17.14 | Apache-2.0 AND ISC | `briansmith/ring` | 1.66.0 | 0.17.14（同版） | `DPOL-4`・`DPOL-46`・`PoC-10` | （空） |
+| `untrusted` 0.9.0 | ISC | `briansmith/untrusted` | 宣言なし | 0.9.0（同版） | `ring` の依存先。個別の記録は確かめていない | （空） |
+| `getrandom` 0.2.17 | MIT OR Apache-2.0 | `rust-random/getrandom` | 宣言なし | 0.4.3（0.2 系の最新かは未確認） | `ring` の依存先。個別の記録は確かめていない | （空） |
+| `getrandom` 0.4.3 | MIT OR Apache-2.0 | `rust-random/getrandom` | 1.85 | 0.4.3（同版） | 個別の記録は確かめていない | （空） |
+| `rand` 0.10.4 | MIT OR Apache-2.0 | `rust-random/rand` | 1.85 | 0.10.4（同版） | `DPOL-4` | （空） |
+| `rand_core` 0.10.1 | MIT OR Apache-2.0 | `rust-random/rand_core` | 1.85 | 0.10.1（同版） | 個別の記録は確かめていない | （空） |
+| `rand_xorshift` 0.5.0 | MIT OR Apache-2.0 | `rust-random/rngs` | 1.85 | 0.5.0（同版） | 個別の記録は確かめていない | （空） |
+| `chacha20` 0.10.2 | MIT OR Apache-2.0 | `RustCrypto/stream-ciphers` | 1.85 | 0.10.2（同版） | 個別の記録は確かめていない | （空） |
+
+- 「`rust-version` が MSRV 以下か」（K11 の観点）は、MSRV の値を本節では再掲しない（`Cargo.toml` の値と `D-2026-11-20-14` を見て人が比べる）。
+- `ring` を `hub-stub`（試験専用の stub）が引くことと `DPOL-4` の PoC の一覧との関係は、人が確かめる。
+
+### 5. 結果 2: 5 区分の候補（未導入）の出所
+
+候補はすべて lock に無く、lock での出所・checksum・advisory は測れない。
+
+| 区分 | 候補 | spec にある記録の ID | lock での出所 | 最新（`cargo search`） | 検証済みかの判定 |
+|---|---|---|---|---|---|
+| 署名 | `aws-lc-rs`・`ring`・`jsonwebtoken`（`aws_lc_rs` の feature のみ） | `DPOL-4`・`DPOL-10`・`DPOL-11`・`DPOL-17`・`PoC-5` | 測れない（`ring` は結果 1 の版が lock にある） | `aws-lc-rs` 1.19.0、`jsonwebtoken` 12.0.0 | （空） |
+| 検証 | 署名と同じ既存の crate | `DPOL-18`・`DPOL-21` | 測れない | 同上 | （空） |
+| 乱数 | 本体は持たず組込み先が実装（`Rng`） | `HOST-2`・`HOST-22` | 本体の依存は 0 件 | 該当なし | （空） |
+| WebAuthn | `webauthn-rs` | `PKEY-4`・`DPOL-10` | 測れない | 0.6.2（PoC で実測した 0.5.5 とは別の版。選定は別に行う） | （空） |
+| TOTP | 本番の crate は未定 | `AMTH-3`・`PoC-18`・`TASK-762` | 測れない | 該当なし | （空） |
+
+### 6. 結果 3: 出所や検証の記録を確かめられない部品（受入基準 (b)）
+
+- `aws-lc-rs`・`jsonwebtoken`・`webauthn-rs`: lock に無く、出所・checksum・advisory を測れない。
+- 署名の実装の選び（`aws-lc-rs` か `ring` か）: 未定。
+- TOTP の本番の crate: 未定（`TASK-762`）。
+- 乱数の実装（`Rng`）: 組込み先が実装し、本体からは見えない（`HOST-2`）。
+- 結果 1 の 8 crate それぞれの、外部の監査・形式検証・認証・保守状況の記録: 本節では調べていない。確認するなら〔資料〕として URL と確認日を添えて別に記録する。
+- `untrusted`・`getrandom`・`rand_core`・`rand_xorshift`・`chacha20` の spec 上の個別の記録: 確かめた範囲では見つからない（他の crate の依存先として現れるだけ）。
+- `getrandom` 0.2 系の最新の版: `cargo search` は最新の 1 件（0.4.3）しか返さず確かめていない。
+- `cargo deny` の結果（ライセンス・bans・sources）: 未実行（`deny.toml` 未作成。`TASK-668`）。
+- 「検証済み」の基準そのもの: 未定。
+
+### 7. 人が決めること
+
+- 「検証済み」の基準（K11 の観点で足りるか、監査の記録を要るとするか）と、各部品の判定。
+- 試験専用の crate の依存（`ring`・`rand` 系など）を検査の対象に含めるか。
+- advisory に該当が出た場合の扱い（`DPOL-35`。今回は該当 0 件）。
+- 署名・WebAuthn・TOTP の crate の選定（`TASK-762` 等）。
+
+### 8. 判定
+
+（人が記入する。空欄）
 
 ## 3/4 自作の暗号処理の走査の仕組み（#5169）
 
