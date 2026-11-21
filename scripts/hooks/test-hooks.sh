@@ -1400,6 +1400,33 @@ make_detector "edge" "x"
 padded_lock "${lock_max}" > "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
 new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${det_bin}" check_scan "skills-lock.json exactly at the size limit is accepted" 0
+# 解析は小さな窓を足しながら読むため、窓（1024 バイト）をまたぐ長い文字列・数・空白・エスケープを受理・拒否することを確かめる（#6011）
+# rep_chars <文字> <個数>: 指定の文字を個数だけ並べる
+rep_chars() {
+  head -c "$2" /dev/zero | tr '\000' "$1"
+}
+long_a="$(rep_chars a 3000)"
+long_d="$(rep_chars 1 200)"
+long_ws="$(rep_chars ' ' 3000)"
+window_lock="{${long_ws}\"version\":2,\"skills\":{\"vendored-a\":{\"k\":\"${long_a}\\n${long_a}\\u00e9${long_a}\",\"n\":-0.${long_d}e+${long_d},\"l\":[true,false,null,${long_d}]${long_ws}},${long_ws}\"vendored-b\":{}}}${long_ws}"
+make_detector "window" "${window_lock}"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_bin}" check_scan "skills-lock.json with strings, numbers and spaces longer than the read window is accepted" 0
+# 閉じていない長い文字列・不正なエスケープ・後ろに文字が続く長い数は、窓をまたいでも拒否する
+check_bad_lock "skills-lock.json with a long unterminated string is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":\"${long_a}}}}"
+check_bad_lock "skills-lock.json with an invalid escape after a long string is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":\"${long_a}\\x\"}}}"
+check_bad_lock "skills-lock.json with a short unicode escape after a long string is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":\"${long_a}\\u12\"}}}"
+check_bad_lock "skills-lock.json with a long number followed by a letter is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${long_d}x}}}"
+check_bad_lock "skills-lock.json with a long number followed by a bare exponent is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${long_d}e}}}"
+check_bad_lock "skills-lock.json with a trailing garbage after long spaces is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{}}}${long_ws}x"
+# 作業ツリー・index・HEAD の一覧が同じ内容なら解析結果を再利用するが、内容が違えば版ごとに解析する（除外は共通部分だけ）
+same_checkout_repo "${lock_ok}"
+printf '%s\n' '{"version":2,"skills":{"vendored-a":{"source":"example/skills"}}}' > skills-lock.json
+git add skills-lock.json
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+stage .agents/skills/vendored-b/sub/n.md "${dsn_line}"
+SCAN_BIN="${same_bin}" check_scan "an index list that differs from the working tree list is parsed separately and narrows the exclusions" 1 .agents/skills/vendored-b/sub/n.md
 # HEAD 側だけが上限を超える（同じ checkout。作業ツリーの一覧は小さい）
 same_checkout_repo "${lock_ok}"
 padded_lock $((lock_max + 1)) > skills-lock.json
