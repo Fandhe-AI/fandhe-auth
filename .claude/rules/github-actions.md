@@ -3,7 +3,7 @@ paths:
   - ".github/workflows/**"
 description: >
   .github/workflows/ を編集する際の方針。runner 選択（public = GitHub ホステッド、ai-review の
-  codex 専用 self-hosted runner は例外）、必須チェックと集約ジョブ ci-complete、発火条件・concurrency・
+  codex 専用 self-hosted runner は例外）、必須チェックと集約ジョブ ci-complete（組織の ruleset が固定して要求する間の `trust-root-secret-scan.yml` の例外を含む）、発火条件・concurrency・
   paths フィルタの書き方、ジョブ追加時のチェックリスト（外部ツールの版と SHA256 の規則と、Rust の toolchain の
   例外を含む）、キャッシュ方針（容量 10 GB・保存は main の push のみ・キー設計・効果の計測）、所要時間の計測方法と
   棚卸し結果を規定する。
@@ -23,6 +23,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 | --- | --- | --- | --- |
 | `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `deps audit frame (tool install only; ...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
+| `trust-root-secret-scan.yml` | `trusted secret scan (tracked files)` | `pull_request`（`branches` を一致しない名前に絞っているため、普通の PR では動かない。組織の ruleset の「Require workflows to pass」から呼ばれたときだけ動く） | `ubuntu-latest` |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
 
 `ci.yml` の Rust のジョブ（`build-test`・`lint`・`it-db-ci`）は、toolchain を MSRV の版で入れて流す（利用者の指示、2026-11-20）。
@@ -94,6 +95,16 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
 - `ci.yml` のジョブを required に個別登録せず、集約ジョブ `ci-complete` だけを登録する
   - `ci-complete` は `if: always()` で全ジョブの結果を検査する fail-closed のジョブ。success 以外は失敗とし、
     skipped は明示的に許容したもの（`pr-title` の push イベント時）に限る
+- **例外: `trust-root-secret-scan.yml` は `ci-complete` の `needs` に入れない**（集約の対象の外）。組織の ruleset が固定した commit SHA で要求する workflow は
+  `ci.yml` とは別の workflow で、ruleset が直接要求するため、`needs` で束ねられない。置き場所をこの repo にしたのは `D-2026-11-22-4`、仕組みは `D-2026-11-21-19`。
+  この例外は `D-2026-11-22-4`（置き場所を `fandhe-auth` に移す利用者の決定）に伴う記録で、承認済みの例外ではない
+  - 例外が成り立つのは、次の条件をすべて満たす間だけ
+    - 組織の ruleset（Require workflows to pass）が、この repo のこのファイルを commit SHA で固定して要求している
+    - その ruleset が active で、bypass が空である
+    - その ruleset の対象の条件に、この repo と既定ブランチ（`main`）が入っている
+  - 条件が崩れたときは、この workflow は必須の検査として働かない。ruleset の固定先が別の repo やファイルを指している間も同じ。
+    ruleset が今このファイルを固定しているとは、この規約では言わない（固定先の確認は組織の owner の操作で、マージ時点で別の repo を指していることがある）
+  - 適用範囲は `trust-root-secret-scan.yml` だけ。ほかの workflow に広げるのは、利用者の承認を待つ（承認は人が行う。ACPT-7）
 - ジョブ名（`name:`）・ジョブ ID・reusable workflow を呼ぶジョブ ID（`codex`）を変えると check 名が変わる。
   required に登録済みの名前を変える場合は ruleset 側も同時に更新する（更新漏れは「永久に pending」でマージ不能になる）
 
@@ -111,7 +122,16 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
 
     - reusable workflow のトップレベル concurrency は効かないため、呼び出し側（wrapper）で設定する
     - schedule・自動 PR 作成のように中断すると不整合が残るものは `cancel-in-progress: false`（`update-external.yml`）
-- `paths` / `paths-ignore` は、required check を含むワークフロー（`ci.yml`・`ai-review.yml`）に
+- **例外: `trust-root-secret-scan.yml` には concurrency を付けない**（利用者の選択、2026-11-22）
+  - 理由: concurrency の group は repo 全体で共有される。PR が書き換えられる `pull_request` の workflow は、同じ group の文字列を書ける。
+    `ci.yml` の `name:` を変えるだけでも、`github.workflow` を含む group は同じにできる。PR が足した workflow が同じ group で `cancel-in-progress` を指定すると、
+    信頼された検査の実行を取り消せる。番号を変えれば、他の PR の実行も取り消せる。待機中に取り消された実行を ruleset がどう判定するかは未試験。
+    concurrency が無ければ、group を通じた取り消しは無くなる。
+    書き込み権限を持つ人の UI・API からの取り消しや、`actions: write` を持つ workflow から cancel API を呼ぶ取り消しは残る。取り消された実行の判定は未試験
+  - 失うもの: 同じ PR に続けて push したとき、古い head の実行（数十秒）も最後まで走る。古い実行は head の SHA が違うので、最新の head の判定には使われない（未試験の読み）
+  - 適用範囲は `trust-root-secret-scan.yml` だけ。concurrency を付ける・この例外を広げるのは、利用者の承認を待つ（承認は人が行う。ACPT-7）。
+    付けるには、取り消しの判定を〔実機〕で試験する必要がある
+- `paths` / `paths-ignore` は、required check を含むワークフロー（`ci.yml`・`ai-review.yml`、および組織の ruleset から必須として呼ばれうる `trust-root-secret-scan.yml`）に
   **ワークフロー単位で付けない**。発火しないと check が報告されず pending のままマージ不能になる
   - ドキュメントのみの変更で重いジョブを省きたい場合は、ジョブ内の変更検知（`git diff` ベース等）で
     ジョブを skip し、`ci-complete` で「その条件での skipped」だけを許容する
@@ -123,10 +143,13 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
 ## ジョブ・ワークフローを追加するときのチェックリスト
 
 1. 新規ワークフローを作らず、まず既存の `ci.yml` へのジョブ追加で済むか検討する（同じトリガーなら `ci.yml` に集約）
+    - 例外: `trust-root-secret-scan.yml`。組織の ruleset が workflow のファイルを固定して要求する間は、`ci.yml` に入れられない（要求されうる）（「必須チェックと集約ジョブ」の例外）
 2. 追加したジョブを `ci-complete` の `needs` に必ず加える（漏れると未検査のままマージ可能になる）。条件付きで skip
     するジョブは、許容する条件を `ci-complete` の jq 式に明示する
+    - 例外: `trust-root-secret-scan.yml` は `needs` に入れない（「必須チェックと集約ジョブ」の例外の条件が満たされる間だけ）
 3. 処理は `make <target>` / `scripts/*.sh` を呼ぶ。CI 側に複数行のロジックを書かない
     （ツール導入のように CI 固有のステップは例外。secret-scan ジョブの走査対象の取得も例外で、理由は「秘密情報の検査ジョブ」の節を参照）
+    - 例外: `trust-root-secret-scan.yml` の検出器と走査対象の取得の step は workflow に置く。取得の前に検出器（`scripts/`）が無いため（「秘密情報の検査ジョブ」の節の `scripts/` に置かない理由と同じ趣旨）。取得後の走査は `scripts/secret-scan-ci.sh` を呼ぶ
 4. lefthook と同じ検査を同じ範囲で重複させない。役割分担は `.claude/rules/git-hooks.md`（重い・網羅的な検査は CI が正）
 5. 不要な `needs` で直列化しない。独立したジョブは並列に走らせ、クリティカルパス（最長ジョブ）を短くする
     - 逆に、セットアップ（checkout・ツール導入・キャッシュ復元）が実処理より長いほど細かく分けない
@@ -334,4 +357,9 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
   lock だけを先に main へ入れて名前を事前登録する運用は、後続の PR が足す本文を初回から走査対象外にするため案内しない
 - 取得は匿名で `GITHUB_TOKEN` を使わないため、ジョブの権限は `permissions: {}` にする
 - 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
-- 既知の限界: pull_request の workflow 定義自体は PR が書き換えられる（#5985 で追跡。人の担当）
+- 既知の限界: `ci.yml` のジョブの定義（この節の `secret scan (tracked files)`・`ci-complete`）は、今も PR が書き換えられる（`D-2026-11-21-18`。#5985 で追跡。人の担当）
+  - これを補うのが、組織の ruleset が固定した SHA で要求する `trust-root-secret-scan.yml`（`D-2026-11-21-19`・`D-2026-11-22-4`）。
+    補えるのは「必須チェックと集約ジョブ」の節の例外の条件が満たされている間だけ。条件が崩れている間は補えない
+  - 検出器と除外の一覧（`skills-lock.json`）は、ruleset が固定した commit から取る。新しい skill の文書は、固定の SHA を上げるまで走査される（安全側）
+  - 固定の SHA の上げ方（確かめる事項と手順）は `trust-root-secret-scan.yml` のヘッダのコメントが正。ここに写さない
+  - fork からの PR での動きは未試験
