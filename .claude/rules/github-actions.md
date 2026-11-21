@@ -23,7 +23,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 | --- | --- | --- | --- |
 | `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `deps audit frame (tool install only; ...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
-| `trust-root-secret-scan.yml` | `trusted secret scan (tracked files)` | `pull_request`（`branches` を一致しない名前に絞っているため、普通の PR では動かない。組織の ruleset の「Require workflows to pass」から呼ばれたときだけ動く） | `ubuntu-latest` |
+| `trust-root-secret-scan.yml` | `trusted secret scan (tracked files)` | `pull_request`（`branches` を一致しにくい名前に絞っており、通常は発火しない。組織の ruleset の「Require workflows to pass」から呼ばれたときに動く。発火の前提は「必須チェックと集約ジョブ」の節の例外を参照） | `ubuntu-latest` |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
 
 `ci.yml` の Rust のジョブ（`build-test`・`lint`・`it-db-ci`）は、toolchain を MSRV の版で入れて流す（利用者の指示、2026-11-20）。
@@ -105,6 +105,15 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - 条件が崩れたときは、この workflow は必須の検査として働かない。ruleset の固定先が別の repo やファイルを指している間も同じ。
     ruleset が今このファイルを固定しているとは、この規約では言わない（固定先の確認は組織の owner の操作で、マージ時点で別の repo を指していることがある）
   - 適用範囲は `trust-root-secret-scan.yml` だけ。ほかの workflow に広げるのは、利用者の承認を待つ（承認は人が行う。ACPT-7）
+  - 普通の `pull_request` で発火しないのは前提つき（以下は未試験の読み）。`on.pull_request.branches` の値（`trust-root-required-only-never-matches`）は有効なブランチ名で、
+    本ファイルが普通に発火する経路には、少なくとも次がある（例）
+    - その名前のブランチを作り、そこを base にした PR を開く。抑えるには、その名前のブランチを作らない・base にしないことが前提になる
+    - 本ファイルの `on:` を書き換える PR（`branches` の削除・trigger の追加を含む。base は `main`）。`pull_request` は PR 側の版の workflow で評価されると読めるため、書き換えた版が発火しうる
+  - 普通の発火の実行は、同じ job 名 `trusted secret scan (tracked files)` で、PR の版の検出器を使うと読める。
+    それが ruleset の必須の判定に数えられないかは未試験。同じ名前の check が PR 上に並ぶので、人が取り違えうる
+  - 同じ名前の check は、本ファイルの発火とは別に、PR が足すほかの workflow の job からも出せる（未試験の読み。経路の数え方は上の例とは別）
+  - ruleset から呼ばれた実行かどうかを、PR が書けない情報で見分けられるかは未確認（未試験）。ログの中身（`workflow sha:` の行など、workflow 自身が出す行）は根拠にしない。
+    ruleset の判定が同じ名前の check を数えないかは、〔実機〕で試験する必要がある（#5985 で追跡）
 - ジョブ名（`name:`）・ジョブ ID・reusable workflow を呼ぶジョブ ID（`codex`）を変えると check 名が変わる。
   required に登録済みの名前を変える場合は ruleset 側も同時に更新する（更新漏れは「永久に pending」でマージ不能になる）
 
