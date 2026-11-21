@@ -25,7 +25,7 @@ pub mod hub_stub;
 pub mod instance;
 pub mod record;
 
-pub use db::{DbFaultError, DbFaultProxy, UpstreamStall};
+pub use db::{DbFaultError, DbFaultProxy, StallExit, UpstreamStall};
 pub use external_store::{ExternalStoreFaultError, ExternalStoreFaultProxy};
 pub use hub_stub::{
     HubStubCallError, HubStubFaultError, HubStubFaultInjector, HubStubFinishFailure,

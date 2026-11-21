@@ -9,7 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fandhe_auth_it_harness::fault::{
-    DbFaultProxy, ExternalStoreFaultError, ExternalStoreFaultProxy, FaultRecordError, UpstreamStall,
+    DbFaultProxy, ExternalStoreFaultError, ExternalStoreFaultProxy, FaultRecordError, StallExit,
+    UpstreamStall,
 };
 use fandhe_auth_it_harness::record::UtcTimestamp;
 use fandhe_auth_it_harness::{EndpointHandle, FaultRecord, FaultTimeline};
@@ -231,8 +232,8 @@ fn conn_accepted_during_block_is_cut_and_later_conn_reaches_upstream() {
 /// 集計値の限界: 計数は転送器全体の合計で、最後の接続だけのものではない。`storm.join()` が待つのは接続側のスレッドで、
 /// 転送器の accept のスレッドが storm の接続を処理し終えたことは保証しない。上流への試行は connect の直前に数えるので
 /// `upstream attempts` は接続中の接続も含み、成否は `accepted`（成功）・`refused`（失敗・切断）にだけ現れる。
-/// 試行の差があるのに `accepted`・`refused` の差が 0 なら、接続の結果がまだ出ていない接続がある（手掛かりにとどめる。
-/// 差がすべて 0 でも「カーネルの段で切れた」とは断定できない）。
+/// 3 つの計数は別々の時点に読むため、同一時点の集計ではない（非同期に採取した参考値）。試行の差と結果の差のずれから
+/// 処理中の接続があるとは断定できず、手掛かりにとどめる（差がすべて 0 でも「カーネルの段で切れた」とは断定できない）。
 #[test]
 fn release_returns_in_time_under_reconnect_storm() {
     let up = echo_upstream();
@@ -290,7 +291,7 @@ fn release_returns_in_time_under_reconnect_storm() {
             last = now;
         }
         panic!(
-            "final {stage} after release failed: {what}; accepted +{}, refused +{}, upstream attempts +{} (aggregate counters; see the test doc for limits)",
+            "final {stage} after release failed: {what}; accepted +{}, refused +{}, upstream attempts +{} (reference values sampled separately, not one atomic snapshot; see the test doc for limits)",
             last.0.saturating_sub(before.0),
             last.1.saturating_sub(before.1),
             last.2.saturating_sub(before.2)
@@ -427,6 +428,16 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     p.release_block(&mut tl).unwrap();
     let released_in = started.elapsed();
     stall.release();
+    // 停止点が期限切れで抜けていないこと。期限切れなら遮断中の即時切断を見たことにならない（ORST-17・AUDB-6）。
+    assert!(
+        wait_until(|| stall.exit_reason().is_some()),
+        "accept thread never left the stall point"
+    );
+    assert_eq!(
+        stall.exit_reason(),
+        Some(StallExit::Released),
+        "stall point expired before the explicit release"
+    );
     assert!(
         blocked_in < Duration::from_secs(1),
         "block waited for the stalled accept: {blocked_in:?}"
@@ -479,10 +490,14 @@ fn stop_returns_while_accept_is_held_at_stall_point() {
     assert!(stall.wait_entered(Duration::from_secs(5)));
     let started = Instant::now();
     p.stop();
+    let elapsed = started.elapsed();
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        elapsed < Duration::from_secs(2),
         "stop waited for the stall point"
     );
+    // 期限切れではなく、停止の通知で待ちが解けたこと。
+    assert!(wait_until(|| stall.exit_reason().is_some()));
+    assert_eq!(stall.exit_reason(), Some(StallExit::Stopped));
 }
 
 /// 接続の試行が続いていても `block()` は期限の中で戻る（Cursor Bugbot の指摘の回帰防止。

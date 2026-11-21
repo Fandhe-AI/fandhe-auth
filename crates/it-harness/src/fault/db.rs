@@ -134,6 +134,20 @@ struct StallInner {
 struct StallState {
     entered: u64,
     released: bool,
+    /// 直近に停止点を離れた理由。試験が「期限切れで抜けたのを合格にしない」ために見る（ORST-17）。
+    last_exit: Option<StallExit>,
+}
+
+/// 停止点を離れた理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StallExit {
+    /// 試験が [`UpstreamStall::release`] で明示に解いた。
+    Released,
+    /// 転送器の停止の通知で解けた。
+    Stopped,
+    /// 上限（[`UpstreamStall::MAX_HOLD`]）の期限切れで解けた。
+    Expired,
 }
 
 impl fmt::Debug for UpstreamStall {
@@ -175,6 +189,17 @@ impl UpstreamStall {
         true
     }
 
+    /// 直近に停止点を離れた理由。まだ離れていなければ `None`。
+    /// 遮断・解除の試験は `Released`（明示の解除まで保持された）、停止の試験は `Stopped` を確かめる。
+    /// `Expired` は期限切れで試験の前提が崩れたことを表し、合格にしない。
+    pub fn exit_reason(&self) -> Option<StallExit> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last_exit
+    }
+
     /// 停止点で待つ接続を先へ進める。以後に入る接続も待たない。
     pub fn release(&self) {
         let mut g = self
@@ -208,6 +233,13 @@ impl UpstreamStall {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
+        g.last_exit = Some(if g.released {
+            StallExit::Released
+        } else if stop.load(Ordering::SeqCst) {
+            StallExit::Stopped
+        } else {
+            StallExit::Expired
+        });
     }
 }
 
@@ -224,7 +256,7 @@ struct Shared {
     block_gen: AtomicU64,
     accepted: AtomicU64,
     refused: AtomicU64,
-    /// 上流への connect を始めようとした回数（診断用。接続処理の直前に加算するので到達の確認には使わず、成否も表さない）。
+    /// 上流への connect を始めようとした回数（診断用。`connect_timeout` の直前（停止点を通過した後）に加算するので到達の確認には使わず、成否も表さない）。
     upstream_attempts: AtomicU64,
     /// 両側を切るための複製（接続 ID と組）。両方向の転送が終わった接続の分は外す。
     /// accept・遮断の状態の確認・ここへの登録は、このロックの下で一度に行う。`block` の状態変更と切断も
@@ -427,7 +459,7 @@ impl DbFaultProxy {
         self.shared.accepted.load(Ordering::SeqCst)
     }
 
-    /// 上流への connect の試行回数（診断用）。接続処理の直前に加算するので、停止点への到達の確認には使えない
+    /// 上流への connect の試行回数（診断用）。`connect_timeout` の直前（停止点を通過した後）に加算するので、停止点への到達の確認には使えない
     /// （到達は [`UpstreamStall::wait_entered`] で待つ）。成否は表さない。
     pub fn upstream_attempt_count(&self) -> u64 {
         self.shared.upstream_attempts.load(Ordering::SeqCst)
@@ -722,7 +754,6 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
         return None;
     };
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
     if let Some(stall) = &shared.stall {
         stall.hold(&shared.stop);
         // 停止の通知で戻った場合は、上流へつながず閉じる（`stop()`・`Drop` を `connect_timeout` で待たせない）。
@@ -732,6 +763,8 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
             return None;
         }
     }
+    // 停止判定を通過し、実際に接続を試みる直前で数える（停止点で閉じた接続は数えない）。
+    shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
     let Ok(up) = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT) else {
         shared.sever_conn(id);
         refuse(&accepted.client, shared);
