@@ -451,6 +451,58 @@ fn clock_factory_panic_propagates_unchanged() {
 /// 生成関数が panic で投げる目印の値（文言を持たない）。
 struct FactoryPanic;
 
+/// 破棄で panic する時計が投げる目印の値（文言を持たない）。
+struct ClockDropPanic;
+
+/// 破棄で panic する時計。時計は `run_target` に渡した後、呼び出し側のスレッドで破棄される。
+struct PanicOnDropClock(StepClock);
+
+impl MonotonicClock for PanicOnDropClock {
+    fn now_ns(&self) -> Result<u64, MeterError> {
+        self.0.now_ns()
+    }
+}
+
+impl Drop for PanicOnDropClock {
+    fn drop(&mut self) {
+        std::panic::panic_any(ClockDropPanic);
+    }
+}
+
+/// 作った時計の破棄の panic も捕捉せず、誤り（`WorkerPanicked` 等）に変わらずにそのまま伝わる。
+/// 並行数 1 と 2 以上の両方で確かめる（ワーカーの中で破棄されないこと）。
+#[test]
+fn clock_drop_panic_propagates_unchanged() {
+    for concurrency in [1_u64, 3] {
+        let plan = StagePlan::new(
+            vec![sc(concurrency, 6, 1, 2)],
+            MetricKey::P99Ns,
+            limits(),
+            vocab(),
+        )
+        .unwrap();
+        let clocks = AtomicU64::new(0);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_stages(
+                || {
+                    clocks.fetch_add(1, Ordering::SeqCst);
+                    Ok(Box::new(PanicOnDropClock(StepClock {
+                        now: AtomicU64::new(0),
+                        step: 10,
+                    })) as Box<dyn MonotonicClock>)
+                },
+                &spec(),
+                &plan,
+                || CallResult::Ok,
+            )
+        }));
+        let payload = caught.unwrap_err();
+        assert!(payload.downcast_ref::<ClockDropPanic>().is_some());
+        // 1 回目の時計の破棄で止まり、2 回目の生成をしない。
+        assert_eq!(clocks.load(Ordering::SeqCst), 1);
+    }
+}
+
 #[test]
 fn staged_run_debug_hides_target_name() {
     // SECR-23・SECR-26: 対象名に目印を渡し、Debug の出力に含まれないことを確かめる。

@@ -8,7 +8,8 @@
 //! 呼び出し先: 対象の呼び出し（`target`）と集計（`aggregate`）だけ。時計は回ごとに作る関数（`Result` を返す）で受け、
 //! 環境変数・設定ファイル・壁時計を読まない（DPOL-32）。
 //! 時計の生成の誤りは段階と回の番号付きの [`StageError::Clock`] で返す。生成関数の panic は捕捉せず、そのまま伝わる
-//! （生成関数のために panic hook を差し替え・抑止しない。境界は [`run_stages`] の doc。仮置きで人の確認待ち。`docs/harness/load.md`）。
+//! （生成関数のために panic hook を差し替え・抑止しない。境界は [`run_stages`] の doc）。
+//! 誤りの型を `MeterError` に固定したことと variant 名は仮置きで、人の確認待ち（`docs/harness/load.md`）。
 //!
 //! 段階と回は順に回し、重ならない（`run_target` は自分のワーカーを join して戻る）。
 //! 誤り（fail-closed・仮置き）: 最初の誤りで以後の回・段階を始めず、終わった段階の結果も返さない
