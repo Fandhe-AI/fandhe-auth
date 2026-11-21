@@ -116,7 +116,7 @@ fn interval_outside_vocabulary_is_rejected_before_any_run() {
     let r = run_stages(
         || {
             clocks.fetch_add(1, Ordering::SeqCst);
-            step_clock(10)
+            Ok(step_clock(10))
         },
         &spec(),
         &plan,
@@ -134,7 +134,7 @@ fn interval_outside_vocabulary_is_rejected_before_any_run() {
 fn results_are_kept_per_stage() {
     let cfgs = vec![sc(1, 5, 1, 2), sc(2, 6, 0, 3), sc(4, 8, 2, 1)];
     let plan = StagePlan::new(cfgs.clone(), MetricKey::P99Ns, limits(), vocab()).unwrap();
-    let r = run_stages(|| step_clock(10), &spec(), &plan, || CallResult::Ok).unwrap();
+    let r = run_stages(|| Ok(step_clock(10)), &spec(), &plan, || CallResult::Ok).unwrap();
     assert_eq!(r.stages().len(), 3);
     assert_eq!(r.target().as_str(), "route_a");
     for (i, st) in r.stages().iter().enumerate() {
@@ -180,7 +180,7 @@ fn stages_and_runs_do_not_overlap() {
             {
                 violations.fetch_add(1, Ordering::SeqCst);
             }
-            step_clock(10)
+            Ok(step_clock(10))
         },
         &spec(),
         &plan,
@@ -215,9 +215,9 @@ fn error_stops_and_discards_finished_stages() {
             let n = clock_calls.fetch_add(1, Ordering::SeqCst) + 1;
             // 3 番目（2 段階目の 1 回目）だけ壊れた時計。
             if n == 3 {
-                Box::new(BrokenClock) as Box<dyn MonotonicClock>
+                Ok(Box::new(BrokenClock) as Box<dyn MonotonicClock>)
             } else {
-                step_clock(10)
+                Ok(step_clock(10))
             }
         },
         &spec(),
@@ -247,7 +247,7 @@ fn worst_run_picks_largest_and_smallest_on_tie() {
     let r = run_stages(
         || {
             let i = usize::try_from(n.fetch_add(1, Ordering::SeqCst)).unwrap();
-            step_clock(steps[i])
+            Ok(step_clock(steps[i]))
         },
         &spec(),
         &plan,
@@ -260,7 +260,13 @@ fn worst_run_picks_largest_and_smallest_on_tie() {
 #[test]
 fn all_timeouts_give_none_and_none_tokens() {
     let plan = StagePlan::new(vec![sc(1, 3, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
-    let r = run_stages(|| step_clock(10), &spec(), &plan, || CallResult::TimedOut).unwrap();
+    let r = run_stages(
+        || Ok(step_clock(10)),
+        &spec(),
+        &plan,
+        || CallResult::TimedOut,
+    )
+    .unwrap();
     assert_eq!(r.stages()[0].worst_run(), None);
     let text = r.to_string();
     assert!(
@@ -276,7 +282,7 @@ fn display_lines_in_order() {
     let plan = StagePlan::new(vec![sc(1, 4, 0, 1)], MetricKey::MaxNs, limits(), vocab()).unwrap();
     let seq = AtomicU64::new(0);
     let r = run_stages(
-        || step_clock(10),
+        || Ok(step_clock(10)),
         &spec(),
         &plan,
         || match seq.fetch_add(1, Ordering::SeqCst) {
@@ -308,6 +314,85 @@ fn error_display_is_fixed_english() {
     };
     assert_eq!(e.to_string(), "target error in stage");
     assert_eq!(StageError::InvalidPlan.to_string(), "invalid stage plan");
+    let c = StageError::Clock {
+        stage: 7,
+        run: 9,
+        error: MeterError::ClockOverflow,
+    };
+    assert_eq!(c.to_string(), "clock error in stage");
+    let p = StageError::ClockPanicked { stage: 7, run: 9 };
+    assert_eq!(p.to_string(), "clock panicked in stage");
+}
+
+#[test]
+fn clock_factory_error_is_numbered_and_stops() {
+    let plan = StagePlan::new(
+        vec![sc(1, 3, 0, 2), sc(1, 3, 0, 2)],
+        MetricKey::P99Ns,
+        limits(),
+        vocab(),
+    )
+    .unwrap();
+    let clocks = AtomicU64::new(0);
+    let calls = AtomicU64::new(0);
+    let r = run_stages(
+        || {
+            // 4 回目（段階 2 の 2 回目）の生成だけが誤りを返す。
+            if clocks.fetch_add(1, Ordering::SeqCst) + 1 == 4 {
+                Err(MeterError::ClockOverflow)
+            } else {
+                Ok(step_clock(10))
+            }
+        },
+        &spec(),
+        &plan,
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            CallResult::Ok
+        },
+    );
+    let e = r.unwrap_err();
+    assert_eq!(
+        e,
+        StageError::Clock {
+            stage: 2,
+            run: 2,
+            error: MeterError::ClockOverflow
+        }
+    );
+    assert_eq!(e.to_string(), "clock error in stage");
+    assert_eq!(clocks.load(Ordering::SeqCst), 4);
+    assert_eq!(calls.load(Ordering::SeqCst), 9);
+}
+
+#[test]
+fn clock_factory_panic_is_caught_and_numbered() {
+    // SECR-23: 生成の panic は捕捉して番号付きの誤りにし、文言（目印）を誤りに載せない。
+    let canary = "canary_clock_panic_zq";
+    let plan = StagePlan::new(vec![sc(1, 3, 0, 3)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let clocks = AtomicU64::new(0);
+    let calls = AtomicU64::new(0);
+    let r = run_stages(
+        || {
+            if clocks.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                panic!("{}", canary);
+            }
+            Ok(step_clock(10))
+        },
+        &spec(),
+        &plan,
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            CallResult::Ok
+        },
+    );
+    let e = r.unwrap_err();
+    assert_eq!(e, StageError::ClockPanicked { stage: 1, run: 2 });
+    assert!(!format!("{e:?}").contains(canary));
+    assert!(!e.to_string().contains(canary));
+    assert_eq!(e.to_string(), "clock panicked in stage");
+    assert_eq!(clocks.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
 #[test]
@@ -319,10 +404,15 @@ fn staged_run_debug_hides_target_name() {
         IntervalName::new("op").unwrap(),
     );
     let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
-    let run = run_stages(|| step_clock(10), &spec, &plan, || CallResult::Ok).unwrap();
+    let run = run_stages(|| Ok(step_clock(10)), &spec, &plan, || CallResult::Ok).unwrap();
     let out = format!("{run:?}");
     assert!(!out.contains(canary));
     assert_eq!(out, "StagedRun(..)");
+    // 目印が結果の対象名まで届いていることを確かめた上で、その Debug が名前を出さないことを固定する。
+    assert_eq!(run.target().as_str(), canary);
+    let target_out = format!("{:?}", run.target());
+    assert!(!target_out.contains(canary));
+    assert_eq!(target_out, "TargetName(..)");
 }
 
 #[test]
@@ -336,7 +426,7 @@ fn plan_and_result_debug_hide_interval_names() {
     let plan_out = format!("{plan:?}");
     assert!(!plan_out.contains(canary));
     assert_eq!(plan_out, "StagePlan(..)");
-    let run = run_stages(|| step_clock(10), &spec, &plan, || CallResult::Ok).unwrap();
+    let run = run_stages(|| Ok(step_clock(10)), &spec, &plan, || CallResult::Ok).unwrap();
     let res_out = format!("{:?}", run.stages()[0]);
     assert!(!res_out.contains(canary));
     assert_eq!(res_out, "StageResult(..)");
@@ -366,7 +456,7 @@ fn multi_stage_display_numbers_runs_per_stage_and_worst_run_stays_in_stage() {
     let r = run_stages(
         || {
             let i = usize::try_from(n.fetch_add(1, Ordering::SeqCst)).unwrap();
-            step_clock(steps[i])
+            Ok(step_clock(steps[i]))
         },
         &spec(),
         &plan,
@@ -427,7 +517,7 @@ fn concurrency_one_stage_never_overlaps() {
         max: AtomicU64::new(0),
     };
     let r = run_stages(
-        || step_clock(10),
+        || Ok(step_clock(10)),
         &spec(),
         &plan,
         || {
@@ -446,9 +536,11 @@ fn multi_worker_stages_really_overlap() {
     // 並行数 4・3 の段階では、各回の最初の「並行数」件の呼び出しが待ち合わせて全員そろうまで抜けない。
     // 全員が実際に同時に実行中になった場合だけ待ち合わせが成立する（sleep に頼らず重なりを確定させる）。
     // 直列の回帰では待ち合わせが成立せず、上限の時間（失敗の検出だけに使う。成功の経路は時間に依らない）で打ち切る。
+    // 回の通し番号 k から段階の添字への対応（各段階 2 回ずつ）。
+    let run_stage = [0_usize, 0, 1, 1];
     let parties = [4_u64, 3];
     let plan = StagePlan::new(
-        vec![sc(4, 8, 0, 1), sc(3, 6, 0, 1)],
+        vec![sc(4, 8, 0, 2), sc(3, 6, 0, 2)],
         MetricKey::P99Ns,
         limits(),
         vocab(),
@@ -461,16 +553,16 @@ fn multi_worker_stages_really_overlap() {
         in_flight: AtomicU64::new(0),
         max: AtomicU64::new(0),
     };
-    // 対象呼び出し側で観測した最大同時実行数を段階ごとに持つ（各段階は 1 回だけ回す）。
+    // 対象呼び出し側で観測した最大同時実行数を段階ごとに持つ（各段階は 2 回ずつ回す）。
     let per_stage_max = [AtomicU64::new(0), AtomicU64::new(0)];
     let current_stage = AtomicU64::new(0);
     let runs_started = AtomicU64::new(0);
     let r = run_stages(
         || {
             let k = usize::try_from(runs_started.fetch_add(1, Ordering::SeqCst)).unwrap();
-            *gate.0.lock().unwrap() = (0, parties[k]);
-            current_stage.store(u64::try_from(k).unwrap(), Ordering::SeqCst);
-            step_clock(10)
+            *gate.0.lock().unwrap() = (0, parties[run_stage[k]]);
+            current_stage.store(u64::try_from(run_stage[k]).unwrap(), Ordering::SeqCst);
+            Ok(step_clock(10))
         },
         &spec(),
         &plan,
@@ -504,6 +596,7 @@ fn multi_worker_stages_really_overlap() {
     )
     .unwrap();
     assert!(!timed_out.load(Ordering::SeqCst));
+    assert_eq!(runs_started.load(Ordering::SeqCst), 4);
     assert_eq!(ov.max.load(Ordering::SeqCst), 4);
     // 段階ごとの対象呼び出し側の最大同時実行数（全体の最大だけでは第 2 段階の上限を検証できない）。
     let target_side: Vec<u64> = per_stage_max
@@ -511,10 +604,10 @@ fn multi_worker_stages_really_overlap() {
         .map(|m| m.load(Ordering::SeqCst))
         .collect();
     assert_eq!(target_side, [4, 3]);
-    let observed: Vec<u64> = r
+    let observed: Vec<Vec<u64>> = r
         .stages()
         .iter()
-        .map(|s| s.runs()[0].max_in_flight)
+        .map(|s| s.runs().iter().map(|x| x.max_in_flight).collect())
         .collect();
-    assert_eq!(observed, [4, 3]);
+    assert_eq!(observed, [[4, 4], [3, 3]]);
 }

@@ -5,8 +5,10 @@
 //! [`StagedRun`] の `Display` は `docs/harness/load.md` の 3・4 の `stage`・`run`・`failure_kind`・`metric`・`failure_metric`・
 //! `worst_run` の行を段階ごとに出す。
 //! 呼び出し元: 結合試験のハーネスの上で構成要素へ負荷をかける試験（試験ビルド）だけ。
-//! 呼び出し先: 対象の呼び出し（`target`）と集計（`aggregate`）だけ。時計は回ごとに作る関数で受け、
+//! 呼び出し先: 対象の呼び出し（`target`）と集計（`aggregate`）だけ。時計は回ごとに作る関数（`Result` を返す）で受け、
 //! 環境変数・設定ファイル・壁時計を読まない（DPOL-32）。
+//! 時計の生成の誤り・panic は段階と回の番号付きの [`StageError`] で返す（panic は捕捉し、文言を出さない。
+//! 仮置きで人の確認待ち。`docs/harness/load.md`）。
 //!
 //! 段階と回は順に回し、重ならない（`run_target` は自分のワーカーを join して戻る）。
 //! 誤り（fail-closed・仮置き）: 最初の誤りで以後の回・段階を始めず、終わった段階の結果も返さない
@@ -19,10 +21,11 @@
 //! （A-2026-10-28-9・ACPT-7）。
 
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::aggregate::{AggregateError, IntervalStats, MetricKey, RunSummary, worst_run};
-use crate::generate::LoadConfig;
-use crate::meter::{IntervalName, MonotonicClock};
+use crate::generate::{LoadConfig, QuietGuard, install_quiet_hook};
+use crate::meter::{IntervalName, MeterError, MonotonicClock};
 use crate::target::{CallResult, TargetError, TargetName, TargetSpec, run_target};
 
 /// 計画の上限。呼び出し元が実行環境に合わせて明示する（既定値・固定の上限は置かない。DPOL-32）。
@@ -77,6 +80,14 @@ pub enum StageError {
     },
     /// 段階の最悪の回の集計の誤り。
     Aggregate { stage: u64, error: AggregateError },
+    /// 時計を作る関数が誤りを返した（段階・回は 1 始まり。回を始める前の失敗で、対象は呼んでいない）。
+    Clock {
+        stage: u64,
+        run: u64,
+        error: MeterError,
+    },
+    /// 時計を作る関数が panic した（段階・回は 1 始まり）。panic の文言は載せない。
+    ClockPanicked { stage: u64, run: u64 },
     /// 番号の計算が溢れた。
     CounterOverflow,
 }
@@ -87,6 +98,8 @@ impl fmt::Display for StageError {
             Self::InvalidPlan => "invalid stage plan",
             Self::Target { .. } => "target error in stage",
             Self::Aggregate { .. } => "aggregate error in stage",
+            Self::Clock { .. } => "clock error in stage",
+            Self::ClockPanicked { .. } => "clock panicked in stage",
             Self::CounterOverflow => "counter overflow",
         };
         f.write_str(msg)
@@ -276,8 +289,13 @@ impl StagedRun {
 
 /// 段階を計画の順に 1 つずつ回す。各回の時計は `new_clock` で作る（回ごとに新しい計測を始めるため）。
 ///
+/// `new_clock` は回ごとに `run_target` の直前に 1 度、計画の順に呼ばれる。`Err` は [`StageError::Clock`]、
+/// panic は捕捉して（文言を既定の hook に出さず。SECR-23）[`StageError::ClockPanicked`] として、段階・回の番号付きで返す。
+/// どちらも以後の生成・対象の呼び出しをせず、終わった段階の結果は返さない。panic の後は `new_clock` を二度と呼ばない。
+/// この形（誤りの型を [`MeterError`] に固定・panic の捕捉）は仮置きで、人の確認待ちである。
+///
 /// # Errors
-/// 計画の不正・回の誤り・集計の誤り。最初の誤りで止め、終わった段階の結果は返さない。
+/// 計画の不正・時計の生成の誤りまたは panic・回の誤り・集計の誤り。最初の誤りで止め、終わった段階の結果は返さない。
 pub fn run_stages<C, F>(
     mut new_clock: C,
     spec: &TargetSpec,
@@ -285,13 +303,14 @@ pub fn run_stages<C, F>(
     call: F,
 ) -> Result<StagedRun, StageError>
 where
-    C: FnMut() -> Box<dyn MonotonicClock>,
+    C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
     F: Fn() -> CallResult + Sync,
 {
     // 語彙外の区間名は記録に出さず、最初の回の前に拒否する。
     if !plan.allowed_intervals.contains(spec.interval()) {
         return Err(StageError::InvalidPlan);
     }
+    install_quiet_hook();
     let mut stages = Vec::with_capacity(plan.stages.len());
     for (si, cfg) in plan.stages.iter().enumerate() {
         let stage = number(si)?;
@@ -299,7 +318,16 @@ where
         let mut runs: Vec<RunSummary> = Vec::new();
         for ri in 0..cfg.repetitions {
             let run = ri.checked_add(1).ok_or(StageError::CounterOverflow)?;
-            let r = run_target(new_clock(), spec, &cfg.load, &call)
+            let made = {
+                let _quiet = QuietGuard::new();
+                catch_unwind(AssertUnwindSafe(&mut new_clock))
+            };
+            let clock = match made {
+                Err(_) => return Err(StageError::ClockPanicked { stage, run }),
+                Ok(Err(error)) => return Err(StageError::Clock { stage, run, error }),
+                Ok(Ok(clock)) => clock,
+            };
+            let r = run_target(clock, spec, &cfg.load, &call)
                 .map_err(|error| StageError::Target { stage, run, error })?;
             runs.push(r.summary);
         }

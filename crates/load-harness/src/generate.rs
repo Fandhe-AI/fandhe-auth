@@ -130,8 +130,9 @@ thread_local! {
 static HOOK_ONCE: Once = Once::new();
 
 /// 対象の閉包の実行中だけ panic のメッセージとソース位置を出さない hook を、直前の hook を包んで 1 度だけ入れる。
+/// 段階の実行の時計の生成（`stage::run_stages`）でも使う。
 /// 抑止はスレッドローカルの印で絞るので、他のスレッドの panic は直前の hook に渡す（SECR-23）。
-fn install_quiet_hook() {
+pub(crate) fn install_quiet_hook() {
     HOOK_ONCE.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -144,10 +145,10 @@ fn install_quiet_hook() {
 }
 
 /// 印を立て、スコープを抜けたとき（panic 後も）下ろす。
-struct QuietGuard;
+pub(crate) struct QuietGuard;
 
 impl QuietGuard {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         IN_TARGET.with(|c| c.set(true));
         Self
     }

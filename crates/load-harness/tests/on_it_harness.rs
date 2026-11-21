@@ -12,9 +12,9 @@ use fandhe_auth_hub_stub::config::{HubStubConfig, StubValue};
 use fandhe_auth_it_harness::{ComponentKind, Harness, HarnessConfig, HubStubComponent};
 use fandhe_auth_load_harness::{
     CallResult, ComponentConditions, ConditionComponent, FailureKind, IntervalName, LoadConfig,
-    LoopModel, MeasurementConditions, MetricKey, Outcome, RunMeter, StageConfig, StageLimits,
-    StagePlan, StdMonotonicClock, TargetName, TargetSpec, Trial, run_closed_loop, run_stages,
-    run_target, summarize_run,
+    LoopModel, MeasurementConditions, MetricKey, MonotonicClock, Outcome, RunMeter, StageConfig,
+    StageLimits, StagePlan, StdMonotonicClock, TargetName, TargetSpec, Trial, run_closed_loop,
+    run_stages, run_target, summarize_run,
 };
 
 const T0: u64 = 1_000;
@@ -209,7 +209,13 @@ fn run_stages_calls_hub_stub_jwks_on_harness() {
         Some(_) => CallResult::Rejected,
         None => CallResult::Unavailable,
     };
-    let r = run_stages(|| Box::new(StdMonotonicClock::new()), &spec, &plan, call).unwrap();
+    let r = run_stages(
+        || Ok(Box::new(StdMonotonicClock::new()) as Box<dyn MonotonicClock>),
+        &spec,
+        &plan,
+        call,
+    )
+    .unwrap();
     assert_eq!(r.stages().len(), 2);
     for st in r.stages() {
         for run in st.runs() {
