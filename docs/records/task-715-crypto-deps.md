@@ -97,7 +97,7 @@
 
 | 名前 | 根 |
 |---|---|
-| `ring`（依存先に `untrusted`・`getrandom 0.2.17` を持つ） | `ring` の直接の依存元は `hub-stub`（normal）で、そこから各ハーネスへ経路が続く（`hub-stub` ← `it-harness` ← `load-harness`、`hub-stub` ← `load-harness`）。`it-harness`・`load-harness` はどちらも `hub-stub` に直接依存する（`load-harness` は `it-harness` 経由の dev 依存もある）。`untrusted`・`getrandom 0.2.17` は `ring` の依存先で、`ring` → `hub-stub` → 各 harness の順に依存元へ至る |
+| `ring`（依存先に `untrusted`・`getrandom 0.2.17` を持つ） | 1/4 の記録時点（基準 `c040dbe`）: `ring` の直接の依存元は `hub-stub`（normal）で、そこから各ハーネスへ経路が続く（`hub-stub` ← `it-harness` ← `load-harness`、`hub-stub` ← `load-harness`）。`untrusted`・`getrandom 0.2.17` は `ring` の依存先で、同じ経路で依存元へ至る。2/4 の基準（`2d38a7e`）以降は `it-harness` が `ring` に dev で直接依存する辺も加わった（2/4 の結果 1 を参照） |
 | `rand`・`rand_core`・`chacha20`・`rand_xorshift`・`getrandom 0.4.3` | `trial-deps` の dev 依存 `proptest` |
 
 試験専用の crate の暗号の扱いを検査の対象にするかは本タスクの範囲外で、人が決める。
@@ -151,7 +151,12 @@
 ### 4. 結果 1: lock にある暗号の crate の出所（事実のみ）
 
 すべて `source` は crates.io の registry（`DPOL-25`）。`checksum` は lock と cache の `.crate` の sha256 が一致した。`cargo audit` の該当は 8 件とも 0 件。
-逆依存の根は 1/4 の結果 3 と同じ（`ring`・`untrusted`・`getrandom 0.2.17` は `hub-stub` 経由の各 harness、他は `trial-deps` の dev 依存 `proptest`）。
+逆依存の根は、`ring`・`untrusted`・`getrandom 0.2.17` が 2 経路、他は 1/4 の結果 3 と同じ（`trial-deps` の dev 依存 `proptest`）。
+`ring` の 2 経路は、(i) `ring` ← `hub-stub` ← `it-harness`・`load-harness`（`hub-stub` は `ring` に normal で依存）と、(ii) `ring` ← `it-harness`（dev。`crates/it-harness/Cargo.toml` の `[dev-dependencies]` に `ring = "0.17.14"`）← `load-harness`（dev）。
+`untrusted`・`getrandom 0.2.17` は `ring` の依存先のため、同じ 2 経路で及ぶ。1/4 の記録（基準 `c040dbe`）の `it-harness` の外部の直接の依存「なし」は、その時点の事実として残す。(ii) は基準 `2d38a7e` 以降の変更で、下の「基準間の `Cargo.lock` の差分」に記録した。
+
+基準間の `Cargo.lock` の差分（実行: `git diff c040dbe 2d38a7e -- Cargo.lock`、終了コード 0。変更は `Cargo.lock` の 3 行の追加だけ）: `fandhe-auth-it-harness` の `dependencies` に `base64`・`ring`・`serde_json` が加わった。`[[package]]` の追加・削除はなく、`name = ` 行は 69 のまま（`base64`・`ring`・`serde_json` は `hub-stub` 経由で既に lock にある）。
+これは基準コミット間の差分であり、2/4 の調査コマンドの実行前後に確認した範囲（作業ツリーの状態確認、測り方 5 の表の最終行）とは別である。後者は調査コマンドが `Cargo.lock` を書き換えなかったことだけを示す。
 
 | crate・版 | license | repository | `rust-version` | 最新（`cargo search`） | spec にある記録の ID | 検証済みかの判定 |
 |---|---|---|---|---|---|---|
@@ -169,11 +174,11 @@
 
 ### 5. 結果 2: 5 区分の候補（未導入）の出所
 
-「本体への導入」と「workspace の `Cargo.lock` への収録」は別である。候補はどれも本体の 4 crate には未導入で、`ring` だけが試験専用の `hub-stub` 経由で lock に収録されている。他の候補は lock に無く、lock での出所・checksum・advisory は測れない。
+「本体への導入」と「workspace の `Cargo.lock` への収録」は別である。候補はどれも本体の 4 crate には未導入で、`ring` だけが試験専用の `hub-stub` 経由と `it-harness` の dev 依存（直接）で lock に収録されている。他の候補は lock に無く、lock での出所・checksum・advisory は測れない。
 
 | 区分 | 候補 | spec にある記録の ID | lock での出所 | 最新（`cargo search`） | 検証済みかの判定 |
 |---|---|---|---|---|---|
-| 署名 | `aws-lc-rs`・`ring`・`jsonwebtoken`（`aws_lc_rs` の feature のみ） | `DPOL-4`・`DPOL-10`・`DPOL-11`・`DPOL-17`・`PoC-5` | `aws-lc-rs`・`jsonwebtoken` は lock に無く測れない。`ring` 0.17.14 は本体には未導入だが workspace の `Cargo.lock` に `hub-stub` 経由で収録済みで、出所・checksum・advisory は結果 1 を参照する | `aws-lc-rs` 1.19.0、`jsonwebtoken` 12.0.0 | （空） |
+| 署名 | `aws-lc-rs`・`ring`・`jsonwebtoken`（`aws_lc_rs` の feature のみ） | `DPOL-4`・`DPOL-10`・`DPOL-11`・`DPOL-17`・`PoC-5` | `aws-lc-rs`・`jsonwebtoken` は lock に無く測れない。`ring` 0.17.14 は本体には未導入だが workspace の `Cargo.lock` に `hub-stub` 経由と `it-harness` の dev 依存（直接）で収録済みで、出所・checksum・advisory は結果 1 を参照する | `aws-lc-rs` 1.19.0、`jsonwebtoken` 12.0.0 | （空） |
 | 検証 | 署名と同じ既存の crate | `DPOL-18`・`DPOL-21` | 署名と同じ。`ring` は結果 1 を参照し、他は lock に無く測れない | 同上 | （空） |
 | 乱数 | 本体は持たず組込み先が実装（`Rng`） | `HOST-2`・`HOST-22` | 本体の依存は 0 件 | 該当なし | （空） |
 | WebAuthn | `webauthn-rs` | `PKEY-4`・`DPOL-10` | 測れない | 0.6.2（PoC で実測した 0.5.5 とは別の版。選定は別に行う） | （空） |
@@ -219,7 +224,7 @@
 | `grep -c '^name = ' Cargo.lock` | 0 | `69` |
 | `cargo info aws-lc-rs`・`cargo info jsonwebtoken`・`cargo info webauthn-rs` | 0 | 6a の表のとおり |
 
-この表で確認できたのは、4 crate の `dependencies[]` が 0 件であること、結果 1・2 で引いた版の逆依存の根の 1 行目、5 名の `name` 一致 0 件、`name` 行数 69 の範囲である。
+この表で確認できたのは、4 crate の `dependencies[]` が 0 件であること、表に載せた 5 件（`ring`・`untrusted`・`rand`・`getrandom@0.2.17`・`getrandom@0.4.3`）の逆依存の 1 行目、5 名の `name` 一致 0 件、`name` 行数 69 の範囲である。`rand_core`・`rand_xorshift`・`chacha20` はこの再計測の表に無く、ここでは確認していない（測り方 1 の再実行の範囲に限る）。
 `Cargo.lock` 全体の同一性、および結果 1 の source・checksum・advisory の再確認は、本表では示していない（比較したコミットと比較コマンドの出力を記録していない。未検証）。
 
 ### 6c. 最新安定版の確認状況（K11）
