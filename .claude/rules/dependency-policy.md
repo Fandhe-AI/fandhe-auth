@@ -113,6 +113,10 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
+  「一致なし」と読むのは、stderr を取得でき、指定した `-i` の対象（例: `rsa`）についての `did not match any packages` の診断だけのとき。
+  stderr を取得できない・別の誤り（lockfile・manifest・fetch・未知の feature 等）・別の対象への診断は「実行失敗」で不合格とし、「依存なし」と読まない。
+  `absent`（一致なし）と、`--exclude` 等で絞り込んだ結果の 0 件（`filtered`）は区別して書く。集計行でも混ぜず、禁止依存が見つからなかったことだけを示すなら絞り込みの有無を併記する。
+  `openssl` が見つかったときは、手動で確認した結果（逆依存の根と、DPOL-10・DPOL-11 への適合の判定）を PR 本文に記録する。
 - `-e normal` だけでは build-dependencies が抜けるので `-e normal,build` で見る。dev-dependencies は除く。試験だけで使う依存の
   監査は `-e dev` を足して別に見る。
 - `--all-features` は DPOL-31 の変異スイッチなど試験用の feature も有効にし、本番のビルドの木と変わるので使わない。

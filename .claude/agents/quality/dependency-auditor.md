@@ -37,7 +37,7 @@ tools:
 ### Step 1: 前提を確かめる
 
 `Cargo.lock` の有無を確かめる。無いときは監査を流さず「前提なし（`Cargo.lock` は TASK-3 の雛形）」と報告して止まる。
-`deny.toml` は TASK-668 まで無いので、無いことを理由に止まらない。「`deny.toml` なし（TASK-668 待ち。cargo-deny の既定の設定で流した）」と報告に書く。厳格な設定（TASK-668）が無い間は、規約固有の検査（bans の DPOL-18・licenses の DPOL-22・DPOL-24・sources の DPOL-25）を「未評価」と書き、既定の設定で得た出力は「参考結果（規約の合否ではない）」と明示する。その結果を DPOL-34 の合格として扱わない（`../../rules/dependency-policy.md` の暫定の手順と同じ扱い）。
+`deny.toml` は TASK-668 まで無いので、無いことを理由に止まらない。「`deny.toml` なし（TASK-668 待ち。cargo-deny の既定の設定で流した）」と報告に書く。暫定の報告の対象はルートの `Cargo.lock` だけで、`crates/trial-deps/fuzz/Cargo.lock` は未実施と記録する。厳格な設定（TASK-668）が無い間は、規約固有の検査（bans の DPOL-18・licenses の DPOL-22・DPOL-24・sources の DPOL-25）を「未評価」と書き、既定の設定で得た出力は「参考結果（規約の合否ではない）」と明示する。その結果を DPOL-34 の合格として扱わない（`../../rules/dependency-policy.md` の暫定の手順と同じ扱い）。
 `cargo deny` / `cargo audit` が未導入なら、その旨を報告して止まる（導入はしない）。
 本番のビルドで有効にする feature を呼び出し元から受け取り、`PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り）と
 `SERVER_FEATURES`（本体の workspace のうち、サーバー側のビルドに入る crate の feature だけ。`--workspace` と併用するため `<crate>/<feature>` のカンマ区切りで渡す。`fandhe-auth-server` は Hub の担当で本体の workspace に無い）に置く。受け取れなければ空（既定の feature だけ）で流し、その旨を報告に書く。
@@ -148,22 +148,23 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 ### 実行の条件
 - cargo-deny: {版} / cargo-audit: {版}
 - advisory DB の取得日: {日付}（commit: cargo-deny {commit} / cargo-audit {commit}）
+- 監査の対象: ルートの `Cargo.lock`（`crates/trial-deps/fuzz/Cargo.lock` は未実施）
 - 逆引きで有効にした feature: {PROD_FEATURES} / {SERVER_FEATURES}（空なら既定の feature だけ）
 
 ### 検査の結果
 | 検査 | 結果（検出あり / なし / 実行失敗） | 件数 | 該当 crate・ID | 関係する ID |
 |------|--------------------------------|-----|---------------|--------------|
 | advisories | | | | DPOL-34 |
-| bans（`deny.toml` なしなら「未評価（参考結果）」） | | | | DPOL-18 |
-| licenses（同上） | | | | DPOL-22・DPOL-24 |
-| sources（同上） | | | | DPOL-25 |
+| bans | {`deny.toml` なしなら「未評価」。出力は参考結果（規約の合否ではない）} | | | DPOL-18（`deny.toml` なしなら未評価） |
+| licenses | {同上} | | | DPOL-22・DPOL-24（同上） |
+| sources | {同上} | | | DPOL-25（同上） |
 | cargo-audit | | | | DPOL-34 |
 
 ### 逆引き
 | crate | 逆依存の有無 | 経路（直下の依存元） | 関係する ID |
 |-------|------------|-------------------|--------------|
 | rsa | | | DPOL-18・DPOL-21 |
-| openssl | | | DPOL-10・DPOL-11・DPOL-13 |
+| openssl（見つかったら、逆依存の根と DPOL-10・DPOL-11 への適合の手動確認結果を PR 本文に記録するよう人へ伝える） | | | DPOL-10・DPOL-11・DPOL-13 |
 | native-tls | | | DPOL-46 |
 | reqwest（HTTP クライアントの具象 crate。他の名前はレビューで見る（名前の一覧は TASK-668 まで無い）） | | | HOST-7・HOST-9 |
 | web-sys（`--workspace --exclude fandhe-auth-webauthn-wasm`） | | | DPOL-40 |
