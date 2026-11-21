@@ -136,6 +136,8 @@ struct StallState {
     released: bool,
     /// `release` が呼ばれた時刻（同じロックの下で記録する。保持の期限までに解かれたかの判定に使う）。
     released_at: Option<Instant>,
+    /// 転送器の停止が通知された時刻（`note_stop` が同じロックの下で記録する。期限までに停止で解かれたかの判定に使う）。
+    stopped_at: Option<Instant>,
     /// 直近に停止点を離れた理由。試験が「期限切れで抜けたのを合格にしない」ために見る（ORST-17）。
     last_exit: Option<StallExit>,
 }
@@ -216,6 +218,20 @@ impl UpstreamStall {
         self.inner.cv.notify_all();
     }
 
+    /// 転送器の停止を通知する。停止フラグを立てる前に呼び、時刻を記録して待ちを起こす。
+    /// 期限の後の停止を `Stopped` と読ませない（`classify_exit`。ORST-17・AUDB-6）。
+    fn note_stop(&self) {
+        let mut g = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if g.stopped_at.is_none() {
+            g.stopped_at = Some(Instant::now());
+        }
+        self.inner.cv.notify_all();
+    }
+
     /// 転送器の accept のスレッドが呼ぶ。解放・転送器の停止・上限のどれかで戻る。
     fn hold(&self, stop: &AtomicBool) {
         let deadline = Instant::now() + Self::MAX_HOLD;
@@ -238,19 +254,19 @@ impl UpstreamStall {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
-        g.last_exit = Some(classify_exit(
-            g.released_at,
-            deadline,
-            stop.load(Ordering::SeqCst),
-        ));
+        g.last_exit = Some(classify_exit(g.released_at, g.stopped_at, deadline));
     }
 }
 
-/// 停止点を離れた理由の決定。期限の後に解かれた場合は期限切れ（明示の解除まで保持された、と読ませない）。
-fn classify_exit(released_at: Option<Instant>, deadline: Instant, stopped: bool) -> StallExit {
+/// 停止点を離れた理由の決定。解除・停止のどちらも期限の後なら期限切れ（解除や停止が待ちを解いた、と読ませない）。
+fn classify_exit(
+    released_at: Option<Instant>,
+    stopped_at: Option<Instant>,
+    deadline: Instant,
+) -> StallExit {
     if released_at.is_some_and(|t| t <= deadline) {
         StallExit::Released
-    } else if stopped {
+    } else if stopped_at.is_some_and(|t| t <= deadline) {
         StallExit::Stopped
     } else {
         StallExit::Expired
@@ -609,6 +625,10 @@ impl DbFaultProxy {
     }
 
     fn shutdown_all(&mut self) {
+        // 停止の時刻を先に記録する（停止フラグを見た待ちが、時刻の無い停止を読まない）。
+        if let Some(stall) = &self.shared.stall {
+            stall.note_stop();
+        }
         self.shared.stop.store(true, Ordering::SeqCst);
         if let Some(h) = self.accept.take() {
             let _ = h.join();
@@ -1440,21 +1460,20 @@ mod tests {
         assert!(!p.shared.blocked.load(Ordering::SeqCst));
     }
 
-    /// 期限の後の解除は `Released` にならない（ORST-17・AUDB-6）。
+    /// 期限の後の解除・停止は `Released`・`Stopped` にならない（ORST-17・AUDB-6）。
     #[test]
-    fn classify_exit_distinguishes_late_release() {
+    fn classify_exit_distinguishes_late_release_and_stop() {
         let deadline = Instant::now() + Duration::from_secs(1);
-        let early = deadline - Duration::from_millis(10);
-        let late = deadline + Duration::from_millis(10);
-        assert_eq!(
-            classify_exit(Some(early), deadline, false),
-            StallExit::Released
-        );
-        assert_eq!(
-            classify_exit(Some(late), deadline, false),
-            StallExit::Expired
-        );
-        assert_eq!(classify_exit(None, deadline, false), StallExit::Expired);
-        assert_eq!(classify_exit(None, deadline, true), StallExit::Stopped);
+        let early = Some(deadline - Duration::from_millis(10));
+        let late = Some(deadline + Duration::from_millis(10));
+        let c = |r, s| classify_exit(r, s, deadline);
+        assert_eq!(c(early, None), StallExit::Released);
+        assert_eq!(c(late, None), StallExit::Expired);
+        assert_eq!(c(None, None), StallExit::Expired);
+        assert_eq!(c(None, early), StallExit::Stopped);
+        // 停止が期限の後に立った場合は、待機から戻っても期限切れ。
+        assert_eq!(c(None, late), StallExit::Expired);
+        assert_eq!(c(late, late), StallExit::Expired);
+        assert_eq!(c(late, early), StallExit::Stopped);
     }
 }

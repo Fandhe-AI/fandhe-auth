@@ -99,13 +99,16 @@ fn echo_conn(mut s: TcpStream, stop: &AtomicBool) {
     }
 }
 
-/// 接続の確立。失敗は呼び出し側が段階つきで扱えるよう、誤りのまま返す。
-fn try_connect(port: u16) -> std::io::Result<TcpStream> {
+/// 接続の確立。失敗は段階（`connect`＝接続の確立、`set_read_timeout`＝接続後のソケット設定）つきの誤りで返す。
+/// 接続確立の失敗とソケット設定の失敗を取り違えない（#6016 の調査）。
+fn try_connect(port: u16) -> Result<TcpStream, (&'static str, std::io::Error)> {
     let s = TcpStream::connect_timeout(
         &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
         Duration::from_secs(5),
-    )?;
-    s.set_read_timeout(Some(Duration::from_secs(5)))?;
+    )
+    .map_err(|e| ("connect", e))?;
+    s.set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| ("set_read_timeout", e))?;
     Ok(s)
 }
 
@@ -265,7 +268,7 @@ fn release_returns_in_time_under_reconnect_storm() {
         p.upstream_attempt_count(),
     );
     let failure = match try_connect(port) {
-        Err(e) => Some(("connect", format!("{:?}", e.kind()))),
+        Err((stage, e)) => Some((stage, format!("{:?}", e.kind()))),
         Ok(mut c) => match roundtrip_detail(&mut c, b"s") {
             (Outcome::Echoed(b), _) if b == b"s" => None,
             (outcome, kind) => Some(("roundtrip", format!("{outcome:?} (io kind {kind:?})"))),
@@ -447,34 +450,54 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
         "release waited for the stalled accept: {released_in:?}"
     );
     // 上流への接続が成立したこと（遮断前の接続の中継を拒む分岐に届いたこと）を確かめる。
+    // `last_exit` は `hold()` の終わりに記録され、上流への connect と世代不一致での切断はその後に起きる。
+    // accept の時点で、握手済みの接続がすでに相手に閉じられていることがある（カーネルの待ち行列に残った接続が
+    // `ConnectionAborted`・`ConnectionReset` で返る。特に macOS）。その場合も接続は成立しており、
+    // バイトは上流へ届き得ないので、成立の証拠として扱う（成立の有無は上流への試行の計数でも確かめる）。
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut upstream_conn = loop {
+    let upstream_conn = loop {
         match up.accept() {
-            Ok((c, _)) => break c,
+            Ok((c, _)) => break Some(c),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
+                ) =>
+            {
+                break None;
+            }
             Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(e) => panic!("upstream connect never established: {:?}", e.kind()),
         }
     };
-    upstream_conn.set_nonblocking(false).unwrap();
-    upstream_conn
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    // 遮断前の接続のバイトは上流へ届かない（読めるのは EOF か切断だけ）。
-    let mut buf = [0u8; 1];
-    match upstream_conn.read(&mut buf) {
-        Ok(0) => {}
-        Err(e)
-            if matches!(
-                e.kind(),
-                ErrorKind::ConnectionReset
-                    | ErrorKind::ConnectionAborted
-                    | ErrorKind::BrokenPipe
-                    | ErrorKind::UnexpectedEof
-            ) => {}
-        Err(e) => panic!("unexpected upstream read error: {:?}", e.kind()),
-        Ok(n) => panic!("bytes from the severed conn reached upstream: {n}"),
+    match upstream_conn {
+        Some(mut upstream_conn) => {
+            upstream_conn.set_nonblocking(false).unwrap();
+            upstream_conn
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            // 遮断前の接続のバイトは上流へ届かない（読めるのは EOF か切断だけ）。
+            let mut buf = [0u8; 1];
+            match upstream_conn.read(&mut buf) {
+                Ok(0) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::UnexpectedEof
+                    ) => {}
+                Err(e) => panic!("unexpected upstream read error: {:?}", e.kind()),
+                Ok(n) => panic!("bytes from the severed conn reached upstream: {n}"),
+            }
+        }
+        None => assert!(
+            wait_until(|| p.upstream_attempt_count() >= 1),
+            "accept reported a reset connection but no upstream attempt was counted"
+        ),
     }
     assert!(wait_until(|| p.refused_count() >= 1));
     assert_eq!(p.accepted_count(), 0, "stalled conn was relayed");
