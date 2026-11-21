@@ -147,10 +147,18 @@ fn is_name(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// 項目ごとの許容する区分（AUDP-29）。性能の目標は持ち越しで、`undecided`（値なし）か `external` 以外にしない。
+/// 項目ごとの許容する区分（AUDP-29）。性能の目標は持ち越しで、`undecided`（値なし）以外にしない。
 /// ここに無い名前は区分を限らない（区分ごとの規則は別に検査する）。
-const NAME_CLASS_RULES: [(&str, &[ValueClass]); 1] =
-    [("p99_target", &[ValueClass::Undecided, ValueClass::External])];
+const NAME_CLASS_RULES: [(&str, &[ValueClass]); 1] = [("p99_target", &[ValueClass::Undecided])];
+
+/// 出典 ID の形（ASCII 英数字・`-`・`_`・1〜64 文字で、予約語でない）。`RefId::new` と
+/// `ApprovedValues::parse` が同じ検査を共有する。
+fn is_ref_shape(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && !RESERVED_REFS.contains(&s)
+}
 
 /// 値の名前（`[a-z0-9_]`・1〜64 文字で、呼び出し元が渡す承認済みの語彙に含まれるもの）。
 #[derive(Clone, PartialEq, Eq)]
@@ -187,10 +195,7 @@ impl RefId {
     /// # Errors
     /// 規則を満たさない・予約語（`none`・`harness_config`・`measured`）・`trusted` に無いとき [`LoadRecordError::InvalidRef`]。
     pub fn new(s: &str, trusted: &[&str]) -> Result<Self, LoadRecordError> {
-        let ok = (1..=64).contains(&s.len())
-            && s.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        if ok && !RESERVED_REFS.contains(&s) && trusted.contains(&s) {
+        if is_ref_shape(s) && trusted.contains(&s) {
             Ok(Self(s.to_owned()))
         } else {
             Err(LoadRecordError::InvalidRef)
@@ -282,7 +287,9 @@ impl fmt::Debug for ApprovedValues {
 }
 
 impl ApprovedValues {
-    /// 承認済みの一覧の本文を読む。人が承認した一覧の読み込みに使い、記録の候補の値からは作らない。
+    /// 承認済みの一覧の本文を読む。本文は人が承認したファイル等の信頼できる経路から読んだものだけを渡す。
+    /// 記録の候補（出典・数値）から本文を組み立てて渡してはならない（ACPT-7・load.md 規則 4。
+    /// 型では防げないため、呼び出し側の契約）。
     ///
     /// # Errors
     /// 書式に反する行・未知の区分や単位・数値でない値・出典の欠け・重複のとき [`LoadRecordError::Format`]
@@ -316,7 +323,9 @@ impl ApprovedValues {
             }
             let list: Vec<&str> = refs.split(',').collect();
             let set: BTreeSet<String> = list.iter().map(|r| (*r).to_owned()).collect();
-            if list.iter().any(|r| r.is_empty()) || set.len() != list.len() || list.len() > MAX_REFS
+            if list.iter().any(|r| !is_ref_shape(r))
+                || set.len() != list.len()
+                || list.len() > MAX_REFS
             {
                 return Err(bad);
             }

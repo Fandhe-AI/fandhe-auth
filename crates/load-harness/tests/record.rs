@@ -24,14 +24,9 @@ fn val(
     v: Option<u64>,
     ids: &[&str],
 ) -> Result<ComparisonValue, LoadRecordError> {
-    // 承認済みの一覧は引数と同じ内容を本文から読んで用意する（一致の検査そのものは approval_* の試験で確かめる）。
-    let text = match (v, class) {
-        (Some(value), ValueClass::Requirement | ValueClass::Initial) => {
-            format!("{name}|{}|{value}|ns|{}\n", class.as_str(), ids.join(","))
-        }
-        _ => String::new(),
-    };
-    let approved = ApprovedValues::parse(&text).unwrap();
+    // 承認済みの一覧は候補とは独立した固定の本文から読む（候補の出典から作らない。ACPT-7）。
+    // 候補が承認済みの一覧と一致する場合の試験は approval_* で確かめる。ここは区分の規則と出典の上限を見る。
+    let approved = ApprovedValues::parse("other_item|initial|9|count|APPROVED-1\n").unwrap();
     ComparisonValue::new(vname(name), class, v, ValueUnit::Ns, refs(ids), &approved)
 }
 
@@ -89,6 +84,11 @@ fn approved_list_parse_is_strict() {
         "v|initial|5|ns|A-1,A-1",
         "v|initial|5|ns",
         "V|initial|5|ns|A-1",
+        // RefId::new と同じ検査（予約語・空白・64 文字超）。
+        "v|initial|5|ns|none",
+        "v|initial|5|ns|measured",
+        "v|initial|5|ns|A 1",
+        &format!("v|initial|5|ns|{}", "a".repeat(65)),
     ] {
         assert_eq!(
             ApprovedValues::parse(bad).err(),
@@ -108,7 +108,11 @@ fn class_rules_fail_closed() {
     for c in [Requirement, Initial] {
         assert!(invalid(val("v", c, Some(1), &[])));
         assert!(invalid(val("v", c, None, &["X-1"])));
-        assert!(val("v", c, Some(1), &["X-1"]).is_ok());
+        // 独立した承認済みの一覧に無いため、区分の規則を通った後に NotApproved になる。
+        assert_eq!(
+            val("v", c, Some(1), &["X-1"]).unwrap_err(),
+            LoadRecordError::InvalidValue(InvalidValueReason::NotApproved)
+        );
     }
     // 規則 5: PoC の数値は比べる値として置かない。
     assert_eq!(
@@ -136,7 +140,10 @@ fn refs_limits() {
         val("v", ValueClass::Initial, Some(1), &nine).unwrap_err(),
         LoadRecordError::TooManyRefs
     );
-    assert!(val("v", ValueClass::Initial, Some(1), &nine[..8]).is_ok());
+    assert_eq!(
+        val("v", ValueClass::Initial, Some(1), &nine[..8]).unwrap_err(),
+        LoadRecordError::InvalidValue(InvalidValueReason::NotApproved)
+    );
     assert_eq!(
         val("v", ValueClass::Initial, Some(1), &["A", "A"]).unwrap_err(),
         LoadRecordError::InvalidRef
@@ -369,7 +376,16 @@ fn value_row_limits_and_duplicates() {
 #[test]
 fn debug_and_errors_do_not_leak() {
     let secret = "canary_name_zz";
-    let v = val(secret, ValueClass::Initial, Some(424_242), &["CANARY-REF"]).unwrap();
+    let approved = list(&format!("{secret}|initial|424242|ns|CANARY-REF\n"));
+    let v = ComparisonValue::new(
+        vname(secret),
+        ValueClass::Initial,
+        Some(424_242),
+        ValueUnit::Ns,
+        refs(&["CANARY-REF"]),
+        &approved,
+    )
+    .unwrap();
     let dbg = format!("{v:?} {:?} {:?}", vname(secret), refs(&["CANARY-REF"]));
     let rec = build(0, 1, vec![v]).unwrap();
     let dbg = format!("{dbg} {rec:?} {:?}", file());
@@ -383,7 +399,7 @@ fn debug_and_errors_do_not_leak() {
 }
 
 #[test]
-fn p99_target_only_undecided_or_external() {
+fn p99_target_only_undecided() {
     // AUDP-29: 性能の目標は未決。数値と出典を付けて要件の値にできない。
     for c in [
         ValueClass::Requirement,
@@ -395,5 +411,9 @@ fn p99_target_only_undecided_or_external() {
             LoadRecordError::InvalidValue(InvalidValueReason::ClassNotAllowed)
         );
     }
+    assert_eq!(
+        val("p99_target", ValueClass::External, None, &["AUDP-29"]).unwrap_err(),
+        LoadRecordError::InvalidValue(InvalidValueReason::ClassNotAllowed)
+    );
     assert!(val("p99_target", ValueClass::Undecided, None, &["AUDP-29"]).is_ok());
 }
