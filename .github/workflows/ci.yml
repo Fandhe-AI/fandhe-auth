@@ -342,9 +342,9 @@ jobs:
         run: |
           set -euo pipefail
           actual_deny="$(cargo-deny --version)"
-          actual_audit="$(cargo-audit --version)"
+          actual_audit="$(cargo-audit audit --version)"
           [ "${actual_deny}" = "cargo-deny ${CARGO_DENY_VERSION}" ] || { echo "::error::${actual_deny} != cargo-deny ${CARGO_DENY_VERSION}"; exit 1; }
-          [ "${actual_audit}" = "cargo-audit ${CARGO_AUDIT_VERSION}" ] || { echo "::error::${actual_audit} != cargo-audit ${CARGO_AUDIT_VERSION}"; exit 1; }
+          [ "${actual_audit}" = "cargo-audit-audit ${CARGO_AUDIT_VERSION}" ] || { echo "::error::${actual_audit} != cargo-audit-audit ${CARGO_AUDIT_VERSION}"; exit 1; }
           echo "${actual_deny}"
           echo "${actual_audit}"
 

@@ -36,7 +36,8 @@ tools:
 
 ### Step 1: 前提を確かめる
 
-`Cargo.lock` と `deny.toml` の有無を確かめる。どちらかが無いときは監査を流さず「前提なし（`Cargo.lock` は TASK-3 の雛形、本番の `deny.toml` は TASK-668 待ち）」と報告して止まる。
+`Cargo.lock` の有無を確かめる。無いときは監査を流さず「前提なし（`Cargo.lock` は TASK-3 の雛形）」と報告して止まる。
+`deny.toml` は TASK-668 まで無いので、無いことを理由に止まらない。「`deny.toml` なし（TASK-668 待ち。cargo-deny の既定の設定で流した）」と報告に書き、その結果を DPOL-34 の合格として扱わない（`../../rules/dependency-policy.md` の暫定の手順と同じ扱い）。
 `cargo deny` / `cargo audit` が未導入なら、その旨を報告して止まる（導入はしない）。
 本番のビルドで有効にする feature を呼び出し元から受け取り、`PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り）と
 `SERVER_FEATURES`（本体の workspace のうち、サーバー側のビルドに入る crate の feature だけ。`--workspace` と併用するため `<crate>/<feature>` のカンマ区切りで渡す。`fandhe-auth-server` は Hub の担当で本体の workspace に無い）に置く。受け取れなければ空（既定の feature だけ）で流し、その旨を報告に書く。
@@ -53,7 +54,8 @@ cargo deny fetch
 cargo audit --file Cargo.lock
 ```
 
-2 つ目は cargo-audit の DB の取得を兼ねる（QP-2 の手順）。取得はこの 1 回だけで、以後の実行は全て取得なしで流す。
+2 つ目は cargo-audit の DB の取得を兼ねる（QP-2 の手順）ため、DPOL-33 の取得と監査の分離を満たさない暫定の手順である（正式な手順と記録の様式は TASK-679。`../../rules/dependency-policy.md` の「依存を足す・更新するときの確認手順」と同じ）。
+取得はこの 1 回だけで、以後の実行は全て取得なしで流す。報告には「暫定の手順で、DPOL-34 の合格ではない」と書く。
 使った DB の commit と取得日を記録する（DPOL-33）。commit は次で読む（`<hash>` は `ls ~/.cargo/advisory-dbs` で確かめる）。
 
 ```bash
@@ -130,7 +132,7 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 
 ## 完了条件
 
-- [ ] 前提（`Cargo.lock`・`deny.toml`・道具）を確かめた
+- [ ] 前提（`Cargo.lock`・道具。`deny.toml` の有無は報告に書くだけで止まらない）を確かめた
 - [ ] DB の取得を 1 回にし、以後の実行を取得なし（`--disable-fetch`・`--no-fetch`）で流した。cargo deny と cargo tree は `--locked`、cargo audit は `git diff --exit-code Cargo.lock` で書き換えなしを確かめた
 - [ ] 逆引きは本番の feature を明示し（`--all-features` なし）、`-e normal,build` で流した
 - [ ] 5 つの実行と 5 つの逆引きの結果を表にした
