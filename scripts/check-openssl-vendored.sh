@@ -25,7 +25,7 @@
 #
 # 動的リンクと版の記録の対応（TASK-667 (2/4)・DPOL-13）:
 #   R4: 静的リンクを強いる設定が無いこと（合否）。openssl-sys の build script は環境変数 OPENSSL_STATIC と <TARGET>_OPENSSL_STATIC を見て、
-#       `0` 以外なら静的にリンクする。`vendored` でなくても配備先の OpenSSL へ動的にリンクしない道になるため、検査の環境変数と
+#       `0` 以外なら静的にリンクする。pkg-config crate は変数が存在すれば値が `0` でも静的リンクを選ぶため、値によらず違反にする。`vendored` でなくても配備先の OpenSSL へ動的にリンクしない道になるため、検査の環境変数と
 #       repo の `.cargo/config.toml`・`.cargo/config` の `[env]` のキー（TOML を構造として読み、引用キーのエスケープを復号した後の名前）の
 #       `OPENSSL_STATIC` と `<TARGET>_OPENSSL_STATIC` を値によらず違反にする（安全側）。コメントや他の設定値の中の文字列は数えない。
 #       TOML が読めない・不正なら検査不能（2）。名前と値は出さず件数だけ出す。
@@ -180,13 +180,13 @@ count_rule() {
   echo "${n}"
 }
 
-# count_static_env: 名前が OPENSSL_STATIC か _OPENSSL_STATIC で終わる環境変数のうち、値が `0` 以外（空を含む）の数を返す（R4）。
-# 名前も値も出さない。値は比較にだけ使い、eval やコマンドの引数に展開しない。
+# count_static_env: 名前が OPENSSL_STATIC か _OPENSSL_STATIC で終わる環境変数の数を値によらず返す（R4。pkg-config crate は存在だけで静的を選ぶため `0` も数える）。
+# 名前も値も出さない。値は読まず、eval やコマンドの引数にも展開しない。
 count_static_env() {
   local name n=0
   while IFS= read -r name; do
     case "${name}" in
-      OPENSSL_STATIC | *_OPENSSL_STATIC) [ "${!name}" != "0" ] && n=$((n + 1)) ;;
+      OPENSSL_STATIC | *_OPENSSL_STATIC) n=$((n + 1)) ;;
     esac
   done < <(compgen -e)
   echo "${n}"
@@ -356,7 +356,7 @@ selftest() {
 
   # F10: 静的リンクの環境変数（R4）。外側の環境に左右されないよう、サブシェルで該当の変数を消してから試す。
   local ev cnt nm
-  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:eq0' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0'; do
+  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0'; do
     cnt="$(
       while IFS= read -r nm; do
         case "${nm}" in OPENSSL_STATIC | *_OPENSSL_STATIC) unset "${nm}" ;; esac

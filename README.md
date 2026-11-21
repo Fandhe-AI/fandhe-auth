@@ -74,7 +74,11 @@ macOS（Homebrew）の例:
 
 ```bash
 brew install lefthook editorconfig-checker shellcheck direnv python@3.12
+# python@3.12 は `python3` を PATH に入れないため、libexec/bin を PATH の先頭に足す（シェルの設定ファイルへ）
+export PATH="$(brew --prefix python@3.12)/libexec/bin:${PATH}"
 ```
+
+`libexec/bin` には versionless の `python3` が入っており、先頭に置くことで 3.11 以上の `python3` が選ばれます。
 
 `make doctor` で導入状況を確認できます（読み取りのみで、何も導入・変更しません）。
 

@@ -36,6 +36,14 @@ check_tool required shellcheck sh -c 'shellcheck --version | grep "^version:"'
 check_tool required cargo cargo --version
 check_tool required cargo-fmt cargo fmt --version
 check_tool required cargo-clippy cargo clippy --version
+# check-openssl-vendored.sh が TOML の解析に python3 の tomllib（3.11 以上）を使う。import できなければ検査不能になる。
+# check_tool は名前を command -v に使うため、python3 は専用に判定する。
+if out="$(python3 -c 'import sys, tomllib; print("python3 " + sys.version.split()[0] + " (tomllib ok)")' 2>&1)"; then
+  echo "ok   python3: ${out}"
+else
+  echo "miss python3: not found or tomllib not importable; Python 3.11+ is required (required)"
+  status=1
+fi
 check_tool optional direnv direnv version
 check_tool optional docker docker compose version
 check_tool optional openssl openssl version
