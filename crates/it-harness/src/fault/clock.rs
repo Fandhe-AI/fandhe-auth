@@ -205,21 +205,45 @@ impl ClockSkewInjector {
 
     /// 実行の記録を確定し、配布済みの [`SkewedClock`] が共有するずれを 0 へ戻す（同じ終了操作。AVLB-31 の試験条件を
     /// 次の実行へ持ち越さない）。未解除だった事実は `unreleased_count` に残る。確定に失敗したときはずれを変えず、
-    /// タイムラインを `FaultFinishFailure` で返す。結んだ実行と別の実行の記録なら、ずれには触らない。
+    /// タイムラインを `FaultFinishFailure` で返す。
     ///
     /// # Errors
-    /// `FaultTimeline::finish` と同じ。
+    /// 別の実行の記録は `RunMismatch`（記録を消費せず、ずれにも触らない）。Hub の stub の注入器も結んだ実行は
+    /// `InjectorBound`（`HubStubFaultInjector::finish_with_clock` で確定する）。そのほかは `FaultTimeline::finish` と同じ。
     pub fn finish(
         &mut self,
         timeline: FaultTimeline,
         recorded_at: UtcTimestamp,
     ) -> Result<FaultRecord, Box<FaultFinishFailure>> {
-        let run_id = timeline.run_id();
-        let record = timeline.finish(recorded_at)?;
-        if self.bound_run == Some(run_id) {
-            self.abandon_state();
+        // 確定の前に実行の一致と結合を検査する（失敗はタイムラインを返し、ずれにも触らない）。
+        if let Err(error) = self.check_finish(&timeline) {
+            return Err(Box::new(FaultFinishFailure { error, timeline }));
         }
-        Ok(record)
+        if timeline.is_injector_bound() {
+            // Hub の stub の注入器も結んだ実行は `HubStubFaultInjector::finish_with_clock` から確定する。
+            return Err(Box::new(FaultFinishFailure {
+                error: FaultRecordError::InjectorBound,
+                timeline,
+            }));
+        }
+        self.reset_after_finish();
+        Ok(timeline.into_record(recorded_at))
+    }
+
+    /// 確定の前の検査（何も変えない）。結んだ実行と別の実行は `RunMismatch`。この注入器が結んでいないのに実行が
+    /// 時計の注入器を結んでいる（別の注入器）なら `ClockInjectorBound`。記録が確定できるかも確かめる。
+    pub(crate) fn check_finish(&self, timeline: &FaultTimeline) -> Result<(), FaultRecordError> {
+        match self.bound_run {
+            Some(id) if id != timeline.run_id() => return Err(FaultRecordError::RunMismatch),
+            None if timeline.is_clock_bound() => return Err(FaultRecordError::ClockInjectorBound),
+            _ => {}
+        }
+        timeline.check_finishable()
+    }
+
+    /// 確定の成功後に、共有のずれを 0 へ戻す（結んでいないときも害はない）。
+    pub(crate) fn reset_after_finish(&mut self) {
+        self.abandon_state();
     }
 
     /// 共有のずれを 0 へ戻し、適用中の状態を捨てる（`abandoned` の印は変えない）。
@@ -237,13 +261,6 @@ impl ClockSkewInjector {
         }
     }
 
-    /// 検査と範囲の事前確認（何も記録しない）。
-    fn prepare(&self, skew_ms: i64) -> Result<FaultKind, ClockSkewError> {
-        let kind = FaultKind::clock_skew(skew_ms).map_err(|_| ClockSkewError::InvalidParam)?;
-        shifted((self.base)(), skew_ms)?;
-        Ok(kind)
-    }
-
     /// ずれを開始する。記録（`Applied`）が通ってから読み取り側に見せる。
     ///
     /// # Errors
@@ -254,15 +271,16 @@ impl ClockSkewInjector {
         timeline: &mut FaultTimeline,
         skew_ms: i64,
     ) -> Result<(), ClockSkewError> {
-        // 意図: 値の誤り（InvalidParam）を AlreadyActive より先に返す順序を保つため、`prepare` と別に先に検査する。
-        FaultKind::clock_skew(skew_ms).map_err(|_| ClockSkewError::InvalidParam)?;
+        // 意図: 値の誤り（InvalidParam）を AlreadyActive より先に返す順序を保つため、先に検査して `kind` を使い回す。
+        let kind = FaultKind::clock_skew(skew_ms).map_err(|_| ClockSkewError::InvalidParam)?;
         if self.active.is_some() {
             return Err(ClockSkewError::AlreadyActive);
         }
         if self.abandoned {
             return Err(ClockSkewError::Abandoned);
         }
-        let kind = self.prepare(skew_ms)?;
+        // 時刻の範囲の事前確認（何も記録しない）。
+        shifted((self.base)(), skew_ms)?;
         // 結合の可否だけを先に検査し、`Applied` の記録が成功してから両側の結合を確定する（記録の拒否で状態を残さない）。
         let first_bind = self.check_bindable(timeline)?;
         timeline
@@ -426,7 +444,7 @@ mod tests {
         assert_eq!(inj.active_skew_ms(), Some(1_000));
         assert_eq!(inj.clock().skew_ms(), 1_000);
         // 事象は増えていない（SIGTERM の適用と時計の適用の 2 件のまま）。
-        let rec = tl.finish(at).unwrap();
+        let rec = inj.finish(tl, at).unwrap();
         assert_eq!(rec.events().len(), 2);
         assert_eq!(rec.unreleased_count(), 1);
     }

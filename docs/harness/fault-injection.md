@@ -154,7 +154,10 @@ hub-stub の実装をそのまま使い、作り直さない。
 
 - 対象の決め方（仮）: 試験対象が読む壁時計の源（`SkewedClock`）に差を足す。OS の時計・DB のホストの時計・単調時計・子プロセスの時計はずらさない。
   LD_PRELOAD・環境変数・feature で切り替える経路は作らない（DPOL-30〜32）。
-- 入口: `ClockSkewInjector::new`・`with_base_clock`（基準の時計を渡す。決定的な試験用）・`clock`・`apply`・`release`・`step`・`abandon`・`active_skew_ms`。
+- 入口: `ClockSkewInjector::new`・`with_base_clock`（基準の時計を渡す。決定的な試験用）・`clock`・`apply`・`release`・`step`・`finish`・`abandon`・`active_skew_ms`。
+  標準の終了手順は `ClockSkewInjector::finish(timeline, recorded_at)`（記録の確定と共有のずれの 0 への復帰を同時に行う。別の実行のタイムラインは `RunMismatch` で返し、何も変えない）。
+  Hub の stub の注入器も結んだ実行は `HubStubFaultInjector::finish_with_clock(&mut clock_injector, timeline, recorded_at)` で確定する。時計の注入器を結んだ実行の `FaultTimeline::finish` と、
+  どちらか片方だけの `finish` は拒否される（`ClockInjectorBound`・`InjectorBound`。AVLB-31）。`abandon` は記録を確定せず共有のずれだけを戻す用途（途中で実行を捨てる場合。以後その注入器の `apply` は `Abandoned`）。
   `SkewedClock` は `now`・`unix_seconds`（切り捨て。stub の `now: u64` 用）・`skew_ms`。
 - 順序: 検査 → 二重の開始の確認 → 基準＋ずれが表せるかの確認（`OutOfRange`。何も記録しない）→ 記録 → 状態の変更。基準線・記録の拒否では状態を変えない（fail-closed。`step` の途中失敗は下記）。
 - `step` は `Released(旧)` → `Applied(新)` の順に記録する。同じ値・0 は `InvalidParam`。`Released` の記録が拒否されたときは状態を変えない。`Released` が成功して `Applied` の記録だけが拒否されたときは、

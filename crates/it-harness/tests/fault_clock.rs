@@ -5,7 +5,9 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use fandhe_auth_it_harness::fault::{ClockSkewError, ClockSkewInjector, FaultRecordError};
+use fandhe_auth_it_harness::fault::{
+    ClockSkewError, ClockSkewInjector, FaultRecordError, HubStubFaultError, HubStubFaultInjector,
+};
 use fandhe_auth_it_harness::record::UtcTimestamp;
 use fandhe_auth_it_harness::{FaultRecord, FaultTimeline};
 
@@ -19,9 +21,9 @@ fn timeline() -> FaultTimeline {
     FaultTimeline::start(Instant::now(), SystemTime::now()).unwrap()
 }
 
-fn finish(tl: FaultTimeline) -> FaultRecord {
+fn finish(inj: &mut ClockSkewInjector, tl: FaultTimeline) -> FaultRecord {
     let at = UtcTimestamp::from_system_time(SystemTime::now()).unwrap();
-    tl.finish(at).unwrap()
+    inj.finish(tl, at).unwrap()
 }
 
 fn injection_lines(r: &FaultRecord) -> Vec<String> {
@@ -46,7 +48,7 @@ fn apply_and_release_shift_the_clock_and_record() {
     inj.release(&mut tl).unwrap();
     assert_eq!(clock.now(), Ok(base));
     assert_eq!(inj.active_skew_ms(), None);
-    let r = finish(tl);
+    let r = finish(&mut inj, tl);
     assert_eq!(r.unreleased_count(), 0);
     let lines = injection_lines(&r);
     assert_eq!(lines.len(), 2);
@@ -65,7 +67,7 @@ fn negative_skew_floors_unix_seconds() {
     assert_eq!(inj.clock().unix_seconds(), Ok(BASE_SECS - 2));
     let r = {
         inj.release(&mut tl).unwrap();
-        finish(tl)
+        finish(&mut inj, tl)
     };
     assert!(injection_lines(&r)[0].ends_with(" skew_ms=-1500"));
 }
@@ -80,7 +82,7 @@ fn step_records_release_then_apply() {
     assert_eq!(inj.step(&mut tl, 3_000), Err(ClockSkewError::InvalidParam));
     assert_eq!(inj.step(&mut tl, 0), Err(ClockSkewError::InvalidParam));
     inj.release(&mut tl).unwrap();
-    let lines = injection_lines(&finish(tl));
+    let lines = injection_lines(&finish(&mut inj, tl));
     let kinds: Vec<_> = lines
         .iter()
         .map(|l| {
@@ -123,7 +125,7 @@ fn state_errors_record_nothing() {
     assert_eq!(inj.apply(&mut tl, 20), Err(ClockSkewError::AlreadyActive));
     assert_eq!(inj.clock().skew_ms(), 10);
     inj.release(&mut tl).unwrap();
-    assert_eq!(injection_lines(&finish(tl)).len(), 2);
+    assert_eq!(injection_lines(&finish(&mut inj, tl)).len(), 2);
 }
 
 #[test]
@@ -157,7 +159,7 @@ fn unreleased_skew_is_counted_and_clones_share_state() {
         a.now().unwrap().duration_since(other.now().unwrap()).ok(),
         Some(Duration::from_secs(2))
     );
-    assert_eq!(finish(tl).unreleased_count(), 1);
+    assert_eq!(finish(&mut inj, tl).unreleased_count(), 1);
 }
 
 #[test]
@@ -179,17 +181,21 @@ fn debug_and_error_do_not_leak_values() {
 }
 
 #[test]
-fn drop_after_finish_clears_shared_skew_and_keeps_unreleased_fact() {
-    // AVLB-31: 実行の終了後に、配布済みの時計がずれたまま次の実行（基準線）へ残らない。
+fn drop_without_finish_clears_shared_skew_and_keeps_unreleased_fact() {
+    // AVLB-31: 終了操作を通らずに注入器を破棄しても、配布済みの時計がずれたまま残らない。
     let mut inj = injector();
     let mut tl = timeline();
     let clock = inj.clock();
     inj.apply(&mut tl, 1_000).unwrap();
-    let r = finish(tl);
-    assert_eq!(r.unreleased_count(), 1);
     assert_eq!(clock.skew_ms(), 1_000);
     drop(inj);
     assert_eq!(clock.skew_ms(), 0);
+    let at = UtcTimestamp::from_system_time(SystemTime::now()).unwrap();
+    // 実行は時計の注入器を結んだままなので、通常の finish は拒否される（記録を確定するのは注入器の経路）。
+    assert_eq!(
+        tl.finish(at).unwrap_err().error,
+        FaultRecordError::ClockInjectorBound
+    );
 }
 
 #[test]
@@ -205,7 +211,7 @@ fn abandon_clears_shared_skew_without_recording_release() {
     // 終端操作: 同じ実行への再適用は受けない（古い Applied が未解除のまま残るため）。
     assert_eq!(inj.apply(&mut tl, -2_000), Err(ClockSkewError::Abandoned));
     assert_eq!(clock.skew_ms(), 0);
-    let r = finish(tl);
+    let r = finish(&mut inj, tl);
     assert_eq!(r.unreleased_count(), 1);
     assert_eq!(injection_lines(&r).len(), 1);
 }
@@ -256,4 +262,79 @@ fn injector_finish_confirms_record_and_clears_shared_skew() {
     assert_eq!(r.unreleased_count(), 1);
     assert_eq!(clock.skew_ms(), 0);
     assert_eq!(inj.active_skew_ms(), None);
+}
+
+#[test]
+fn plain_timeline_finish_is_rejected_for_clock_bound_run() {
+    // AVLB-31: 時計だけの実行を、時計を戻さない経路で確定させない。失敗してもタイムラインを失わない。
+    let mut inj = injector();
+    let mut tl = timeline();
+    let clock = inj.clock();
+    inj.apply(&mut tl, 1_000).unwrap();
+    let at = UtcTimestamp::from_system_time(SystemTime::now()).unwrap();
+    let failure = tl.finish(at).unwrap_err();
+    assert_eq!(failure.error, FaultRecordError::ClockInjectorBound);
+    assert_eq!(clock.skew_ms(), 1_000);
+    let r = inj.finish(failure.timeline, at).unwrap();
+    assert_eq!(r.unreleased_count(), 1);
+    assert_eq!(clock.skew_ms(), 0);
+}
+
+#[test]
+fn finish_with_other_run_timeline_returns_it_and_keeps_skew() {
+    let mut a = injector();
+    let mut b = injector();
+    let mut tl_a = timeline();
+    let mut tl_b = timeline();
+    let clock_b = b.clock();
+    a.apply(&mut tl_a, 1_000).unwrap();
+    b.apply(&mut tl_b, 2_000).unwrap();
+    let at = UtcTimestamp::from_system_time(SystemTime::now()).unwrap();
+    // A に B の実行のタイムラインを渡すと拒否され、タイムラインが戻る。B の時計は触られない。
+    let failure = a.finish(tl_b, at).unwrap_err();
+    assert_eq!(failure.error, FaultRecordError::RunMismatch);
+    assert_eq!(clock_b.skew_ms(), 2_000);
+    // 戻ったタイムラインで B が正しく確定できる。
+    let r = b.finish(failure.timeline, at).unwrap();
+    assert_eq!(r.unreleased_count(), 1);
+    assert_eq!(clock_b.skew_ms(), 0);
+    // 時計を結んでいない注入器でも、時計を結んだ実行は確定させない。
+    let mut c = injector();
+    let failure = c.finish(tl_a, at).unwrap_err();
+    assert_eq!(failure.error, FaultRecordError::ClockInjectorBound);
+}
+
+#[test]
+fn run_with_both_injectors_finishes_record_and_resets_clock_together() {
+    // AVLB-31: 両方を結んだ実行は、どちらか片方の finish では確定せず、`finish_with_clock` で記録とリセットを一緒に行う。
+    let mut inj = injector();
+    let mut tl = timeline();
+    let clock = inj.clock();
+    let hub = HubStubFaultInjector::new(|_: Duration| {}, &tl).unwrap();
+    inj.apply(&mut tl, 1_000).unwrap();
+    let at = UtcTimestamp::from_system_time(SystemTime::now()).unwrap();
+    let failure = inj.finish(tl, at).unwrap_err();
+    assert_eq!(failure.error, FaultRecordError::InjectorBound);
+    assert_eq!(clock.skew_ms(), 1_000);
+    let failure = hub.finish(failure.timeline, at).unwrap_err();
+    assert_eq!(
+        failure.error,
+        HubStubFaultError::Record(FaultRecordError::ClockInjectorBound)
+    );
+    assert_eq!(clock.skew_ms(), 1_000);
+    let (hub, tl) = (failure.injector, failure.timeline);
+    // 別の実行の時計の注入器は受けない。
+    let mut other = injector();
+    let failure = hub.finish_with_clock(&mut other, tl, at).unwrap_err();
+    assert_eq!(
+        failure.error,
+        HubStubFaultError::Record(FaultRecordError::ClockInjectorBound)
+    );
+    assert_eq!(clock.skew_ms(), 1_000);
+    let (record, _log) = failure
+        .injector
+        .finish_with_clock(&mut inj, failure.timeline, at)
+        .unwrap();
+    assert_eq!(record.unreleased_count(), 1);
+    assert_eq!(clock.skew_ms(), 0);
 }
