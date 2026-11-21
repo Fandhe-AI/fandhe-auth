@@ -395,6 +395,85 @@ fn clock_factory_panic_is_caught_and_numbered() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
+/// 子プロセスで走らせる本体。親が環境変数で起動したときだけ動く（単独で走らせたときは何もしない）。
+const CHILD_ENV: &str = "FANDHE_STAGE_PANIC_CHILD";
+const CHILD_CANARY: &str = "canary_stderr_clock_panic_qx";
+
+#[test]
+fn child_clock_panic_body() {
+    if std::env::var_os(CHILD_ENV).is_none() {
+        return;
+    }
+    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let r = run_stages(
+        || -> Result<Box<dyn MonotonicClock>, MeterError> { panic!("{}", CHILD_CANARY) },
+        &spec(),
+        &plan,
+        || CallResult::Ok,
+    );
+    assert_eq!(
+        r.unwrap_err(),
+        StageError::ClockPanicked { stage: 1, run: 1 }
+    );
+}
+
+#[test]
+fn clock_factory_panic_message_is_not_written_to_stderr() {
+    // SECR-23: 独立した子プロセスで時計の生成を panic させ、目印が stderr にも出ないことを確かめる。
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "child_clock_panic_body",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "child failed");
+    // 子が本当に走ったこと（走っていなければ目印が無いのは当然になる）。
+    assert!(
+        stdout.contains("child_clock_panic_body"),
+        "child did not run"
+    );
+    assert!(!stderr.contains(CHILD_CANARY));
+    assert!(!stdout.contains(CHILD_CANARY));
+}
+
+/// Drop が panic する値を持つ時計の生成関数でも、結果は変わらず文言も出ない。
+struct PanicOnDrop;
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        panic!("canary_drop_panic_vk");
+    }
+}
+
+#[test]
+fn clock_closure_drop_panic_is_swallowed_and_result_kept() {
+    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let guard = PanicOnDrop;
+    let r = run_stages(
+        move || {
+            let _keep = &guard;
+            Err(MeterError::ClockOverflow)
+        },
+        &spec(),
+        &plan,
+        || CallResult::Ok,
+    );
+    assert!(matches!(
+        r,
+        Err(StageError::Clock {
+            stage: 1,
+            run: 1,
+            ..
+        })
+    ));
+}
+
 #[test]
 fn staged_run_debug_hides_target_name() {
     // SECR-23・SECR-26: 対象名に目印を渡し、Debug の出力に含まれないことを確かめる。

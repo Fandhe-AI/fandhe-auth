@@ -306,6 +306,39 @@ where
     C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
     F: Fn() -> CallResult + Sync,
 {
+    let result = run_stages_inner(&mut new_clock, spec, plan, &call);
+    // 時計を作る関数（クロージャ）の破棄も抑止と捕捉の内側で行う。所有する値の Drop が panic しても
+    // 文言を hook に渡さず、返す結果を変えない（SECR-23）。
+    let _ = quiet_catch(move || drop(new_clock));
+    result
+}
+
+/// 抑止の印を立てて `f` を呼び、panic は捕捉して `None` にする。
+/// ペイロードの Drop も印の内側で走らせる。その Drop の中で起きた二次 panic のペイロードは、
+/// Drop を走らせずに忘れる（Drop がまた panic して伝播しないように。SECR-23）。
+fn quiet_catch<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let _quiet = QuietGuard::new();
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(v) => Some(v),
+        Err(payload) => {
+            if let Err(second) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+                std::mem::forget(second);
+            }
+            None
+        }
+    }
+}
+
+fn run_stages_inner<C, F>(
+    new_clock: &mut C,
+    spec: &TargetSpec,
+    plan: &StagePlan,
+    call: &F,
+) -> Result<StagedRun, StageError>
+where
+    C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
+    F: Fn() -> CallResult + Sync,
+{
     // 語彙外の区間名は記録に出さず、最初の回の前に拒否する。
     if !plan.allowed_intervals.contains(spec.interval()) {
         return Err(StageError::InvalidPlan);
@@ -318,24 +351,13 @@ where
         let mut runs: Vec<RunSummary> = Vec::new();
         for ri in 0..cfg.repetitions {
             let run = ri.checked_add(1).ok_or(StageError::CounterOverflow)?;
-            let made = {
-                let _quiet = QuietGuard::new();
-                match catch_unwind(AssertUnwindSafe(&mut new_clock)) {
-                    Ok(v) => Some(v),
-                    Err(payload) => {
-                        // ペイロードの Drop も guard と catch_unwind の内側で走らせ、Drop 内の panic も
-                        // 文言を出さず ClockPanicked に畳む（SECR-23）。
-                        let _ = catch_unwind(AssertUnwindSafe(move || drop(payload)));
-                        None
-                    }
-                }
-            };
+            let made = quiet_catch(&mut *new_clock);
             let clock = match made {
                 None => return Err(StageError::ClockPanicked { stage, run }),
                 Some(Err(error)) => return Err(StageError::Clock { stage, run, error }),
                 Some(Ok(clock)) => clock,
             };
-            let r = run_target(clock, spec, &cfg.load, &call)
+            let r = run_target(clock, spec, &cfg.load, call)
                 .map_err(|error| StageError::Target { stage, run, error })?;
             runs.push(r.summary);
         }
