@@ -40,9 +40,13 @@ elif [ "${max_jobs}" -gt 16 ]; then
   max_jobs=16
 fi
 
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shellcheck-staged.XXXXXX")"
+# 道具の失敗（一時領域・並べ替え・結果の読み出し）は検査不能として 2 で終わる。set -e の既定の 1 は「指摘あり」と区別できない。
+if ! tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shellcheck-staged.XXXXXX")"; then
+  echo "shellcheck-staged: cannot create a temporary directory" >&2
+  exit 2
+fi
 trap 'rm -rf "${tmp_dir}"' EXIT
-trap 'exit 1' INT TERM
+trap 'exit 2' INT TERM
 
 # 重複を除いた引数を files に集める（名前の完全一致。引数は高々数百件で、二重の走査で足りる）
 files=()
@@ -72,7 +76,10 @@ while [ "${i}" -lt "${total}" ]; do
   fi
   printf '%s %s\n' "${size:-0}" "${i}"
   i=$((i + 1))
-done | sort -rn -k1,1 -k2,2n > "${tmp_dir}/order"
+done | sort -rn -k1,1 -k2,2n > "${tmp_dir}/order" || {
+  echo "shellcheck-staged: cannot order the files" >&2
+  exit 2
+}
 
 # check_one <番号> <ファイル>: 出力と終了コードを番号付きの一時ファイルへ書く。番号は親が持ち、子には引数で渡す。
 # ファイル名が空なら何も書かずに戻る（結果が無いものは下で失敗になる。名前の無いまま検査が 0 で終わる経路を作らない）。
@@ -115,7 +122,10 @@ unchecked=0
 i=0
 while [ "${i}" -lt "${total}" ]; do
   if [ -s "${tmp_dir}/${i}.out" ]; then
-    cat "${tmp_dir}/${i}.out"
+    cat "${tmp_dir}/${i}.out" || {
+      echo "shellcheck-staged: cannot read the output for ${files[i]}" >&2
+      exit 2
+    }
   fi
   rc_text=""
   if [ -s "${tmp_dir}/${i}.rc" ]; then

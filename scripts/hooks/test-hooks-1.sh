@@ -269,7 +269,7 @@ check_bad_lock "skills-lock.json with an unexpected top-level key is rejected" '
 
 # ---------------------------------------------------------------- shellcheck-staged.sh（pre-commit の shellcheck の並列実行）
 # 本物の shellcheck には頼らず（macOS の CI にあるとは限らない）、PATH 先頭に置いた偽物で呼び方と集約を確かめる。
-# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。名前に bad を含むファイルは 3 行を出して 1 で終わり、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とす。
+# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。名前に bad を含むファイルは 3 行を出して 1 で終わり、err を含むものは 1 行を出して 2 で終わり（shellcheck 自身の失敗）、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とす。
 sc_shim_dir="${work_dir}/sc-shim"
 mkdir -p "${sc_shim_dir}"
 cat > "${sc_shim_dir}/shellcheck" <<'EOF'
@@ -355,7 +355,7 @@ else
   fail "shellcheck-staged: duplicate arguments are checked once" "exit ${sc_rc}, calls: $(cat "${sc_log}")"
 fi
 
-# 検査が結果を書く前に落ちたとき（子の bash が kill される）は、成功にせず 1 で止まり、ファイル名つきの診断を出す
+# 検査が結果を書く前に落ちたとき（子の bash が kill される）は、成功にせず 2（検査不能）で止まり、ファイル名つきの診断を出す
 sc_run a.sh die.sh c.sh
 if [ "${sc_rc}" -eq 2 ] && grep -qF "no valid result for die.sh" "${work_dir}/out"; then
   pass "shellcheck-staged: a check that dies before writing its result exits 2 and names the file"
@@ -377,6 +377,18 @@ if [ "${sc_rc}" -eq 2 ] && grep -qF "could not check err1.sh (exit 2)" "${work_d
   pass "shellcheck-staged: one unchecked file among findings exits 2 (unchecked wins over findings)"
 else
   fail "shellcheck-staged: one unchecked file among findings exits 2 (unchecked wins over findings)" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 一時領域を作れない（TMPDIR が存在しない）ときは、指摘ありの 1 ではなく検査不能の 2 で止まる
+if SC_LOG="${sc_log}" TMPDIR="${work_dir}/no-such-dir" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" a.sh > "${work_dir}/out" 2>&1; then
+  sc_rc=0
+else
+  sc_rc=$?
+fi
+if [ "${sc_rc}" -eq 2 ] && grep -qF "cannot create a temporary directory" "${work_dir}/out"; then
+  pass "shellcheck-staged: a missing TMPDIR exits 2"
+else
+  fail "shellcheck-staged: a missing TMPDIR exits 2" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 # 件数が並列数の上限を超えても、全件が 1 回ずつ検査される
