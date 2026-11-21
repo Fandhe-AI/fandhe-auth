@@ -880,7 +880,7 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
         return None;
     };
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    // 停止点は本物の接続と同じ呼び出し（`shared.dialer`）の内側にある。この呼び出しを `conns` のロックの下で
+    // 停止点は本物の接続と同じ呼び出し（`shared.connect`）の内側にある。この呼び出しを `conns` のロックの下で
     // 行う回帰が入ると、試験中の停止点の待ちも `block()` を待たせて試験が落ちる（ORST-17）。
     let Some(up) = dial_upstream(&addr, shared) else {
         shared.sever_conn(id);
@@ -911,6 +911,8 @@ fn dial_upstream(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
 }
 
 /// 本番の接続。`TcpStream::connect_timeout` そのもの。
+/// ここで `conns` のロックを取らない。ロックで囲む回帰を試験が検出できる境界は、この関数の上の `dial_upstream` の
+/// `shared.connect` の呼び出しで、停止点はその内側にある。この関数の中は停止点より下なので、囲んでも試験は検出できない（ORST-17）。
 fn connect_real(_: &Shared, addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
     TcpStream::connect_timeout(addr, timeout)
 }
@@ -925,7 +927,9 @@ fn connect_after_stall(
     if let Some(stall) = &shared.stall {
         stall.hold(&shared.stop);
         if shared.stop.load(Ordering::SeqCst) {
-            return Err(io::ErrorKind::Interrupted.into());
+            // 再試行の意味を持つ `Interrupted` は使わない（`pump`・`drain_with` が「もう一度試す」の意味で使う）。
+            // 停止の後に connect を呼ばない点は変えない。
+            return Err(io::Error::other("stopped at the upstream stall point"));
         }
     }
     TcpStream::connect_timeout(addr, timeout)
@@ -1585,7 +1589,7 @@ mod tests {
     }
 
     /// 停止の時刻が見える時点で、停止フラグも必ず true と読める（同じロックの下で公開する。ORST-17）。
-    /// 時刻の記録とフラグの公開が別々になると、`hold` が `Stopped` を返した後に `dial_upstream` が false を読み得る。
+    /// 時刻の記録とフラグの公開が別々になると、`hold` が `Stopped` を返した後に `connect_after_stall` が false を読み得る。
     /// 競合の再現は確率的で、毎回は落ちない（スケジューラ依存）。多数回の繰り返しで検出の機会を増やす。
     #[test]
     fn stop_flag_is_visible_whenever_stop_time_is() {

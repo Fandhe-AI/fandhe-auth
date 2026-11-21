@@ -238,7 +238,8 @@ fn conn_accepted_during_block_is_cut_and_later_conn_reaches_upstream() {
 /// - `accepted`: 上流へつないで中継を始めた接続（成功の段階。`accepted_count`）
 /// - `refused`: accept した後に直ちに閉じた接続。接続の失敗・遮断・停止のほか、上流への接続が成功した後の複製の失敗・
 ///   世代の不一致も含む（`refused_count`）。接続の失敗と中継前の拒否は `refused` だけでは区別できない
-/// - `upstream attempts`: 上流への connect の試行。connect の直前に数えるので接続中の接続も含み、成否を表さない
+/// - `upstream attempts`: 上流への connect の試行。connect の直前に数えるので接続中の接続も含み、成否を表さない。
+///   停止点で待っている接続と、そこで打ち切った接続も数に入る
 /// - `upstream connected`: 上流への connect の成功。`attempts` との差が接続の失敗、`connected` と `accepted` の差が
 ///   中継前の拒否（世代の不一致・複製の失敗）の手掛かりになる
 ///
