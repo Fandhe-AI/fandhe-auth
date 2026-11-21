@@ -129,6 +129,13 @@ fn requirement_and_initial_always_rejected() {
             Some(ca)
         );
     }
+    // 出典の上限・重複の検査より先に拒否する（本来は TooManyRefs・InvalidRef になる入力）。
+    let nine: Vec<String> = (0..9).map(|i| format!("R-{i}")).collect();
+    let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+    for c in [Requirement, Initial] {
+        assert_eq!(approval(c, 5, &nine, &ok).err(), Some(ca));
+        assert_eq!(approval(c, 5, &["A", "A"], &ok).err(), Some(ca));
+    }
     // 測定値・試験の条件・未決・他所有者の値は、これまでどおり通る。
     assert!(approval(Measured, 5, &[], &ok).is_ok());
     assert!(approval(TestCondition, 5, &[], &ok).is_ok());
@@ -591,10 +598,25 @@ fn debug_and_errors_do_not_leak() {
         &ApprovedValues::default(),
     )
     .unwrap();
-    let dbg = format!("{v:?} {:?} {:?}", vname(secret), refs(&["CANARY-REF"]));
-    let rec = build(0, 1, vec![v]).unwrap();
+    // 数値の欄（SECR-23）: 測定値の数値と名前が Debug に出ない。
+    let secret_m = "canary_meas_zz";
+    let m = ComparisonValue::new(
+        vname(secret_m),
+        ValueClass::Measured,
+        Some(424_242),
+        ValueUnit::Ns,
+        vec![],
+        &ApprovedValues::default(),
+    )
+    .unwrap();
+    let dbg = format!(
+        "{v:?} {m:?} {:?} {:?}",
+        vname(secret),
+        refs(&["CANARY-REF"])
+    );
+    let rec = build(0, 1, vec![v, m]).unwrap();
     let dbg = format!("{dbg} {rec:?} {:?}", file());
-    for bad in [secret, "CANARY-REF", "it-run-0-1-1"] {
+    for bad in [secret, secret_m, "CANARY-REF", "424242", "it-run-0-1-1"] {
         assert!(!dbg.contains(bad));
     }
     let e = RunRecordFile::new("bad\nlines").unwrap_err().to_string();

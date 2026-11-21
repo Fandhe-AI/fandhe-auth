@@ -332,7 +332,7 @@ struct ApprovedValue {
 ///
 /// 信頼の境界: この型が検査するのは形式（ファイルの種類・大きさ・UTF-8・書式、候補との完全一致）だけで、
 /// 一覧の行を人が承認したこと（真正性）は検査しない。ライブラリの中では、ファイルを書いたのが人か、
-/// 記録の候補を持つ同じ呼び出し元かを区別できない（呼び出し元が候補から書いたファイルを渡せば、その値は通る）。
+/// 記録の候補を持つ同じ呼び出し元かを区別できない（照合を戻した後は、呼び出し元が候補から書いたファイルを渡せば、その値は通る。TASK-12・#121 までは通らない）。
 /// 真正性は、承認一覧を repo に commit し、人がレビューで承認することで担保する（値の決定・承認は人が行う。ACPT-7）。
 /// 一覧のファイルの置き場と形は未定で、人が決める（`docs/harness/load.md` の「未決・人の確認待ち」）。
 ///
@@ -350,9 +350,11 @@ impl fmt::Debug for ApprovedValues {
 }
 
 impl ApprovedValues {
+    /// 現在は `ComparisonValue::new` がこの結果を使わない（要件の値・初期値を常に拒否する。#121）。
+    ///
     /// 承認一覧のファイルを読み込み専用で開き、形式を検査して読む。検査は形式だけで、承認の真正性は見ない
-    /// （型の doc の信頼の境界）。渡すのは repo に commit され人がレビューで承認したファイルに限る。記録の候補から
-    /// 書いたファイルを渡すと、その値が要件の値・初期値として通る（ACPT-7・load.md 規則 4。呼び出し側の契約）。
+    /// （型の doc の信頼の境界）。渡すのは repo に commit され人がレビューで承認したファイルに限る。照合を戻した後は、
+    /// 記録の候補から書いたファイルを渡すと、その値が要件の値・初期値として通る（ACPT-7・load.md 規則 4。呼び出し側の契約）。
     ///
     /// 開くときに止まらない: Unix では `O_NONBLOCK` を付けて開くため、書き手のいない FIFO を指しても `open` で
     /// 待たず、開いたハンドルの種別の検査で拒否する。種別と大きさは開いたハンドルで見る（パスの差し替えに依らない）。
@@ -528,7 +530,9 @@ impl ComparisonValue {
     /// 区分の規則に反するとき [`LoadRecordError::InvalidValue`]、出典が 9 件以上のとき
     /// [`LoadRecordError::TooManyRefs`]、重複のとき [`LoadRecordError::InvalidRef`]。
     // TODO(TASK-12): 承認一覧の置き場・形・承認の手順が決まったら、`approved` との完全一致の照合を戻す
-    // （`ApprovedValues::contains`。拒否の理由は `NotInApprovedList` に戻る。追跡は #121）。
+    // （`ApprovedValues::contains`。拒否の理由は `NotInApprovedList` に戻る。追跡は #121）。あわせて、不一致 5 種
+    // （項目・区分・数値・単位・出典のどれか 1 つが違うと出せない）の試験も戻す
+    // （削除した `approval_must_match_name_class_value_unit_refs` に当たるもの。AUDB-6）。
     pub fn new(
         name: ValueName,
         class: ValueClass,
