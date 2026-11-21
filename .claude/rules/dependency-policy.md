@@ -43,7 +43,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 | 対象 | 規則 | 根拠 |
 | --- | --- | --- |
-| `rsa`（RUSTSEC-2023-0071） | 本番の依存（RP 向けの `fandhe-auth-client` を含む）に 0 件 | DPOL-18（未評価。逆引きだけでは満たさない）・DPOL-21（逆引きだけでは満たさない） |
+| `rsa`（RUSTSEC-2023-0071） | 本番の依存（RP 向けの `fandhe-auth-client` を含む）に 0 件 | DPOL-18・DPOL-21（未評価。逆引きだけでは満たさない） |
 | `openssl` | 直接の宣言 0 件。逆依存の根は `webauthn-rs` 系だけ。`vendored` 不可。配備物は配備先の OpenSSL に動的にリンクする（版の記録 DPOL-12 は → Hub `AOPS-2`） | DPOL-10・DPOL-11・DPOL-13（`vendored` は `scripts/check-openssl-vendored.sh`〔`make lint`・`make no-vendored`〕で機械的に検査する。合否の対象は試験専用メンバーを除いた本番メンバーの normal・build 依存で、既定 feature と `PROD_FEATURES` で明示した feature だけ。全 feature を有効にする走査は警告だけの参考） |
 | `native-tls` | 使わない。外向き通信の TLS は OS の信頼ストアに頼らない（DPOL-46。実クライアントの選定は Hub の `ARUN-14`） | DPOL-46 |
 | `web-sys` | サーバー側のビルドに 0 件。引いてよいのは `fandhe-auth-webauthn-wasm`（段階 2）だけ。サーバーのビルドの確認は Hub のビルドにも課される（→ Hub `ARUN-16`） | DPOL-40・`D-2026-10-17-35` の (2) |
@@ -87,9 +87,9 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 この手順は暫定で、cargo-audit の DB の取得が監査を兼ねており DPOL-33 の取得と監査の分離を満たさない。正式な手順と記録の様式は TASK-679（DPOL-33）、`deny.toml` は TASK-668 で決める。
 この手順の合格を DPOL-34 の合格とは扱わない。
-cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、`deny.toml` の有無にかかわらず参考結果（規約の合否ではない）とする。DPOL-18・DPOL-20・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 は PR 本文に「未評価」と書く（`dependency-auditor` Agent の手順と同じ）。
+cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、`deny.toml` の有無にかかわらず参考結果（規約の合否ではない）とする。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 は PR 本文に「未評価」と書く（`dependency-auditor` Agent の手順と同じ）。
 
-ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（参考結果。DPOL-18・DPOL-20・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 は未評価）と、例外を足したならその理由を PR 本文に書く。
+ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（参考結果。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 は未評価）と、例外を足したならその理由を PR 本文に書く。
 
 ```bash
 # advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。取得日・DB の版は記録しない（下の記録の項。TASK-679 で決める）
@@ -111,7 +111,7 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 ```
 
 - advisory DB の記録（DPOL-33）: DPOL-33 は Should で、使った DB の commit と取得日の両方の記録を求めるが、今は記録していない。取得日も DB の版も「未記録（TASK-679 で決める）」と書く。取得の開始ログ（`Fetching advisory database from` 等）・終了コード・DB の HEAD・取得元との照合（`ls-remote` 等）は、どれも取得や DB の版の根拠にしない。記録の手順は TASK-679 で決める。
-- cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、すべて参考結果とする。DPOL-18・DPOL-20・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 の判定は未評価とする。読まれ得る設定ファイルの名前は未確認の例として、`deny.toml`・`.deny.toml`・`.cargo/deny.toml`・`audit.toml` がある（確かめ方は決めていない。親ディレクトリの設定を探すかも未確認）。
+- cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、すべて参考結果とする。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 の判定は未評価とする。読まれ得る設定ファイルの名前は未確認の例として、`deny.toml`・`.deny.toml`・`.cargo/deny.toml`・`audit.toml` がある（確かめ方は決めていない。親ディレクトリの設定を探すかも未確認）。
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。対象が `Cargo.lock` にあっても指定した依存の種類・feature のグラフに無いときは、終了コード 0 で `nothing to print` を出す。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
   「一致なし」と読むのは、stderr を取得でき、指定した `-i` の対象（例: `rsa`）についての `did not match any packages` の診断だけのとき、
