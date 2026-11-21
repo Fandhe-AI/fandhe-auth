@@ -177,10 +177,10 @@ impl FaultTimeline {
         Ok(Some(Arc::clone(&self.injector_bound)))
     }
 
-    /// 時計のずれの注入器をこの実行へ結ぶ。結べたら `Ok(true)`、すでに別の注入器が結んでいれば `Ok(false)`。
-    /// 公開の直接記録で時計の事象を積んだ実行へは結べない（`ClockSkewEventOutsideInjector`。解除の対応が食い違うため）。
-    /// 結合は取り消さない（注入器を破棄しても、実行の時計の事象は残るため）。
-    pub(crate) fn bind_clock_injector(&mut self) -> Result<bool, FaultRecordError> {
+    /// 時計のずれの注入器をこの実行へ結べるかを確かめる（状態は変えない）。結べるなら `Ok(true)`、すでに別の注入器が
+    /// 結んでいれば `Ok(false)`。公開の直接記録で時計の事象を積んだ実行へは結べない（`ClockSkewEventOutsideInjector`。
+    /// 解除の対応が食い違うため）。
+    pub(crate) fn check_clock_bindable(&self) -> Result<bool, FaultRecordError> {
         if self.clock_bound {
             return Ok(false);
         }
@@ -191,8 +191,13 @@ impl FaultTimeline {
         {
             return Err(FaultRecordError::ClockSkewEventOutsideInjector);
         }
-        self.clock_bound = true;
         Ok(true)
+    }
+
+    /// 時計のずれの注入器の結合を確定する。初回の `Applied` の記録が成功した後にだけ呼ぶ（記録の拒否で結合が残らないように）。
+    /// 結合は取り消さない（注入器を破棄しても、実行の時計の事象は残るため）。
+    pub(crate) fn commit_clock_bound(&mut self) {
+        self.clock_bound = true;
     }
 
     /// ハーネスの時計で現在の時刻を押して積む。

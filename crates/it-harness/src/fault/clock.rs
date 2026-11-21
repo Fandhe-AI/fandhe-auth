@@ -26,8 +26,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::record::{FaultRecordError, FaultTimeline};
+use super::record::{FaultFinishFailure, FaultRecord, FaultRecordError, FaultTimeline};
 use super::{FaultKind, FaultPhase};
+use crate::record::UtcTimestamp;
 
 /// 時計のずれの注入の誤り。ずれの値・時刻を載せない（SECR-11）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub enum ClockSkewError {
     AlreadyBound,
     /// 適用中のずれが無い。
     NotActive,
+    /// 適用中のまま `abandon` した注入器は、その実行では再び使えない（未解除の `Applied` が記録に残るため）。
+    Abandoned,
     /// 適用した実行と別の実行の記録を渡された（状態も記録も変えない）。
     RunMismatch,
     /// 基準の時刻にずれを足すと表せない、または UNIX 紀元より前になる。
@@ -55,6 +58,7 @@ impl fmt::Display for ClockSkewError {
             Self::AlreadyActive => "already active",
             Self::AlreadyBound => "already bound",
             Self::NotActive => "not active",
+            Self::Abandoned => "abandoned",
             Self::RunMismatch => "run mismatch",
             Self::OutOfRange => "skewed time out of range",
             Self::Record(_) => "record rejected",
@@ -142,6 +146,8 @@ pub struct ClockSkewInjector {
     run_id: Option<u64>,
     /// 結んだ実行の識別。`abandon`・`release` では消さない（同じ実行へ再び適用できる。別の実行へは結ばない）。
     bound_run: Option<u64>,
+    /// 適用中のまま `abandon` した（未解除の `Applied` が記録に残る）。以後 `apply` を受けない（解除先の取り違えを防ぐ）。
+    abandoned: bool,
 }
 
 impl fmt::Debug for ClockSkewInjector {
@@ -172,6 +178,7 @@ impl ClockSkewInjector {
             active: None,
             run_id: None,
             bound_run: None,
+            abandoned: false,
         }
     }
 
@@ -185,7 +192,38 @@ impl ClockSkewInjector {
 
     /// 実行の終了時に、解除の記録なしで共有のずれを 0 へ戻す。`FaultTimeline::finish` の前後どちらでも呼べる。
     /// 記録には触らないので、未解除だった事実は `unreleased_count` に残る。適用中でなければ何もしない。
+    /// 適用中だったときは終端操作で、以後この注入器の `apply` は `Abandoned`（古い `Applied` が未解除のまま残り、
+    /// 同じ値の再適用の `Released` が古い方を消して AVLB-31 の記録が食い違うのを避ける）。
     pub fn abandon(&mut self) {
+        if self.active.is_some() {
+            self.abandoned = true;
+        }
+        self.skew_ms.store(0, Ordering::SeqCst);
+        self.active = None;
+        self.run_id = None;
+    }
+
+    /// 実行の記録を確定し、配布済みの [`SkewedClock`] が共有するずれを 0 へ戻す（同じ終了操作。AVLB-31 の試験条件を
+    /// 次の実行へ持ち越さない）。未解除だった事実は `unreleased_count` に残る。確定に失敗したときはずれを変えず、
+    /// タイムラインを `FaultFinishFailure` で返す。結んだ実行と別の実行の記録なら、ずれには触らない。
+    ///
+    /// # Errors
+    /// `FaultTimeline::finish` と同じ。
+    pub fn finish(
+        &mut self,
+        timeline: FaultTimeline,
+        recorded_at: UtcTimestamp,
+    ) -> Result<FaultRecord, Box<FaultFinishFailure>> {
+        let run_id = timeline.run_id();
+        let record = timeline.finish(recorded_at)?;
+        if self.bound_run == Some(run_id) {
+            self.abandon_state();
+        }
+        Ok(record)
+    }
+
+    /// 共有のずれを 0 へ戻し、適用中の状態を捨てる（`abandoned` の印は変えない）。
+    fn abandon_state(&mut self) {
         self.skew_ms.store(0, Ordering::SeqCst);
         self.active = None;
         self.run_id = None;
@@ -210,7 +248,7 @@ impl ClockSkewInjector {
     ///
     /// # Errors
     /// 0 のずれ（`InvalidParam`）・適用中（`AlreadyActive`）・表せない時刻（`OutOfRange`）・記録の拒否（`Record`）。
-    /// 誤りのときは何も記録せず状態も変えない。
+    /// 誤りのときは何も記録せず状態も変えない（結合も確定しない）。`abandon` 済みは `Abandoned`。
     pub fn apply(
         &mut self,
         timeline: &mut FaultTimeline,
@@ -221,30 +259,37 @@ impl ClockSkewInjector {
         if self.active.is_some() {
             return Err(ClockSkewError::AlreadyActive);
         }
+        if self.abandoned {
+            return Err(ClockSkewError::Abandoned);
+        }
         let kind = self.prepare(skew_ms)?;
-        self.bind(timeline)?;
+        // 結合の可否だけを先に検査し、`Applied` の記録が成功してから両側の結合を確定する（記録の拒否で状態を残さない）。
+        let first_bind = self.check_bindable(timeline)?;
         timeline
             .record_now_with_log_pos(kind, FaultPhase::Applied, None)
             .map_err(ClockSkewError::Record)?;
+        if first_bind {
+            timeline.commit_clock_bound();
+            self.bound_run = Some(timeline.run_id());
+        }
         self.skew_ms.store(skew_ms, Ordering::SeqCst);
         self.active = Some(kind);
         self.run_id = Some(timeline.run_id());
         Ok(())
     }
 
-    /// 時計の注入器をこの実行へ結ぶ（1 つの実行に 1 つ）。すでに自分が結んでいれば何もしない。
-    /// 別の実行へは結べない（`RunMismatch`）。同じ実行に別の注入器がいれば `AlreadyBound`。
-    fn bind(&mut self, timeline: &mut FaultTimeline) -> Result<(), ClockSkewError> {
+    /// 時計の注入器をこの実行へ結べるかを確かめる（状態は変えない）。初回の結合が要るなら `Ok(true)`、
+    /// すでに自分が結んでいれば `Ok(false)`。別の実行へは結べない（`RunMismatch`）。同じ実行に別の注入器がいれば `AlreadyBound`。
+    fn check_bindable(&self, timeline: &FaultTimeline) -> Result<bool, ClockSkewError> {
         match self.bound_run {
-            Some(id) if id == timeline.run_id() => Ok(()),
+            Some(id) if id == timeline.run_id() => Ok(false),
             Some(_) => Err(ClockSkewError::RunMismatch),
             None => {
                 if timeline
-                    .bind_clock_injector()
+                    .check_clock_bindable()
                     .map_err(ClockSkewError::Record)?
                 {
-                    self.bound_run = Some(timeline.run_id());
-                    Ok(())
+                    Ok(true)
                 } else {
                     Err(ClockSkewError::AlreadyBound)
                 }

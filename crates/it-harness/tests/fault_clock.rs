@@ -202,7 +202,58 @@ fn abandon_clears_shared_skew_without_recording_release() {
     assert_eq!(clock.skew_ms(), 0);
     assert_eq!(inj.active_skew_ms(), None);
     assert_eq!(inj.release(&mut tl), Err(ClockSkewError::NotActive));
+    // 終端操作: 同じ実行への再適用は受けない（古い Applied が未解除のまま残るため）。
+    assert_eq!(inj.apply(&mut tl, -2_000), Err(ClockSkewError::Abandoned));
+    assert_eq!(clock.skew_ms(), 0);
     let r = finish(tl);
     assert_eq!(r.unreleased_count(), 1);
     assert_eq!(injection_lines(&r).len(), 1);
+}
+
+#[test]
+fn rejected_apply_leaves_no_binding() {
+    // 基準線への適用が拒否されても、注入器は別の実行へ結べる（RunMismatch にならない）。
+    let mut inj = injector();
+    let mut base = FaultTimeline::baseline(Instant::now(), SystemTime::now()).unwrap();
+    assert!(inj.apply(&mut base, 1_000).is_err());
+    let mut tl = timeline();
+    inj.apply(&mut tl, 1_000).unwrap();
+    inj.release(&mut tl).unwrap();
+    // offset が逆行して Applied の記録が拒否された実行へは、別の注入器が AlreadyBound にならず試せる。
+    let mut tl2 = timeline();
+    let at = UtcTimestamp::from_system_time(SystemTime::now()).unwrap();
+    tl2.record_at(
+        fandhe_auth_it_harness::fault::FaultKind::InstanceSigterm,
+        fandhe_auth_it_harness::fault::FaultPhase::Applied,
+        at,
+        u64::MAX / 2,
+    )
+    .unwrap();
+    let mut a = injector();
+    let mut b = injector();
+    assert_eq!(
+        a.apply(&mut tl2, 1_000),
+        Err(ClockSkewError::Record(
+            FaultRecordError::OffsetWentBackwards
+        ))
+    );
+    assert_eq!(
+        b.apply(&mut tl2, 1_000),
+        Err(ClockSkewError::Record(
+            FaultRecordError::OffsetWentBackwards
+        ))
+    );
+}
+
+#[test]
+fn injector_finish_confirms_record_and_clears_shared_skew() {
+    let mut inj = injector();
+    let mut tl = timeline();
+    let clock = inj.clock();
+    inj.apply(&mut tl, 1_000).unwrap();
+    let at = UtcTimestamp::from_system_time(SystemTime::now()).unwrap();
+    let r = inj.finish(tl, at).unwrap();
+    assert_eq!(r.unreleased_count(), 1);
+    assert_eq!(clock.skew_ms(), 0);
+    assert_eq!(inj.active_skew_ms(), None);
 }
