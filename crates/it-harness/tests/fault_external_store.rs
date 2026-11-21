@@ -1,7 +1,7 @@
 //! TASK-13 (4/8): DB の外の保存先の遮断の注入の試験。Docker・外部ネットワークなし（上流はローカルの echo）。
 //! 時間に依る確認は下限だけにする。記録は事実の出力で合否の判定ではない（ACPT-7）。ORST-17・ORST-2。
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -404,7 +404,7 @@ fn start_for_with_empty_handle_closes_connections() {
 /// 上流側で観測した結果（ORST-17）。
 #[derive(Debug, PartialEq, Eq)]
 enum UpstreamObservation {
-    /// 接続を受け、EOF か切断までに受けたバイト数。
+    /// 接続を受け、EOF までに受けたバイト数（読み取りの失敗の後は、届いた分があるときだけ）。
     Received(usize),
     /// accept か読み取りが失敗し、バイトが届いたかを確かめられない。
     Unverifiable(ErrorKind),
@@ -418,29 +418,64 @@ fn observe_upstream(up: TcpListener) -> thread::JoinHandle<UpstreamObservation> 
             Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
         };
         c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mut total = 0;
-        let mut buf = [0u8; 64];
-        loop {
-            match c.read(&mut buf) {
-                Ok(0) => return UpstreamObservation::Received(total),
-                Ok(n) => total += n,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        ErrorKind::ConnectionReset
-                            | ErrorKind::ConnectionAborted
-                            | ErrorKind::BrokenPipe
-                            | ErrorKind::UnexpectedEof
-                    ) =>
-                {
-                    return UpstreamObservation::Received(total);
+        read_until_eof(&mut c)
+    })
+}
+
+/// EOF までに受けたバイト数を数える。EOF（`Ok(0)`）を確認したときだけ「受信 0 バイト」を表せる。
+/// 読み取りの失敗は、バイトが届いたかを確かめられない（RST は届いた分も捨てうる）ので、届いたバイトが
+/// 無ければ `Unverifiable`（合格にしない）。届いたバイトがあれば、数を返す（判定は失敗のまま）（ORST-17・AUDB-6）。
+fn read_until_eof<R: Read>(c: &mut R) -> UpstreamObservation {
+    let mut total = 0;
+    let mut buf = [0u8; 64];
+    loop {
+        match c.read(&mut buf) {
+            Ok(0) => return UpstreamObservation::Received(total),
+            Ok(n) => total += n,
+            Err(_) if total > 0 => return UpstreamObservation::Received(total),
+            Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
+        }
+    }
+}
+
+/// ORST-17: 最初の読み取りが `ConnectionReset` 等で失敗したときは、受信 0 バイトとして合格にしない。
+/// EOF を確認した場合だけ 0 バイト。バイトを受けた後の失敗は、受けた数を返す。
+#[test]
+fn read_failure_before_eof_is_unverifiable_not_zero_bytes() {
+    struct Script(Vec<io::Result<Vec<u8>>>);
+    impl Read for Script {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.remove(0) {
+                Ok(b) => {
+                    buf[..b.len()].copy_from_slice(&b);
+                    Ok(b.len())
                 }
-                // 読み取りの失敗でも、届いたバイトがあれば数を返す（判定は失敗のまま。原因が分かるようにする）。
-                Err(_) if total > 0 => return UpstreamObservation::Received(total),
-                Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
+                Err(e) => Err(e),
             }
         }
-    })
+    }
+    for kind in [
+        ErrorKind::ConnectionReset,
+        ErrorKind::ConnectionAborted,
+        ErrorKind::BrokenPipe,
+        ErrorKind::UnexpectedEof,
+        ErrorKind::TimedOut,
+    ] {
+        let obs = read_until_eof(&mut Script(vec![Err(kind.into())]));
+        assert_eq!(obs, UpstreamObservation::Unverifiable(kind));
+        assert!(judge_upstream(obs).is_err());
+    }
+    assert_eq!(
+        read_until_eof(&mut Script(vec![Ok(vec![])])),
+        UpstreamObservation::Received(0)
+    );
+    assert_eq!(
+        read_until_eof(&mut Script(vec![
+            Ok(b"ab".to_vec()),
+            Err(ErrorKind::ConnectionReset.into())
+        ])),
+        UpstreamObservation::Received(2)
+    );
 }
 
 /// 観測の判定。受信 0 バイトだけが合格で、バイトが届いた場合と観測できない場合は失敗（緩和の分岐を持たない）。

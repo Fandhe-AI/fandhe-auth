@@ -562,7 +562,8 @@ impl DbFaultProxy {
     /// 5. 中継の開始（[`Self::accepted_count`]）。
     ///
     /// 段階 1 で終わった接続（遮断中・上流なし）は `refused_count` にだけ現れる。段階 2 で終わった接続（connect の失敗）は
-    /// `refused_count` と試行の計数に現れ、成功の計数には現れない。接続の成否は 2 と 3 の差で、中継前の拒否は 4 で分ける。
+    /// `refused_count` と試行の計数に現れ、成功の計数には現れない。段階 3 の後でソケットの複製に失敗した接続は、
+    /// `refused_count`・試行・成功の計数に現れ、世代の拒否の計数には現れない。接続の成否は 2 と 3 の差で、中継前の拒否は 4 で分ける。
     ///
     /// 上流への connect の試行回数（診断用）。`connect_timeout` の直前（停止点を通過した後）に加算するので、停止点への到達の確認には使えない
     /// （到達は [`UpstreamStall::wait_entered`] で待つ）。成否は表さない。
@@ -578,8 +579,9 @@ impl DbFaultProxy {
     }
 
     /// 中継を始める段で遮断の世代の比較が外れ、client のバイトを上流へ送らずに拒否した回数（ORST-17）。
-    /// 停止による拒否・接続の失敗・ソケットの複製の失敗・遮断中の accept での拒否は数えない
-    /// （それらは [`Self::refused_count`] にだけ出る）。
+    /// 停止による拒否・接続の失敗・ソケットの複製の失敗・遮断中の accept での拒否は数えない。
+    /// それらは [`Self::refused_count`] に出て、到達した段階の計数にも残る（接続の失敗は
+    /// [`Self::upstream_attempt_count`]、上流へ接続した後の複製の失敗は [`Self::upstream_connected_count`] にも出る）。
     /// 転送器全体の数。接続を 1 本に限った試験でだけ、接続ごとの証拠になる。
     pub fn generation_refused_count(&self) -> u64 {
         self.shared.generation_refused.load(Ordering::SeqCst)
