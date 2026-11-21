@@ -55,6 +55,14 @@ if ! python3 -I -c 'import tomllib' >/dev/null 2>&1; then
   log "error: python3 with tomllib (3.11+) required; cannot inspect"
   exit 2
 fi
+# 環境を消した子（試験の env -i）でも動くよう、確認済みの Python の実体を最初に解決する。pyenv・asdf・mise の shim は HOME 等が無いと起動に失敗するため、
+# 試験では名前（python3）ではなくこの実体を直接起動する。解決できない・実行できないときは検査不能（2）。
+PY="$(python3 -I -c 'import sys; print(sys.executable)' 2>/dev/null)" || PY=""
+case "${PY}" in /*) ;; *) PY="" ;; esac
+if [ -z "${PY}" ] || [ ! -x "${PY}" ]; then
+  log "error: cannot resolve python3 executable; cannot inspect"
+  exit 2
+fi
 
 # 生の診断（絶対パス・ホームのパスを含み得る mkdir・mktemp・cd・cargo・redirect の標準エラー）は出さない。
 # 失敗した箇所は固定の英語の文で報告して終了コード 2 にする。出力の抑制は合否を変えず、終了コードで判定する。
@@ -188,11 +196,13 @@ count_rule() {
 # pkg-config crate は存在だけで静的を選ぶため、値が `0` でも数える。名前も値も出さない。値は判定に使わず、eval やコマンドの引数にも展開しない。
 # <TARGET> はハイフンを含み得る（上流の openssl-sys はハイフンを `_` に替えた名前を読むため、ここでは上流の版が変わっても漏らさないよう、
 # 安全側に多めに数える）。bash の変数名にならない名前も見落とさないよう、compgen ではなく python の os.environ で列挙する。
-# 前置コマンドは試験用（env -i で子の環境を作る）。bash を経ず python3 を直接起動するので、bash 3.2 等の環境変数の扱いに依らない。
+# 前置コマンドは試験用（env -i で子の環境を作る）。bash を経ず、解決済みの Python の実体（PY）を直接起動する。
+# <TARGET> の検査契約は上流と同じ「大文字にし `-` を `_` に替えた名前」（openssl-sys 0.9.117 の build/main.rs、pkg-config 0.3.34 の lib.rs で確認）。
+# ハイフン入りの名前は上流が読まないので契約の外で、見えれば多めに数える分。上流の版を上げたら、読む名前の形が変わっていないか確かめ直す。
 # 出力が数字でなければ検査不能（2）。python が 0 で何も出さない場合を 0 件として扱わない（fail-closed）。
 count_static_env() {
   local c
-  c="$("$@" python3 -I -c '
+  c="$("$@" "${PY}" -I -c '
 import os
 n = 0
 for k in os.environ:
@@ -370,11 +380,11 @@ selftest() {
     exit 1
   fi
 
-  # F10: 静的リンクの環境変数（R4）。env -i で外側の環境を消し、試験の変数だけを渡した子プロセスで数える。
+  # F10: 静的リンクの環境変数（R4）。env -i で外側の環境（PATH・HOME も）を消し、試験の変数だけを渡して解決済みの Python の実体を直接起動して数える。
   # ハイフンを含む名前（bash の変数名にならない）も数えることを確かめる。
   local ev cnt rc
   for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'PKG_CONFIG_ALL_STATIC=1:ge1' 'x86_64-unknown-linux-gnu_OPENSSL_STATIC=1:ge1' 'aarch64-linux-android_PKG_CONFIG_ALL_STATIC=1:ge1' 'NOT_OPENSSL_STATIC_X=1:eq0' 'NOT-OPENSSL_STATIC_X=1:eq0'; do
-    cnt="$(count_static_env env -i "PATH=${PATH}" "${ev%:*}")" || exit 2
+    cnt="$(count_static_env env -i "${ev%:*}")" || exit 2
     case "${cnt}" in '' | *[!0-9]*) log "error: selftest F10: non-numeric count; cannot inspect"; exit 2 ;; esac
     if { [ "${ev##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${ev##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
       log "FAIL selftest F10: static env check wrong (case ${ev##*:})"
@@ -392,12 +402,22 @@ selftest() {
       exit 2
     fi
     rc=0
-    count_static_env env -i "PATH=${f}/fakepy-${fk}" >/dev/null 2>&1 || rc=$?
+    PY="${f}/fakepy-${fk}/python3" count_static_env env -i >/dev/null 2>&1 || rc=$?
     if [ "${rc}" -ne 2 ]; then
       log "FAIL selftest F10b: fake python output (${fk}) not treated as cannot-inspect"
       exit 1
     fi
   done
+
+  # F10c: 公開入口（bash の起動の前に環境で渡す）から、上流が読む正規化した名前（大文字・`-` を `_`）が検出されて R4 で失敗する。
+  # 子はスクリプト自身。自己試験の再帰を避けるため OSV_SELFTEST_CHILD で子の自己試験だけを省く（検出の経路は同じ）。
+  local out
+  rc=0
+  out="$(env "X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=1" OSV_SELFTEST_CHILD=1 "${BASH}" "${DIR}/check-openssl-vendored.sh" 2>&1)" || rc=$?
+  if [ "${rc}" -ne 1 ] || ! printf '%s\n' "${out}" | grep -q 'FAIL: static OpenSSL link forced'; then
+    log "FAIL selftest F10c: normalized target env not detected via entry point (rc=${rc})"
+    exit 1
+  fi
 
   # F11: repo の .cargo/config の OPENSSL_STATIC（R4）
   local cfg
@@ -460,10 +480,12 @@ selftest() {
     exit 1
   fi
 
-  log "selftest ok (F1-F12)"
+  log "selftest ok (F1-F12, F10b, F10c)"
 }
 
-selftest
+if [ -z "${OSV_SELFTEST_CHILD:-}" ]; then
+  selftest
+fi
 
 # 走査 A（合否）。検査不能（2）と違反（1）はここで確定し、参考の走査 B より先に返す。
 total=0
