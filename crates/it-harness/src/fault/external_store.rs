@@ -20,7 +20,7 @@
 
 use std::fmt;
 
-use super::db::{DbFaultError, DbFaultProxy};
+use super::db::{DbFaultError, DbFaultProxy, UpstreamConnector};
 use super::{FaultKind, FaultRecordError, FaultTimeline};
 use crate::database::{DatabaseEndpoint, EndpointHandle};
 
@@ -86,6 +86,20 @@ impl ExternalStoreFaultProxy {
         DbFaultProxy::start_to_port_as(port, FaultKind::ExternalStoreBlock)
             .map(|inner| Self { inner })
             .map_err(convert)
+    }
+
+    /// 上流への接続の処理を差し替えて始める（試験用。接続中で止まる状態を同期で作る。ORST-17）。
+    pub fn start_to_port_with_connector(
+        port: u16,
+        connector: UpstreamConnector,
+    ) -> Result<Self, ExternalStoreFaultError> {
+        DbFaultProxy::start_to_port_with_connector_as(
+            port,
+            FaultKind::ExternalStoreBlock,
+            connector,
+        )
+        .map(|inner| Self { inner })
+        .map_err(convert)
     }
 
     /// 接続情報のハンドルに向けて始める（別の `Database` を保存先に見立てる場合）。

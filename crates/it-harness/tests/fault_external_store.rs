@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fandhe_auth_it_harness::fault::{
     DbFaultProxy, ExternalStoreFaultError, ExternalStoreFaultProxy, FaultRecordError,
+    UpstreamConnector,
 };
 use fandhe_auth_it_harness::record::UtcTimestamp;
 use fandhe_auth_it_harness::{EndpointHandle, FaultRecord, FaultTimeline};
@@ -118,17 +119,19 @@ enum Outcome {
     Echoed(Vec<u8>),
     Disconnected,
     TimedOut,
+    /// 分類にない I/O エラー。パニックにせず返し、比較では常に不一致にして試験を失敗させる（原因は診断に出る）。
+    Other(ErrorKind),
 }
 
 fn classify(e: &std::io::Error) -> Outcome {
     match e.kind() {
         ErrorKind::WouldBlock | ErrorKind::TimedOut => Outcome::TimedOut,
-        // 切断を示す種類だけ。それ以外の I/O エラーは試験の失敗にする（原因を隠さない）。
+        // 切断を示す種類だけ。それ以外は `Other` として返し、期待と食い違って失敗する（種類は診断に出る）。
         ErrorKind::UnexpectedEof
         | ErrorKind::ConnectionReset
         | ErrorKind::ConnectionAborted
         | ErrorKind::BrokenPipe => Outcome::Disconnected,
-        kind => panic!("unexpected io error kind: {kind:?}"),
+        kind => Outcome::Other(kind),
     }
 }
 
@@ -227,8 +230,10 @@ fn conn_accepted_during_block_is_cut_and_later_conn_reaches_upstream() {
 /// 期待（最後の往復が `Echoed`）は変えない（AUDB-6）。失敗の文言には、失敗した段階（connect・往復）と誤りの種類、
 /// 最後の接続の前後の `accepted`・`refused`・上流への試行の差を出す。
 /// 集計値の限界: 計数は転送器全体の合計で、最後の接続だけのものではない。`storm.join()` が待つのは接続側のスレッドで、
-/// 転送器の accept のスレッドが storm の接続を処理し終えたことは保証しない。accept 済みで上流へ接続中の接続は
-/// どの計数も増やさないので、差がすべて 0 でも「カーネルの段で切れた」とは断定できない（手掛かりにとどめる）。
+/// 転送器の accept のスレッドが storm の接続を処理し終えたことは保証しない。上流への試行は connect の直前に数えるので
+/// `upstream attempts` は接続中の接続も含み、成否は `accepted`（成功）・`refused`（失敗・切断）にだけ現れる。
+/// 試行の差があるのに `accepted`・`refused` の差が 0 なら、接続の結果がまだ出ていない接続がある（手掛かりにとどめる。
+/// 差がすべて 0 でも「カーネルの段で切れた」とは断定できない）。
 #[test]
 fn release_returns_in_time_under_reconnect_storm() {
     let up = echo_upstream();
@@ -383,68 +388,44 @@ fn start_for_with_empty_handle_closes_connections() {
     assert_eq!(roundtrip(&mut c, b"x"), Outcome::Disconnected);
 }
 
-/// 上流の待ち行列を満杯にして、新しい上流への connect が固まる状態を作る（accept のスレッドを止める用）。
-/// 返す値は drop まで保つ（待ち受けと満杯にした接続）。
-struct StalledUpstream {
-    port: u16,
-    _listener: TcpListener,
-    _filled: Vec<TcpStream>,
-}
-
-fn stalled_upstream() -> StalledUpstream {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let mut filled = Vec::new();
-    loop {
-        match TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
-            Ok(s) => filled.push(s),
-            Err(e) if e.kind() == ErrorKind::TimedOut => break,
-            Err(e) => panic!(
-                "cannot stall upstream connect: error kind {:?} after {} filled connections (accept-queue overflow is one possible cause; fd exhaustion or an OS that resets on overflow are others)",
-                e.kind(),
-                filled.len()
-            ),
-        }
-        assert!(filled.len() < 20_000, "backlog never filled");
-    }
-    StalledUpstream {
-        port,
-        _listener: listener,
-        _filled: filled,
-    }
-}
-
-/// 遮断中に始めた接続・遮断は、accept のスレッドが上流への接続で固まっていても待たされない。
+/// 遮断中に始めた接続・遮断は、accept のスレッドが上流への接続で止まっていても待たされない。
 /// `Applied` の記録から実際の遮断までに、上流への接続の上限（5 秒）に及ぶずれを作らない（ORST-17）。
-/// 固まった接続は遮断で切れる。
+/// 止まった接続は遮断で切れ、解放後に上流へ届かない。
 ///
-/// 上流を固める土台は、待ち行列があふれたときに SYN を黙って捨てる挙動（Linux の既定 `tcp_abort_on_overflow=0`）に依る。
-/// 土台が組めない環境では `ignore` で外さず、観測した誤りの種類つきで失敗させる（検証を黙って外さない。AUDB-6）。
-/// `block()` の前に、accept のスレッドが上流への connect に入ったこと（`upstream_attempt_count`）を待って確かめ、
-/// その後も拒否も転送も始まっていないことを見る（中身の無い合格にしない）。
+/// 上流への接続の処理を注入し、処理に入ったことを通知してから `block()` が戻るまで完了させない（OS の待ち行列の挙動に
+/// 依らず、停止点を同期で作る。`block()` は必ず接続の処理の最中に呼ばれる）。
 #[test]
 fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
-    let up = stalled_upstream();
-    let mut p = ExternalStoreFaultProxy::start_to_port(up.port).unwrap();
+    use std::sync::Mutex;
+    use std::sync::mpsc;
+
+    let up = echo_upstream();
+    let upstream_port = up.port();
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (gate_tx, gate_rx) = mpsc::channel::<()>();
+    let entered_tx = Mutex::new(entered_tx);
+    let gate_rx = Mutex::new(gate_rx);
+    let connector: UpstreamConnector = Arc::new(move |addr, timeout| {
+        let _ = entered_tx.lock().unwrap().send(());
+        // `block()` が戻るまで完了させない。解放されない場合は上限で打ち切って実際の接続へ進む（試験を固めない）。
+        let _ = gate_rx.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        TcpStream::connect_timeout(&addr, timeout)
+    });
+    let mut p =
+        ExternalStoreFaultProxy::start_to_port_with_connector(upstream_port, connector).unwrap();
     let mut tl = timeline();
     let mut stuck = connect(p.listen_port());
-    // 停止点への到達: accept のスレッドが上流への connect に入ったことを同期して待つ。
-    assert!(
-        wait_until(|| p.upstream_attempt_count() >= 1),
-        "accept thread never began the upstream connect"
-    );
-    // 前提: 入った後も上流への接続で止まっており、拒否も転送も始まっていない（上流の待ち行列の満杯は
-    // `stalled_upstream` が connect の時間切れで確かめ済み。connect の上限は 5 秒で、ここまでは数 ms）。
-    assert_eq!(
-        p.refused_count(),
-        0,
-        "upstream connect failed instead of stalling"
-    );
-    assert_eq!(p.accepted_count(), 0, "upstream connect was not stalled");
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("accept thread never entered the upstream connect");
+    // 前提: 接続の処理の中で止まっており、拒否も転送も始まっていない。
+    assert_eq!(p.refused_count(), 0, "connect finished before the block");
+    assert_eq!(p.accepted_count(), 0, "conn was relayed before the block");
     let started = Instant::now();
     p.block(&mut tl).unwrap();
     let elapsed = started.elapsed();
+    // `block()` が戻ってから接続の処理を完了させる。
+    gate_tx.send(()).unwrap();
     assert!(
         elapsed < Duration::from_secs(1),
         "block waited for the stalled accept: {elapsed:?}"
@@ -454,6 +435,8 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
         Outcome::Disconnected,
         "stalled conn is cut by the block"
     );
+    assert!(wait_until(|| p.refused_count() >= 1));
+    assert_eq!(p.accepted_count(), 0, "stalled conn reached upstream");
 }
 
 /// 接続の試行が続いていても `block()` は期限の中で戻る（Cursor Bugbot の指摘の回帰防止。

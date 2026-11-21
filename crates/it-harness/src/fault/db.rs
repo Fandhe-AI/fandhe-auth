@@ -115,8 +115,19 @@ impl Upstream {
     }
 }
 
+/// 上流への接続の処理（試験の注入用）。既定は `TcpStream::connect_timeout`。
+/// 試験が「接続中で止まる」状態を同期で作るために差し替える（ORST-17）。宛先は常に `127.0.0.1`。
+pub type UpstreamConnector =
+    Arc<dyn Fn(SocketAddr, Duration) -> std::io::Result<TcpStream> + Send + Sync>;
+
+fn default_connector() -> UpstreamConnector {
+    Arc::new(|addr, timeout| TcpStream::connect_timeout(&addr, timeout))
+}
+
 /// 転送のスレッドと注入の入口で共有する状態。
 struct Shared {
+    /// 上流への接続の処理。
+    connector: UpstreamConnector,
     stop: AtomicBool,
     blocked: AtomicBool,
     delay_ms: AtomicU64,
@@ -137,8 +148,14 @@ struct Shared {
 }
 
 impl Shared {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_connector(default_connector())
+    }
+
+    fn with_connector(connector: UpstreamConnector) -> Self {
         Self {
+            connector,
             stop: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             delay_ms: AtomicU64::new(0),
@@ -244,6 +261,23 @@ impl DbFaultProxy {
     }
 
     fn start(upstream: Upstream, block_kind: FaultKind) -> Result<Self, DbFaultError> {
+        Self::start_with(upstream, block_kind, default_connector())
+    }
+
+    /// 上流への接続の処理を差し替えて、上流をポート直指定で始める（`external_store` の包みが使う内部の口）。
+    pub(super) fn start_to_port_with_connector_as(
+        port: u16,
+        block_kind: FaultKind,
+        connector: UpstreamConnector,
+    ) -> Result<Self, DbFaultError> {
+        Self::start_with(Upstream::Port(port), block_kind, connector)
+    }
+
+    fn start_with(
+        upstream: Upstream,
+        block_kind: FaultKind,
+        connector: UpstreamConnector,
+    ) -> Result<Self, DbFaultError> {
         // 遮断として記録できる種類だけ受ける（fail-closed）。
         if !matches!(
             block_kind,
@@ -260,7 +294,7 @@ impl DbFaultProxy {
             .local_addr()
             .map_err(|_| DbFaultError::StartFailed)?
             .port();
-        let shared = Arc::new(Shared::new());
+        let shared = Arc::new(Shared::with_connector(connector));
         let listener = Arc::new(listener);
         let accept = {
             let shared = Arc::clone(&shared);
@@ -602,7 +636,7 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
     };
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
-    let Ok(up) = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT) else {
+    let Ok(up) = (shared.connector)(addr, UPSTREAM_CONNECT_TIMEOUT) else {
         shared.sever_conn(id);
         refuse(&accepted.client, shared);
         return None;
