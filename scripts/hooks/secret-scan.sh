@@ -352,7 +352,7 @@ fi
 index_listing() {
   g ls-files -s -z > "$1" || return 1
   printf '\000\000' >> "$1" || return 1
-  g diff --cached --name-only -z --no-renames --ita-invisible-in-index "${empty_tree}" >> "$1" || return 1
+  g diff --cached --name-only -z --no-renames --ita-invisible-in-index "${empty_tree}" -- >> "$1" || return 1
 }
 if ! index_listing "${tmp_dir}/index-listing-before"; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
@@ -1036,7 +1036,8 @@ add_flagged() {
 
 # 1. .env 系ファイル。-z で受け、非 ASCII を含むパスが core.quotePath で引用符付き・
 #    8 進エスケープになり末尾一致しなくなるのを防ぐ。
-if ! scan_diff --name-only -z --diff-filter=ACMR > "${tmp_dir}/names"; then
+# リビジョンの後ろは `--` で区切る（リビジョンと同名のパスがあっても、引数をパスと取り違えて止まらない。本文の側は body_pathspec が `--` で始まる）。
+if ! scan_diff --name-only -z --diff-filter=ACMR -- > "${tmp_dir}/names"; then
   echo "secret-scan: failed to list files; aborting" >&4
   exit 2
 fi

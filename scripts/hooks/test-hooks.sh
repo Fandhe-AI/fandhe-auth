@@ -1463,6 +1463,16 @@ check_bad_lock "skills-lock.json with an invalid escape after a long string is r
 check_bad_lock "skills-lock.json with a short unicode escape after a long string is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":\"${long_a}\\u12\"}}}"
 check_bad_lock "skills-lock.json with a long number followed by a letter is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${long_d}x}}}"
 check_bad_lock "skills-lock.json with a long number followed by a bare exponent is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${long_d}e}}}"
+# 窓（1024 バイト）を何度も補充しないと読み終えない長い数（#6011）
+huge_d="$(rep_chars 1 5000)"
+huge_f="$(rep_chars 2 3000)"
+huge_e="$(rep_chars 3 3000)"
+make_detector "hugenum" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":-${huge_d}.${huge_f}e+${huge_e}}}}"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_bin}" check_scan "skills-lock.json with a number needing many window refills is accepted" 0
+check_bad_lock "skills-lock.json with a number needing many window refills followed by a letter is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${huge_d}x}}}"
+check_bad_lock "skills-lock.json with a long number and a bare exponent at the end is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${huge_d}.${huge_f}e+}}}"
+check_bad_lock "skills-lock.json with a long number and a trailing dot is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${huge_d}.}}}"
 check_bad_lock "skills-lock.json with a trailing garbage after long spaces is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{}}}${long_ws}x"
 # 窓の境目の総当たり: 先頭の空白を 0〜70 バイトずつずらし、次の字句（先頭が 985〜1055 バイト目）が 1024 バイトの境目をまたぐ位置をすべて通す。
 # 窓の大きさは変えず、入力の側をずらす。受理するはずのものは受理（0）、拒否するはずのものは固定の文言・終了コード 2 になること。
@@ -1551,9 +1561,32 @@ same_checkout_repo "${lock_ok}"
 padded_lock $((lock_max + 1)) > skills-lock.json
 git add skills-lock.json
 git commit -q -m "chore: big lock"
+# 小さい一覧を作業ツリーと index の両方へ戻す（上限を超える版を HEAD だけに残す）。index に大きい一覧が残ると、
+# 検出器は HEAD より先に index の一覧を検証して同じ診断で止まり、HEAD 側の検査がなくても通ってしまう（#6011）
 printf '%s\n' "${lock_ok}" > skills-lock.json
+git add -- skills-lock.json
 stage src/app.txt "x = placeholder"
+# 大きさは終了コードを確かめた cat-file -s で取る（index に登録が無いと空の出力が 0 に読めて「小さい」が成り立ってしまう）
+idx_size=""
+head_size=""
+if idx_size="$(git cat-file -s :skills-lock.json 2> /dev/null)" && head_size="$(git cat-file -s HEAD:skills-lock.json 2> /dev/null)" \
+  && [ "${idx_size}" -gt 0 ] && [ "${idx_size}" -le "${lock_max}" ] && [ "${head_size}" -gt "${lock_max}" ]; then
+  pass "secret-scan: precondition: only the committed skills-lock.json is over the size limit"
+else
+  fail "secret-scan: precondition: only the committed skills-lock.json is over the size limit" "index size: ${idx_size:-none}, HEAD size: ${head_size:-none}"
+fi
 run_big_lock "the committed skills-lock.json over the size limit is rejected" "${same_bin}"
+
+# リビジョン（空の tree・HEAD のコミット ID）と同名のパスがあっても、引数をパスと取り違えて止まらない（`--` で区切る。#6011）
+empty_tree_id="$(git hash-object -t tree --stdin < /dev/null)"
+# 中身に検出対象を入れ、同名のパスが黙って走査から外れていないこと（検出して 1・ファイル名が報告に出る）も確かめる
+new_repo; stage "${empty_tree_id}" "x = ${token}"
+SCAN_ARG=--tracked check_scan "tracked: a path named like the empty tree id does not stop the scan and is still scanned" 1 "${empty_tree_id}"
+new_repo; stage "${empty_tree_id}" "x = ${token}"
+check_scan "staged: a path named like the empty tree id does not stop the scan and is still scanned" 1 "${empty_tree_id}"
+new_repo; stage src/app.txt "hello"; git commit -q -m "chore: base"
+stage "$(git rev-parse HEAD)" "x = ${token}"
+check_scan "staged: a path named like the HEAD commit id is still scanned" 1 "$(git rev-parse HEAD)"
 
 # 別の checkout の staged でも、差分の基準は確定した ID を使う
 new_repo; stage src/app.txt "x = ${token}"
