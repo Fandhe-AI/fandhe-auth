@@ -43,7 +43,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 | 対象 | 規則 | 根拠 |
 | --- | --- | --- |
-| `rsa`（RUSTSEC-2023-0071） | 本番の依存（RP 向けの `fandhe-auth-client` を含む）に 0 件 | DPOL-18（未評価。逆引きだけでは満たさない）・DPOL-21 |
+| `rsa`（RUSTSEC-2023-0071） | 本番の依存（RP 向けの `fandhe-auth-client` を含む）に 0 件 | DPOL-18（未評価。逆引きだけでは満たさない）・DPOL-21（逆引きだけでは満たさない） |
 | `openssl` | 直接の宣言 0 件。逆依存の根は `webauthn-rs` 系だけ。`vendored` 不可。配備物は配備先の OpenSSL に動的にリンクする（版の記録 DPOL-12 は → Hub `AOPS-2`） | DPOL-10・DPOL-11・DPOL-13（`vendored` は `scripts/check-openssl-vendored.sh`〔`make lint`・`make no-vendored`〕で機械的に検査する。合否の対象は試験専用メンバーを除いた本番メンバーの normal・build 依存で、既定 feature と `PROD_FEATURES` で明示した feature だけ。全 feature を有効にする走査は警告だけの参考） |
 | `native-tls` | 使わない。外向き通信の TLS は OS の信頼ストアに頼らない（DPOL-46。実クライアントの選定は Hub の `ARUN-14`） | DPOL-46 |
 | `web-sys` | サーバー側のビルドに 0 件。引いてよいのは `fandhe-auth-webauthn-wasm`（段階 2）だけ。サーバーのビルドの確認は Hub のビルドにも課される（→ Hub `ARUN-16`） | DPOL-40・`D-2026-10-17-35` の (2) |
@@ -103,7 +103,7 @@ git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換�
 
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
 # SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形。無ければ空）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 合格: 「did not match any packages」（一致なし）。DPOL-21 の観点に限る。DPOL-18 は厳格版の bans も要るので未評価（逆引きだけでは満たさない）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 検出なし（参考）は「did not match any packages」（一致なし）。DPOL-18・DPOL-21 は厳格版の bans も要るため、逆引きだけでは満たさない
 cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls  # 合格: 同上
 cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
 cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
