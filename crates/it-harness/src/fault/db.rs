@@ -123,6 +123,10 @@ impl Upstream {
 ///
 /// この値は接続先も接続の結果も決めない（ループバック・指定ポートの制約を外さない）。
 /// 待ちは解放・転送器の停止・上限（[`UpstreamStall::MAX_HOLD`]）のどれかで必ず解ける（`stop()`・`Drop` を固めない）。
+///
+/// 転送器に渡すとき（`start_*_with_stall`）に、到達の記録（[`UpstreamStall::wait_entered`] の対象）と離れた理由
+/// （[`UpstreamStall::exit_reason`]）を戻す。前の転送器の到達で、今回の `wait_entered` が即座に `true` にならない（ORST-17）。
+/// 解放済みの状態（[`UpstreamStall::release`]）は戻さない（以後に入る接続も待たない契約のため）。
 #[derive(Clone, Default)]
 pub struct UpstreamStall {
     inner: Arc<StallInner>,
@@ -224,6 +228,17 @@ impl UpstreamStall {
         self.inner.cv.notify_all();
     }
 
+    /// 転送器に渡す時に呼ぶ。前の使用の到達と離れた理由を戻し、今回の到達だけを `wait_entered` が待てるようにする。
+    fn rebind(&self) {
+        let mut g = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        g.entered = 0;
+        g.last_exit = None;
+    }
+
     /// 転送器の停止を通知する。停止の時刻の記録と停止フラグの公開を同じロックの下で行ってから待ちを起こす。
     /// 期限の後の停止を `Stopped` と読ませず、`hold` が `Stopped` を返したときは呼び出し側も必ずフラグを true と読む
     /// （ORST-17・AUDB-6）。ロックは入れ子にしない（ここで持つのはこの状態のロックだけ）。
@@ -277,17 +292,19 @@ impl UpstreamStall {
 }
 
 /// 停止点を離れた理由の決定。解除・停止のどちらも期限の後なら期限切れ（解除や停止が待ちを解いた、と読ませない）。
+/// どちらも期限内なら、先に記録されたほうを理由にする（停止が先に待ちを解いた後に解除が割り込んでも `Stopped`。同時刻は `Released`）。
 fn classify_exit(
     released_at: Option<Instant>,
     stopped_at: Option<Instant>,
     deadline: Instant,
 ) -> StallExit {
-    if released_at.is_some_and(|t| t <= deadline) {
-        StallExit::Released
-    } else if stopped_at.is_some_and(|t| t <= deadline) {
-        StallExit::Stopped
-    } else {
-        StallExit::Expired
+    let released = released_at.filter(|t| *t <= deadline);
+    let stopped = stopped_at.filter(|t| *t <= deadline);
+    match (released, stopped) {
+        (Some(r), Some(s)) if s < r => StallExit::Stopped,
+        (Some(_), _) => StallExit::Released,
+        (None, Some(_)) => StallExit::Stopped,
+        (None, None) => StallExit::Expired,
     }
 }
 
@@ -459,6 +476,9 @@ impl DbFaultProxy {
         ) {
             return Err(DbFaultError::StartFailed);
         }
+        if let Some(stall) = &stall {
+            stall.rebind();
+        }
         let listener =
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|_| DbFaultError::StartFailed)?;
         listener
@@ -514,6 +534,15 @@ impl DbFaultProxy {
         self.shared.accepted.load(Ordering::SeqCst)
     }
 
+    /// 診断の計数が数える処理の段階（受け付け順）。
+    /// 1. accept した接続（[`Self::refused_count`] の対象は、この後に直ちに閉じたもの）。
+    /// 2. 上流への connect の試行（[`Self::upstream_attempt_count`]。停止点の後、connect の直前に数える）。
+    /// 3. 上流への connect の成功（[`Self::upstream_connected_count`]）。
+    /// 4. 世代の比較。外れれば client のバイトを送らずに拒否（[`Self::generation_refused_count`]）。
+    /// 5. 中継の開始（[`Self::accepted_count`]）。
+    ///
+    /// 段階 1〜2 で終わった接続は `refused_count` にだけ現れる。接続の成否は 2 と 3 の差で、中継前の拒否は 4 で分ける。
+    ///
     /// 上流への connect の試行回数（診断用）。`connect_timeout` の直前（停止点を通過した後）に加算するので、停止点への到達の確認には使えない
     /// （到達は [`UpstreamStall::wait_entered`] で待つ）。成否は表さない。
     pub fn upstream_attempt_count(&self) -> u64 {
@@ -1579,5 +1608,27 @@ mod tests {
         assert_eq!(c(None, late), StallExit::Expired);
         assert_eq!(c(late, late), StallExit::Expired);
         assert_eq!(c(late, early), StallExit::Stopped);
+        // 両方が期限内なら、先に記録されたほうが理由になる。
+        let first = Some(deadline - Duration::from_millis(20));
+        let second = Some(deadline - Duration::from_millis(10));
+        assert_eq!(c(second, first), StallExit::Stopped, "stop came first");
+        assert_eq!(c(first, second), StallExit::Released, "release came first");
+        assert_eq!(c(first, first), StallExit::Released, "tie is release");
+    }
+
+    /// 転送器に渡す時に前の使用の到達・離れた理由を戻す（ORST-17。再利用で `wait_entered` が即座に true にならない）。
+    #[test]
+    fn rebind_clears_previous_entry_and_exit() {
+        let stall = UpstreamStall::new();
+        stall.release();
+        stall.hold(&AtomicBool::new(false));
+        assert!(stall.wait_entered(Duration::from_millis(1)));
+        assert!(stall.exit_reason().is_some());
+        stall.rebind();
+        assert!(
+            !stall.wait_entered(Duration::from_millis(30)),
+            "stale entry"
+        );
+        assert_eq!(stall.exit_reason(), None);
     }
 }

@@ -233,9 +233,16 @@ fn conn_accepted_during_block_is_cut_and_later_conn_reaches_upstream() {
 /// 期待（最後の往復が `Echoed`）は変えない（AUDB-6）。失敗の文言には、失敗した段階（connect・往復）と誤りの種類、
 /// 最後の接続の前後の `accepted`・`refused`・上流への試行の差を出す。
 /// 集計値の限界: 計数は転送器全体の合計で、最後の接続だけのものではない。`storm.join()` が待つのは接続側のスレッドで、
-/// 転送器の accept のスレッドが storm の接続を処理し終えたことは保証しない。上流への試行は connect の直前に数えるので
-/// `upstream attempts` は接続中の接続も含み、成否は `accepted`（成功）・`refused`（失敗・切断）にだけ現れる。
-/// 3 つの計数は別々の時点に読むため、同一時点の集計ではない（非同期に採取した参考値）。試行の差と結果の差のずれから
+/// 転送器の accept のスレッドが storm の接続を処理し終えたことは保証しない。
+/// 各計数は接続が通る処理の段階を表す（詳細は `DbFaultProxy::upstream_attempt_count` の rustdoc）:
+/// - `accepted`: 上流へつないで中継を始めた接続（成功の段階。`accepted_count`）
+/// - `refused`: accept した後に直ちに閉じた接続。接続の失敗・遮断・停止のほか、上流への接続が成功した後の複製の失敗・
+///   世代の不一致も含む（`refused_count`）。接続の失敗と中継前の拒否は `refused` だけでは区別できない
+/// - `upstream attempts`: 上流への connect の試行。connect の直前に数えるので接続中の接続も含み、成否を表さない
+/// - `upstream connected`: 上流への connect の成功。`attempts` との差が接続の失敗、`connected` と `accepted` の差が
+///   中継前の拒否（世代の不一致・複製の失敗）の手掛かりになる
+///
+/// 4 つの計数は別々の時点に読むため、同一時点の集計ではない（非同期に採取した参考値）。差のずれから
 /// 処理中の接続があるとは断定できず、手掛かりにとどめる（差がすべて 0 でも「カーネルの段で切れた」とは断定できない）。
 #[test]
 fn release_returns_in_time_under_reconnect_storm() {
@@ -266,6 +273,7 @@ fn release_returns_in_time_under_reconnect_storm() {
         p.accepted_count(),
         p.refused_count(),
         p.upstream_attempt_count(),
+        p.upstream_connected_count(),
     );
     let failure = match try_connect(port) {
         Err((stage, e)) => Some((stage, format!("{:?}", e.kind()))),
@@ -281,6 +289,7 @@ fn release_returns_in_time_under_reconnect_storm() {
                 p.accepted_count(),
                 p.refused_count(),
                 p.upstream_attempt_count(),
+                p.upstream_connected_count(),
             )
         };
         let mut last = snap();
@@ -294,10 +303,11 @@ fn release_returns_in_time_under_reconnect_storm() {
             last = now;
         }
         panic!(
-            "final {stage} after release failed: {what}; accepted +{}, refused +{}, upstream attempts +{} (reference values sampled separately, not one atomic snapshot; see the test doc for limits)",
+            "final {stage} after release failed: {what}; accepted +{}, refused +{}, upstream attempts +{}, upstream connected +{} (reference values sampled separately, not one atomic snapshot; see the test doc for limits)",
             last.0.saturating_sub(before.0),
             last.1.saturating_sub(before.1),
-            last.2.saturating_sub(before.2)
+            last.2.saturating_sub(before.2),
+            last.3.saturating_sub(before.3)
         );
     }
 }
@@ -391,6 +401,82 @@ fn start_for_with_empty_handle_closes_connections() {
     assert_eq!(roundtrip(&mut c, b"x"), Outcome::Disconnected);
 }
 
+/// 上流側で観測した結果（ORST-17）。
+#[derive(Debug, PartialEq, Eq)]
+enum UpstreamObservation {
+    /// 接続を受け、EOF か切断までに受けたバイト数。
+    Received(usize),
+    /// accept か読み取りが失敗し、バイトが届いたかを確かめられない。
+    Unverifiable(ErrorKind),
+}
+
+/// 上流の接続を 1 本だけ受け、閉じられるまでの受信バイト数を数える。呼び出し側は blocking のリスナーを渡す。
+fn observe_upstream(up: TcpListener) -> thread::JoinHandle<UpstreamObservation> {
+    thread::spawn(move || {
+        let mut c = match up.accept() {
+            Ok((c, _)) => c,
+            Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
+        };
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut total = 0;
+        let mut buf = [0u8; 64];
+        loop {
+            match c.read(&mut buf) {
+                Ok(0) => return UpstreamObservation::Received(total),
+                Ok(n) => total += n,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    return UpstreamObservation::Received(total);
+                }
+                Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
+            }
+        }
+    })
+}
+
+/// 観測の判定。受信 0 バイトだけが合格で、バイトが届いた場合と観測できない場合は失敗（緩和の分岐を持たない）。
+fn judge_upstream(obs: UpstreamObservation) -> Result<(), String> {
+    match obs {
+        UpstreamObservation::Received(0) => Ok(()),
+        UpstreamObservation::Received(n) => {
+            Err(format!("bytes from the severed conn reached upstream: {n}"))
+        }
+        UpstreamObservation::Unverifiable(kind) => Err(format!(
+            "could not verify that no bytes reached upstream: {kind:?}"
+        )),
+    }
+}
+
+/// ORST-17: 観測の判定は、バイトの到達と観測の不能を合格にしない（accept が `ConnectionAborted`・`ConnectionReset` を返す
+/// macOS の経路と同じ判定を、Linux でも通す）。
+#[test]
+fn judge_upstream_accepts_only_zero_bytes() {
+    assert_eq!(judge_upstream(UpstreamObservation::Received(0)), Ok(()));
+    assert!(judge_upstream(UpstreamObservation::Received(1)).is_err());
+    for kind in [ErrorKind::ConnectionAborted, ErrorKind::ConnectionReset] {
+        assert!(judge_upstream(UpstreamObservation::Unverifiable(kind)).is_err());
+    }
+}
+
+/// 観測のスレッドは、実際に届いたバイトを数える（陽性対照。0 と数え違えると回帰を見逃す）。
+#[test]
+fn observe_upstream_counts_delivered_bytes() {
+    let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = up.local_addr().unwrap().port();
+    let h = observe_upstream(up);
+    let mut c = connect(port);
+    c.write_all(b"abc").unwrap();
+    drop(c);
+    assert_eq!(h.join().unwrap(), UpstreamObservation::Received(3));
+}
+
 /// 遮断・解除は、accept のスレッドが上流への接続の直前で止まっていても待たされない。
 /// `Applied` の記録から実際の遮断までに、上流への接続の上限（5 秒）に及ぶずれを作らない（ORST-17）。
 /// 止まった接続は、遮断が解除された後に上流への接続が成立しても中継されず、client のバイトは上流へ届かない
@@ -401,8 +487,10 @@ fn start_for_with_empty_handle_closes_connections() {
 #[test]
 fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    up.set_nonblocking(true).unwrap();
     let upstream_port = up.local_addr().unwrap().port();
+    // blocking の accept で待つ観測のスレッドを、転送器の起動の前に作る（待ち行列に残って切られる前に受ける）。
+    up.set_nonblocking(false).unwrap();
+    let observer = observe_upstream(up);
     let stall = UpstreamStall::new();
     let mut p =
         ExternalStoreFaultProxy::start_to_port_with_stall(upstream_port, stall.clone()).unwrap();
@@ -458,50 +546,12 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
         p.upstream_connected_count(),
         p.generation_refused_count()
     );
-    // macOS だけの緩和: `last_exit` は `hold()` の終わりに記録され、上流への connect と世代不一致での切断はその後に
-    // 起きる。macOS（Darwin）は、握手済みで相手に閉じられた接続が待ち行列に残っていると accept が
-    // `ConnectionAborted`・`ConnectionReset` を返す。この場合は上流の読み取りの確認ができないので、
-    // 接続の成立と世代による拒否は上の専用の計数だけで確かめる（バイトが届いていれば拒否の計数が 1 にならない）。
-    // Linux ではこの分岐を作らず、accept の `Ok` と読み取りの確認を必須にする（狭い確認で合格させない。AUDB-6）。
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let upstream_conn = loop {
-        match up.accept() {
-            Ok((c, _)) => break Some(c),
-            #[cfg(target_os = "macos")]
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
-                ) =>
-            {
-                break None;
-            }
-            Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => panic!("upstream connect never established: {:?}", e.kind()),
-        }
-    };
-    if let Some(mut upstream_conn) = upstream_conn {
-        upstream_conn.set_nonblocking(false).unwrap();
-        upstream_conn
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        // 遮断前の接続のバイトは上流へ届かない（読めるのは EOF か切断だけ）。
-        let mut buf = [0u8; 1];
-        match upstream_conn.read(&mut buf) {
-            Ok(0) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    ErrorKind::ConnectionReset
-                        | ErrorKind::ConnectionAborted
-                        | ErrorKind::BrokenPipe
-                        | ErrorKind::UnexpectedEof
-                ) => {}
-            Err(e) => panic!("unexpected upstream read error: {:?}", e.kind()),
-            Ok(n) => panic!("bytes from the severed conn reached upstream: {n}"),
-        }
+    // 遮断前のバイトが上流へ届いていないことを、上流側の受信バイト数で確かめる（ORST-17・AUDB-6）。
+    // 観測は上で起動した専用のスレッド（blocking の accept）が行う。観測できない場合（accept・読み取りの失敗、
+    // macOS の `ConnectionAborted`・`ConnectionReset` を含む）は合格にせず失敗にする。計数だけでは、
+    // 世代の検査より前にバイトを送る回帰を検出できないため、どの OS でも同じ判定を通す。
+    if let Err(why) = judge_upstream(observer.join().unwrap()) {
+        panic!("{why}");
     }
     assert!(wait_until(|| p.refused_count() >= 1));
     assert_eq!(p.accepted_count(), 0, "stalled conn was relayed");
