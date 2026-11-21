@@ -205,9 +205,12 @@ fn it_record_started_line(r: &fandhe_auth_it_harness::RunRecord) -> String {
 //
 // AAUD-30・AAUD-31 の方法（登録簿の各値を生・base64・base64url・16 進の形で出力に掛け、一致の件数を数える）を
 // ハーネスの出力に当てはめたもので、AAUD-30・AAUD-31 を満たしたものではない（実環境の走査は Hub〔`AOPS-73`〕）。
-// 対象は「stub の設定の 3 欄から負荷の記録・it-run の記録へ値が流れないこと」の回帰の検出まで。
-// 署名鍵（`AssertionSigningKey`）の秘密値は登録簿に入れておらず対象外（AAUD-30 の確定の範囲が
-// 既知の欠けとする「keys 段の秘密値が外れている」と同じ）。
+// 対象は「stub の設定の 3 欄から負荷の記録へ値が流れないこと」の回帰の検出と、it-run の記録（設定の入る口
+// `with_hub_stub_record` を通して書いたもの）に登録簿の値が現れないことの確認まで。it-run の記録に入るのは
+// 欄名（`&'static str`）と印（`ValueMark`）だけで、設定の値が届く経路は無い。そのため it-run の記録側の
+// 陽性対照は置けない（値を入れて書き出す経路が無い）。照合そのものの検出力は負荷の記録側の陽性対照で見る。
+// 署名鍵（`AssertionSigningKey`）の秘密値は登録簿に入れておらず対象外で、未確認のまま持ち越し
+// （追跡先は未定。利用者の判断待ち）。
 
 /// 実行時に乱数から作る 16 バイトの値（固定の値をソースに置かない）。`RandomState` は実行ごとに種が変わる。
 fn random_value() -> Vec<u8> {
@@ -315,13 +318,23 @@ fn count_matches(registry: &[Vec<u8>], haystack: &[u8]) -> usize {
         .sum()
 }
 
-/// JWT の形（`eyJ` で始まる区画が 2 つ以上ある 3 区画以上の語）の件数。語は英数字・`-`・`_`・`.` の連なり。
+/// JWT の形（`eyJ<英数字・-・_>.eyJ<…>.` の部分列）の件数。語の頭に限らず、本文のどこにあっても数える
+/// （`x.`・`name_` などが前に付いた形も数える）。
 fn count_jwt_like(haystack: &[u8]) -> usize {
-    haystack
-        .split(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
-        .filter(|tok| {
-            let segs: Vec<&[u8]> = tok.split(|b| *b == b'.').collect();
-            segs.len() >= 3 && segs[0].starts_with(b"eyJ") && segs[1].starts_with(b"eyJ")
+    let seg = |from: usize| {
+        let mut i = from;
+        while i < haystack.len()
+            && (haystack[i].is_ascii_alphanumeric() || matches!(haystack[i], b'-' | b'_'))
+        {
+            i += 1;
+        }
+        i
+    };
+    (0..haystack.len())
+        .filter(|&p| haystack[p..].starts_with(b"eyJ"))
+        .filter(|&p| {
+            let e1 = seg(p + 3);
+            haystack[e1..].starts_with(b".eyJ") && haystack.get(seg(e1 + 4)) == Some(&b'.')
         })
         .count()
 }
@@ -341,7 +354,12 @@ fn write_record_for(cfg: HubStubConfig, interval: &str) -> Written {
     let key = AssertionSigningKey::generate("kid-load-trial.test").unwrap();
     handle.with(|s| s.jwks.publish(&key)).unwrap();
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("load-trial-canary");
-    let it_record = running.run_record(VersionInfo::detect().unwrap()).unwrap();
+    // 設定が it-run の記録に入る口は `with_hub_stub_record` だけ（欄名と印のみを取り込む）。その口を通して書く。
+    let it_record = running
+        .run_record(VersionInfo::detect().unwrap())
+        .unwrap()
+        .with_hub_stub_record(&handle.provisional_record().unwrap())
+        .unwrap();
     let it_path = it_record.write_new(&dir).unwrap();
     let it_name = it_path.file_name().unwrap().to_str().unwrap().to_owned();
     let started_kinds: Vec<(ConditionComponent, bool)> = running
@@ -415,7 +433,7 @@ fn canary_registry_and_config() -> (Vec<Vec<u8>>, HubStubConfig) {
 }
 
 /// AAUD-30・SECR-23（方法を当てはめたもの）: stub の設定の 3 欄に入れた登録簿の値（乱数の値と欄の全文）が、
-/// 負荷の記録と it-run の記録の全文に、生・base64・base64url・16 進のどの形でも現れない（一致の件数が 0）。
+/// 負荷の記録と、設定の口（`with_hub_stub_record`）を通した it-run の記録の全文に、生・base64・base64url・16 進のどの形でも現れない（一致の件数が 0）。
 /// JWT の形の語も 0 件。
 #[test]
 fn written_records_have_no_registered_secret_in_any_form() {
@@ -459,6 +477,19 @@ fn matcher_detects_every_form_mixed_into_output() {
         .as_bytes(),
     );
     assert_eq!(count_jwt_like(&jwt), 1);
+    // 前に文字が付いた形（`x.`・`name_`・語の途中）も数える。
+    let body = format!(
+        "eyJ{}.eyJ{}.{}",
+        "a".repeat(20),
+        "b".repeat(20),
+        "c".repeat(20)
+    );
+    for prefix in ["x.", "name_", "Zm9v", "k="] {
+        let mut m = w.load.clone();
+        m.extend_from_slice(format!("note: {prefix}{body}\n").as_bytes());
+        assert_eq!(count_jwt_like(&m), 1, "prefix {prefix}");
+    }
+    assert_eq!(count_jwt_like(b"eyJabc.def.ghi"), 0);
 }
 
 /// 陽性対照 2（`write_new` を通る経路）: 登録簿の 16 進の値を測る区間の名前に入れて書き出すと、
