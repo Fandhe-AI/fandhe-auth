@@ -16,8 +16,8 @@ use fandhe_auth_it_harness::{
 use fandhe_auth_load_harness::{
     ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
     IntervalName, LoadConfig, LoadRecord, LoopModel, MeasurementConditions, MetricKey, RefId,
-    RunRecordFile, StageConfig, StageLimits, StagePlan, StdMonotonicClock, TargetName, TargetSpec,
-    ValueClass, ValueName, ValueUnit, run_stages,
+    RunEvidence, RunRecordFile, StageConfig, StageLimits, StagePlan, StdMonotonicClock, TargetName,
+    TargetSpec, ValueClass, ValueName, ValueUnit, run_stages,
 };
 
 const T0: u64 = 1_000;
@@ -123,15 +123,15 @@ fn small_trial_run_writes_record_without_requirement_values() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let record = LoadRecord::new(
-        &run_file,
+    let evidence = RunEvidence::new(
+        run_file,
         started,
-        recorded_at,
-        &conditions,
-        &staged,
-        vec![target],
+        conditions,
+        staged,
+        &[ConditionComponent::HubStub],
     )
     .unwrap();
+    let record = LoadRecord::new(&evidence, recorded_at, vec![target]).unwrap();
     let path = record.write_new(&dir).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert_eq!(text, record.to_string());

@@ -15,17 +15,19 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
 use std::fs::OpenOptions;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::condition::MeasurementConditions;
+use crate::condition::{ComponentState, ConditionComponent, MeasurementConditions};
 use crate::stage::StagedRun;
 
 /// 形式の識別子。形式を変えたら末尾の版を上げる。
 pub const LOAD_RECORD_FORMAT: &str = "fandhe-auth-load-record/1";
 /// 1 行の出典の数の上限（仮置き）。
 pub const MAX_REFS: usize = 8;
+/// 承認済みの一覧のファイルの大きさの上限（バイト。仮置き）。
+const MAX_APPROVED_FILE_BYTES: u64 = 64 * 1024;
 /// 値の行の数の上限（仮置き）。
 pub const MAX_VALUES: usize = 64;
 /// 時刻（UNIX 秒）の上限。9999-12-31T23:59:59Z。RFC 3339 の 4 桁年に収める（仮置き）。
@@ -39,6 +41,8 @@ pub enum LoadRecordError {
     InvalidName,
     InvalidRef,
     InvalidRunRecordFile,
+    InvalidRunEvidence,
+    ApprovedFile,
     InvalidValue(InvalidValueReason),
     RunStartMismatch,
     TimeOutOfRange,
@@ -56,6 +60,10 @@ impl fmt::Display for LoadRecordError {
             Self::InvalidName => f.write_str("load record error: invalid name"),
             Self::InvalidRef => f.write_str("load record error: invalid ref"),
             Self::InvalidRunRecordFile => f.write_str("load record error: invalid run record file"),
+            Self::InvalidRunEvidence => {
+                f.write_str("load record error: run evidence does not match the stages")
+            }
+            Self::ApprovedFile => f.write_str("load record error: approved list unreadable"),
             Self::InvalidValue(r) => write!(f, "load record error: invalid value ({})", r.as_str()),
             Self::RunStartMismatch => {
                 f.write_str("load record error: run record file and run_started_at differ")
@@ -260,7 +268,7 @@ impl fmt::Debug for RunRecordFile {
 
 /// 人が承認した「項目・区分・数値・単位・出典」の組（`load.md` の「値の区別」規則 4。ACPT-7）。
 /// 要件の値・初期値は、この組と完全に一致するときだけ記録に出せる。フィールドは非公開で、
-/// 呼び出し元がその場で組み立てる口はない（[`ApprovedValues::parse`] だけが作る）。
+/// 呼び出し元がその場で組み立てる口はない（[`ApprovedValues::load`] だけが作る）。
 #[derive(Clone, PartialEq, Eq)]
 struct ApprovedValue {
     name: String,
@@ -272,6 +280,9 @@ struct ApprovedValue {
 
 /// 人の承認を経た一覧。記録の候補（[`ComparisonValue::new`] の引数）とは独立した経路で読み込み、
 /// 候補をこの一覧に照合する（ACPT-7・規則 4）。記録の候補から一覧を作る経路はない。
+///
+/// 入力は人が承認した記録ファイルの読み込み専用の口（[`ApprovedValues::load`]）だけで、本文の文字列から
+/// 作る公開の口はない（書式の解析は非公開）。
 ///
 /// 書式（仮置き）: 1 行 1 件 `項目|区分|数値|単位|出典,出典`。区分は `requirement`・`initial` だけ。
 /// 単位は `ns`・`count`・`per_s`。空行と `#` で始まる行は読み飛ばす。
@@ -287,14 +298,33 @@ impl fmt::Debug for ApprovedValues {
 }
 
 impl ApprovedValues {
-    /// 承認済みの一覧の本文を読む。本文は人が承認したファイル等の信頼できる経路から読んだものだけを渡す。
-    /// 記録の候補（出典・数値）から本文を組み立てて渡してはならない（ACPT-7・load.md 規則 4。
-    /// 型では防げないため、呼び出し側の契約）。
+    /// 人が承認した記録ファイルから読む（読み込み専用）。通常のファイルだけを受け、大きさに上限を置く。
+    /// ファイルは人が承認した信頼できる経路のものだけを渡す。記録の候補から作ったファイルを渡してはならない
+    /// （ACPT-7・load.md 規則 4。ファイルの出所は型では防げないため、呼び出し側の契約）。
     ///
     /// # Errors
+    /// 読めない・通常のファイルでない・大きすぎる・UTF-8 でないとき [`LoadRecordError::ApprovedFile`]。
     /// 書式に反する行・未知の区分や単位・数値でない値・出典の欠け・重複のとき [`LoadRecordError::Format`]
-    /// （入力の値を誤りに載せない）。
-    pub fn parse(text: &str) -> Result<Self, LoadRecordError> {
+    /// （入力の値・パスを誤りに載せない）。
+    pub fn load(path: &Path) -> Result<Self, LoadRecordError> {
+        let bad = LoadRecordError::ApprovedFile;
+        let file = std::fs::File::open(path).map_err(|_| bad)?;
+        let meta = file.metadata().map_err(|_| bad)?;
+        if !meta.is_file() || meta.len() > MAX_APPROVED_FILE_BYTES {
+            return Err(bad);
+        }
+        let mut text = String::new();
+        file.take(MAX_APPROVED_FILE_BYTES + 1)
+            .read_to_string(&mut text)
+            .map_err(|_| bad)?;
+        if text.len() as u64 > MAX_APPROVED_FILE_BYTES {
+            return Err(bad);
+        }
+        Self::parse_text(&text)
+    }
+
+    /// 本文の書式を解析する。非公開（本文を呼び出し元が渡す口にしない）。
+    fn parse_text(text: &str) -> Result<Self, LoadRecordError> {
         let bad = LoadRecordError::Format;
         let mut out = Vec::new();
         for line in text.lines() {
@@ -503,6 +533,59 @@ fn rfc3339(secs: u64) -> String {
     )
 }
 
+/// 1 回の実行から得た値のまとめ（実行の記録への参照・起動時刻・測定の条件・段階の結果。`load.md` の 1・5）。
+/// 別々の実行の値を組み合わせて記録を作れないよう、作る時点で整合を検査する（fail-closed）:
+/// ファイル名の起動秒と起動時刻の一致、および実際に呼び出した構成要素（`exercised`）がすべて
+/// 測定の条件で起動済みであること（stub を呼んだのに構成に載っていない組み合わせを作らない。
+/// stub の起動を `note:` に出すのは条件の `Display`）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct RunEvidence {
+    run_record_file: RunRecordFile,
+    run_started_at: u64,
+    conditions: MeasurementConditions,
+    staged: StagedRun,
+}
+
+impl RunEvidence {
+    /// # Errors
+    /// 時刻が範囲外のとき [`LoadRecordError::TimeOutOfRange`]、ファイル名の起動秒と違うとき
+    /// [`LoadRecordError::RunStartMismatch`]、`exercised` が空、または起動していない要素を含むとき
+    /// [`LoadRecordError::InvalidRunEvidence`]。
+    pub fn new(
+        run_record_file: RunRecordFile,
+        run_started_at_unix_secs: u64,
+        conditions: MeasurementConditions,
+        staged: StagedRun,
+        exercised: &[ConditionComponent],
+    ) -> Result<Self, LoadRecordError> {
+        if run_started_at_unix_secs > MAX_UNIX_SECS {
+            return Err(LoadRecordError::TimeOutOfRange);
+        }
+        if run_record_file.started_unix_secs() != run_started_at_unix_secs {
+            return Err(LoadRecordError::RunStartMismatch);
+        }
+        if exercised.is_empty()
+            || exercised
+                .iter()
+                .any(|k| conditions.components.state(*k) == ComponentState::NotStarted)
+        {
+            return Err(LoadRecordError::InvalidRunEvidence);
+        }
+        Ok(Self {
+            run_record_file,
+            run_started_at: run_started_at_unix_secs,
+            conditions,
+            staged,
+        })
+    }
+}
+
+impl fmt::Debug for RunEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RunEvidence(..)")
+    }
+}
+
 /// 結果の記録のファイル全体。行の順は `load.md` の 7 の見本に合わせる。
 #[derive(Clone, PartialEq, Eq)]
 pub struct LoadRecord {
@@ -516,18 +599,15 @@ impl LoadRecord {
     /// # Errors
     /// 時刻の順が逆・値の行が多すぎる・名前の重複・整形の失敗のとき。
     pub fn new(
-        run_record_file: &RunRecordFile,
-        run_started_at_unix_secs: u64,
+        evidence: &RunEvidence,
         recorded_at_unix_secs: u64,
-        conditions: &MeasurementConditions,
-        staged: &StagedRun,
         values: Vec<ComparisonValue>,
     ) -> Result<Self, LoadRecordError> {
-        if run_started_at_unix_secs > MAX_UNIX_SECS || recorded_at_unix_secs > MAX_UNIX_SECS {
+        let run_started_at_unix_secs = evidence.run_started_at;
+        let run_record_file = &evidence.run_record_file;
+        let (conditions, staged) = (&evidence.conditions, &evidence.staged);
+        if recorded_at_unix_secs > MAX_UNIX_SECS {
             return Err(LoadRecordError::TimeOutOfRange);
-        }
-        if run_record_file.started_unix_secs() != run_started_at_unix_secs {
-            return Err(LoadRecordError::RunStartMismatch);
         }
         if recorded_at_unix_secs < run_started_at_unix_secs {
             return Err(LoadRecordError::ClockOrder);

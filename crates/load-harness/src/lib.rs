@@ -50,7 +50,7 @@ pub use meter::{
 
 pub use record::{
     ApprovedValues, ComparisonValue, InvalidValueReason, LOAD_RECORD_FORMAT, LoadRecord,
-    LoadRecordError, RefId, RunRecordFile, ValueClass, ValueName, ValueUnit,
+    LoadRecordError, RefId, RunEvidence, RunRecordFile, ValueClass, ValueName, ValueUnit,
 };
 
 pub use stage::{

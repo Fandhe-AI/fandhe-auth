@@ -2,11 +2,11 @@
 //! PoC の数値・要件の値を置かない（ACPT-7）。
 
 use fandhe_auth_load_harness::{
-    ApprovedValues, CallResult, ComparisonValue, ComponentConditions, IntervalName,
-    InvalidValueReason, LOAD_RECORD_FORMAT, LoadConfig, LoadRecord, LoadRecordError, LoopModel,
-    MeasurementConditions, MetricKey, RefId, RunRecordFile, StageConfig, StageLimits, StagePlan,
-    StagedRun, StdMonotonicClock, TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
-    run_stages,
+    ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
+    IntervalName, InvalidValueReason, LOAD_RECORD_FORMAT, LoadConfig, LoadRecord, LoadRecordError,
+    LoopModel, MeasurementConditions, MetricKey, RefId, RunEvidence, RunRecordFile, StageConfig,
+    StageLimits, StagePlan, StagedRun, StdMonotonicClock, TargetName, TargetSpec, ValueClass,
+    ValueName, ValueUnit, run_stages,
 };
 
 /// 試験用の語彙。入れた名前だけが通る。
@@ -26,7 +26,7 @@ fn val(
 ) -> Result<ComparisonValue, LoadRecordError> {
     // 承認済みの一覧は候補とは独立した固定の本文から読む（候補の出典から作らない。ACPT-7）。
     // 候補が承認済みの一覧と一致する場合の試験は approval_* で確かめる。ここは区分の規則と出典の上限を見る。
-    let approved = ApprovedValues::parse("other_item|initial|9|count|APPROVED-1\n").unwrap();
+    let approved = list("other_item|initial|9|count|APPROVED-1\n");
     ComparisonValue::new(vname(name), class, v, ValueUnit::Ns, refs(ids), &approved)
 }
 
@@ -46,8 +46,23 @@ fn approval(
     )
 }
 
+/// 承認済みの記録ファイルを読み込み専用の口（`load`）で読む。本文は試験の固定の文言で、候補から組み立てない（ACPT-7）。
+fn try_list(text: &str) -> Result<ApprovedValues, LoadRecordError> {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "approved-{}-{}.txt",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, text).unwrap();
+    let r = ApprovedValues::load(&path);
+    std::fs::remove_file(&path).unwrap();
+    r
+}
+
 fn list(text: &str) -> ApprovedValues {
-    ApprovedValues::parse(text).unwrap()
+    try_list(text).unwrap()
 }
 
 /// ACPT-7・load.md 規則 4: 承認済みの一覧と一致しない値は、無関係な承認済み ID を添えても出せない。
@@ -75,7 +90,7 @@ fn approval_must_match_name_class_value_unit_refs() {
 /// 承認済みの一覧は本文からだけ読む。PoC の区分・不正な行は受けない（規則 5）。
 #[test]
 fn approved_list_parse_is_strict() {
-    assert!(ApprovedValues::parse("# c\n\nv|initial|5|ns|A-1,B-2\n").is_ok());
+    assert!(try_list("# c\n\nv|initial|5|ns|A-1,B-2\n").is_ok());
     for bad in [
         "v|poc_parameter|5|ns|A-1",
         "v|initial|x|ns|A-1",
@@ -90,12 +105,25 @@ fn approved_list_parse_is_strict() {
         "v|initial|5|ns|A 1",
         &format!("v|initial|5|ns|{}", "a".repeat(65)),
     ] {
-        assert_eq!(
-            ApprovedValues::parse(bad).err(),
-            Some(LoadRecordError::Format),
-            "{bad}"
-        );
+        assert_eq!(try_list(bad).err(), Some(LoadRecordError::Format), "{bad}");
     }
+}
+
+/// 読み込み専用の口: 存在しない・ディレクトリ・大きすぎるものは `ApprovedFile`。
+#[test]
+fn approved_load_rejects_non_files_and_oversize() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let missing = dir.join("approved-missing-none.txt");
+    assert_eq!(
+        ApprovedValues::load(&missing).err(),
+        Some(LoadRecordError::ApprovedFile)
+    );
+    assert_eq!(
+        ApprovedValues::load(dir).err(),
+        Some(LoadRecordError::ApprovedFile)
+    );
+    let big = "#".repeat(70_000);
+    assert_eq!(try_list(&big).err(), Some(LoadRecordError::ApprovedFile));
 }
 
 fn invalid(r: Result<ComparisonValue, LoadRecordError>) -> bool {
@@ -258,8 +286,21 @@ fn staged() -> StagedRun {
 }
 
 fn conditions() -> MeasurementConditions {
-    MeasurementConditions::detect(ComponentConditions::new(&[]).unwrap(), LoopModel::Closed)
-        .unwrap()
+    MeasurementConditions::detect(
+        ComponentConditions::new(&[(ConditionComponent::HubStub, true)]).unwrap(),
+        LoopModel::Closed,
+    )
+    .unwrap()
+}
+
+fn evidence(s: u64) -> Result<RunEvidence, LoadRecordError> {
+    RunEvidence::new(
+        file_at(s),
+        s,
+        conditions(),
+        staged(),
+        &[ConditionComponent::HubStub],
+    )
 }
 
 fn file_at(s: u64) -> RunRecordFile {
@@ -271,7 +312,7 @@ fn file() -> RunRecordFile {
 }
 
 fn build(s: u64, r: u64, values: Vec<ComparisonValue>) -> Result<LoadRecord, LoadRecordError> {
-    LoadRecord::new(&file_at(s), s, r, &conditions(), &staged(), values)
+    LoadRecord::new(&evidence(s)?, r, values)
 }
 
 #[test]
@@ -309,7 +350,13 @@ fn rfc3339_known_values() {
 
 #[test]
 fn run_start_mismatch_and_time_range() {
-    let m = LoadRecord::new(&file_at(5), 6, 6, &conditions(), &staged(), vec![]);
+    let m = RunEvidence::new(
+        file_at(5),
+        6,
+        conditions(),
+        staged(),
+        &[ConditionComponent::HubStub],
+    );
     assert_eq!(m.unwrap_err(), LoadRecordError::RunStartMismatch);
     const MAX: u64 = 253_402_300_799;
     let t = build(MAX, MAX, vec![]).unwrap().to_string();
@@ -319,17 +366,35 @@ fn run_start_mismatch_and_time_range() {
         LoadRecordError::TimeOutOfRange
     );
     assert_eq!(
-        LoadRecord::new(
-            &file_at(0),
+        RunEvidence::new(
+            file_at(0),
             MAX + 1,
-            MAX + 1,
-            &conditions(),
-            &staged(),
-            vec![]
+            conditions(),
+            staged(),
+            &[ConditionComponent::HubStub],
         )
         .unwrap_err(),
         LoadRecordError::TimeOutOfRange
     );
+}
+
+/// 実行の整合: 呼び出した構成要素が起動していない・空の組は作れない。stub を呼んだ記録は `note:` を出す。
+#[test]
+fn run_evidence_binds_exercised_components_to_conditions() {
+    let bad = |exercised: &[ConditionComponent]| {
+        RunEvidence::new(file_at(0), 0, conditions(), staged(), exercised).unwrap_err()
+    };
+    assert_eq!(bad(&[]), LoadRecordError::InvalidRunEvidence);
+    assert_eq!(
+        bad(&[ConditionComponent::ConsoleStub]),
+        LoadRecordError::InvalidRunEvidence
+    );
+    assert_eq!(
+        bad(&[ConditionComponent::HubStub, ConditionComponent::Host]),
+        LoadRecordError::InvalidRunEvidence
+    );
+    let t = build(0, 0, vec![]).unwrap().to_string();
+    assert!(t.contains("note: stub results are not counted as real results\n"));
 }
 
 #[test]

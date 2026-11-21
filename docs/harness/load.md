@@ -365,17 +365,17 @@ judgment:
 `TASK-12` の 9/10（#120）。`crates/load-harness` の `record` に、`fandhe-auth-load-record/1` のファイル全体を組んで新規ファイルへ書き出す部品を置いた。
 名前・語・上限はすべて仮置きで、人が確認する。合否は付けない（`ACPT-7`）。
 
-- API: `LoadRecord::new`（実行の記録のファイル名・起動時刻・記録時刻・機材と構成・段階の結果・比べる値を受ける）、`LoadRecord::write_new(dir)`、
+- API: `RunEvidence::new`（実行の記録のファイル名・起動時刻・機材と構成・段階の結果・実際に呼び出した構成要素を 1 つにまとめ、作る時点で整合を検査する）、`LoadRecord::new`（`RunEvidence`・記録時刻・比べる値を受ける）、`LoadRecord::write_new(dir)`、
   `ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`LoadRecordError`。
 - 行の順: `format:` → `run_record_file:` → `run_started_at:` → `recorded_at:` → 条件 → 段階 → `value:` → `judgment:`（形式の 7 の見本どおり）。`judgment:` は常に空で、ハーネスは書かない。
-- 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial` は出典と整数の値が必須で、さらに人が承認した「項目・区分・数値・単位・出典」の一覧（`ApprovedValues`。フィールドは非公開で、`ApprovedValues::parse` が承認済みの本文〔1 行 `項目|区分|数値|単位|出典,出典`〕から読む。本文は人が承認したファイル等の信頼できる経路から読み、記録の候補から組み立てて渡さない〔呼び出し側の契約。型では防げない〕。出典 ID は `RefId::new` と同じ形・予約語の検査を読み込み時に通し、満たさない行は `Format`）の 1 件と完全一致しなければ `NotApproved` で拒否する（規則 4・`ACPT-7`。出典 ID が信頼済み一覧にあるだけでは足りない）。`poc_parameter` は比べる値として置かない（規則 5）ため `ClassNotAllowed` で拒否する、`undecided` は値なし、`external` は値なし・出典必須、
+- 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial` は出典と整数の値が必須で、さらに人が承認した「項目・区分・数値・単位・出典」の一覧（`ApprovedValues`。フィールドは非公開で、`ApprovedValues::load(path)` が人の承認した記録ファイル〔1 行 `項目|区分|数値|単位|出典,出典`。通常のファイルだけ・64 KiB まで〕を読む。本文の文字列から作る公開の口はなく〔書式の解析は非公開〕、記録の候補から一覧を組み立てる口もない。ファイルの出所は人が承認したものに限る〔呼び出し側の契約。型では防げない〕。読めなければ `ApprovedFile`。出典 ID は `RefId::new` と同じ形・予約語の検査を読み込み時に通し、満たさない行は `Format`）の 1 件と完全一致しなければ `NotApproved` で拒否する（規則 4・`ACPT-7`。出典 ID が信頼済み一覧にあるだけでは足りない）。`poc_parameter` は比べる値として置かない（規則 5）ため `ClassNotAllowed` で拒否する、`undecided` は値なし、`external` は値なし・出典必須、
   `test_condition`・`measured` は整数の値が必須で出典を受けず、行には固定の印（`harness_config`・`measured`）を出す。出典は 1 行 8 件まで・重複は誤り。
   測定値・既定値を要件の値へ上げる経路は作らない。
 - 書き出し: `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。無ければ `dir` を作る。隠し名の一時ファイルへ書ききってから、上書きなしの `hard_link` で最終名へ公開する
   （途中の失敗で不完全なファイルを完成品の名前で残さない。一時ファイルは作れたときだけ消しにいくが、削除の失敗は無視するため、失敗時は残りうる。名前が衝突して作れなかったときは既存のファイルを消さない）。乱数・環境変数・設定ファイルを使わない。出力先のファイルシステムはハードリンクに対応している必要がある（非対応だと `WriteFailed`）。
 - 入力の検査（仮置き）: `ValueName::new` は呼び出し元が渡す承認済みの語彙に含まれる名前だけを受ける。`RefId::new` は呼び出し元が渡す信頼済みの出典の一覧（spec の ID 等）に完全一致するものだけを受け、予約語（`none`・`harness_config`・`measured`）を拒否する。
   `p99_target` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する（`AUDP-29`）。`RunRecordFile` は生成元と同じ整数型で解析し、再整形した名前と一致しない名前（先頭ゼロ等）を拒否する。
-  `RunRecordFile` の起動秒と `run_started_at` が違えば `RunStartMismatch`。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
+  `RunRecordFile` の起動秒と `run_started_at` が違えば `RunEvidence::new` が `RunStartMismatch`。呼び出した構成要素が空、または測定の条件で起動していなければ `InvalidRunEvidence`（stub を呼んだ結果に stub の起動を載せない構成が付く組を作らない。stub の `note:` は条件の `Display`）。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
   値の行の違反の理由は固定の列挙 `InvalidValueReason` で持つ（`&'static str` を公開しない）。
 - 時刻の RFC 3339 の整形は、通常の依存を 0 に保つため it-harness の `UtcTimestamp` と同じ変換を `record` に重複して持つ。
 - 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない。`Debug` は中身を出さない固定文字列にした（`SECR-23`・`SECR-26`）。
