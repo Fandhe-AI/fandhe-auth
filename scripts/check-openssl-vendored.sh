@@ -202,7 +202,8 @@ count_static_config() {
   local f c n=0
   # 優先順位で片方が無視されても、消えると残りが有効になるため、存在する両方のファイルを検査する（安全側）。
   for f in "$1/.cargo/config" "$1/.cargo/config.toml"; do
-    [ -e "${f}" ] || continue
+    # リンク切れのシンボリックリンクは -e が偽になるため -L も見て、読み取り検査（失敗は 2）へ進める。
+    [ -e "${f}" ] || [ -L "${f}" ] || continue
     {
     [ -r "${f}" ] || return 2
     c="$(python3 -I -c '
@@ -215,9 +216,7 @@ except Exception:
 e = d.get("env", {})
 if not isinstance(e, dict):
     sys.exit(2)
-n = 0
-if True:
-    n = sum(1 for k in e if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")))
+n = sum(1 for k in e if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")))
 print(n)
 ' "${f}" 2>/dev/null)" || return 2
     case "${c}" in '' | *[!0-9]*) return 2 ;; esac
@@ -393,9 +392,11 @@ selftest() {
     ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config.toml" ||
     ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config" ||
     ! printf '[env\nOPENSSL_STATIC = 1\n' 2>/dev/null >"${f}/c8/.cargo/config.toml" ||
-    ! mkdir -p "${f}/c11/.cargo" "${f}/c12/.cargo" 2>/dev/null ||
-    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c11/.cargo/config.toml" ||
-    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c11/.cargo/config" ||
+    ! mkdir -p "${f}/c11/.cargo" "${f}/c12/.cargo" "${f}/c13/.cargo" 2>/dev/null ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c13/.cargo/config" ||
+    ! ln -s missing-target "${f}/c13/.cargo/config.toml" 2>/dev/null ||
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c11/.cargo/config.toml" ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c11/.cargo/config" ||
     ! printf 'env = []\n' 2>/dev/null >"${f}/c12/.cargo/config.toml"; then
     log "error: cannot write fixture (f11); cannot inspect"
     exit 2
@@ -409,7 +410,7 @@ selftest() {
   done
 
   # F11b: TOML として不正な設定は検査不能（2）で止まる（構文・読み取りの失敗を 0 件に丸めない）
-  for cfg in c8 c12; do
+  for cfg in c8 c12 c13; do
     rc=0
     count_static_config "${f}/${cfg}" >/dev/null 2>&1 || rc=$?
     if [ "${rc}" -ne 2 ]; then
