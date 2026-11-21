@@ -294,7 +294,10 @@ impl StagedRun {
 /// # Panics
 /// `new_clock` の panic と、`new_clock`・作った時計の破棄の panic は捕捉せず、そのまま呼び出し元へ伝わる
 /// （これらの panic のために panic hook を差し替え・抑止しない。hook はプロセス全体の共有状態で、ハーネスが握り続けることを
-/// 保証できないため。対象の閉包の panic の扱いは [`run_target`] が使う `run_closed_loop` の既存のとおりで、ここでは変えない）。
+/// 保証できないため）。
+/// アンワインド中に生成関数や時計の破棄が続けて panic すると、二重 panic でプロセスが中断し、何も伝わらない。
+/// 対象の閉包の panic の文言の抑止は、[`run_target`] が使う `run_closed_loop` の既存の `install_quiet_hook` に依る。
+/// これも panic hook に依るので同じ限界を持つ（呼び出し元が後から hook を差し替えた場合など）。その扱いはこの PR（#6017）の範囲外で、ここでは変えない。
 /// 対象の名前を伏せることをハーネスが保証するのは、`Result` の誤りの経路（[`StageError`] の `Display`・`Debug`）だけである。
 /// panic の文言に対象の名前を入れないのは生成関数の書き手の責任で、伏せたい失敗は panic ではなく `Err` で返す（SECR-23）。
 ///

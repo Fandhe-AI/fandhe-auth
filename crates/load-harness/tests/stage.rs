@@ -469,6 +469,47 @@ impl Drop for PanicOnDropClock {
     }
 }
 
+/// 破棄で panic する値（文言を持たない目印を投げる）。生成関数の閉包に捕まえさせる。
+struct GeneratorDropPanic;
+
+struct PanicOnDropValue;
+
+impl Drop for PanicOnDropValue {
+    fn drop(&mut self) {
+        std::panic::panic_any(GeneratorDropPanic);
+    }
+}
+
+/// 生成関数が所有する値の破棄の panic も捕捉せず、誤りに変わらずにその値のまま伝わる。
+#[test]
+fn generator_drop_panic_propagates_unchanged() {
+    let plan = StagePlan::new(vec![sc(1, 3, 0, 2)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let clocks = AtomicU64::new(0);
+    let calls = AtomicU64::new(0);
+    let held = PanicOnDropValue;
+    let made = &clocks;
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_stages(
+            move || {
+                let _keep = &held;
+                made.fetch_add(1, Ordering::SeqCst);
+                Ok(step_clock(10))
+            },
+            &spec(),
+            &plan,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                CallResult::Ok
+            },
+        )
+    }));
+    let payload = caught.unwrap_err();
+    assert!(payload.downcast_ref::<GeneratorDropPanic>().is_some());
+    // 全回を回した後の破棄で起きる（実行の途中では止めていない）。
+    assert_eq!(clocks.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+}
+
 /// 作った時計の破棄の panic も捕捉せず、誤り（`WorkerPanicked` 等）に変わらずにそのまま伝わる。
 /// 並行数 1 と 2 以上の両方で確かめる（ワーカーの中で破棄されないこと）。
 #[test]
