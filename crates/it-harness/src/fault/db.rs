@@ -119,7 +119,7 @@ impl Upstream {
 /// 試験が「接続中で止まる」状態を同期で作るための同期点だけを持つ。宛先の決定と実際の接続は転送器が行い、
 /// 転送器 1 つにつき 1 つ使う（複数の転送器へ複製して共有しない。共有すると、停止の時刻と停止フラグを同じロックの下で
 /// 公開した保証が成り立たない〔`note_stop` が公開するのは渡された 1 つのフラグだけ〕。`stopped_at` は転送器ごとの停止の時刻で、
-/// 再利用した場合は保持の開始より前の記録を無視して `Expired` と分類する）。
+/// 再利用した場合は転送器へ渡した時刻より前の記録を無視して `Expired` と分類する）。
 ///
 /// この値は接続先も接続の結果も決めない（ループバック・指定ポートの制約を外さない）。
 /// 待ちは解放・転送器の停止・上限（[`UpstreamStall::MAX_HOLD`]）のどれかで必ず解ける（`stop()`・`Drop` を固めない）。
@@ -149,6 +149,9 @@ struct StallState {
     stopped_at: Option<Instant>,
     /// 直近の `hold` の開始時刻。これより前の `stopped_at` は別の転送器の停止の名残として無視する。
     hold_started: Option<Instant>,
+    /// 直近に転送器へ渡した（`rebind`）時刻。これより前の `stopped_at` は別の転送器の停止の名残として無視する。
+    /// 渡した後から `hold` に入るまでの停止は、この転送器の停止として数える（`hold_started` だけでは `Expired` に誤る）。
+    bound_at: Option<Instant>,
     /// 直近に停止点を離れた理由。試験が「期限切れで抜けたのを合格にしない」ために見る（ORST-17）。
     last_exit: Option<StallExit>,
 }
@@ -242,6 +245,7 @@ impl UpstreamStall {
         }
         g.entered = 0;
         g.last_exit = None;
+        g.bound_at = Some(Instant::now());
         true
     }
 
@@ -255,7 +259,7 @@ impl UpstreamStall {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         // 現在の保持より前の記録（再利用された別の転送器の停止）は上書きする。同じ停止の 2 回目は上書きしない。
-        let stale = match (g.stopped_at, g.hold_started) {
+        let stale = match (g.stopped_at, g.bound_at.or(g.hold_started)) {
             (None, _) => true,
             (Some(t), Some(h)) => t < h,
             (Some(_), None) => false,
@@ -269,8 +273,13 @@ impl UpstreamStall {
 
     /// 転送器の accept のスレッドが呼ぶ。解放・転送器の停止・上限のどれかで戻る。
     fn hold(&self, stop: &AtomicBool) {
+        self.hold_for(stop, Self::MAX_HOLD);
+    }
+
+    /// [`Self::hold`] の本体。上限だけ引数にする（期限切れの分類を短い待ちで試験するため）。
+    fn hold_for(&self, stop: &AtomicBool, max: Duration) {
         let started = Instant::now();
-        let deadline = started + Self::MAX_HOLD;
+        let deadline = started + max;
         let mut g = self
             .inner
             .state
@@ -291,8 +300,15 @@ impl UpstreamStall {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
-        // 保持の開始より前の停止の記録は、この保持を解いたものではない。
-        let stopped_at = g.stopped_at.filter(|t| *t >= started);
+        // 転送器へ渡す前の停止の記録は、この保持を解いたものではない（渡した後・保持の開始前の停止は数える。
+        // 渡していない値は保持の開始を境にする）。
+        // 使い回した停止点に、生きている別の転送器の停止が後から記録され得る。自分の停止フラグが立っていないなら、
+        // その記録はこの保持を解いたものではない（`note_stop` は記録とフラグを同じロックの下で公開するので、
+        // 自分の停止なら、ロックを持つここでフラグは true に見える。ORST-17・AUDB-6）。
+        let since = g.bound_at.unwrap_or(started);
+        let stopped_at = g
+            .stopped_at
+            .filter(|t| *t >= since && stop.load(Ordering::SeqCst));
         g.last_exit = Some(classify_exit(g.released_at, stopped_at, deadline));
     }
 }
@@ -1625,6 +1641,46 @@ mod tests {
         thread::sleep(Duration::from_millis(5));
         let stop = AtomicBool::new(true);
         stall.hold(&stop);
+        assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
+    }
+
+    /// 転送器へ渡した後・保持の開始前の停止は `Stopped`（`Expired` に誤らない）。渡す前の別の転送器の停止は数えない
+    /// （ORST-17。`connect_upstream` の停止の確認を通った直後に停止する競合の再現）。
+    #[test]
+    fn stop_between_bind_and_hold_is_stopped() {
+        let stall = UpstreamStall::new();
+        stall.note_stop(&AtomicBool::new(false));
+        thread::sleep(Duration::from_millis(5));
+        assert!(stall.rebind());
+        thread::sleep(Duration::from_millis(5));
+        let stop = AtomicBool::new(false);
+        stall.note_stop(&stop);
+        thread::sleep(Duration::from_millis(5));
+        stall.hold(&stop);
+        assert_eq!(stall.exit_reason(), Some(StallExit::Stopped));
+    }
+
+    /// 使い回した停止点で、生きている古い転送器が渡した後に止まっても、自分の停止フラグが false のまま期限切れなら
+    /// `Stopped` にしない（合格の側への誤分類。ORST-17・AUDB-6）。
+    #[test]
+    fn stop_of_old_proxy_after_rebind_does_not_stop_new_hold() {
+        let stall = UpstreamStall::new();
+        assert!(stall.rebind());
+        assert!(stall.rebind());
+        stall.note_stop(&AtomicBool::new(false));
+        stall.hold_for(&AtomicBool::new(false), Duration::from_millis(60));
+        assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
+    }
+
+    /// 渡した後でも、渡す前の別の転送器の停止だけが残る場合は `Expired`。
+    #[test]
+    fn stop_before_bind_is_still_expired() {
+        let stall = UpstreamStall::new();
+        stall.note_stop(&AtomicBool::new(false));
+        thread::sleep(Duration::from_millis(5));
+        assert!(stall.rebind());
+        thread::sleep(Duration::from_millis(5));
+        stall.hold(&AtomicBool::new(true));
         assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
     }
 

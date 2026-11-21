@@ -658,6 +658,19 @@ fn stalled_upstream() -> StalledUpstream {
     }
 }
 
+/// `/proc/net/tcp` に、宛先ポートが `port` で SYN_SENT（状態 02）の接続があるか。
+/// 溜まりきった待ち行列への connect は SYN を落とされ、OS の中で SYN_SENT のまま待つ。
+#[cfg(target_os = "linux")]
+fn syn_sent_to(port: u16) -> bool {
+    let want = format!(":{port:04X}");
+    std::fs::read_to_string("/proc/net/tcp").is_ok_and(|t| {
+        t.lines().skip(1).any(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            f.len() > 3 && f[2].ends_with(&want) && f[3] == "02"
+        })
+    })
+}
+
 /// ORST-17: 本物の上流への connect が固まっていても `block()` は待たされない（Linux のみ。検出を足す試験で、契約を変えない）。
 /// 停止点の試験（全 OS）は OS の connect の 1 行を停止点の外に残す。この試験は本物の connect を詰まらせ、
 /// その 1 行だけを `conns` のロックで囲む回帰を `block()` の 1 秒超えで検出する。
@@ -675,9 +688,20 @@ fn block_returns_promptly_while_real_upstream_connect_is_stalled_linux() {
             && p.refused_count() == 0),
         "the forwarder connect did not reach the stalled state"
     );
+    // 計数は `connect_real` を呼ぶ前に増える。OS が SYN を送って待つ状態（SYN_SENT）になったことまで確かめる。
+    // `conns` のロックで囲む回帰では、ロックを取った後でなければこの状態にならない（コードに同期点を足さない）。
+    assert!(
+        wait_until(|| syn_sent_to(up.port)),
+        "no SYN_SENT socket toward the stalled upstream"
+    );
     let started = Instant::now();
     p.block(&mut tl).unwrap();
     let elapsed = started.elapsed();
+    // 回帰が無ければ connect はまだ SYN_SENT のまま。外れていたら観測が遅れて試験が空振りしたので、失敗に倒す。
+    assert!(
+        syn_sent_to(up.port),
+        "the connect left SYN_SENT before block returned; the check did not exercise the stall"
+    );
     assert!(
         elapsed < Duration::from_secs(1),
         "block waited for the stalled connect: {elapsed:?}"
