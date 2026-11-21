@@ -1152,17 +1152,6 @@ case "${cmp_rc}" in
     ;;
 esac
 
-# 走査中に HEAD が動いていたら、固定した ID を基準にした結果は古い。合格を返さず検査不能（2）にする
-# （未作成ブランチ・空の ID のまま始まり、走査中にブランチが作られた場合も違いに含む）。
-if [ "${head_resolved}" -eq 1 ]; then
-  pinned_head="${head_id}"
-  resolve_head
-  if [ "${head_id}" != "${pinned_head}" ]; then
-    echo "secret-scan: HEAD changed during the scan; aborting" >&4
-    exit 2
-  fi
-fi
-
 # 走査中に元の index の内容が変わっていたら、固定した複写に基づく結果は実際の内容と食い違う。合格を返さず検査不能（2）にする。
 # 終了時も元の index を固定時と同じ方法で 1 回だけ複写し、2 つの一覧（ls-files -s と intent-to-add の印）を同じ複写から取る。
 # 元の index を一覧ごとに開くと、2 つの呼び出しの間の更新で 2 つの一覧が別の版を見て、どちらの版とも違う組で一致し得る（#6011）。
@@ -1199,6 +1188,18 @@ cmp -s "${tmp_dir}/index-listing-before" "${tmp_dir}/index-listing-after" || ind
 if [ "${index_cmp_rc}" -ne 0 ]; then
   echo "secret-scan: the index changed during the scan; aborting" >&4
   exit 2
+fi
+
+# 走査中に HEAD が動いていたら、固定した ID を基準にした結果は古い。合格を返さず検査不能（2）にする
+# （未作成ブランチ・空の ID のまま始まり、走査中にブランチが作られた場合も違いに含む）。
+# 取り直しは終了時の index の検証より後、集計の直前に置く（検証の途中に動いた HEAD も見落とさない。git-hooks.md の (f)。#6011）。
+if [ "${head_resolved}" -eq 1 ]; then
+  pinned_head="${head_id}"
+  resolve_head
+  if [ "${head_id}" != "${pinned_head}" ]; then
+    echo "secret-scan: HEAD changed during the scan; aborting" >&4
+    exit 2
+  fi
 fi
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。

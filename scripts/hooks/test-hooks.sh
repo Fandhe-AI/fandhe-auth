@@ -1165,6 +1165,40 @@ else
   fail "secret-scan: a failure to copy the index at the end of the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# 終了時の index の検証の途中（元の index の複写の直後）に HEAD が動いても、古い基準の結果で合格させない（2）。
+# HEAD の取り直しは集計の直前に置く（.claude/rules/git-hooks.md の (f)。index の検証より前に置くと、その後の動きを見落とす。#6011）
+cp_head_shim_dir="${work_dir}/cp-head-shim"
+mkdir -p "${cp_head_shim_dir}"
+cat > "${cp_head_shim_dir}/cp" <<'EOF3'
+#!/bin/sh
+for last in "$@"; do :; done
+"${REAL_CP}" "$@" || exit $?
+case "${last}" in
+  */index-after)
+    if [ ! -e "${CP_HEAD_FLAG}" ]; then
+      : > "${CP_HEAD_FLAG}"
+      "${REAL_GIT}" update-ref HEAD "${CP_HEAD_TO}"
+    fi
+    ;;
+esac
+EOF3
+chmod +x "${cp_head_shim_dir}/cp"
+same_checkout_repo "${lock_ok}"
+git commit -q --allow-empty -m "chore: second"
+second_sha="$(git rev-parse HEAD)"
+git reset -q --hard HEAD~1
+stage src/app.txt "x = placeholder"
+rm -f "${work_dir}/head-moved"
+rc=0
+CP_HEAD_FLAG="${work_dir}/head-moved" CP_HEAD_TO="${second_sha}" PATH="${cp_head_shim_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/head-moved" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: HEAD changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: HEAD moving during the end-of-scan index check is a scan failure (2)"
+else
+  fail "secret-scan: HEAD moving during the end-of-scan index check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 # 登録 0 件の index でも、固定時にあった index が終了時に無ければ 2（一覧の差だけで判定すると空のまま変わらず 0 になる。#6011）
 new_repo
 idx_path="$(git rev-parse --path-format=absolute --git-path index)"
@@ -1442,7 +1476,7 @@ brute_total=0
 # str: "k":"<a を並べて字句を境目の付近に置く><字句><字句の後ろ>   raw: "k":<空白を並べて字句を境目の付近に置く><字句><字句の後ろ>
 brute_sweep() {
   local desc="$1" want="$2" kind="$3" tok="$4" tail="$5" n rc fill_len bad="" cnt=0 lead body
-  for n in $(seq 0 70); do
+  for ((n = 0; n <= 70; n++)); do
     lead="$(rep_chars ' ' "${n}")"
     if [ "${kind}" = str ]; then
       fill_len=$((985 - ${#brute_head} - 1))
