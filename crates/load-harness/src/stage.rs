@@ -315,7 +315,7 @@ impl StagedRun {
 /// 続けて panic すると二重 panic でプロセスが中断し、誤りを返せない（`panic = "abort"` の設定でも同じ）。
 /// 実行中の誤りが先にあれば、破棄の panic の有無に関わらずその誤りを返す。
 pub fn run_stages<C, F>(
-    mut new_clock: C,
+    new_clock: C,
     spec: &TargetSpec,
     plan: &StagePlan,
     call: F,
@@ -331,13 +331,42 @@ where
         std::mem::forget(new_clock);
         return Err(StageError::HookUnavailable);
     }
-    let result = run_stages_inner(&mut new_clock, spec, plan, &call);
-    // 時計を作る関数（クロージャ）の破棄も抑止と捕捉の内側で行う。所有する値の Drop が panic しても文言を hook に渡さない。
+    // 生成関数は抑止付きの破棄ガードが所有する。正常に戻る経路は `dispose` で、`run_target` 内の panic が
+    // 伝播するアンワインドの経路はガードの Drop で、どちらも抑止と捕捉の内側で破棄する（SECR-23）。
+    let mut owner = ClockOwner(Some(new_clock));
+    let result = run_stages_inner(owner.get_mut(), spec, plan, &call);
     // 実行の誤りがあればその最初の誤りを保ち、実行が成功して破棄だけが失敗したときは専用の誤りを返す（fail-closed。SECR-23）。
-    let dropped = quiet_catch(move || drop(new_clock));
+    let dropped = owner.dispose();
     match (result, dropped) {
         (Ok(_), None) => Err(StageError::ClockDropPanicked),
         (result, _) => result,
+    }
+}
+
+/// 時計の生成関数の所有者。破棄を必ず抑止と捕捉の内側で行う（SECR-23）。
+struct ClockOwner<C>(Option<C>);
+
+impl<C> ClockOwner<C> {
+    fn get_mut(&mut self) -> &mut C {
+        // 生成中は常に Some。`dispose` は所有者を消費するため、その後に呼べない。
+        self.0
+            .as_mut()
+            .expect("clock owner holds the generator until disposed")
+    }
+
+    /// 破棄して、panic しなければ `Some(())` を返す。
+    fn dispose(mut self) -> Option<()> {
+        let c = self.0.take()?;
+        quiet_catch(move || drop(c))
+    }
+}
+
+impl<C> Drop for ClockOwner<C> {
+    /// アンワインドで届く経路。破棄の panic は捕捉して呼び出し側へ伝えない（二重 panic の回避）。
+    fn drop(&mut self) {
+        if let Some(c) = self.0.take() {
+            let _ = quiet_catch(move || drop(c));
+        }
     }
 }
 

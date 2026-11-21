@@ -779,3 +779,76 @@ fn hook_unavailable_has_fixed_message() {
         "quiet hook unavailable"
     );
 }
+
+const CHILD_UNWIND_ENV: &str = "FANDHE_STAGE_UNWIND_CHILD";
+const CHILD_UNWIND_CANARY: &str = "canary_unwind_generator_drop_qk";
+
+/// 破棄で panic する時計。`run_target` の中で panic がアンワインドする経路を作る。
+struct PanicOnDropClock(StepClock);
+
+impl MonotonicClock for PanicOnDropClock {
+    fn now_ns(&self) -> Result<u64, MeterError> {
+        self.0.now_ns()
+    }
+}
+
+impl Drop for PanicOnDropClock {
+    fn drop(&mut self) {
+        panic!("clock_drop_panic_for_unwind_test");
+    }
+}
+
+struct PanicOnDropCanary2;
+impl Drop for PanicOnDropCanary2 {
+    fn drop(&mut self) {
+        panic!("{}", CHILD_UNWIND_CANARY);
+    }
+}
+
+#[test]
+fn child_unwind_generator_drop_body() {
+    if std::env::var_os(CHILD_UNWIND_ENV).is_none() {
+        return;
+    }
+    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    // hook を通常の文脈で先に入れる。
+    let _ = run_stages(|| Ok(step_clock(10)), &spec(), &plan, || CallResult::Ok);
+    let guard = PanicOnDropCanary2;
+    let caught = std::panic::catch_unwind(|| {
+        let _ = run_stages(
+            move || {
+                let _keep = &guard;
+                Ok(Box::new(PanicOnDropClock(StepClock {
+                    now: AtomicU64::new(0),
+                    step: 10,
+                })) as Box<dyn MonotonicClock>)
+            },
+            &spec(),
+            &plan,
+            || CallResult::Ok,
+        );
+    });
+    assert!(caught.is_err());
+}
+
+/// アンワインドで生成関数が破棄されても、その panic 文言は出ない（SECR-23）。
+#[test]
+fn unwinding_path_does_not_write_generator_drop_panic() {
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "child_unwind_generator_drop_body",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_UNWIND_ENV, "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "child failed");
+    assert!(stdout.contains("child_unwind_generator_drop_body"));
+    assert!(!stderr.contains(CHILD_UNWIND_CANARY));
+    assert!(!stdout.contains(CHILD_UNWIND_CANARY));
+}
