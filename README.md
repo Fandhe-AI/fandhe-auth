@@ -155,7 +155,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make pg-check` | `scripts/dev-pg-check.sh` | 開発・検証用 PostgreSQL の起動の確かめ（起動中のインスタンスが対象。起動・停止はしない。CI では流さない。名前は暫定） |
 | `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。`.env` 系の名前の検査は全パスに掛かり、本文の走査の除外は、検出器の repo の `skills-lock.json` に登録された `.agents/skills/<名前>/` だけで、本文の走査にだけ効く〔`*.lock`・`.claude/skills/` は除外しない。#6000。登録名のディレクトリの下は既存ファイルへの追記・新規ファイル・リネームによる移動も走査されない残る限界で、TASK-6・#6000 で追跡し人のレビューで確かめる〕。ローカルの走査（検出器と走査対象が同じ checkout）では、HEAD にコミット済みの一覧・作業ツリーの一覧・index の一覧のすべてに登録された名前（共通部分）だけを除外し、一部にしか無い名前は走査する。CI では保護された main の検出器の一覧の名前だけを使い、PR の head の一覧から名前を足さない（head の index の一覧は検証し、不正なら 2。除外は検出器の一覧と head の index の一覧の共通部分だけで、PR が登録を削除した名前は走査する）。index は走査の最初に固定し、走査中に変われば 2。`secret scan (tracked files)` ジョブが `scripts/secret-scan-ci.sh` 経由で呼ぶ〔#51〕。名前は暫定） |
 | `make scan-canary` | `scripts/secret-scan-canary.sh` | `make secret-scan` の陰性対照（ダミーで検出器が 1 を返し、`--summary` の集計行が期待と完全に一致し、ダミー値が出力に無いことを確かめる。何も変更しない。名前は暫定） |
-| `make test-hooks` | `scripts/hooks/test-hooks.sh` | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
+| `make test-hooks` | `scripts/hooks/test-hooks.sh`（入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-lib.sh`） | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
 
 ## 開発・検証用 DB
 
@@ -183,6 +183,7 @@ CI（`.github/workflows/ci.yml`）で行います。時間予算（pre-commit �
 
 フックスクリプト（`scripts/hooks/*.sh`）自体のテストもフックには置かず、CI の `test-hooks` ジョブ（`make test-hooks`）で
 Linux・macOS（標準の bash 3.2 を含む）について実行します。`scripts/hooks/` を変更したらローカルでも `make test-hooks` を実行してください。
+入口は `test-hooks.sh` で、試験の本体は `test-hooks-N.sh`（part）、共有部は `test-hooks-lib.sh` に置きます。足す試験は該当する part に書きます。
 
 ## CI
 

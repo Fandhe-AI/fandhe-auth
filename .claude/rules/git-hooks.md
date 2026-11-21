@@ -34,7 +34,7 @@ description: >
 - 依存パッケージのインストール・ネットワークアクセス
 - `ci.yml` のジョブと同じコマンドを同じ範囲で実行するもの
 - フックスクリプト（`scripts/hooks/*.sh`）自体のテスト — これも CI のジョブとして実行する
-  （`ci.yml` の `test-hooks` ジョブ。実体は `scripts/hooks/test-hooks.sh`、ローカルでは `make test-hooks`）
+  （`ci.yml` の `test-hooks` ジョブ。実体は `scripts/hooks/test-hooks.sh`〔入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-lib.sh`〕、ローカルでは `make test-hooks`）
 
 ## フックに置いてよいもの
 
@@ -48,6 +48,13 @@ description: >
 
 - pre-commit の editorconfig-checker / shellcheck は CI の `check` ジョブ（`make check`）と重複するが、
   staged ファイル限定で合計 0.3 秒程度のため維持する（2026-10-11 計測・決定）
+  - 2026-11-21 追記（実測。上の決定の文言は書き換えない）: 追跡している `*.sh` が 31 件・合計約 4.9 秒分の検査になり、
+    `--all-files` では 0.3 秒に収まらない（staged のみの実コミットは数ファイルで 0.3 秒前後）。シェルスクリプトの検査は
+    `scripts/hooks/shellcheck-staged.sh` でファイルごとに並列に流す（並列数は `getconf _NPROCESSORS_ONLN`。
+    lefthook は glob が 2 つあると同じファイルを 2 回渡すため、重複は除く）。検査時間はほぼ行数に比例するので、
+    最大だった `test-hooks.sh`（2818 行・単独で約 1.9 秒）は共有部と 7 つの part（各約 300〜440 行）に分けた（入口は変えない）。
+    この実装の `--all-files` の summary は約 1.1〜1.35 秒（10 コアの 1 台で、ほかの負荷が無いときの 12 回の実測。ビルドと並走すると 2 秒前後）で、予算の 1 秒未満には届いていない
+    （残りは shellcheck 自体の CPU 時間で、秘密情報の検査と editorconfig-checker の並走も効く）。予算の値は変えていない。残りは #6056（TASK-6）で追う
 - `secret-scan.sh` 冒頭の正規表現自己テストは ms 単位の fail-closed ガードであり、
   上記「フックスクリプト自体のテスト」には当たらない。削除・CI への移動はしない
 
@@ -63,7 +70,7 @@ description: >
 
 秘密情報検査のように「検出できなかった = 合格」になる検査は、検査そのものの失敗を合格と取り違えると
 黙って素通りする（fail-open）。以下は過去に実際に見つかった不具合クラスであり、`scripts/hooks/` を
-書く・変える際は必ず守る。各項目には `scripts/hooks/test-hooks.sh` に回帰ケースがある。
+書く・変える際は必ず守る。各項目には `scripts/hooks/test-hooks-N.sh`（`test-hooks.sh` が順に起動する part）に回帰ケースがある。
 
 - (a) 検査エラーを「一致なし」と同一視しない（fail-closed）
   - `grep` の終了状態は 0 = 一致・1 = 不一致・2 以上 = エラー。`if grep -q ...` / `grep ... || true` は
@@ -138,7 +145,7 @@ description: >
     - できない → CI へ置く
 3. CI へ置く場合は `ci.yml` にジョブを追加し、集約ジョブ `ci-complete` の `needs` にも必ず追加する
     - ツールの導入・バージョン固定は既存の `check` ジョブの方式（バージョン + SHA256 検証）に合わせる
-4. `scripts/hooks/` を変更した場合は `scripts/hooks/test-hooks.sh` に検出・許可（OK / NG）ケースを追加し、
+4. `scripts/hooks/` を変更した場合は `scripts/hooks/test-hooks-N.sh` の該当する part（共有部は `test-hooks-lib.sh`）に検出・許可（OK / NG）ケースを追加し、
     `make test-hooks` を通す（Linux・macOS の検証は CI の `test-hooks` ジョブが行う）
 5. 編集後に以下を実行し、summary の合計時間をユーザーへ報告する（1 秒以上なら構成を見直す）
 
