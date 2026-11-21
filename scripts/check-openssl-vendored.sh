@@ -31,7 +31,7 @@
 #       TOML が読めない・不正なら検査不能（2）。名前と値は出さず件数だけ出す。
 #       PKG_CONFIG_ALL_STATIC も存在だけで静的を選ぶため同じく違反にする（上流が読む名前の正確な一覧と、多めに数える分は count_static_env のコメント）。同じ .cargo に config と config.toml が
 #       共存する場合は両方を検査する（片方が消えると残りが有効になるため。dependency-policy.md の配置禁止に合わせ、優先順位で無視される側も見ない道を作らない）。
-#       `include` のキー（Cargo の設定の読み込み。どの形でも）がある設定は、読み込み先を追わず検査不能（2。"include is not supported"）。
+#       `include` のキー（Cargo の設定の読み込み。Cargo が受ける形（配列・テーブルの配列）に加え、受けない形も安全側に止める）がある設定は、読み込み先を追わず検査不能（2。"include is not supported"）。
 #       `[env]` が存在してテーブルでない（`env = []` 等）場合は検査不能（2）。
 #   報告: 本番の依存の木の openssl-sys の件数（package ごと。(*) の付記は除いて重複排除）を出す（参考。合否に入れない）。
 #       依存の木だけではリンク方式（動的か静的か）を断定できない。1 件以上なら版の記録の要否と最終バイナリのリンク方式の確認は
@@ -181,7 +181,9 @@ print(n)
   echo "${c}"
 }
 
-# count_static_config <root>: <root>/.cargo/config.toml・config の `[env]` のキーのうち OPENSSL_STATIC か _OPENSSL_STATIC で終わるものの数を返す
+# count_static_config <root>: <root>/.cargo/config.toml・config の `[env]` のキーのうち、count_static_env と同じ規則の名前
+# （OPENSSL_STATIC・PKG_CONFIG_ALL_STATIC、末尾一致 _OPENSSL_STATIC・_PKG_CONFIG_ALL_STATIC、接尾辞 OPENSSL_STATIC_<target>・PKG_CONFIG_ALL_STATIC_<target>）の数を返す
+# （`include` のキーがあれば検査不能）。Python は resolve_python が解決した ${PY} を使う。
 # （R4。値が 0 でも数える＝安全側）。TOML を tomllib で構造として読み、復号後のキー名で判定する。コメント・他の値の文字列は数えない。
 # 読めない・TOML として不正なファイルは検査不能（2）。python の診断（パスを含み得る）は出さない。
 count_static_config() {
@@ -193,14 +195,14 @@ count_static_config() {
     {
     [ -r "${f}" ] || return 2
     rc=0
-    c="$(python3 -I -c '
+    c="$("${PY}" -I -c '
 import sys, tomllib
 try:
     with open(sys.argv[1], "rb") as fh:
         d = tomllib.load(fh)
 except Exception:
     sys.exit(2)
-# Cargo の include（文字列・配列・テーブルの配列・テーブル。どの形でもキー名は include）は読み込み先を追わず、検査不能（3 を bash が 2 にする）。
+# Cargo の include（Cargo が受ける形（配列・テーブルの配列）に加え、受けない形も安全側に止める。どの形でもキー名は include）は読み込み先を追わず、検査不能（3 を bash が 2 にする）。
 if "include" in d:
     sys.exit(3)
 e = d.get("env", {})
@@ -371,8 +373,10 @@ selftest() {
   # F10b: python3 が 0 で終わって何も出さない・数字以外を出すときは検査不能（2）。0 件として扱わない（fail-closed）
   local fk
   for fk in empty junk; do
+    # shellcheck disable=SC2016 # 偽スクリプトの $0 は偽の側で展開する（env -i で PATH が無くても動くよう、組み込みの : だけを使う）。
     if ! mkdir -p "${f}/fakepy-${fk}" 2>/dev/null ||
-      ! { printf '#!/bin/sh\n: >%q\n' "${f}/fakepy-${fk}/ran"; [ "${fk}" = empty ] && printf 'exit 0\n' || printf 'echo x1\nexit 0\n'; } 2>/dev/null >"${f}/fakepy-${fk}/python3" ||
+      ! printf '#!/bin/sh\n: >"${0%%/*}/ran"\n' 2>/dev/null >"${f}/fakepy-${fk}/python3" ||
+      ! { [ "${fk}" = empty ] && printf 'exit 0\n' || printf 'echo x1\nexit 0\n'; } 2>/dev/null >>"${f}/fakepy-${fk}/python3" ||
       ! chmod +x "${f}/fakepy-${fk}/python3" 2>/dev/null; then
       log "error: cannot write fixture (f10b); cannot inspect"
       exit 2
@@ -449,7 +453,7 @@ selftest() {
     fi
   done
 
-  # F11c: .cargo/config の include（文字列・配列・テーブルの配列・テーブル）は読み込み先を追わず検査不能（2）。include が無ければ従来どおり（0 件）
+  # F11c: .cargo/config の include（Cargo が受ける形（配列・テーブルの配列）に加え、受けない形も安全側に止める）は読み込み先を追わず検査不能（2）。include が無ければ従来どおり（0 件）
   local ic
   mkdir -p "${f}/i1/.cargo" "${f}/i2/.cargo" "${f}/i3/.cargo" "${f}/i4/.cargo" "${f}/i5/.cargo" "${f}/i6/.cargo" 2>/dev/null || { log "error: cannot write fixture (f11c); cannot inspect"; exit 2; }
   if ! printf 'include = "extra.toml"\n' >"${f}/i1/.cargo/config.toml" 2>/dev/null ||
@@ -457,11 +461,15 @@ selftest() {
     ! printf '[[include]]\npath = "a.toml"\noptional = true\n' >"${f}/i3/.cargo/config.toml" 2>/dev/null ||
     ! printf '[include]\npath = "a.toml"\n' >"${f}/i4/.cargo/config" 2>/dev/null ||
     ! printf 'include = [{ path = "a.toml" }]\n' >"${f}/i5/.cargo/config.toml" 2>/dev/null ||
-    ! printf '[env]\nOTHER = "1"\n' >"${f}/i6/.cargo/config.toml" 2>/dev/null; then
+    ! printf '[env]\nOTHER = "1"\n' >"${f}/i6/.cargo/config.toml" 2>/dev/null ||
+    ! mkdir -p "${f}/i7/.cargo" "${f}/i8/.cargo" "${f}/i9/.cargo" 2>/dev/null ||
+    ! printf '"include" = ["a.toml"]\n' >"${f}/i7/.cargo/config.toml" 2>/dev/null ||
+    ! printf 'include.path = "a.toml"\n' >"${f}/i8/.cargo/config.toml" 2>/dev/null ||
+    ! printf '"incl\\u0075de" = ["a.toml"]\n' >"${f}/i9/.cargo/config.toml" 2>/dev/null; then
     log "error: cannot write fixture (f11c); cannot inspect"
     exit 2
   fi
-  for ic in i1 i2 i3 i4 i5; do
+  for ic in i1 i2 i3 i4 i5 i7 i8 i9; do
     rc=0
     count_static_config "${f}/${ic}" >/dev/null 2>&1 || rc=$?
     if [ "${rc}" -ne 2 ]; then
