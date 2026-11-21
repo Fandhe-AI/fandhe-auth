@@ -208,7 +208,7 @@ fn it_record_started_line(r: &fandhe_auth_it_harness::RunRecord) -> String {
 // 対象は「stub の設定の 3 欄から負荷の記録へ値が流れないこと」の回帰の検出と、it-run の記録（設定の入る口
 // `with_hub_stub_record` を通して書いたもの）に登録簿の値が現れないことの確認まで。it-run の記録に入るのは
 // 欄名（`&'static str`）と印（`ValueMark`）だけで、設定の値が届く経路は無い。そのため it-run の記録側の
-// 陽性対照は置けない（値を入れて書き出す経路が無い）。照合そのものの検出力は負荷の記録側の陽性対照で見る。
+// 陽性対照は置かない（設定から値が届く経路が無い）。照合そのものの検出力は負荷の記録側の陽性対照で見る。
 // 署名鍵（`AssertionSigningKey`）の秘密値は登録簿に入れておらず対象外で、未確認のまま持ち越し
 // （追跡先は未定。利用者の判断待ち）。
 
@@ -440,6 +440,16 @@ fn written_records_have_no_registered_secret_in_any_form() {
     let (registry, cfg) = canary_registry_and_config();
     let w = write_record_for(cfg, "stub_jwks");
     assert!(!w.load.is_empty() && !w.it_run.is_empty());
+    // 設定の口（`with_hub_stub_record`）を通った行が it-run の記録に実際に書き出されている（欄名と印だけ）。
+    let it_text = String::from_utf8(w.it_run.clone()).unwrap();
+    for field in ["client_id", "public_host", "jwks_uri"] {
+        assert!(
+            it_text
+                .lines()
+                .any(|l| l.starts_with(&format!("hub_stub_field: {field} "))),
+            "hub_stub_field line for {field} missing from the it-run record"
+        );
+    }
     for (what, bytes) in [("load record", &w.load), ("it-run record", &w.it_run)] {
         let n = count_matches(&registry, bytes);
         assert_eq!(n, 0, "registered values found in the {what}: {n} match(es)");
