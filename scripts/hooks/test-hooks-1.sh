@@ -342,6 +342,14 @@ else
   fail "shellcheck-staged: file names with spaces or a leading dash are passed intact after --" "exit ${sc_rc}, calls: $(cat "${sc_log}")"
 fi
 
+# 同じ名前の引数（lefthook は glob が 2 つあると両方に一致するファイルを 2 回渡す）は 1 回だけ検査する
+sc_run a.sh b.sh a.sh "x y.sh" "x y.sh" b.sh
+if [ "${sc_rc}" -eq 0 ] && [ "$(sort "${sc_log}")" = "$(printf '%s\n' '-- a.sh' '-- b.sh' '-- x y.sh')" ]; then
+  pass "shellcheck-staged: duplicate arguments are checked once"
+else
+  fail "shellcheck-staged: duplicate arguments are checked once" "exit ${sc_rc}, calls: $(cat "${sc_log}")"
+fi
+
 # 件数が並列数の上限を超えても、全件が 1 回ずつ検査される
 sc_many=()
 for sc_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do

@@ -4,9 +4,10 @@
 # 使い方: shellcheck-staged.sh <file>...
 #   - 引数が 0 件なら何もせず 0 で終わる（lefthook は glob に一致するファイルが無ければジョブを起動しない）。
 #   - 1 ファイルでも指摘があれば 1、shellcheck が PATH に無ければ 2 で終わる（未検査で成功にしない）。
+#   - 同じ名前の引数は 1 回だけ検査する（lefthook は glob を 2 つ書くと、両方に一致するファイルを 2 回渡す）。
 #   - 並列数は getconf _NPROCESSORS_ONLN から決める。取れない・数でない値は固定値 4 にする（上限 16）。
 #     nproc と `xargs -P 0` は使わない（macOS で当てにならない）。
-#   - 出力はファイルごとに一時ファイルへ受け、終わってから引数の順に出す（並列の出力が混ざらない）。
+#   - 大きいファイルから先に起動する。出力はファイルごとに一時ファイルへ受け、終わってから引数の順に出す（並列の出力が混ざらない）。
 #   - 設定は .shellcheckrc（source-path・external-sources）に従う。ファイル名は引数のまま `--` の後ろで渡す。
 #
 # 目的は pre-commit の時間予算（.claude/rules/git-hooks.md。TASK-6）。macOS 標準の bash 3.2 でも動くように、
@@ -53,20 +54,49 @@ check_one() {
   echo "${rc}" > "${tmp_dir}/$1.rc"
 }
 
-pids=()
-total=0
-reaped=0
+# 重複を除いた引数を files に集める（名前の完全一致。引数は高々数百件で、二重の走査で足りる）
+files=()
 for file in "$@"; do
-  check_one "${total}" "${file}" &
-  pids[total]=$!
-  total=$((total + 1))
+  duplicate=0
+  for prev in ${files[@]+"${files[@]}"}; do
+    if [ "${prev}" = "${file}" ]; then
+      duplicate=1
+      break
+    fi
+  done
+  if [ "${duplicate}" -eq 0 ]; then
+    files[${#files[@]}]="${file}"
+  fi
+done
+total=${#files[@]}
+
+# 大きいファイルから先に起動する（検査時間はほぼ大きさに比例し、最後に起動した大きなファイルが全体の時間を決めるため）。
+# 起動順は番号だけで持ち、ファイル名を並べ替えの入力に使わない。出力は引数の順（番号順）のまま。
+i=0
+while [ "${i}" -lt "${total}" ]; do
+  if size="$({ wc -c < "${files[i]}"; } 2> /dev/null)"; then
+    size="${size//[!0-9]/}"
+  else
+    size=0
+  fi
+  printf '%s %s\n' "${size:-0}" "${i}"
+  i=$((i + 1))
+done | sort -rn -k1,1 -k2,2n > "${tmp_dir}/order"
+
+pids=()
+launched=0
+reaped=0
+while read -r _size idx; do
+  check_one "${idx}" "${files[idx]}" &
+  pids[launched]=$!
+  launched=$((launched + 1))
   # 同時に走らせる数を上限に収める。最も古いものを待つ（wait -n は bash 3.2 に無い）。終了コードは rc ファイルから読む。
-  if [ $((total - reaped)) -ge "${max_jobs}" ]; then
+  if [ $((launched - reaped)) -ge "${max_jobs}" ]; then
     wait "${pids[reaped]}" || true
     reaped=$((reaped + 1))
   fi
-done
-while [ "${reaped}" -lt "${total}" ]; do
+done < "${tmp_dir}/order"
+while [ "${reaped}" -lt "${launched}" ]; do
   wait "${pids[reaped]}" || true
   reaped=$((reaped + 1))
 done
