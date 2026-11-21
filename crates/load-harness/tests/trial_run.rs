@@ -307,16 +307,27 @@ fn encoders_match_rfc4648_vectors() {
 
 /// 登録簿の全値・全形が `haystack` に現れる件数だけを返す（値は返さない）。
 fn count_matches(registry: &[Vec<u8>], haystack: &[u8]) -> usize {
+    match_counts(registry, haystack).iter().flatten().sum()
+}
+
+/// 登録簿の値ごと・形ごとの一致の件数（`[値の番号][形の番号]`。形の順は `forms`）。`count_matches` はこの合計。
+/// 陽性対照は、混ぜた形そのものの件数を見る（合計だけだと、ある形が別の形の部分列として見つかり、
+/// その形の照合が外れても通る。例: パディングありの base64 はパディングなしの形を含む）。
+fn match_counts(registry: &[Vec<u8>], haystack: &[u8]) -> Vec<Vec<usize>> {
     registry
         .iter()
-        .flat_map(|v| forms(v))
-        .map(|f| {
-            haystack
-                .windows(f.len())
-                .filter(|w| *w == f.as_slice())
-                .count()
+        .map(|v| {
+            forms(v)
+                .iter()
+                .map(|f| {
+                    haystack
+                        .windows(f.len())
+                        .filter(|w| *w == f.as_slice())
+                        .count()
+                })
+                .collect()
         })
-        .sum()
+        .collect()
 }
 
 /// JWT の形（`eyJ<英数字・-・_>.eyJ<…>.` の部分列）の件数。語の頭に限らず、本文のどこにあっても数える
@@ -460,7 +471,7 @@ fn written_records_have_no_registered_secret_in_any_form() {
 }
 
 /// 陽性対照 1（照合の検出力）: 登録簿の全値・全形（生・`+` を含む base64 も含む）を出力に混ぜると、
-/// 照合は形ごとに検出する。JWT の形の語も数える。生のバイトと `+` を含む base64 は形の網の外にあり、
+/// 照合は形ごとに検出する（混ぜた値の、混ぜた形そのものの件数が 1 以上。合計の件数では見ない）。JWT の形の語も数える。生のバイトと `+` を含む base64 は形の網の外にあり、
 /// `write_new` を通らない（その経路は次の試験）。ここは照合そのものの検出力を見る。
 #[test]
 fn matcher_detects_every_form_mixed_into_output() {
@@ -473,7 +484,7 @@ fn matcher_detects_every_form_mixed_into_output() {
             mixed.extend_from_slice(b"note: ");
             mixed.extend_from_slice(f);
             mixed.push(b'\n');
-            let n = count_matches(&registry, &mixed);
+            let n = match_counts(&registry, &mixed)[vi][fi];
             assert!(n >= 1, "form {fi} of value {vi} was not detected");
         }
     }
