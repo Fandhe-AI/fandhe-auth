@@ -698,6 +698,16 @@ printf '%s\n' "${lock_ok}" > "${nl_root}/skills-lock.json"
 new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${nl_dir}/secret-scan.sh" check_scan "detector in a directory whose name ends with a newline reads its list" 0
 
+# scripts がシンボリックリンクでも、検出器の実体の場所から一覧を読む（論理的な `..` で別のルートを選ばない。#6000）
+lnk_real="${work_dir}/det-real"
+lnk_other="${work_dir}/det-other"
+mkdir -p "${lnk_real}/scripts/hooks" "${lnk_other}"
+cp "${SECRET_SCAN}" "${lnk_real}/scripts/hooks/secret-scan.sh"
+printf '%s\n' "${lock_ok}" > "${lnk_real}/skills-lock.json"
+ln -s "${lnk_real}/scripts" "${lnk_other}/scripts"
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${lnk_other}/scripts/hooks/secret-scan.sh" check_scan "detector reached through a symlinked scripts directory reads the real list" 0
+
 # 同じ checkout（検出器と走査対象が同じ repo）では、除外の一覧はコミット済み（HEAD）の名前だけを使う（#6000）。
 # 未コミットの作業ツリー・index の編集で除外を足せない。
 same_lock_two='{

@@ -101,23 +101,56 @@ if [ "${summary}" -eq 1 ]; then
   exec 2> /dev/null
 fi
 
-# 除外の一覧の読み元は、このスクリプト自身の場所から決める（走査対象の repo ではない）。
-# cd が CDPATH で別のディレクトリを選ばないよう先に外す。親パスは BASH_SOURCE からシェルの展開だけで取る
-# （dirname のコマンド置換は末尾の改行を落とす）。末尾の改行は番兵（x）で保つ。
+# 除外の一覧の読み元は、このスクリプト自身の実体の場所から決める（走査対象の repo ではない）。
+# cd は既定で `..` を論理的（シンボリックリンクを辿らず文字列として）に処理するため、scripts や hooks がリンクだと
+# 実体と異なるルートを選び得る。スクリプト自身のリンクを先に解決し、実体のディレクトリを物理パス（pwd -P）で取ってから
+# 親を切り出す。リンクを解決できない起動・階層が足りない配置は検査不能（2）にする。
+# cd が CDPATH で別のディレクトリを選ばないよう先に外す。文字列の加工はシェルの展開だけで行う
+# （dirname・readlink のコマンド置換は末尾の改行を落とす。末尾の改行は番兵（x）で保つ）。
 unset CDPATH
+detector_fail() {
+  echo "secret-scan: cannot resolve the detector location; aborting" >&4
+  exit 2
+}
 _src="${BASH_SOURCE[0]}"
+_hops=0
+while [ -L "${_src}" ]; do
+  _hops=$((_hops + 1))
+  [ "${_hops}" -le 40 ] || detector_fail
+  _link="$(readlink -- "${_src}" && printf x)" || detector_fail
+  _link="${_link%x}"
+  _link="${_link%$'\n'}"
+  [ -n "${_link}" ] || detector_fail
+  case "${_link}" in
+    /*) _src="${_link}" ;;
+    */*) _src="${_src%/*}/${_link}" ;;
+    *)
+      case "${_src}" in
+        */*) _src="${_src%/*}/${_link}" ;;
+        *) _src="${_link}" ;;
+      esac
+      ;;
+  esac
+done
 case "${_src}" in
   */*) _src_dir="${_src%/*}" ;;
   *) _src_dir="." ;;
 esac
 [ -n "${_src_dir}" ] || _src_dir="/"
-if ! detector_root="$(cd -- "${_src_dir}/../.." && pwd -P && printf x)"; then
-  echo "secret-scan: cannot resolve the detector location; aborting" >&4
-  exit 2
+if ! _real_dir="$(cd -P -- "${_src_dir}" && pwd -P && printf x)"; then
+  detector_fail
 fi
-unset _src _src_dir
-detector_root="${detector_root%x}"
-detector_root="${detector_root%$'\n'}"
+_real_dir="${_real_dir%x}"
+_real_dir="${_real_dir%$'\n'}"
+# 実体のディレクトリ（<root>/scripts/hooks）から 2 階層上がルート。階層が足りない配置は検査不能（2）。
+case "${_real_dir}" in
+  /*/*) ;;
+  *) detector_fail ;;
+esac
+detector_root="${_real_dir%/*}"
+detector_root="${detector_root%/*}"
+[ -n "${detector_root}" ] || detector_root="/"
+unset _src _src_dir _hops _link _real_dir
 detector_lock="${detector_root}/skills-lock.json"
 
 # 呼び出し側の環境変数で pathspec の解釈（literal・glob・大文字小文字無視）が変わると、除外の範囲がずれる。
@@ -493,12 +526,23 @@ resolve_head() {
   elif [ "${rc}" -eq 0 ] && [ -n "${head_ref}" ]; then
     case "${head_ref}" in
       refs/*)
-        if head_id="$(g rev-parse -q --verify "${head_ref}^{commit}" 2> /dev/null)" && [[ "${head_id}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
-          return 0
-        fi
-        head_id=""
+        # rev-parse --verify は refs/ で始まる名前にも候補の展開（refs/refs/…・refs/tags/refs/… 等）を行い、
+        # 完全名と別の参照へ解決し得る。show-ref --verify は完全名の一致だけを受けるため、先にそれでオブジェクト ID を取り、
+        # その ID（40・64 桁の 16 進）だけをコミットとして検証する。
         rc=0
         g show-ref --verify -q "${head_ref}" > /dev/null 2>&1 || rc=$?
+        if [ "${rc}" -eq 0 ]; then
+          ref_line="$(g show-ref --verify "${head_ref}" 2> /dev/null)" || rc=$?
+        fi
+        if [ "${rc}" -eq 0 ] && [[ "${ref_line}" =~ ^([0-9a-f]{40}([0-9a-f]{24})?)[[:space:]] ]]; then
+          if head_id="$(g rev-parse -q --verify "${BASH_REMATCH[1]}^{commit}" 2> /dev/null)" && [ "${head_id}" = "${BASH_REMATCH[1]}" ]; then
+            return 0
+          fi
+          rc=2
+        elif [ "${rc}" -eq 0 ]; then
+          rc=2
+        fi
+        head_id=""
         ;;
       *) rc=2 ;;
     esac
@@ -523,7 +567,7 @@ resolve_head() {
   exit 2
 }
 load_skill_names() {
-  local repo_real rc name n head_names=" " keep head_ref head_entry head_mode head_size work_present=0
+  local repo_real rc name n head_names=" " keep head_ref head_entry head_mode head_size work_present=0 lock_pid lock_wd lock_rc
   local -a work_names
   work_names=()
   if [ -e "${detector_lock}" ] || [ -L "${detector_lock}" ]; then
@@ -532,29 +576,29 @@ load_skill_names() {
     if [ -L "${detector_lock}" ] || [ ! -f "${detector_lock}" ] || [ ! -r "${detector_lock}" ]; then
       lock_fail
     fi
-    # 確認と open の間の差し替え（TOCTOU）対策: 読み取り専用で open し、開いた fd 自体を確かめてからその fd だけを読む。
-    # 読み取り専用で開くのは、書き込み権限のない実行ユーザー・読み取り専用マウントでも読めるようにするため。
-    # FIFO への差し替えは、直前に通常ファイルであることを確かめた直後の極小の窓に限られる。
-    if ! exec 5< "${detector_lock}"; then
-      lock_fail
-    fi
-    # fd が通常ファイルで、パスが（リンクでなく）同じ実体であることを確かめる。違反は 2。
-    # Linux は /dev/fd/5 が fd の実体への参照で、種別と同一性を fd から確かめられる。
-    # macOS の /dev/fd/5 は文字デバイス（fdesc）で -f が偽になるため、その場合は開いた後のパスの種別だけを確かめる。
-    if [ -L "${detector_lock}" ] || [ ! -f "${detector_lock}" ]; then
-      exec 5<&-
-      lock_fail
-    fi
-    if [ -f /dev/fd/5 ] && [ ! /dev/fd/5 -ef "${detector_lock}" ]; then
-      exec 5<&-
-      lock_fail
-    fi
+    # 確認と open の間の差し替えへの対策。FIFO への差し替えで open が読み手の到着待ちで止まり続けないよう、
+    # 読み取りを別プロセス（head）で行い、時間を区切って打ち切る（待ち時間の制限。超過・失敗は 2）。
+    # open はその別プロセスの中で行うため、止まっても kill で終わらせられる。読み取り専用のため権限・読み取り専用マウントも問題ない。
+    # 読み終えた後に、パスがリンクでない通常ファイルのままであることを再確認する（違反は 2）。
+    # /dev/fd/N による同一性の確認は、macOS の /dev/fd が fd の実体を指さず使えないため置かない。
     # 上限 + 1 バイトだけ複写する（超過は parse_lock が固定の診断で止める）。
-    if ! head -c $((lock_max_bytes + 1)) <&5 > "${tmp_dir}/work-lock"; then
-      exec 5<&-
+    head -c $((lock_max_bytes + 1)) 2> /dev/null < "${detector_lock}" > "${tmp_dir}/work-lock" &
+    lock_pid=$!
+    (
+      sleep 5
+      kill "${lock_pid}"
+    ) > /dev/null 2>&1 < /dev/null &
+    lock_wd=$!
+    lock_rc=0
+    wait "${lock_pid}" 2> /dev/null || lock_rc=$?
+    kill "${lock_wd}" > /dev/null 2>&1 || true
+    wait "${lock_wd}" > /dev/null 2>&1 || true
+    if [ "${lock_rc}" -ne 0 ]; then
       lock_fail
     fi
-    exec 5<&-
+    if [ -L "${detector_lock}" ] || [ ! -f "${detector_lock}" ]; then
+      lock_fail
+    fi
     parse_lock "${tmp_dir}/work-lock"
     work_names=(${parsed_names[@]+"${parsed_names[@]}"})
     work_present=1
