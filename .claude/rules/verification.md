@@ -38,7 +38,7 @@ implement-review・implement-review-pr・create-pr 等）。サブエージェ�
 | crate 間の依存 | `make crate-deps` | 許可表との照合（`scripts/check-crate-deps.sh`） |
 | `openssl-sys` の `vendored` | `make no-vendored` | `cargo tree -e features` の 0 件の検査と、静的リンクを強いる設定が無いことの検査（`make lint` にも入る。DPOL-13・TASK-667。名前は暫定） |
 | `lefthook.yml`・`scripts/hooks/` の時間予算 | `time lefthook run pre-commit --all-files` | `./git-hooks.md` の時間予算の確認 |
-| 秘密情報の検査規則（`scripts/hooks/secret-scan.sh`） | `make secret-scan` と `make test-hooks` | 追跡ファイル全体で合計 0 件（終了コード 0）。規則の追加は `test-hooks.sh` にも足す |
+| 秘密情報の検査規則（`scripts/hooks/secret-scan.sh`） | `make secret-scan` と `make test-hooks` | 追跡ファイル全体で合計 0 件（終了コード 0）。規則の追加は `scripts/hooks/test-hooks-N.sh` の該当する part にも足す |
 | `Makefile`・`scripts/*.sh` | `make help` と `scripts/help.sh` の一致 | `./makefile.md` の手順 5 |
 | `.github/workflows/` | `actionlint`・PR 上での実際の CI の実行 | `./github-actions.md` |
 

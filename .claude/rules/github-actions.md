@@ -150,7 +150,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
       - 他の外部ツール（`check` ジョブの検査ツール等）には広げない。それらは従来どおり版 + SHA256 の宣言と検証を要る
       - 例外の範囲を広げる・条件を緩めるのは、利用者の承認を待つ（承認は人が行う。ACPT-7）
       - #47（TASK-6）で追跡していた残りの課題（ルートの宣言との照合・後続のステップでの toolchain の明示・配布元の条件の機械的な強制）は解消した。
-        ルートの照合は `scripts/msrv.sh`、後者 2 つは `scripts/install-msrv.sh` が持ち、`scripts/hooks/test-hooks.sh` で試験する。
+        ルートの照合は `scripts/msrv.sh`、後者 2 つは `scripts/install-msrv.sh` が持ち、`scripts/hooks/test-hooks-7.sh` で試験する。
         試験は `cargo`・`jq`・`tomllib` を持つ `python3`（3.11 以上）を要し、CI（`CI`・`GITHUB_ACTIONS` が設定）では前提が足りなければ skip せず失敗にする
 10. 信頼できない入力（PR タイトル等）は `${{ }}` で `run` に直接展開せず `env` 経由で渡す（`pr-title` ジョブの方式）
 11. 時間予算: `ci.yml` は PR の wall-clock で 2 分以内を目安とする。超える場合は並列化・キャッシュ・
