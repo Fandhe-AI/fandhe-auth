@@ -176,6 +176,13 @@ expect_out() {
   fi
 }
 
+# stage_lock: 走査対象の index に、検出器と同じ内容の skills-lock.json（lock_ok）を登録する。
+# 除外は検出器の一覧と対象の index の一覧の共通部分だけに効く（#6000）。lock_ok は後ろで定義されるため実行時に参照する。
+stage_lock() {
+  printf '%s\n' "${lock_ok}" > skills-lock.json
+  git add -- skills-lock.json
+}
+
 # stage <path> <内容（printf の書式ではなくそのまま書き込む）>
 stage() {
   mkdir -p "$(dirname "$1")"
@@ -314,8 +321,15 @@ check_scan "env var placeholder" 0
 new_repo; stage README.md "see https://example.com/path and user${at}example.com"
 check_scan "URL without credentials" 0
 
-new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"; stage .agents/skills/vendored-b/sub/n.md "${dsn_line}"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"; stage .agents/skills/vendored-b/sub/n.md "${dsn_line}"
 SCAN_BIN="${det_ok}" check_scan "paths registered in the detector's skills-lock.json are excluded" 0
+
+# 走査対象の index で登録が消えた名前は、検出器の一覧に残っていても除外しない（共通部分だけを除外に使う。#6000）
+new_repo; stage skills-lock.json '{"version":2,"skills":{"vendored-b":{"source":"x"}}}'
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "a registration removed in the target index no longer excludes the directory" 1 .agents/skills/vendored-a/SKILL.md
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_ok}" check_scan "a target index without skills-lock.json excludes nothing" 1 .agents/skills/vendored-a/SKILL.md
 
 # 除外は検出器の skills-lock.json に登録された .agents/skills/<名前>/ の下だけ。パスの形では決めない（#6000）
 new_repo; stage .agents/skills/other/SKILL.md "x = ${token}"
@@ -665,7 +679,7 @@ check_good_lock() {
   local desc="$1" content="$2"
   make_detector "good${bad_n}" "${content}"
   bad_n=$((bad_n + 1))
-  new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+  new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
   SCAN_BIN="${det_bin}" check_scan "${desc}" 0
 }
 check_good_lock "skills-lock.json with braces inside strings is accepted" '{
@@ -706,7 +720,7 @@ nl_dir="${nl_root}/s/h"$'\n'
 mkdir -p "${nl_dir}"
 cp "${SECRET_SCAN}" "${nl_dir}/secret-scan.sh"
 printf '%s\n' "${lock_ok}" > "${nl_root}/skills-lock.json"
-new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${nl_dir}/secret-scan.sh" check_scan "detector in a directory whose name ends with a newline reads its list" 0
 
 # scripts がシンボリックリンクでも、検出器の実体の場所から一覧を読む（論理的な `..` で別のルートを選ばない。#6000）
@@ -716,11 +730,11 @@ mkdir -p "${lnk_real}/scripts/hooks" "${lnk_other}"
 cp "${SECRET_SCAN}" "${lnk_real}/scripts/hooks/secret-scan.sh"
 printf '%s\n' "${lock_ok}" > "${lnk_real}/skills-lock.json"
 ln -s "${lnk_real}/scripts" "${lnk_other}/scripts"
-new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${lnk_other}/scripts/hooks/secret-scan.sh" check_scan "detector reached through a symlinked scripts directory reads the real list" 0
 
 # ファイル名だけで起動した相対リンクの先が / を含んでも、リンクの親ディレクトリを基準に解決する（#6000）
-new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 ln -s "../det-real/scripts/hooks/secret-scan.sh" sslink
 SCAN_BIN="sslink" check_scan "a bare-name symlink with a relative target containing a slash resolves from the link's directory" 0
 
@@ -993,7 +1007,7 @@ new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 run_big_lock "skills-lock.json one byte over the size limit is rejected" "${det_bin}"
 make_detector "edge" "x"
 padded_lock "${lock_max}" > "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
-new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${det_bin}" check_scan "skills-lock.json exactly at the size limit is accepted" 0
 # HEAD 側だけが上限を超える（同じ checkout。作業ツリーの一覧は小さい）
 same_checkout_repo "${lock_ok}"
@@ -1143,7 +1157,7 @@ else
   fail "secret-scan: (tracked) --summary omits file names" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
+new_repo; stage_lock; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"; git commit -q -m "chore: skill"
 SCAN_BIN="${det_ok}" check_scan "(tracked) registered skill path is excluded" 0
 
 new_repo; stage .agents/skills/other/SKILL.md "x = ${token}"; stage deps.lock "x = ${token}"

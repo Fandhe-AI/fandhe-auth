@@ -33,7 +33,9 @@
 # 除外（本文の走査だけに効く。env-file の名前の検査は除外より前に全パスへ掛かる。fail-closed）:
 #   このスクリプトのある repo の skills-lock.json（<このファイル>/../../skills-lock.json）に登録された名前の
 #   `.agents/skills/<名前>/` の下だけを本文の走査から外す（外部取得物の参考文書）。
-#   一覧は検出器の側だけから読み、走査対象（staged・追跡ファイル・PR の head）の skills-lock.json は読まない。
+#   除外に使う名前は検出器の側の一覧から読み、走査対象（staged・追跡ファイル・PR の head）の skills-lock.json から
+#   名前を足さない。走査対象の index の一覧は「除外を縮める」ためだけに使い、検出器の一覧と対象の index の一覧の共通部分
+#   だけを除外にする（PR が登録を削除した名前は走査される。対象の index に一覧が無ければ除外は 0 件）。
 #   PR が自分の変更で一覧に名前を足して検査を免れる経路を作らないため（CI は保護された main の検出器を使う。
 #   #51・#6000）。パスの形（*.lock・.claude/skills/・未登録の .agents/skills/ の下）では除外しない。
 #   名前は `[a-z0-9-]` の規則に合うものだけを通し、literal の pathspec にする（glob・`..`・`/` を持ち込ませない）。
@@ -49,6 +51,8 @@
 #   既存ファイルへの値の追記・新しく置いたファイル・他のパスからのリネームによる移動のいずれも、本文の走査から外れる。
 #   登録名の下の変更は、人のレビューで確かめる（内容に結び付けた除外は未実装）。
 #   一覧は大きさに上限を設け（暫定。超えたら 2）、走査の結果を返す前に HEAD を取り直して固定した ID と違えば 2 にする。
+#   index は最初に 1 回だけ複写して固定し、登録の確認・パス一覧・本文の走査はすべてその複写から行う。走査の後に元の
+#   index の内容が固定時と違えば 2 にする（登録の確認と本文が別の index を見る経路を作らない）。
 # 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
 # 本文のバイト列は照合するが、圧縮・エンコードの展開と、複数行に分かれた値の復元はしない。
 # 保守的なヒューリスティックであり網羅的なスキャナの代替ではない。AAUD-30 の実行時の登録簿による走査とも別物。
@@ -257,6 +261,29 @@ if ! tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")" || [ -z "${tmp_
   exit 2
 fi
 trap 'rm -rf "${tmp_dir}"' EXIT
+
+# index を 1 回だけ複写して固定し、以降の登録の確認・パス一覧・本文の走査はすべてその複写（GIT_INDEX_FILE）に対して行う。
+# 別々に index を開くと、間に index が書き換わったとき、登録の確認とパス一覧・本文が別の内容を見る（#6000）。
+# 走査の後に、元の index の内容（git ls-files -s）が固定時と同じことを確かめ、違えば検査不能（2）にする
+# （stat 情報だけの更新では差が出ない）。index が無い（空）ときは存在しない複写のパスを指し、git は空として扱う。
+if [ -n "${GIT_INDEX_FILE:-}" ]; then
+  orig_index="${GIT_INDEX_FILE}"
+elif ! orig_index="$(g rev-parse --path-format=absolute --git-path index 2> /dev/null)" || [ -z "${orig_index}" ]; then
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
+fi
+snap_index="${tmp_dir}/index-snap"
+if [ -e "${orig_index}" ]; then
+  if ! cp -- "${orig_index}" "${snap_index}" 2> /dev/null; then
+    echo "secret-scan: cannot snapshot the index; aborting" >&4
+    exit 2
+  fi
+fi
+export GIT_INDEX_FILE="${snap_index}"
+if ! g ls-files -s -z > "${tmp_dir}/index-listing-before"; then
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
+fi
 
 # 本文の走査から外す名前を、検出器の skills-lock.json から読む。形は
 #   { "version": 2, "skills": { "<名前>": { ... }, ... } }
@@ -521,7 +548,13 @@ resolve_head() {
   rc=0
   # 'HEAD^{commit}' は短縮参照名の規則で解決され、未作成ブランチでは refs/tags/HEAD 等に誤って当たる。
   # シンボリック HEAD は先に参照先の完全名（refs/...）を取り、その完全名だけで厳密に解決する。
-  head_ref="$(g symbolic-ref -q HEAD 2> /dev/null)" || rc=$?
+  # コマンド置換の中で終了状態 1（detached HEAD）を返すと、bash 3.2（macOS）は ERR トラップをサブシェルで実行して
+  # 2 に化かす。置換を使わず、一時ファイルへ書き出して終了状態をそのまま受ける。
+  head_ref=""
+  g symbolic-ref -q HEAD > "${tmp_dir}/head-ref" 2> /dev/null || rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    IFS= read -r head_ref < "${tmp_dir}/head-ref" || true
+  fi
   if [ "${rc}" -eq 1 ]; then
     # detached HEAD（$GIT_DIR/HEAD が直接コミットを指す）。
     if head_id="$(g rev-parse -q --verify 'HEAD^{commit}' 2> /dev/null)" && [[ "${head_id}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
@@ -682,9 +715,15 @@ load_skill_names() {
   repo_real="${repo_real%$'\n'}"
   load_index_lock
   if [ "${repo_real}" != "${detector_root}" ]; then
-    if [ "${work_present}" -eq 1 ]; then
-      skill_names=(${work_names[@]+"${work_names[@]}"})
-    fi
+    # 別の checkout（CI で PR の head を走査する形）でも、信頼済みの一覧（検出器側）と走査対象の index の一覧の
+    # 共通部分だけを除外に使う。PR が登録を削除した名前は、マージ前に本文を走査する（除外が縮む方向にだけ効く）。
+    # 対象の index に一覧が無いときは index_names が空のため、除外は 0 件になる。
+    skill_names=()
+    for name in ${work_names[@]+"${work_names[@]}"}; do
+      case "${index_names}" in
+        *" ${name} "*) skill_names+=("${name}") ;;
+      esac
+    done
     return 0
   fi
   # 検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のとき、作業ツリーの
@@ -921,6 +960,18 @@ if [ "${head_resolved}" -eq 1 ]; then
     echo "secret-scan: HEAD changed during the scan; aborting" >&4
     exit 2
   fi
+fi
+
+# 走査中に元の index の内容が変わっていたら、固定した複写に基づく結果は実際の内容と食い違う。合格を返さず検査不能（2）にする。
+if ! GIT_INDEX_FILE="${orig_index}" g ls-files -s -z > "${tmp_dir}/index-listing-after" 2> /dev/null; then
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
+fi
+index_cmp_rc=0
+cmp -s "${tmp_dir}/index-listing-before" "${tmp_dir}/index-listing-after" || index_cmp_rc=$?
+if [ "${index_cmp_rc}" -ne 0 ]; then
+  echo "secret-scan: the index changed during the scan; aborting" >&4
+  exit 2
 fi
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
