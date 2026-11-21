@@ -22,7 +22,7 @@ tools:
 | 区分 | 内容 |
 |------|------|
 | ✅ 読む | `Cargo.toml`・`Cargo.lock`・`deny.toml`・`crates/*/Cargo.toml` |
-| ✅ 実行 | `cargo deny fetch`・`cargo audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ）・`cargo deny --locked check <検査> --disable-fetch`・`cargo audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`git diff --exit-code Cargo.lock`・`date -u +%FT%TZ`・`git -C ~/.cargo/advisory-db log -1 --format='%H %cI'`・`git -C ~/.cargo/advisory-db rev-parse HEAD`・`ls -d ~/.cargo/advisory-dbs/advisory-db-*`・`git -C "$DENY_DB_DIR" rev-parse HEAD`・`GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git ls-remote https://github.com/RustSec/advisory-db.git HEAD`（固定の形のみ。`origin` を使わない）・`ls deny.toml`・`git -C "$DENY_DB_DIR" log -1 --format='%H %cI'`・`cargo deny --version`・`cargo audit --version` |
+| ✅ 実行 | `cargo deny fetch`・`cargo audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ）・`cargo deny --locked check <検査> --disable-fetch`・`cargo audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`git diff --exit-code Cargo.lock`・`printenv CARGO_HOME`・DB の版を読む 1 回の Bash（Step 2 の 2 つの形に限る。`ls -d`・glob・`git -C "${VAR:?}" rev-parse --show-toplevel`・`git -C "${VAR:?}" log -1 --format='%H %cI'` を含む）・`ls deny.toml .deny.toml .cargo/deny.toml`・`cargo deny --version`・`cargo audit --version` |
 | ❌ 禁止 | `cargo update`・`cargo add` / `remove`・`cargo install`・ファイルの編集・例外の追加・`cargo deny` / `cargo tree` を `--locked` なしで流すこと・`cargo tree` に `--all-features` を付けること |
 
 ## 遵守する規約
@@ -37,9 +37,10 @@ tools:
 ### Step 1: 前提を確かめる
 
 `Cargo.lock` の有無を確かめる。無いときは監査を流さず「前提なし（`Cargo.lock` は TASK-3 の雛形）」と報告して止まる。
-`deny.toml`（ルート）の有無を `ls deny.toml` で確かめ、無くても止まらない。結果を報告に書く。
-- 無いとき: 「`deny.toml` なし（TASK-668 待ち。cargo-deny の既定の設定で流した）」と書く。厳格な設定（TASK-668）が無い間は、規約固有の検査（bans の DPOL-18・licenses の DPOL-22・DPOL-24・sources の DPOL-25）を「未評価」と書き、既定の設定で得た出力は「参考結果（規約の合否ではない）」と明示する。その結果を DPOL-34 の合格として扱わない（`../../rules/dependency-policy.md` の暫定の手順と同じ扱い）。
-- あるとき: 「`deny.toml` あり（使った設定: ルートの `deny.toml`）」と書き、Read・Grep で `db-path`・`db-urls` の有無も確かめて報告する。ファイルがあるだけでは「未評価」の印を外さない。人が TASK-668 の厳格版だと確かめるまで、DPOL-18・DPOL-22・DPOL-24・DPOL-25 は「未評価」のままにし、その設定での出力は参考結果とする（`../../rules/dependency-policy.md` と同じ）。
+`deny.toml`（ルート）・`.deny.toml`・`.cargo/deny.toml` の有無を `ls` で確かめ、無くても止まらない。結果を報告に書く。
+- ルートの `deny.toml` が無いとき: 「`deny.toml` なし（TASK-668 待ち。cargo-deny の既定の設定で流した）」と書く。
+- あるとき: 「`deny.toml` あり（使った設定: ルートの `deny.toml`）」と書く。
+- どちらでも、bans の DPOL-18・licenses の DPOL-22・DPOL-24・sources の DPOL-25 は「未評価」とし、出力は「参考結果（規約の合否ではない）」と明示する。人が厳格版だと確かめた記録の置き場は今は決まっていない（TASK-668 で決める）ので、当面は常に「未評価」にする。その結果を DPOL-34 の合格として扱わない（`../../rules/dependency-policy.md` の暫定の手順と同じ）。
 どちらも、暫定の報告の対象はルートの `Cargo.lock` だけで、`crates/trial-deps/fuzz/Cargo.lock` は未実施と記録する。
 `cargo deny` / `cargo audit` が未導入なら、その旨を報告して止まる（導入はしない）。
 本番のビルドで有効にする feature を呼び出し元から受け取り、`PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り）と
@@ -59,20 +60,23 @@ cargo audit --file Cargo.lock
 
 2 つ目は cargo-audit の DB の取得を兼ねる（QP-2 の手順）ため、DPOL-33 の取得と監査の分離を満たさない暫定の手順である（正式な手順と記録の様式は TASK-679。`../../rules/dependency-policy.md` の「依存を足す・更新するときの確認手順」と同じ）。
 取得はこの 1 回だけで、以後の実行は全て取得なしで流す。報告には「暫定の手順で、DPOL-34 の合格ではない」と書く。
-使った DB の commit と取得日を記録する（DPOL-33）。取得の成否は、取得の開始を示す表示（`Fetching advisory database from`）やエラーの表示の有無では決めない（途中の中断・stderr の欠落でも満たされ、古いキャッシュを今回取得した DB と記録してしまうため）。判定に使うのは、実行後に読んだ DB の HEAD と固定の取得元の HEAD の一致だけで、取得前の HEAD は判定に使わない（`../../rules/dependency-policy.md` の記録の項と同じ）。
-- 取得元の HEAD: `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git ls-remote https://github.com/RustSec/advisory-db.git HEAD`（repo の設定を読まない固定の形。`origin` を使わない。許可するのはこの形だけ）。
-- cargo-deny: `cargo deny fetch` の終了コードが 0 で、`ls -d ~/.cargo/advisory-dbs/advisory-db-*` がちょうど 1 つを返し（`DENY_DB_DIR` に置く）、実行後の `git -C "$DENY_DB_DIR" rev-parse HEAD` が取得元の HEAD と一致したとき、その直後に `date -u +%FT%TZ` を流した日時を取得日とする。ディレクトリが 1 つに決まらないとき、または `deny.toml` に `db-path`・`db-urls` があるとき（Read・Grep で確かめる）は「未記録」にする。
-- cargo-audit: 実行の前に `git -C ~/.cargo/advisory-db rev-parse HEAD` を読む（読めなければ「前」を未記録にするだけ）。`cargo audit --file Cargo.lock` の後に同じ `rev-parse HEAD` を読み、取得元の HEAD と一致したときだけ、その直後に `date -u +%FT%TZ` を流した日時を取得日とする。終了コードは検出でも非 0 になるため、取得の成否に使わない（検出による非 0 は監査結果として別に記録する）。
-- 確認できないとき（cargo-deny の終了コード非 0・`ls-remote` の失敗・`ls-remote` の出力が空・commit の不一致・HEAD を読めない・DB のディレクトリが 1 つに決まらない）は取得日を書かず、「取得日は未記録（確認できず）」と報告し、DB の commit だけを記録する。
-- `Loaded <N> security advisories` は読み込みの表示で、取得の成功の証拠にしない。取得日は `%cI`（DB の commit の日時）とは別に書く。
-commit は次で読む（`DENY_DB_DIR` は上の 1 つに決まったディレクトリ。決まらないときは読まない）。
+使った DB の版（HEAD の commit の sha と、その commit の日時 `%cI`）をツールごとに記録する（DPOL-33。Should）。DB の中身が持つ時刻なので、古いキャッシュなら古い日時が出る。この日時は DB の最終更新で、取得した日時ではない。
+「取得日」の欄は「未記録（TASK-679 で決める。DPOL-33 は取得日の記録を求めるが、今は未記録）」と書く。取得元との照合（`ls-remote`）や、取得の開始ログ・終了コード・出力の有無による取得の成否の推定はしない（`../../rules/dependency-policy.md` の記録の項と同じ）。cargo-audit の非 0 は検出でも出るので、取得の成否に使わない。
+
+読む前に、使われた DB を特定できないかを確かめる。次のどれかに当たれば「DB の版は未記録」と書き、DB を読まない（`printenv CARGO_HOME`・Read・Grep で確かめる）。
+- `printenv CARGO_HOME` が値を返す。
+- `.cargo/audit.toml`・`~/.cargo/audit.toml`・`$CARGO_HOME/audit.toml` のどれかに `[database]` がある。
+- ルートの `deny.toml` に `db-path`・`db-urls` がある。
+- ルート以外の deny の設定（`.deny.toml`・`.cargo/deny.toml`）がある。
+
+当たらなければ、ディレクトリの確認・代入・参照を同じ 1 回の Bash で流す（変数が空のまま `git -C` が repo 自身を読まないようにする）。0 個または 2 個以上のとき・DB の repo でないときは、その場で「DB の版は未記録」を出して止まる。次の 2 つの形に限る。
 
 ```bash
-git -C ~/.cargo/advisory-db log -1 --format='%H %cI'
+set -- ~/.cargo/advisory-dbs/advisory-db-*; [ "$#" -eq 1 ] && [ -d "$1" ] && [ "$(git -C "$1" rev-parse --show-toplevel)" = "$1" ] || { echo "DB の版は未記録"; exit 1; }; DENY_DB_DIR=$1; git -C "${DENY_DB_DIR:?}" log -1 --format='%H %cI'
 ```
 
 ```bash
-git -C "$DENY_DB_DIR" log -1 --format='%H %cI'
+AUDIT_DB=~/.cargo/advisory-db; [ -d "$AUDIT_DB" ] && [ "$(git -C "$AUDIT_DB" rev-parse --show-toplevel)" = "$AUDIT_DB" ] || { echo "DB の版は未記録"; exit 1; }; git -C "${AUDIT_DB:?}" log -1 --format='%H %cI'
 ```
 
 ### Step 3: 4 検査と cargo-audit を取得なしで流す（DPOL-33・DPOL-34）
@@ -138,16 +142,16 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 
 `deny.toml` に例外（`advisories.ignore` 等）があれば、理由・期限・範囲がそろっているかと期限切れが無いかを読む（DPOL-20）。
 評価は「検出あり / 検出なし / 実行失敗」で書き、合否や承認を書かない。
-`deny.toml` が無いとき、またはあっても人が TASK-668 の厳格版と確かめるまでは、bans・licenses・sources の行を「未評価（参考結果: その設定での出力）」とし、DPOL-18・DPOL-22・DPOL-24・DPOL-25 にひも付けた評価として書かない。
+`deny.toml` の有無にかかわらず（人の確認の記録の置き場は TASK-668 で決める）、bans・licenses・sources の行を「未評価（参考結果: その設定での出力）」とし、DPOL-18・DPOL-22・DPOL-24・DPOL-25 にひも付けた評価として書かない。
 
 ## 完了条件
 
-- [ ] 前提（`Cargo.lock`・道具。`deny.toml` は有無を確かめ、あれば使った設定を、無ければ既定設定と未評価の扱いを報告に書く。有無で止まらない）を確かめた
+- [ ] 前提（`Cargo.lock`・道具。`deny.toml` は有無を確かめ、あれば使った設定を、無ければ既定設定を報告に書く。有無で止まらず、どちらも規約固有の検査は未評価）を確かめた
 - [ ] DB の取得を 1 回にし、以後の実行を取得なし（`--disable-fetch`・`--no-fetch`）で流した。cargo deny と cargo tree は `--locked`、cargo audit は `git diff --exit-code Cargo.lock` で書き換えなしを確かめた
 - [ ] 逆引きは本番の feature を明示し（`--all-features` なし）、`-e normal,build` で流した
 - [ ] 5 つの実行と 5 つの逆引きの結果を表にした（逆引きは absent・filtered・実行失敗を区別した）
-- [ ] DB の取得日をツールごとに、取得の成功を確かめた時点の日時として commit 日時と別に記録した（実行後の DB の HEAD と固定の取得元の HEAD の一致で確かめ〔cargo-deny は終了コード 0 と DB のディレクトリが 1 つに決まることも条件〕、開始ログの有無を根拠にしていない。確認できなければ「取得日は未記録」と報告した）
-- [ ] `deny.toml` が無いとき、またはあっても人が厳格版と確かめるまで、規約固有の検査（DPOL-18・DPOL-22・DPOL-24・DPOL-25）を「未評価」とし、出力を参考結果と明示した
+- [ ] DB の版（HEAD の sha と commit 日時）をツールごとに記録し、取得日は「未記録（TASK-679 で決める）」とした。`ls-remote` と取得の成否の推定をしていない。使われた DB を特定できない条件（`CARGO_HOME`・`audit.toml` の `[database]`・`db-path`/`db-urls`・ルート以外の deny の設定）に当たれば「DB の版は未記録」とした
+- [ ] `deny.toml` の有無にかかわらず、規約固有の検査（DPOL-18・DPOL-22・DPOL-24・DPOL-25）を「未評価」とし、出力を参考結果と明示した
 - [ ] 例外の承認・ファイルの変更をしていない
 
 ## 報告フォーマット
@@ -157,10 +161,10 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 
 ### 実行の条件
 - cargo-deny: {版} / cargo-audit: {版}
-- advisory DB の記録（ツールごと。取得日は「取得元の最新と一致したことを確かめた日時」で、commit 日時 `%cI` とは別。確認できなければ「取得日は未記録」と書く）:
-  - cargo-deny: 確認の結果 {一致 / 確認できず（理由: 終了コード非 0・ls-remote の失敗・出力が空・不一致・HEAD を読めない・ディレクトリが 1 つに決まらない・db-path/db-urls あり）} / 取得日（取得元の最新と一致したことを確かめた日時）{日時 / 未記録} / 実行後の HEAD {commit} / 取得元の commit {commit} / commit 日時 {%cI}
-  - cargo-audit: 確認の結果 {一致 / 確認できず（理由は同上。検出による非 0 とは別）} / 取得日（取得元の最新と一致したことを確かめた日時）{日時 / 未記録} / 取得前の HEAD {commit / 未記録} / 実行後の HEAD {commit} / 取得元の commit {commit} / commit 日時 {%cI}
-- deny.toml: {なし（既定の設定。bans・licenses・sources は未評価）/ あり（使った設定を明記。厳格版と人が確かめるまで未評価。db-path・db-urls の有無）}
+- advisory DB の記録（ツールごと。HEAD の commit の sha とその commit の日時 `%cI`。`%cI` は DB の最終更新で、取得日ではない。特定できない・読めないときは「DB の版は未記録」と理由を書く）:
+  - cargo-deny: DB の commit {sha / DB の版は未記録（理由）} / commit 日時 {%cI / 未記録} / 取得日 未記録（TASK-679 で決める）
+  - cargo-audit: DB の commit {sha / DB の版は未記録（理由）} / commit 日時 {%cI / 未記録} / 取得日 未記録（TASK-679 で決める）
+- deny.toml: {なし（既定の設定）/ あり（使った設定。db-path・db-urls の有無、ルート以外の deny の設定の有無）}。どちらも bans・licenses・sources は未評価（参考結果）
 - 監査の対象: ルートの `Cargo.lock`（`crates/trial-deps/fuzz/Cargo.lock` は未実施）
 - 逆引きで有効にした feature: {PROD_FEATURES} / {SERVER_FEATURES}（空なら既定の feature だけ）
 
@@ -168,9 +172,9 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 | 検査 | 結果（検出あり / なし / 実行失敗） | 件数 | 該当 crate・ID | 関係する ID |
 |------|--------------------------------|-----|---------------|--------------|
 | advisories | | | | DPOL-34 |
-| bans | {`deny.toml` なしなら「未評価」。出力は参考結果（規約の合否ではない）} | | | DPOL-18（`deny.toml` なしなら未評価） |
-| licenses | {同上} | | | DPOL-22・DPOL-24（同上） |
-| sources | {同上} | | | DPOL-25（同上） |
+| bans | {未評価。出力は参考結果（規約の合否ではない）} | | | DPOL-18（常に未評価） |
+| licenses | {同上} | | | DPOL-22・DPOL-24（常に未評価） |
+| sources | {同上} | | | DPOL-25（常に未評価） |
 | cargo-audit | | | | DPOL-34 |
 
 ### 逆引き
