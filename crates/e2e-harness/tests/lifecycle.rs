@@ -123,7 +123,10 @@ fn browser_mismatch_is_rejected_before_any_start() {
         }
     }
     let log: Log = Log::default();
-    let cfg = config().with(Box::new(Gecko(Arc::clone(&log))));
+    // P2-b: RelyingParty の Fake も起動しない（ブラウザが合わなければ、どの構成要素の起動にも進まない）。
+    let cfg = config()
+        .with(Fake::boxed(E2eComponentKind::RelyingParty, &log, false))
+        .with(Box::new(Gecko(Arc::clone(&log))));
     let err = E2eHarness::start(cfg).err().unwrap();
     assert_eq!(err.kind(), E2eErrorKind::BrowserMismatch);
     assert!(entries(&log).is_empty());
@@ -178,8 +181,13 @@ fn browser_driver_without_browser_is_rejected() {
             Ok(())
         }
     }
-    let Err(err) = E2eHarness::start(config().with(Box::new(Unbound))) else {
+    let log: Log = Log::default();
+    let cfg = config()
+        .with(Fake::boxed(E2eComponentKind::RelyingParty, &log, false))
+        .with(Box::new(Unbound));
+    let Err(err) = E2eHarness::start(cfg) else {
         panic!("started");
     };
     assert_eq!(err.kind(), E2eErrorKind::BrowserMismatch);
+    assert!(entries(&log).is_empty());
 }

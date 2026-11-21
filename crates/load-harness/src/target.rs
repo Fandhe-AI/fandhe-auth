@@ -44,9 +44,10 @@ impl TargetName {
     }
 }
 
+/// SECR-23・SECR-26: `IntervalName` と同じ理由で、名前の中身を出さない固定文字列にする。
 impl fmt::Debug for TargetName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TargetName({})", self.0)
+        f.write_str("TargetName(..)")
     }
 }
 

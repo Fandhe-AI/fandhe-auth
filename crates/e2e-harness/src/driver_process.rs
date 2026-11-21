@@ -78,6 +78,8 @@ pub(crate) struct DriverSpec {
     pub(crate) port_args: fn(u16) -> Vec<String>,
     /// `POST /session` の本文。
     pub(crate) session_request: fn() -> Value,
+    /// 確立したセッションの応答の `capabilities.browserName` に要求する値（W3C の小文字の名前）。
+    pub(crate) browser_name: &'static str,
 }
 
 struct Live {
@@ -133,6 +135,11 @@ impl DriverHandle {
     /// 非同期スクリプトを実行する。応答は生の `Value` のため crate の外へ公開しない。
     pub(crate) fn execute_async(&self, script: &str, args: &[Value]) -> Result<Value, E2eError> {
         self.session()?.execute_async(script, args)
+    }
+
+    /// 仮想 authenticator の User Verified の状態を切り替える。
+    pub fn set_user_verified(&self, id: &AuthenticatorId, verified: bool) -> Result<(), E2eError> {
+        self.session()?.set_user_verified(id, verified)
     }
 
     /// 仮想 authenticator の credential の要約。
@@ -254,7 +261,7 @@ impl DriverComponent {
             sleep(Duration::from_millis(100).min(left_now));
         }
         let (session, browser_version) = client
-            .new_session(&(self.spec.session_request)())
+            .new_session(&(self.spec.session_request)(), self.spec.browser_name)
             .map_err(|_| fail())?;
         let mut guard = self.handle.0.lock().map_err(|_| fail())?;
         *guard = Some(Live {

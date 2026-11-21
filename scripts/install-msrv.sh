@@ -7,10 +7,10 @@
 # パッチ版まで指定する（`1.100` を渡すと rustup はパッチ版が出た後に新しい版を選ぶ）。`X.Y.Z` はそのまま使う。
 # 後続のステップへの引き継ぎ: `rustup default` は RUSTUP_TOOLCHAIN や rust-toolchain.toml に負けるため、
 # GitHub Actions では $GITHUB_ENV に RUSTUP_TOOLCHAIN=<版> を書く（環境変数は rust-toolchain.toml より優先される）。
-# あわせて、導入の直後に実際に使われる rustc の版が MSRV と一致することを確かめ、違えば 2 で止める。
+# 書き込みに失敗したら 2 で止める。あわせて、導入の直後に実際に使われる rustc の版が MSRV と一致することを確かめ、違えば 2 で止める。
 # 配布元: RUSTUP_DIST_SERVER・RUSTUP_UPDATE_ROOT が設定されていれば（空の値も含む）、rustup を呼ばずに 2 で止める
 # （公式の配布元だけを使う条件。.claude/rules/github-actions.md のチェックリスト 9 の例外）。
-# 終了コード: 誤用・環境の誤り（rustup 等が無い・版を読めない・配布元の設定・版の不一致）は 2。rustup の失敗はその終了コード。
+# 終了コード: 誤用・環境の誤り（rustup 等が無い・版を読めない・配布元の設定・版の不一致・GITHUB_ENV への書き込みの失敗）は 2。rustup の失敗はその終了コード。
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
@@ -65,6 +65,12 @@ if ! active="$(rustc --version 2> /dev/null)" || [[ "${active}" != "rustc ${msrv
   exit 2
 fi
 if [ -n "${GITHUB_ENV:-}" ]; then
-  printf 'RUSTUP_TOOLCHAIN=%s\n' "${msrv}" >> "${GITHUB_ENV}"
+  # 書けない場合は変更前も set -e で非ゼロ終了していたが、終了コードは失敗した操作の状態に依っていた。
+  # 明示的に処理するのは、環境エラーの終了コードを 2 に統一し、原因を示す診断を出すため。
+  # 書けないまま進むと後続のステップが MSRV 以外の toolchain で黙って走る（fail-open）ので、必ず止める。
+  if ! printf 'RUSTUP_TOOLCHAIN=%s\n' "${msrv}" >> "${GITHUB_ENV}"; then
+    echo "error: could not write RUSTUP_TOOLCHAIN to GITHUB_ENV (later steps would not use the MSRV)" >&2
+    exit 2
+  fi
 fi
 log "active toolchain is ${msrv}"

@@ -120,6 +120,64 @@ impl AuthenticatorId {
     }
 }
 
+/// 登録で得た credential ID（base64url）。認証の `allowCredentials` に渡すための不透明な値。
+///
+/// WebAuthn では秘密値でなく外に出る識別子だが、ログ・結果に出さない方針（SECR-11・SECR-23）で `Debug` は固定の文字列。
+/// `Display` は実装せず、値は crate 内の `as_str` だけで借りる。パディングなしの正規の base64url（`[A-Za-z0-9_-]`、1〜1366 文字）だけを受ける（A03）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct CredentialRef(String);
+
+impl fmt::Debug for CredentialRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("CredentialRef").field(&REDACTED).finish()
+    }
+}
+
+impl CredentialRef {
+    /// 検証して作る。外れた値は `CommandFailed`。
+    pub fn new(raw: &str) -> Result<Self, E2eError> {
+        if is_canonical_base64url(raw) {
+            Ok(Self(raw.to_owned()))
+        } else {
+            Err(failed())
+        }
+    }
+
+    /// 認証スクリプトの引数にだけ使う。戻り値をログ・誤りに渡さない。
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// パディングなしの正規の base64url か（1〜1366 文字）。長さ mod 4 が 1 の値と、末尾の余りビットが 0 でない値は拒否する
+/// （認証スクリプトの `atob` が拒否する・再エンコードで一致しない表現を構築時に落とす）。
+fn is_canonical_base64url(raw: &str) -> bool {
+    let val = |b: u8| match b {
+        b'A'..=b'Z' => Some(b - b'A'),
+        b'a'..=b'z' => Some(b - b'a' + 26),
+        b'0'..=b'9' => Some(b - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    };
+    let bytes = raw.as_bytes();
+    if bytes.is_empty() || bytes.len() > 1366 || bytes.len() % 4 == 1 {
+        return false;
+    }
+    let mut last = 0;
+    for &b in bytes {
+        match val(b) {
+            Some(v) => last = v,
+            None => return false,
+        }
+    }
+    match bytes.len() % 4 {
+        2 => last & 0x0f == 0,
+        3 => last & 0x03 == 0,
+        _ => true,
+    }
+}
+
 /// 仮想 authenticator が保持する credential の要約。判定に要る欄だけを持ち、秘密鍵・user handle は保持しない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSummary {
@@ -214,9 +272,13 @@ impl WebDriverClient {
     }
 
     /// 新しいセッションを作る。成功したらセッションとブラウザの版を返す。
+    ///
+    /// 応答の `capabilities.browserName` が `expected_browser_name` と完全一致しなければ、確立したセッションを
+    /// 最善で閉じてから `CommandFailed` を返す（別のブラウザのドライバに繋がった記録を作らない。fail-closed）。
     pub fn new_session(
         &self,
         capabilities: &Value,
+        expected_browser_name: &str,
     ) -> Result<(WebDriverSession, String), E2eError> {
         let v = self.request(HttpMethod::Post, "/session", Some(capabilities))?;
         let id = v
@@ -228,13 +290,25 @@ impl WebDriverClient {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        Ok((
-            WebDriverSession {
-                client: *self,
-                id: SessionId::new(id)?,
-            },
-            version,
-        ))
+        let session = WebDriverSession {
+            client: *self,
+            id: SessionId::new(id)?,
+        };
+        // SECR-23: ドライバが現在のセッション ID を版の欄に返しても、結果行に出ないよう空にする。
+        let version = if version == id {
+            String::new()
+        } else {
+            version
+        };
+        let name_ok = v
+            .pointer("/capabilities/browserName")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n == expected_browser_name);
+        if !name_ok {
+            let _ = session.delete();
+            return Err(failed());
+        }
+        Ok((session, version))
     }
 }
 
@@ -471,6 +545,17 @@ impl WebDriverSession {
                 .and_then(|u| AuthenticatorId::new(&u.to_string())),
             _ => Err(failed()),
         }
+    }
+
+    /// 仮想 authenticator の User Verified の状態を切り替える（`false` にすると UV 必須の認証が拒否される）。
+    pub fn set_user_verified(&self, id: &AuthenticatorId, verified: bool) -> Result<(), E2eError> {
+        self.client
+            .request(
+                HttpMethod::Post,
+                &self.path(&format!("/webauthn/authenticator/{}/uv", id.0)),
+                Some(&json!({ "isUserVerified": verified })),
+            )
+            .map(|_| ())
     }
 
     /// 仮想 authenticator の credential の要約を返す。秘密鍵の欄は読み捨てる。
