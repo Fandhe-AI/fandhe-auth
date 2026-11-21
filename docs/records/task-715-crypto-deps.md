@@ -137,15 +137,15 @@
 2. `cargo metadata --format-version 1 --locked --offline` の `packages[]` から `source`・`license`・`repository`・`rust_version` を取った。
 3. `Cargo.lock` の `checksum` と、cargo の registry cache にある `<名前>-<版>.crate` の `sha256sum` を比べた。
 4. `cargo search <名前> --limit 1` で crates.io の最新の版を得た（読み取りのみ。安定版かの区別は検索結果からは付けていない）。
-5. `cargo audit --file Cargo.lock`（advisory DB を取得して実行。`DPOL-33`・`DPOL-34`）。
+5. `cargo audit --file Cargo.lock`（advisory DB を取得して実行。`DPOL-33`・`DPOL-34`）。取得後の DB の commit（基準節の `f291af9b…`）を固定したまま、`cargo audit --no-fetch --file Cargo.lock` を再実行して同じ DB に対する結果を記録した（`DPOL-33`）。
 6. `cargo deny` は流していない（`deny.toml` が未作成のため。`TASK-668`）。
 
 | コマンド | 終了コード | 出力の抜粋 |
 |---|---|---|
 | `cargo metadata --format-version 1 --locked --offline` | 0 | 対象 8 件の `source` はすべて crates.io の registry |
 | `sha256sum <名前>-<版>.crate`（8 件） | 0 | 8 件とも lock の `checksum` と一致 |
-| `cargo search <名前> --limit 1`（10 名） | 0 | 結果 1・2 の「最新」欄のとおり |
-| `cargo audit --file Cargo.lock` | 0 | `Loaded 1555 security advisories`、`Scanning Cargo.lock for vulnerabilities (69 crate dependencies)`。警告・脆弱性の出力なし（該当 0 件） |
+| `cargo search <名前> --limit 1`（重複を除いた 10 名） | 0 | 結果 1・2 の「最新」欄のとおり。10 名は `ring`・`untrusted`・`getrandom`・`rand`・`rand_core`・`rand_xorshift`・`chacha20`（結果 1 の 7 名）と `aws-lc-rs`・`jsonwebtoken`・`webauthn-rs`（結果 2 のみの 3 名）。結果 1 は `getrandom` が 0.2.17・0.4.3 の 2 行になるため 8 行で、検索は 1 名 1 回（`getrandom` は 1 回）。`ring` は結果 2 にも載るが同じ検索結果を使う |
+| `cargo audit --no-fetch --file Cargo.lock`（DB は commit `f291af9b1cc0d21dfcea1709d6b037963cef262b` に固定） | 0 | `Loaded 1555 security advisories`、`Scanning Cargo.lock for vulnerabilities (69 crate dependencies)`。警告・脆弱性の出力なし（該当 0 件） |
 | 実行後の作業ツリーの状態確認（`status --porcelain`） | 0 | 出力なし（`Cargo.lock` に変更なし） |
 
 ### 4. 結果 1: lock にある暗号の crate の出所（事実のみ）
@@ -169,19 +169,19 @@
 
 ### 5. 結果 2: 5 区分の候補（未導入）の出所
 
-候補はすべて lock に無く、lock での出所・checksum・advisory は測れない。
+「本体への導入」と「workspace の `Cargo.lock` への収録」は別である。候補はどれも本体の 4 crate には未導入で、`ring` だけが試験専用の `hub-stub` 経由で lock に収録されている。他の候補は lock に無く、lock での出所・checksum・advisory は測れない。
 
 | 区分 | 候補 | spec にある記録の ID | lock での出所 | 最新（`cargo search`） | 検証済みかの判定 |
 |---|---|---|---|---|---|
-| 署名 | `aws-lc-rs`・`ring`・`jsonwebtoken`（`aws_lc_rs` の feature のみ） | `DPOL-4`・`DPOL-10`・`DPOL-11`・`DPOL-17`・`PoC-5` | 測れない（`ring` は結果 1 の版が lock にある） | `aws-lc-rs` 1.19.0、`jsonwebtoken` 12.0.0 | （空） |
-| 検証 | 署名と同じ既存の crate | `DPOL-18`・`DPOL-21` | 測れない | 同上 | （空） |
+| 署名 | `aws-lc-rs`・`ring`・`jsonwebtoken`（`aws_lc_rs` の feature のみ） | `DPOL-4`・`DPOL-10`・`DPOL-11`・`DPOL-17`・`PoC-5` | `aws-lc-rs`・`jsonwebtoken` は lock に無く測れない。`ring` 0.17.14 は本体には未導入だが workspace の `Cargo.lock` に `hub-stub` 経由で収録済みで、出所・checksum・advisory は結果 1 を参照する | `aws-lc-rs` 1.19.0、`jsonwebtoken` 12.0.0 | （空） |
+| 検証 | 署名と同じ既存の crate | `DPOL-18`・`DPOL-21` | 署名と同じ。`ring` は結果 1 を参照し、他は lock に無く測れない | 同上 | （空） |
 | 乱数 | 本体は持たず組込み先が実装（`Rng`） | `HOST-2`・`HOST-22` | 本体の依存は 0 件 | 該当なし | （空） |
 | WebAuthn | `webauthn-rs` | `PKEY-4`・`DPOL-10` | 測れない | 0.6.2（PoC で実測した 0.5.5 とは別の版。選定は別に行う） | （空） |
 | TOTP | 本番の crate は未定 | `AMTH-3`・`PoC-18`・`TASK-762` | 測れない | 該当なし | （空） |
 
 ### 6. 結果 3: 出所や検証の記録を確かめられない部品（受入基準 (b)）
 
-- `aws-lc-rs`・`jsonwebtoken`・`webauthn-rs`: lock に無く、出所・checksum・advisory を測れない。
+- `aws-lc-rs`・`jsonwebtoken`・`webauthn-rs`: lock に無く（`ring` は本体に未導入だが lock に収録済みで結果 1 に記録がある）、出所・checksum・advisory を測れない。
 - 署名の実装の選び（`aws-lc-rs` か `ring` か）: 未定。
 - TOTP の本番の crate: 未定（`TASK-762`）。
 - 乱数の実装（`Rng`）: 組込み先が実装し、本体からは見えない（`HOST-2`）。
