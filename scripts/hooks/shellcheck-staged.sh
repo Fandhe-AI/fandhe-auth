@@ -3,7 +3,8 @@
 #
 # 使い方: shellcheck-staged.sh <file>...
 #   - 引数が 0 件なら何もせず 0 で終わる（lefthook は glob に一致するファイルが無ければジョブを起動しない）。
-#   - 1 ファイルでも指摘があれば 1、shellcheck が PATH に無ければ 2 で終わる（未検査で成功にしない）。
+#   - 終了コード: 0 = 全件成功、1 = 指摘だけ（shellcheck が 1 を返したものだけ）、
+#     2 = 検査不能（shellcheck が PATH に無い・結果が無い・0 と 1 以外・名前が空）。2 は 1 より優先する（未検査で成功にしない）。
 #   - 同じ名前の引数は 1 回だけ検査する（lefthook は glob を 2 つ書くと、両方に一致するファイルを 2 回渡す）。
 #   - 並列数は getconf _NPROCESSORS_ONLN から決める。取れない・数でない値は固定値 4 にする（上限 16）。
 #     nproc と `xargs -P 0` は使わない（macOS で当てにならない）。
@@ -107,24 +108,34 @@ while [ "${reaped}" -lt "${launched}" ]; do
   reaped=$((reaped + 1))
 done
 
-status=0
+# 終了コード（git-hooks.md の (a)。検査不能を「指摘あり」と同じにしない）: 0 = 全件成功、1 = 指摘だけ（shellcheck が 1）、
+# 2 = 検査不能が 1 件でもある（.rc が無い・数字でない・0 と 1 以外・名前が空）。2 は 1 より優先する。
+findings=0
+unchecked=0
 i=0
 while [ "${i}" -lt "${total}" ]; do
   if [ -s "${tmp_dir}/${i}.out" ]; then
     cat "${tmp_dir}/${i}.out"
   fi
-  # rc ファイルが無い・0 でないものは失敗にする（途中で落ちた検査を成功にしない）
   rc_text=""
   if [ -s "${tmp_dir}/${i}.rc" ]; then
     rc_text="$(cat "${tmp_dir}/${i}.rc")"
   fi
-  if [ "${rc_text}" != "0" ]; then
-    status=1
-    # 検査の指摘は上で出した。ここは .rc が無い・数字でないとき（検査が途中で落ちた）の診断で、ファイル名を出す
-    case "${rc_text}" in
-      '' | *[!0-9]*) echo "shellcheck-staged: no valid result for ${files[i]} (the check did not finish)" >&2 ;;
-    esac
-  fi
+  case "${rc_text}" in
+    0) ;;
+    1) findings=1 ;;
+    '' | *[!0-9]*)
+      unchecked=1
+      echo "shellcheck-staged: no valid result for ${files[i]} (the check did not finish)" >&2
+      ;;
+    *)
+      unchecked=1
+      echo "shellcheck-staged: shellcheck could not check ${files[i]} (exit ${rc_text})" >&2
+      ;;
+  esac
   i=$((i + 1))
 done
-exit "${status}"
+if [ "${unchecked}" -ne 0 ]; then
+  exit 2
+fi
+exit "${findings}"

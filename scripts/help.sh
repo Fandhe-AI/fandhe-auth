@@ -41,7 +41,7 @@ Git hooks（lefthook.yml から呼ばれる。直接実行も可）:
 
   scripts/hooks/secret-scan.sh          staged 差分の秘密情報検知（--tracked は追跡ファイル全体。フックからは呼ばない）
   scripts/hooks/commit-msg-check.sh F   コミットメッセージ F の Conventional Commits 検証
-  scripts/hooks/shellcheck-staged.sh F...  staged の *.sh をファイルごとに並列で shellcheck する（引数 0 件は何もしない。shellcheck が無ければ 2）
+  scripts/hooks/shellcheck-staged.sh F...  staged の *.sh をファイルごとに並列で shellcheck する（引数 0 件は何もしない。0 = 成功、1 = 指摘だけ、2 = 検査不能）
 
 `make <target>` は上記と同じコマンドを呼ぶだけの薄い入口であり、
 処理の定義は scripts/ 側にのみ存在する。

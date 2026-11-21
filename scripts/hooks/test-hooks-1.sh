@@ -279,6 +279,10 @@ for arg in "$@"; do
   case "${arg}" in
     *slow*) sleep 0.3 ;;
     *die*) kill -9 "${PPID}" ;;
+    *err*)
+      echo "${arg}: could not be read"
+      exit 2
+      ;;
   esac
   case "${arg}" in
     *bad*)
@@ -353,18 +357,26 @@ fi
 
 # 検査が結果を書く前に落ちたとき（子の bash が kill される）は、成功にせず 1 で止まり、ファイル名つきの診断を出す
 sc_run a.sh die.sh c.sh
-if [ "${sc_rc}" -eq 1 ] && grep -qF "no valid result for die.sh" "${work_dir}/out"; then
-  pass "shellcheck-staged: a check that dies before writing its result exits 1 and names the file"
+if [ "${sc_rc}" -eq 2 ] && grep -qF "no valid result for die.sh" "${work_dir}/out"; then
+  pass "shellcheck-staged: a check that dies before writing its result exits 2 and names the file"
 else
-  fail "shellcheck-staged: a check that dies before writing its result exits 1 and names the file" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
+  fail "shellcheck-staged: a check that dies before writing its result exits 2 and names the file" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 # 空のファイル名（名前が子に渡らない形）は検査を始めず、成功にもしない
 sc_run ""
-if [ "${sc_rc}" -eq 1 ] && [ ! -s "${sc_log}" ] && grep -qF "no valid result for" "${work_dir}/out"; then
+if [ "${sc_rc}" -eq 2 ] && [ ! -s "${sc_log}" ] && grep -qF "no valid result for" "${work_dir}/out"; then
   pass "shellcheck-staged: an empty file name is never reported as a pass"
 else
   fail "shellcheck-staged: an empty file name is never reported as a pass" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
+fi
+
+# 検査の道具自身の失敗（shellcheck が 2）は検査不能で、指摘（1）より優先して 2 で終わる。指摘だけのときは 1 のまま
+sc_run bad1.sh err1.sh bad2.sh a.sh
+if [ "${sc_rc}" -eq 2 ] && grep -qF "could not check err1.sh (exit 2)" "${work_dir}/out" && grep -qF "bad1.sh: begin" "${work_dir}/out"; then
+  pass "shellcheck-staged: one unchecked file among findings exits 2 (unchecked wins over findings)"
+else
+  fail "shellcheck-staged: one unchecked file among findings exits 2 (unchecked wins over findings)" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 # 件数が並列数の上限を超えても、全件が 1 回ずつ検査される
