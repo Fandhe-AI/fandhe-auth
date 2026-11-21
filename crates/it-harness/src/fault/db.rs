@@ -315,10 +315,17 @@ fn classify_exit(
     }
 }
 
+/// 上流への接続を行う関数の型。`None` は接続しなかった（停止の通知・接続の失敗）。
+type Dialer = fn(&SocketAddr, &Shared) -> Option<TcpStream>;
+
 /// 転送のスレッドと注入の入口で共有する状態。
 struct Shared {
     /// 上流への接続の直前の停止点（試験用。無ければ待たない）。
     stall: Option<UpstreamStall>,
+    /// 上流への接続を行う関数。停止点が無ければ本物の接続だけ、あれば停止点で待ってから本物の接続をする。
+    /// 停止点と本物の接続を 1 回の呼び出しにまとめるので、呼び出しを `conns` のロックで囲む回帰は
+    /// 試験中の待ちも囲み、`block()` が待たされて試験が落ちる（ORST-17）。
+    dialer: Dialer,
     stop: AtomicBool,
     blocked: AtomicBool,
     delay_ms: AtomicU64,
@@ -350,8 +357,14 @@ impl Shared {
     }
 
     fn with_stall(stall: Option<UpstreamStall>) -> Self {
+        let dialer: Dialer = if stall.is_some() {
+            dial_with_stall
+        } else {
+            dial_plain
+        };
         Self {
             stall,
+            dialer,
             stop: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             delay_ms: AtomicU64::new(0),
@@ -866,8 +879,8 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
         return None;
     };
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    // 停止点は実際の接続の代わりの待ちで、接続と同じ段（呼び出しの境界）の内側に置く。
-    // この段をロックの下で呼ぶ回帰が入ると、停止点の待ちが `block()` を待たせて試験が落ちる（ORST-17）。
+    // 停止点は本物の接続と同じ呼び出し（`shared.dialer`）の内側にある。この呼び出しを `conns` のロックの下で
+    // 行う回帰が入ると、試験中の停止点の待ちも `block()` を待たせて試験が落ちる（ORST-17）。
     let Some(up) = dial_upstream(&addr, shared) else {
         shared.sever_conn(id);
         refuse(&accepted.client, shared);
@@ -886,16 +899,30 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
     })
 }
 
-/// 上流への実際の接続。試験用の停止点があれば、接続の代わりにそこで待つ。
-/// 停止の通知で戻った場合は、上流へつながず `None`（`stop()`・`Drop` を `connect_timeout` で待たせない）。
+/// 上流への接続の呼び出し口。`shared.dialer` を呼ぶ 1 か所だけで、ここを `conns` のロックの下で呼ばない。
 fn dial_upstream(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
+    (shared.dialer)(addr, shared)
+}
+
+/// 停止点が無い場合の接続。
+fn dial_plain(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
+    connect_counted(addr, shared)
+}
+
+/// 試験用の停止点で待ってから、本物の接続をする。停止の通知で戻った場合は上流へつながず `None`
+/// （`stop()`・`Drop` を `connect_timeout` で待たせない）。
+fn dial_with_stall(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
     if let Some(stall) = &shared.stall {
         stall.hold(&shared.stop);
         if shared.stop.load(Ordering::SeqCst) {
             return None;
         }
     }
-    // 停止判定を通過し、実際に接続を試みる直前で数える（停止点で閉じた接続は数えない）。
+    connect_counted(addr, shared)
+}
+
+/// 本物の接続。停止判定を通過し、実際に接続を試みる直前で数える（停止点で閉じた接続は数えない）。
+fn connect_counted(addr: &SocketAddr, shared: &Shared) -> Option<TcpStream> {
     shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
     let up = TcpStream::connect_timeout(addr, UPSTREAM_CONNECT_TIMEOUT).ok()?;
     shared.upstream_connected.fetch_add(1, Ordering::SeqCst);
@@ -922,8 +949,11 @@ fn start_relay(connected: Connected, shared: &Arc<Shared>) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push((id, u_kill));
+    // 読む順は `halted()`、世代の順。逆にすると、間に `block()` と `release_block()` が両方終わった
+    // ときに、世代は進んだのに遮断は解けた状態を見て、遮断の間に受理した接続を見逃す（ORST-17）。
+    let halted = shared.halted();
     let gen_mismatch = shared.block_gen.load(Ordering::SeqCst) != block_gen;
-    if shared.halted() || gen_mismatch {
+    if halted || gen_mismatch {
         let _ = up.shutdown(Shutdown::Both);
         shared.sever_conn(id);
         // 世代の比較が外れたときだけ数える（停止・現在の遮断による拒否は数えない）。
@@ -936,8 +966,11 @@ fn start_relay(connected: Connected, shared: &Arc<Shared>) {
     let remaining = Arc::new(AtomicUsize::new(2));
     let (r1, r2) = (Arc::clone(&remaining), remaining);
     // 登録の間に遮断が入った場合に取りこぼさない。
+    // 読む順は `halted()`、世代の順。逆にすると、間に `block()` と `release_block()` が両方終わった
+    // ときに、世代は進んだのに遮断は解けた状態を見て、遮断の間に受理した接続を見逃す（ORST-17）。
+    let halted = shared.halted();
     let gen_mismatch = shared.block_gen.load(Ordering::SeqCst) != block_gen;
-    if shared.halted() || gen_mismatch {
+    if halted || gen_mismatch {
         shared.sever_conn(id);
         if gen_mismatch {
             shared.generation_refused.fetch_add(1, Ordering::SeqCst);
