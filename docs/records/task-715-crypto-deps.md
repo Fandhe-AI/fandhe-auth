@@ -133,7 +133,7 @@
 
 ### 3. 測り方
 
-1. 1/4 の測り方を再実行し、lock が動いていないことを確かめた（`cargo metadata --format-version 1 --locked`、`cargo tree --locked --workspace -e normal,build,dev --target all -i <名前>`、`grep -c '^name = "<名前>"' Cargo.lock`）。結果は 1/4 と同じ: 4 crate の `dependencies[]` は 0 件、lock は 69 crate、`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken` は 0 件、逆依存の根も 1/4 の結果 3 と同じ。
+1. 1/4 の測り方を再実行し、lock が動いていないことを確かめた（`cargo metadata --format-version 1 --locked`、`cargo tree --locked --workspace -e normal,build,dev --target all -i <名前>`、`grep -c '^name = "<名前>"' Cargo.lock`）。1/4 と同じだった項目: 4 crate の `dependencies[]` は 0 件、lock は 69 crate、`openssl`・`rsa`・`webauthn-rs`・`aws-lc-rs`・`jsonwebtoken` は 0 件。1/4 と異なる項目: `ring`・`untrusted`・`getrandom 0.2.17` の逆依存は、`it-harness` から `ring` への直接の dev 依存が加わった分だけ経路が増えた（結果 1 と「基準間の `Cargo.lock` の差分」を参照）。それ以外の根は 1/4 の結果 3 と同じ。
 2. `cargo metadata --format-version 1 --locked --offline` の `packages[]` から `source`・`license`・`repository`・`rust_version` を取った。
 3. `Cargo.lock` の `checksum` と、cargo の registry cache にある `<名前>-<版>.crate` の `sha256sum` を比べた。
 4. `cargo search <名前> --limit 1` で crates.io の最新の版を得た（読み取りのみ。安定版かの区別は検索結果からは付けていない）。
@@ -146,7 +146,7 @@
 | `sha256sum <名前>-<版>.crate`（8 件） | 0 | 8 件とも lock の `checksum` と一致 |
 | `cargo search <名前> --limit 1`（重複を除いた 10 名） | 0 | 結果 1・2 の「最新」欄のとおり。10 名は `ring`・`untrusted`・`getrandom`・`rand`・`rand_core`・`rand_xorshift`・`chacha20`（結果 1 の 7 名）と `aws-lc-rs`・`jsonwebtoken`・`webauthn-rs`（結果 2 のみの 3 名）。結果 1 は `getrandom` が 0.2.17・0.4.3 の 2 行になるため 8 行で、検索は 1 名 1 回（`getrandom` は 1 回）。`ring` は結果 2 にも載るが同じ検索結果を使う |
 | `cargo audit --no-fetch --file Cargo.lock`（DB は commit `f291af9b1cc0d21dfcea1709d6b037963cef262b` に固定） | 0 | `Loaded 1555 security advisories`、`Scanning Cargo.lock for vulnerabilities (69 crate dependencies)`。警告・脆弱性の出力なし（該当 0 件） |
-| 実行後の作業ツリーの状態確認（`status --porcelain`） | 0 | 出力なし（`Cargo.lock` に変更なし） |
+| 実行後の作業ツリーの状態確認（`status --porcelain`） | 0 | 出力なし（実行後に作業ツリーがクリーンだった。実行前の状態は記録しておらず、調査の前後で `Cargo.lock` が同じだったとは主張しない） |
 
 ### 4. 結果 1: lock にある暗号の crate の出所（事実のみ）
 
@@ -156,7 +156,7 @@
 `untrusted`・`getrandom 0.2.17` は `ring` の依存先のため、同じ 2 経路で及ぶ。1/4 の記録（基準 `c040dbe`）の `it-harness` の外部の直接の依存「なし」は、その時点の事実として残す。(ii) は基準 `2d38a7e` 以降の変更で、下の「基準間の `Cargo.lock` の差分」に記録した。
 
 基準間の `Cargo.lock` の差分（実行: `git diff c040dbe 2d38a7e -- Cargo.lock`、終了コード 0。変更は `Cargo.lock` の 3 行の追加だけ）: `fandhe-auth-it-harness` の `dependencies` に `base64`・`ring`・`serde_json` が加わった。`[[package]]` の追加・削除はなく、`name = ` 行は 69 のまま（`base64`・`ring`・`serde_json` は `hub-stub` 経由で既に lock にある）。
-これは基準コミット間の差分であり、2/4 の調査コマンドの実行前後に確認した範囲（作業ツリーの状態確認、測り方 5 の表の最終行）とは別である。後者は調査コマンドが `Cargo.lock` を書き換えなかったことだけを示す。
+これは基準コミット間の差分であり、2/4 の調査コマンドの実行前後に確認した範囲（作業ツリーの状態確認、測り方 5 の表の最終行）とは別である。後者は実行後に作業ツリーがクリーンだったことだけを示し、実行前後の比較ではない（調査コマンドが `Cargo.lock` を書き換えなかったことの証拠にはならない。未検証）。
 
 | crate・版 | license | repository | `rust-version` | 最新（`cargo search`） | spec にある記録の ID | 検証済みかの判定 |
 |---|---|---|---|---|---|---|
