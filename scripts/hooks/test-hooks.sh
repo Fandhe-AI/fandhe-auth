@@ -42,7 +42,16 @@ for part_file in "${HOOKS_DIR}"/test-hooks-[0-9]*.sh; do
   fi
 done
 parts_listed=0
+seen_parts=" "
 for part in ${parts}; do
+  # 同じ番号を 2 回書いても件数が合ってしまうため、重複は拒否する
+  case "${seen_parts}" in
+    *" ${part} "*)
+      echo "test-hooks: part ${part} is listed more than once in parts" >&2
+      exit 1
+      ;;
+  esac
+  seen_parts="${seen_parts}${part} "
   parts_listed=$((parts_listed + 1))
   if [ ! -e "${HOOKS_DIR}/test-hooks-${part}.sh" ]; then
     echo "test-hooks: part ${part} listed in parts does not exist" >&2

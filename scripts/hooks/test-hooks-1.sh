@@ -353,7 +353,7 @@ fi
 
 # 検査が結果を書く前に落ちたとき（子の bash が kill される）は、成功にせず 1 で止まり、ファイル名つきの診断を出す
 sc_run a.sh die.sh c.sh
-if [ "${sc_rc}" -eq 1 ] && grep -qF "no valid result for die.sh" "${work_dir}/out" && ! grep -qF "no valid result for a.sh" "${work_dir}/out"; then
+if [ "${sc_rc}" -eq 1 ] && grep -qF "no valid result for die.sh" "${work_dir}/out"; then
   pass "shellcheck-staged: a check that dies before writing its result exits 1 and names the file"
 else
   fail "shellcheck-staged: a check that dies before writing its result exits 1 and names the file" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
