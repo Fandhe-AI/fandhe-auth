@@ -128,6 +128,19 @@ mkdir -p "${detector_dir}/scripts/hooks" 2> /dev/null || die "mkdir failed"
 scanner_shebang=""
 { IFS= read -r scanner_shebang < "${ROOT_DIR}/scripts/hooks/secret-scan.sh"; } 2> /dev/null || true
 [ "${scanner_shebang}" = '#!/usr/bin/env bash' ] || die "the scanner's first line is not the expected shebang"
+# bash 4 以降の read は NUL を黙って落とすため、行の中の NUL（直接起動では解釈系の名前がそこで切れる）を上の比較では弾けない。
+# バイト単位でも、1 行目が同じ文言の行全体の一致（-x）であることを grep で確かめる。grep の終了状態は
+# 0 = 一致 / 1 = 不一致 / 2 以上 = エラー（検査不能）。一致した最初の行が 1 行目であることを行番号で見る。
+shebang_rc=0
+LC_ALL=C grep -anxF -- '#!/usr/bin/env bash' "${ROOT_DIR}/scripts/hooks/secret-scan.sh" > "${work_dir}/shebang" 2> /dev/null || shebang_rc=$?
+case "${shebang_rc}" in
+  0) ;;
+  1) die "the scanner's first line is not the expected shebang" ;;
+  *) die "could not check the scanner's first line (grep exit ${shebang_rc})" ;;
+esac
+shebang_hit=""
+{ IFS= read -r shebang_hit < "${work_dir}/shebang"; } 2> /dev/null || true
+[ "${shebang_hit}" = '1:#!/usr/bin/env bash' ] || die "the scanner's first line is not the expected shebang"
 cp -p -- "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" 2> /dev/null || die "failed to copy the scanner"
 copy_rc=0
 cmp -s "${ROOT_DIR}/scripts/hooks/secret-scan.sh" "${detector_dir}/scripts/hooks/secret-scan.sh" || copy_rc=$?

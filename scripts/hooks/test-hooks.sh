@@ -2068,6 +2068,22 @@ if [ "${rc}" -eq 2 ]; then
 else
   fail "scan-canary: grep error on the leak check fails (exit 2)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
+# 検出器の 1 行目のバイト単位の確認（grep -anxF）のエラーも、不一致と取り違えず検査不能（2）にする（#6011）
+cat > "${grep_shim_dir}/grep" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "-anxF" ]; then
+  exit 2
+fi
+exec "${REAL_GREP}" "$@"
+EOF
+chmod +x "${grep_shim_dir}/grep"
+rc=0
+REAL_GREP="${real_grep}" PATH="${grep_shim_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF "scan-canary: could not check the scanner's first line (grep exit 2)" "${work_dir}/out"; then
+  pass "scan-canary: grep error on the shebang check fails (exit 2)"
+else
+  fail "scan-canary: grep error on the shebang check fails (exit 2)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
 rc=0
 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${HOOKS_DIR}/../secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
 if [ "${rc}" -eq 0 ]; then
@@ -2169,10 +2185,18 @@ chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
 # （CI の本走査と make secret-scan は検出器を直接起動し、shebang が壊れていると起動できない。陰性対照は複製を bash に
 # 読み込ませるため shebang に依らず、確かめないと通ってしまう。#6011）。
 # 壊し方は bash として読めば動くもの（解釈系の名前の誤り・CR の付加・別の解釈系のパス）にし、確かめなければ 0 で通る形にする。
+# NUL は変数に持てないため、1 行目は printf の書式で直接書く（bash 4 以降の read は NUL を落とし、文字列の比較だけでは通る）。
 # 判定は固定の診断と、ERR trap（同じく 2）ではないことの両方で行う
-for broken_shebang in '#!/usr/bin/env bsah' "#!/usr/bin/env bash"$'\r' '#!/bin/bash'; do
+for broken_kind in misspelled cr other-interpreter nul; do
+  case "${broken_kind}" in
+    misspelled) shebang_fmt='#!/usr/bin/env bsah\n' ;;
+    cr) shebang_fmt='#!/usr/bin/env bash\r\n' ;;
+    other-interpreter) shebang_fmt='#!/bin/bash\n' ;;
+    nul) shebang_fmt='#!/usr/bin/env b\000ash\n' ;;
+  esac
   {
-    printf '%s\n' "${broken_shebang}"
+    # shellcheck disable=SC2059 # 書式は上の固定の値（NUL・CR を書くため書式として渡す）
+    printf "${shebang_fmt}"
     tail -n +2 "${SECRET_SCAN}"
   } > "${canary_root}/scripts/hooks/secret-scan.sh"
   chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
@@ -2180,12 +2204,12 @@ for broken_shebang in '#!/usr/bin/env bsah' "#!/usr/bin/env bash"$'\r' '#!/bin/b
   (cd "${canary_root}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" scripts/secret-scan-canary.sh) > "${work_dir}/out" 2>&1 || rc=$?
   if [ "${rc}" -eq 2 ] && grep -qF "scan-canary: the scanner's first line is not the expected shebang" "${work_dir}/out" \
     && ! grep -qF "internal error" "${work_dir}/out"; then
-    pass "scan-canary: a scanner with a broken shebang ($(printf '%q' "${broken_shebang}")) makes the canary exit 2"
+    pass "scan-canary: a scanner with a broken shebang (${broken_kind}) makes the canary exit 2"
   else
-    fail "scan-canary: a scanner with a broken shebang ($(printf '%q' "${broken_shebang}")) makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+    fail "scan-canary: a scanner with a broken shebang (${broken_kind}) makes the canary exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
   fi
 done
-unset broken_shebang
+unset broken_kind shebang_fmt
 cp "${SECRET_SCAN}" "${canary_root}/scripts/hooks/secret-scan.sh"
 chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
 
