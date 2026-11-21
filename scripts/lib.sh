@@ -68,12 +68,18 @@ log() {
   echo "[$(basename "$0")] $*" >&2
 }
 
-# run_e2e_registration <script-name> <driver-cmd> <test-target>: ドライバ付きの E2E（#[ignore]）の登録試験を流す共通処理。
+# run_e2e <script-name> <driver-cmd> <test-target>...: ドライバ付きの E2E（#[ignore]）の試験を target ごとに流す共通処理。
 # 呼び出し元: scripts/e2e-chrome.sh・scripts/e2e-firefox.sh（コマンド契約の一元化。makefile.md）。
 # 試験の対象は cfg(unix) 限定のため、uname ではなく実行した試験の件数で確かめる。
-# 登録試験が 0 件のまま成功しない（DPOL-30〜32）。
-run_e2e_registration() {
-  local script_name="$1" driver="$2" target="$3" out
+# どの target も 0 件のまま成功しない（DPOL-30〜32）。`--test-threads=1` はブラウザを同時に複数起動しないための安全側の選択、
+# `--show-output` は成功した試験の結果行（e2e-result:）も実行のログに出すため。
+run_e2e() {
+  local script_name="$1" driver="$2" target out
+  shift 2
+  [ "$#" -ge 1 ] || {
+    echo "usage: run_e2e <script-name> <driver-cmd> <test-target>..." >&2
+    return 2
+  }
   require_cmd cargo
   require_cmd "${driver}"
   require_cmd mktemp
@@ -85,9 +91,12 @@ run_e2e_registration() {
   # 固定の本文から、スクリプト全体で生きるグローバル変数を引用付きで渡す。
   E2E_REG_OUT="${out}"
   trap 'rm -f -- "${E2E_REG_OUT:-}"' EXIT
-  cargo test -p fandhe-auth-e2e-harness --locked --test "${target}" -- --ignored 2>&1 | tee "${out}"
-  if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' "${out}"; then
-    echo "${script_name}: no registration test ran (non-unix target or runner?); failing instead of passing with 0 tests" >&2
-    return 1
-  fi
+  for target in "$@"; do
+    : >"${out}"
+    cargo test -p fandhe-auth-e2e-harness --locked --test "${target}" -- --ignored --test-threads=1 --show-output 2>&1 | tee "${out}"
+    if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' "${out}"; then
+      echo "${script_name}: no test ran in target ${target} (non-unix target or runner?); failing instead of passing with 0 tests" >&2
+      return 1
+    fi
+  done
 }

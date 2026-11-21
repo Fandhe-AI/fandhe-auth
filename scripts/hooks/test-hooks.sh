@@ -3,7 +3,9 @@
 #
 # 一時ディレクトリに使い捨ての git リポジトリを作り、secret-scan.sh の検出・許可ケースと
 # commit-msg-check.sh の OK / NG ケースを実際のスクリプトで検証する。
-# 外部依存は bash と git のみ。フックではなく CI で実行する（.claude/rules/git-hooks.md）。
+# 基本の外部依存は bash と git。msrv・install-msrv の節は cargo・jq・tomllib を持つ python3（3.11 以上）も要し、
+# 前提が足りなければ CI（CI か GITHUB_ACTIONS が設定されている）では失敗、ローカルでは skip する。
+# crate-deps の節は cargo が無ければ skip する。フックではなく CI で実行する（.claude/rules/git-hooks.md）。
 #
 # 回帰ケースは過去に見つかった fail-open の不具合クラスに対応する:
 #   (a) 検査エラーを「一致なし」と同一視する
@@ -1699,15 +1701,16 @@ if [ "${msrv_prereq}" = "ok" ]; then
   # 偽の rustup は引数を 1 呼び出し 1 行で記録する（配布元の拒否が rustup の呼び出しより前であること、
   # 入れる版・既定にする版がパッチ版であることを確かめる）。偽のコマンドの中身は固定で、パスは環境変数で渡す
   # （TMPDIR 由来の値をシェルのコードへ埋め込まない）。
-  install_msrv_case() {
-    local name="$1" want_rc="$2" override_ver="$3" want_env="$4" want_calls="$5" rc=0 bin gh_env calls got_calls
-    shift 5
+  # install_msrv_run <偽 rustc の版の上書き> <GITHUB_ENV のパス> [環境変数 NAME=VALUE...]
+  #   偽の rustup・rustc を新しい bin ディレクトリに作り、install-msrv.sh を 1 回流す共用の処理。
+  #   結果は run_rc（終了状態）・run_calls（rustup の呼び出しの記録）に入れる。stderr は ${work_dir}/out。
+  install_msrv_run() {
+    local override_ver="$1" gh_env="$2" bin calls
+    shift 2
     install_seq=$((${install_seq:-0} + 1))
     bin="${work_dir}/install-msrv-bin-${install_seq}"
-    gh_env="${work_dir}/install-msrv-ghenv-${install_seq}"
     calls="${bin}/rustup-calls"
     mkdir -p "${bin}"
-    : > "${gh_env}"
     : > "${calls}"
     cat > "${bin}/rustup" <<'EOF'
 #!/bin/sh
@@ -1719,14 +1722,22 @@ EOF
 echo "rustc ${FAKE_RUSTC_VER:-${RUSTUP_TOOLCHAIN:-unset}} (abcdef 2026-01-01)"
 EOF
     chmod +x "${bin}/rustup" "${bin}/rustc"
+    run_rc=0
     env -u RUSTUP_DIST_SERVER -u RUSTUP_UPDATE_ROOT -u RUSTUP_TOOLCHAIN ${@+"$@"} \
       FAKE_RUSTUP_CALLS="${calls}" FAKE_RUSTC_VER="${override_ver}" PATH="${bin}:${PATH}" HOME="${real_home}" GITHUB_ENV="${gh_env}" \
-      "${HOOK_BASH}" "${INSTALL_MSRV_SH}" > /dev/null 2> "${work_dir}/out" || rc=$?
-    got_calls="$(cat "${calls}")"
-    if [ "${rc}" -eq "${want_rc}" ] && [ "$(cat "${gh_env}")" = "${want_env}" ] && [ "${got_calls}" = "${want_calls}" ]; then
+      "${HOOK_BASH}" "${INSTALL_MSRV_SH}" > /dev/null 2> "${work_dir}/out" || run_rc=$?
+    run_calls="$(cat "${calls}")"
+  }
+  install_msrv_case() {
+    local name="$1" want_rc="$2" override_ver="$3" want_env="$4" want_calls="$5" gh_env
+    shift 5
+    gh_env="${work_dir}/install-msrv-ghenv-$((${install_seq:-0} + 1))"
+    : > "${gh_env}"
+    install_msrv_run "${override_ver}" "${gh_env}" ${@+"$@"}
+    if [ "${run_rc}" -eq "${want_rc}" ] && [ "$(cat "${gh_env}")" = "${want_env}" ] && [ "${run_calls}" = "${want_calls}" ]; then
       pass "install-msrv: ${name}"
     else
-      fail "install-msrv: ${name}" "exit ${rc} (expected ${want_rc}), GITHUB_ENV: $(cat "${gh_env}"), rustup calls: ${got_calls} (expected: ${want_calls})" "stderr: $(cat "${work_dir}/out")"
+      fail "install-msrv: ${name}" "exit ${run_rc} (expected ${want_rc}), GITHUB_ENV: $(cat "${gh_env}"), rustup calls: ${run_calls} (expected: ${want_calls})" "stderr: $(cat "${work_dir}/out")"
     fi
   }
   want_ver="$(HOME="${real_home}" "${HOOK_BASH}" "${MSRV_SH}")"
@@ -1738,6 +1749,18 @@ EOF
   install_msrv_case "RUSTUP_UPDATE_ROOT set exits 2 without calling rustup" 2 "" "" "" RUSTUP_UPDATE_ROOT=https://example.invalid
   install_msrv_case "empty RUSTUP_DIST_SERVER exits 2 without calling rustup" 2 "" "" "" RUSTUP_DIST_SERVER=
   install_msrv_case "empty RUSTUP_UPDATE_ROOT exits 2 without calling rustup" 2 "" "" "" RUSTUP_UPDATE_ROOT=
+  # 書けない GITHUB_ENV（ディレクトリ。root でも確実に書き込みに失敗する）は、導入と既定化を終えた後の書き込みの段で
+  # 2 で止まり、原因を示す誤り文を出す（環境の誤りは 2 の契約。完了の log も出さない）。
+  ro_env="${work_dir}/install-msrv-ghenv-dir"
+  mkdir -p "${ro_env}"
+  install_msrv_run "" "${ro_env}"
+  if [ "${run_rc}" -eq 2 ] && [ "${run_calls}" = "${want_calls}" ] \
+    && grep -qF "could not write RUSTUP_TOOLCHAIN to GITHUB_ENV" "${work_dir}/out" \
+    && ! grep -qF "active toolchain is" "${work_dir}/out"; then
+    pass "install-msrv: an unwritable GITHUB_ENV exits 2 after installing"
+  else
+    fail "install-msrv: an unwritable GITHUB_ENV exits 2 after installing" "exit ${run_rc} (expected 2), rustup calls: ${run_calls} (expected: ${want_calls})" "stderr: $(cat "${work_dir}/out")"
+  fi
 else
   echo "ok - install-msrv: skipped (cargo, jq or python3 with tomllib not found)"
 fi

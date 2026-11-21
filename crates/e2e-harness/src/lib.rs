@@ -20,10 +20,15 @@
 //! この 2 つは unix（Linux・macOS 等）に限る（`cfg(unix)`）。
 //! 3/6 の実体: Firefox（geckodriver）の `firefox::GeckoDriverComponent`。起動・停止は Chrome と共通の
 //! `driver_process`（unix のみ）に切り出した（振る舞いは 2/6 のまま）。
+//! 4/6 の実体: 登録の後の認証 1 件の手順 `authentication::authenticate_once`（unix のみ）、失敗の名前の共通の列挙
+//! `webauthn_error::WebAuthnErrorName`、登録で得る credential ID の不透明な型 `CredentialRef`、確立したセッションの
+//! `browserName` の照合。結果は〔仮想〕で、サーバー側の検証は `TASK-716` 待ち。
 //! RP 側の実体は `TASK-716` 待ちで置かない。構成の下書きは `docs/harness/e2e.md`。
 
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+pub mod authentication;
 pub mod browser;
 #[cfg(unix)]
 pub mod chrome;
@@ -37,8 +42,11 @@ pub mod harness;
 pub mod registration;
 pub mod scope;
 pub mod virtual_authenticator;
+pub mod webauthn_error;
 pub mod webdriver;
 
+#[cfg(unix)]
+pub use authentication::{AuthenticationOutcome, authenticate_once};
 pub use browser::{AuthenticatorKind, Browser, Evidence};
 #[cfg(unix)]
 pub use chrome::{ChromeDriverComponent, ChromeDriverConfig, ChromeHandle};
@@ -52,4 +60,7 @@ pub use harness::{E2eConfig, E2eError, E2eErrorKind, E2eHarness, RunningE2e};
 pub use registration::{RegistrationErrorName, RegistrationOutcome, register_once};
 pub use scope::PasskeyOperation;
 pub use virtual_authenticator::{Protocol, Transport, VirtualAuthenticatorOptions};
-pub use webdriver::{AuthenticatorId, CredentialSummary, WebDriverClient, WebDriverSession};
+pub use webauthn_error::WebAuthnErrorName;
+pub use webdriver::{
+    AuthenticatorId, CredentialRef, CredentialSummary, WebDriverClient, WebDriverSession,
+};
