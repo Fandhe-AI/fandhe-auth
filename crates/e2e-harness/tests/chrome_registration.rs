@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use fandhe_auth_e2e_harness::{
     Browser, ChromeDriverComponent, ChromeDriverConfig, E2eConfig, E2eHarness, PasskeyOperation,
-    Protocol, RunResult, Transport, VirtualAuthenticatorOptions, register_once,
+    Protocol, Transport, VirtualAuthenticatorOptions, register_once,
 };
 use support::TestOrigin;
 use support::passkey::RecordSink;
@@ -48,7 +48,7 @@ fn registers_one_passkey_with_chrome_virtual_authenticator() {
     let result = register_once(&handle, &origin.origin(), "localhost");
     sink.record(
         PasskeyOperation::Registration,
-        RunResult::from_registration(&result),
+        support::passkey::registration_run_result(&handle, &aid, &result),
     )
     .expect("record");
     let outcome = result.expect("register");

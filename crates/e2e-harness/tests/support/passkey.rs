@@ -44,7 +44,7 @@ pub fn register(
     let result = register_once(handle, &origin.origin(), "localhost");
     sink.record(
         PasskeyOperation::Registration,
-        RunResult::from_registration(&result),
+        registration_run_result(handle, &aid, &result),
     )
     .expect("record");
     let outcome = result.expect("register");
@@ -55,6 +55,26 @@ pub fn register(
     assert_one_localhost_credential(handle, &aid);
     let cred = outcome.credential().expect("credential").clone();
     (aid, cred)
+}
+
+/// 登録の呼び出し結果と後続の検査（credential がちょうど 1 件・RP ID が `localhost`）をあわせた実行の結果を返す。
+/// 呼び出しが成功でも後続の検査を満たさなければ `CheckFailed` にし、成功に数えない（SECR-23: 値は出さない）。
+pub fn registration_run_result(
+    handle: &DriverHandle,
+    aid: &AuthenticatorId,
+    result: &Result<
+        fandhe_auth_e2e_harness::RegistrationOutcome,
+        fandhe_auth_e2e_harness::E2eError,
+    >,
+) -> RunResult {
+    let run = RunResult::from_registration(result);
+    if run != RunResult::Succeeded {
+        return run;
+    }
+    match handle.credentials(aid) {
+        Ok(creds) if creds.len() == 1 && creds[0].rp_id == "localhost" => run,
+        _ => RunResult::CheckFailed,
+    }
 }
 
 /// 仮想 authenticator の credential がちょうど 1 件で、RP ID が `localhost` であることを確かめる。
@@ -102,9 +122,11 @@ impl RecordSink {
 
     fn emit(&self) -> Result<(), RecordError> {
         // println! は失敗で panic するため、値で受ける書き込みを使う。
+        // 先頭の改行は、libtest が `--test-threads=1` でテスト名の後ろに改行なしで書く行から記録を切り離し、
+        // 記録の先頭行 `format:` を独立した行にする。
         let printed = {
             let mut out = std::io::stdout().lock();
-            writeln!(out, "{}", self.record)
+            write!(out, "\n{}", self.record)
         };
         let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("e2e-records");
         let written = self.record.write_new(&dir);
