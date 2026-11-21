@@ -66,14 +66,19 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | [editorconfig-checker](https://github.com/editorconfig-checker/editorconfig-checker) | `.editorconfig` 準拠チェック | ✓ |
 | [ShellCheck](https://www.shellcheck.net/) | シェルスクリプトの lint | ✓ |
 | Rust toolchain（cargo・rustfmt・clippy） | `make fmt`・`make lint`（stable の 1.100 以上が要る。`D-2026-11-20-12`） | ✓ |
+| [Python](https://www.python.org/) 3.11 以上（`python3`・標準の `tomllib`） | `make no-vendored`・`make lint`（`scripts/check-openssl-vendored.sh` が `.cargo/config*` の TOML の解析に使う。無い・3.11 未満だと検査不能で失敗する） | ✓ |
 | [direnv](https://direnv.net/) | `.env` の自動読み込み | 任意 |
 | Docker・Docker Compose v2 以降・openssl | 開発・検証用 PostgreSQL 、`make pg-check`・`make it-db`（[dev/postgres/README.md](./dev/postgres/README.md)） | 任意 |
 
 macOS（Homebrew）の例:
 
 ```bash
-brew install lefthook editorconfig-checker shellcheck direnv
+brew install lefthook editorconfig-checker shellcheck direnv python@3.12
+# python@3.12 は `python3` を PATH に入れないため、libexec/bin を PATH の先頭に足す（シェルの設定ファイルへ）
+export PATH="$(brew --prefix python@3.12)/libexec/bin:${PATH}"
 ```
+
+`libexec/bin` には versionless の `python3` が入っており、先頭に置くことで 3.11 以上の `python3` が選ばれます。
 
 `make doctor` で導入状況を確認できます（読み取りのみで、何も導入・変更しません）。
 
@@ -142,7 +147,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make fmt` | `cargo fmt --all` | rustfmt で整形を適用する（ソースを書き換える） |
 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査 + vendored の検査（CI の `lint` ジョブと同じ契約） |
 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
-| `make no-vendored` | `scripts/check-openssl-vendored.sh` | `openssl-sys` の `vendored` feature が 0 件かを `cargo tree -e features` で検査する。合否は試験専用メンバーを除いた本番対象メンバーの normal・build 依存に限る。feature は既定 + 環境変数 `PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り。無ければ空）で、全 feature と試験専用メンバーを含む走査は参考の警告、dev 依存は対象外。メンバーが本番・試験専用のどちらの表にも無ければ検査不能（2）。違反（1）と検査不能（2）を終了コードで分けられるのはスクリプトを直接実行したときだけで、`make` 経由では GNU Make が中のコマンドの 1 も 2 に変える（陰性対照つき。DPOL-13・TASK-667。名前は暫定） |
+| `make no-vendored` | `scripts/check-openssl-vendored.sh` | `openssl-sys` の `vendored` feature が 0 件かを `cargo tree -e features` で検査する。合否は試験専用メンバーを除いた本番対象メンバーの normal・build 依存に限る。feature は既定 + 環境変数 `PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り。無ければ空）で、全 feature と試験専用メンバーを含む走査は参考の警告、dev 依存は対象外。メンバーが本番・試験専用のどちらの表にも無ければ検査不能（2）。静的リンクを強いる設定（環境変数と repo の `.cargo/config*` の `[env]` の `OPENSSL_STATIC`・`<TARGET>_OPENSSL_STATIC`・`PKG_CONFIG_ALL_STATIC`・`<TARGET>_PKG_CONFIG_ALL_STATIC`。上流が実際に読むのは、openssl-sys 0.9.117 が `OPENSSL_STATIC` と大文字・`_` 化した `<TARGET>_OPENSSL_STATIC`、pkg-config 0.3.34 が接頭辞なしの `OPENSSL_STATIC` と `PKG_CONFIG_ALL_STATIC`。`<TARGET>_PKG_CONFIG_ALL_STATIC`・ハイフン入りの名前・接尾辞の `OPENSSL_STATIC_<target>`・`PKG_CONFIG_ALL_STATIC_<target>` は上流が読まないが、安全側に多めに数える。上流の版を上げたら確かめ直す）が 1 件でもあれば違反（R4）で、本番の木の `openssl-sys` の件数と版の記録の宛先（Hub `AOPS-2`）を参考として出す。違反（1）と検査不能（2）を終了コードで分けられるのはスクリプトを直接実行したときだけで、`make` 経由では GNU Make が中のコマンドの 1 も 2 に変える（陰性対照つき。DPOL-13・TASK-667。名前は暫定） |
 | `make it-db` | `scripts/it-db.sh` | ハーネスの DB 結合試験（Docker 必須・`#[ignore]` の試験を流す。CI では流さない。名前は暫定） |
 | `make it-db-ci` | `scripts/it-db-ci.sh` | CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験 `db_job_frame` だけを流す。0 件は失敗。名前は暫定） |
 | `make e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネスの Chrome の E2E（chromedriver 必須・`#[ignore]` の試験を流す。結果は〔仮想〕。CI では流さない。名前は暫定） |

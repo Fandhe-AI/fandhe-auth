@@ -19,10 +19,25 @@
 # 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。
 # B は依存の列挙にだけ使い、ビルド・clippy には使わない（DPOL-31。check-crate-deps.sh と同じ扱い）。
 # 本番の範囲は normal・build（dev は見ない）。`cargo tree -i` は一致が無いと非 0 のため使わない。
-# 実行のたびに自己試験（陰性対照 F1〜F9）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陰性対照 F1〜F12）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は件数と規則名だけ。cargo tree の生の出力には絶対パスが入るため出さない。
 # 限界: dev の依存・別 workspace の crates/trial-deps/fuzz・Hub の最終バイナリは対象外。
-# TODO(TASK-667): 動的リンクと版の記録の対応（#318 の 2/4）を足す
+#
+# 動的リンクと版の記録の対応（TASK-667 (2/4)・DPOL-13）:
+#   R4: 静的リンクを強いる設定が無いこと（合否）。openssl-sys の build script は環境変数 OPENSSL_STATIC と <TARGET>_OPENSSL_STATIC を見て、
+#       `0` 以外なら静的にリンクする。pkg-config crate は変数が存在すれば値が `0` でも静的リンクを選ぶため、値によらず違反にする。`vendored` でなくても配備先の OpenSSL へ動的にリンクしない道になるため、検査の環境変数と
+#       repo の `.cargo/config.toml`・`.cargo/config` の `[env]` のキー（TOML を構造として読み、引用キーのエスケープを復号した後の名前）の
+#       `OPENSSL_STATIC` と `<TARGET>_OPENSSL_STATIC` を値によらず違反にする（安全側）。コメントや他の設定値の中の文字列は数えない。
+#       TOML が読めない・不正なら検査不能（2）。名前と値は出さず件数だけ出す。
+#       PKG_CONFIG_ALL_STATIC も存在だけで静的を選ぶため同じく違反にする（上流が読む名前の正確な一覧と、多めに数える分は count_static_env のコメント）。同じ .cargo に config と config.toml が
+#       共存する場合は両方を検査する（片方が消えると残りが有効になるため。dependency-policy.md の配置禁止に合わせ、優先順位で無視される側も見ない道を作らない）。
+#       `include` のキー（Cargo の設定の読み込み。Cargo が受ける形（配列・テーブルの配列）に加え、受けない形も安全側に止める）がある設定は、読み込み先を追わず検査不能（2。"include is not supported"）。
+#       `[env]` が存在してテーブルでない（`env = []` 等）場合は検査不能（2）。
+#   報告: 本番の依存の木の openssl-sys の件数（package ごと。(*) の付記は除いて重複排除）を出す（参考。合否に入れない）。
+#       依存の木だけではリンク方式（動的か静的か）を断定できない。1 件以上なら版の記録の要否と最終バイナリのリンク方式の確認は
+#       Hub の `AOPS-2` で行う（本体は記録を持たない。D-2026-10-30-1）。0 件なら本体の依存の木から `AOPS-2` に載せるものは無い。
+#   限界: 親ディレクトリ・CARGO_HOME の cargo 設定と --config の指定は呼び出し側の環境のため見ない。配備先に静的ライブラリしか無い場合と
+#       最終バイナリのリンクの実機での確認（ldd 等）は Hub の担当（`AOPS-2`）。
 #
 # 終了コード: 0 合格 / 1 違反または自己試験の異常 / 2 検査不能（fail-closed）。
 set -euo pipefail
@@ -30,33 +45,6 @@ unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
-
-reject_args "$(basename "$0")" "$@"
-# 使う外部コマンドは作業ディレクトリの作成前にすべて確かめる（EXIT トラップの rm の不足で 127 にしない）。
-for c in cargo mktemp mkdir rm grep dirname basename; do
-  require_cmd "${c}" || exit 2
-done
-
-# 生の診断（絶対パス・ホームのパスを含み得る mkdir・mktemp・cd・cargo・redirect の標準エラー）は出さない。
-# 失敗した箇所は固定の英語の文で報告して終了コード 2 にする。出力の抑制は合否を変えず、終了コードで判定する。
-if ! cd "${ROOT_DIR}" 2>/dev/null; then
-  log "error: cannot enter repository root; cannot inspect"
-  exit 2
-fi
-
-# 偽 crate は repo の target/ の下に作る。誰でも書ける /tmp の下だと、親の .cargo/config.toml
-# （build.rustc-wrapper 等）を別の利用者に置かれて任意のコードが実行され得るため。
-# 準備の失敗は検査不能（2）。set -e の 1 では「違反」と区別できないため明示する。
-if ! mkdir -p "${ROOT_DIR}/target" 2>/dev/null; then
-  log "error: cannot create target/; cannot inspect"
-  exit 2
-fi
-if ! WORK="$(mktemp -d "${ROOT_DIR}/target/openssl-vendored.XXXXXX" 2>/dev/null)"; then
-  log "error: cannot create work dir; cannot inspect"
-  exit 2
-fi
-cleanup() { rm -rf "${WORK}" 2>/dev/null || true; }
-trap cleanup EXIT
 
 # 本番対象から外す試験専用メンバー（Cargo.toml の注記・check-crate-deps.sh の試験専用の表と同じ。TASK-667）。
 TEST_ONLY_PKGS=(
@@ -161,6 +149,98 @@ count_rule() {
       R3) case "${line}" in 'openssl-src v'*) n=$((n + 1)) ;; esac ;;
     esac
   done <<<"${tree}" || return 2
+  echo "${n}"
+}
+
+# count_static_env [前置コマンド...]: 環境変数のうち、名前が次のどれかの形のものの数を返す（R4。count_static_config の `[env]` のキーも同じ規則）。
+#   (a) 接頭辞なし: OPENSSL_STATIC・PKG_CONFIG_ALL_STATIC
+#   (b) 末尾一致: <TARGET>_OPENSSL_STATIC・<TARGET>_PKG_CONFIG_ALL_STATIC（HOST_・TARGET_ の接頭辞の形を含む）
+#   (c) 接尾辞: OPENSSL_STATIC_<target>・PKG_CONFIG_ALL_STATIC_<target>（<target> は `-` のままでも `_` でもよい）
+# 上流が実際に読む名前（openssl-sys 0.9.117 の build/main.rs、pkg-config 0.3.34 の lib.rs で確認）:
+#   openssl-sys: `OPENSSL_STATIC` と、<TARGET> を大文字にして `-` を `_` に替えた <TARGET>_OPENSSL_STATIC の 2 つ（env 関数）。
+#   pkg-config: infer_static が `<LIB>_STATIC`（OPENSSL_STATIC。接頭辞なし）と PKG_CONFIG_ALL_STATIC を接頭辞なしで読むだけ。
+#     targeted_env_var（PKG_CONFIG_PATH 等の他の変数用）がターゲット付きで読む形は、接尾辞の <VAR>_<target>（`-` のままと `_` に替えた形）と
+#     HOST_・TARGET_ の接頭辞。infer_static はこれを通さないが、上流の版が変わっても漏らさないよう (c) も数える。
+#   <TARGET>_PKG_CONFIG_ALL_STATIC と、ハイフン入りの名前は上流が読まない。見えれば安全側に多めに数える分で、検査契約の中心ではない。
+# 上流の版を上げたら、読む名前の形（上の 2 crate の箇所）が変わっていないか確かめ直す。
+# pkg-config crate は存在だけで静的を選ぶため、値が `0` でも数える。名前も値も出さない。値は判定に使わず、eval やコマンドの引数にも展開しない。
+# bash の変数名にならない名前も見落とさないよう、compgen ではなく python の os.environ で列挙する。
+# 前置コマンドは試験用（env -i で子の環境を作る）。bash を経ず、解決済みの Python の実体（PY）を直接起動する。
+# 出力が数字でなければ検査不能（2）。python が 0 で何も出さない場合を 0 件として扱わない（fail-closed）。
+count_static_env() {
+  local c
+  c="$("$@" "${PY}" -I -c '
+import os
+n = 0
+for k in os.environ:
+    if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")) or k.startswith(("OPENSSL_STATIC_", "PKG_CONFIG_ALL_STATIC_")):
+        n += 1
+print(n)
+' 2>/dev/null)" || return 2
+  case "${c}" in '' | *[!0-9]*) return 2 ;; esac
+  echo "${c}"
+}
+
+# count_static_config <root>: <root>/.cargo/config.toml・config の `[env]` のキーのうち、count_static_env と同じ規則の名前
+# （OPENSSL_STATIC・PKG_CONFIG_ALL_STATIC、末尾一致 _OPENSSL_STATIC・_PKG_CONFIG_ALL_STATIC、接尾辞 OPENSSL_STATIC_<target>・PKG_CONFIG_ALL_STATIC_<target>）の数を返す
+# （`include` のキーがあれば検査不能）。Python は resolve_python が解決した ${PY} を使う。
+# （R4。値が 0 でも数える＝安全側）。TOML を tomllib で構造として読み、復号後のキー名で判定する。コメント・他の値の文字列は数えない。
+# 読めない・TOML として不正なファイルは検査不能（2）。python の診断（パスを含み得る）は出さない。
+count_static_config() {
+  local f c rc n=0
+  # 優先順位で片方が無視されても、消えると残りが有効になるため、存在する両方のファイルを検査する（安全側）。
+  for f in "$1/.cargo/config" "$1/.cargo/config.toml"; do
+    # リンク切れのシンボリックリンクは -e が偽になるため -L も見て、読み取り検査（失敗は 2）へ進める。
+    [ -e "${f}" ] || [ -L "${f}" ] || continue
+    {
+    [ -r "${f}" ] || return 2
+    rc=0
+    c="$("${PY}" -I -c '
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as fh:
+        d = tomllib.load(fh)
+except Exception:
+    sys.exit(2)
+# Cargo の include（Cargo が受ける形（配列・テーブルの配列）に加え、受けない形も安全側に止める。どの形でもキー名は include）は読み込み先を追わず、検査不能（3 を bash が 2 にする）。
+if "include" in d:
+    sys.exit(3)
+e = d.get("env", {})
+if not isinstance(e, dict):
+    sys.exit(2)
+n = sum(1 for k in e if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")) or k.startswith(("OPENSSL_STATIC_", "PKG_CONFIG_ALL_STATIC_")))
+print(n)
+' "${f}" 2>/dev/null)" || rc=$?
+    if [ "${rc}" -eq 3 ]; then
+      log "error: cargo config include is not supported (loaded files are not followed); cannot inspect"
+      return 2
+    fi
+    [ "${rc}" -eq 0 ] || return 2
+    case "${c}" in '' | *[!0-9]*) return 2 ;; esac
+    n=$((n + c))
+    }
+  done
+  echo "${n}"
+}
+
+# count_openssl_sys <tree>: 木に出る openssl-sys の package の数。参考の報告用。feature 行は数えず、(*)（重複の省略印）等の
+# 末尾の付記を除いてから重複を排除する（付記の有無で同じ package が別行になり水増しされるのを防ぐ）。
+count_openssl_sys() {
+  local line key seen=$'\n' n=0
+  while IFS= read -r line; do
+    case "${line}" in 'openssl-sys v'*) ;; *) continue ;; esac
+    key="${line}"
+    while :; do
+      case "${key}" in
+        *' (*)') key="${key% (*)}" ;;
+        *' (proc-macro)') key="${key% (proc-macro)}" ;;
+        *) break ;;
+      esac
+    done
+    case "${seen}" in *$'\n'"${key}"$'\n'*) continue ;; esac
+    seen="${seen}${key}"$'\n'
+    n=$((n + 1))
+  done <<<"$1"
   echo "${n}"
 }
 
@@ -278,24 +358,154 @@ selftest() {
     exit 1
   fi
 
-  log "selftest ok (F1-F9)"
+  # F10: 静的リンクの環境変数（R4）。env -i で外側の環境（PATH・HOME も）を消し、試験の変数だけを渡して解決済みの Python の実体を直接起動して数える。
+  # ハイフンを含む名前（bash の変数名にならない）も数えることを確かめる。
+  local ev cnt rc
+  for ev in 'OPENSSL_STATIC=1:ge1' 'OPENSSL_STATIC=0:ge1' 'X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=yes:ge1' 'OPENSSL_STATIC=:ge1' 'PKG_CONFIG_ALL_STATIC=1:ge1' 'x86_64-unknown-linux-gnu_OPENSSL_STATIC=1:ge1' 'aarch64-linux-android_PKG_CONFIG_ALL_STATIC=1:ge1' 'OPENSSL_STATIC_x86_64-unknown-linux-gnu=1:ge1' 'PKG_CONFIG_ALL_STATIC_x86_64_unknown_linux_gnu=1:ge1' 'HOST_PKG_CONFIG_ALL_STATIC=1:ge1' 'OPENSSL_STATICX=1:eq0' 'PKG_CONFIG_ALL_STATICX=1:eq0' 'NOT_OPENSSL_STATIC_X=1:eq0' 'NOT-OPENSSL_STATIC_X=1:eq0'; do
+    cnt="$(count_static_env env -i "${ev%:*}")" || exit 2
+    case "${cnt}" in '' | *[!0-9]*) log "error: selftest F10: non-numeric count; cannot inspect"; exit 2 ;; esac
+    if { [ "${ev##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${ev##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
+      log "FAIL selftest F10: static env check wrong (case ${ev##*:})"
+      exit 1
+    fi
+  done
+
+  # F10b: python3 が 0 で終わって何も出さない・数字以外を出すときは検査不能（2）。0 件として扱わない（fail-closed）
+  local fk
+  for fk in empty junk; do
+    # shellcheck disable=SC2016 # 偽スクリプトの $0 は偽の側で展開する（env -i で PATH が無くても動くよう、組み込みの : だけを使う）。
+    if ! mkdir -p "${f}/fakepy-${fk}" 2>/dev/null ||
+      ! printf '#!/bin/sh\n: >"${0%%/*}/ran"\n' 2>/dev/null >"${f}/fakepy-${fk}/python3" ||
+      ! { [ "${fk}" = empty ] && printf 'exit 0\n' || printf 'echo x1\nexit 0\n'; } 2>/dev/null >>"${f}/fakepy-${fk}/python3" ||
+      ! chmod +x "${f}/fakepy-${fk}/python3" 2>/dev/null; then
+      log "error: cannot write fixture (f10b); cannot inspect"
+      exit 2
+    fi
+    rc=0
+    ( PY="${f}/fakepy-${fk}/python3"; count_static_env env -i ) >/dev/null 2>&1 || rc=$?
+    if [ "${rc}" -ne 2 ]; then
+      log "FAIL selftest F10b: fake python output (${fk}) not treated as cannot-inspect"
+      exit 1
+    fi
+    # 偽の Python が実際に起動したことを目印で確かめる（noexec の場所での起動失敗も 2 になり、空振りで通るのを防ぐ）。
+    if [ ! -f "${f}/fakepy-${fk}/ran" ]; then
+      log "FAIL selftest F10b: fake python (${fk}) did not run (noexec target dir?); cannot trust selftest"
+      exit 1
+    fi
+  done
+
+  # F10c: 子の bash を、環境に上流が読む正規化した名前（大文字・`-` を `_`）を入れて起動し、スクリプトを source して R4 の環境変数の側を数える。
+  # シェルが環境を加工した後に Python が見る経路を通る。出力が数字だけ（source したときに本体が走らず何も出さない）で、1 以上を期待する。
+  local out
+  rc=0
+  # shellcheck disable=SC2016 # 単引用符の中身は子の bash が展開する（$1 は子の引数）。
+  out="$(env "X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=1" "${BASH}" -c '. "$1"; resolve_python; count_static_env' _ "${DIR}/check-openssl-vendored.sh" 2>&1)" || rc=$?
+  if [ "${rc}" -eq 2 ]; then
+    log "error: selftest F10c: child exited 2; cannot inspect"
+    exit 2
+  fi
+  case "${out}" in '' | *[!0-9]*) rc=1 ;; *) [ "${out}" -ge 1 ] || rc=1 ;; esac
+  if [ "${rc}" -ne 0 ]; then
+    log "FAIL selftest F10c: normalized target env not counted via sourced shell, or main ran on source"
+    exit 1
+  fi
+
+  # F11: repo の .cargo/config の OPENSSL_STATIC（R4）
+  local cfg
+  if ! mkdir -p "${f}/c1/.cargo" "${f}/c2/.cargo" "${f}/c3/.cargo" "${f}/c4" 2>/dev/null ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c1/.cargo/config.toml" ||
+    ! printf '[env]\nOPENSSL_STATIC = { value = "1", force = true }\n' 2>/dev/null >"${f}/c2/.cargo/config.toml" ||
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c3/.cargo/config.toml" ||
+    ! mkdir -p "${f}/c5/.cargo" "${f}/c6/.cargo" "${f}/c7/.cargo" "${f}/c8/.cargo" 2>/dev/null ||
+    ! printf '[env]\n"OPENSSL_\\u0053TATIC" = "1"\n' 2>/dev/null >"${f}/c5/.cargo/config.toml" ||
+    ! printf '# OPENSSL_STATIC = "1"\n[env]\nOTHER = "OPENSSL_STATIC"\n' 2>/dev/null >"${f}/c6/.cargo/config.toml" ||
+    ! printf 'env.X86_OPENSSL_STATIC = "0"\n' 2>/dev/null >"${f}/c7/.cargo/config.toml" ||
+    ! mkdir -p "${f}/c9/.cargo" "${f}/c10/.cargo" 2>/dev/null ||
+    ! printf '[env]\nPKG_CONFIG_ALL_STATIC = "1"\n' 2>/dev/null >"${f}/c9/.cargo/config.toml" ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config.toml" ||
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c10/.cargo/config" ||
+    ! printf '[env\nOPENSSL_STATIC = 1\n' 2>/dev/null >"${f}/c8/.cargo/config.toml" ||
+    ! mkdir -p "${f}/c11/.cargo" "${f}/c12/.cargo" "${f}/c13/.cargo" "${f}/c14/.cargo" 2>/dev/null ||
+    ! printf '[env]\nOPENSSL_STATIC_x86_64 = "1"\nPKG_CONFIG_ALL_STATICX = "1"\n' 2>/dev/null >"${f}/c14/.cargo/config.toml" ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c13/.cargo/config" ||
+    ! ln -s missing-target "${f}/c13/.cargo/config.toml" 2>/dev/null ||
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c11/.cargo/config.toml" ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c11/.cargo/config" ||
+    ! printf 'env = []\n' 2>/dev/null >"${f}/c12/.cargo/config.toml"; then
+    log "error: cannot write fixture (f11); cannot inspect"
+    exit 2
+  fi
+  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0 c5:ge1 c6:eq0 c7:ge1 c9:ge1 c10:ge1 c11:ge1 c14:ge1; do
+    cnt="$(count_static_config "${f}/${cfg%%:*}")" || exit 2
+    if { [ "${cfg##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${cfg##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
+      log "FAIL selftest F11: static config check wrong (${cfg%%:*})"
+      exit 1
+    fi
+  done
+
+  # F11b: TOML として不正な設定は検査不能（2）で止まる（構文・読み取りの失敗を 0 件に丸めない）
+  for cfg in c8 c12 c13; do
+    rc=0
+    count_static_config "${f}/${cfg}" >/dev/null 2>&1 || rc=$?
+    if [ "${rc}" -ne 2 ]; then
+      log "FAIL selftest F11: invalid config not treated as cannot-inspect (${cfg})"
+      exit 1
+    fi
+  done
+
+  # F11c: .cargo/config の include（Cargo が受ける形（配列・テーブルの配列）に加え、受けない形も安全側に止める）は読み込み先を追わず検査不能（2）。include が無ければ従来どおり（0 件）
+  local ic
+  mkdir -p "${f}/i1/.cargo" "${f}/i2/.cargo" "${f}/i3/.cargo" "${f}/i4/.cargo" "${f}/i5/.cargo" "${f}/i6/.cargo" 2>/dev/null || { log "error: cannot write fixture (f11c); cannot inspect"; exit 2; }
+  if ! printf 'include = "extra.toml"\n' 2>/dev/null >"${f}/i1/.cargo/config.toml" ||
+    ! printf 'include = ["a.toml", "b.toml"]\n' 2>/dev/null >"${f}/i2/.cargo/config.toml" ||
+    ! printf '[[include]]\npath = "a.toml"\noptional = true\n' 2>/dev/null >"${f}/i3/.cargo/config.toml" ||
+    ! printf '[include]\npath = "a.toml"\n' 2>/dev/null >"${f}/i4/.cargo/config" ||
+    ! printf 'include = [{ path = "a.toml" }]\n' 2>/dev/null >"${f}/i5/.cargo/config.toml" ||
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/i6/.cargo/config.toml" ||
+    ! mkdir -p "${f}/i7/.cargo" "${f}/i8/.cargo" "${f}/i9/.cargo" 2>/dev/null ||
+    ! printf '"include" = ["a.toml"]\n' 2>/dev/null >"${f}/i7/.cargo/config.toml" ||
+    ! printf 'include.path = "a.toml"\n' 2>/dev/null >"${f}/i8/.cargo/config.toml" ||
+    ! printf '"incl\\u0075de" = ["a.toml"]\n' 2>/dev/null >"${f}/i9/.cargo/config.toml"; then
+    log "error: cannot write fixture (f11c); cannot inspect"
+    exit 2
+  fi
+  for ic in i1 i2 i3 i4 i5 i7 i8 i9; do
+    rc=0
+    count_static_config "${f}/${ic}" >/dev/null 2>&1 || rc=$?
+    if [ "${rc}" -ne 2 ]; then
+      log "FAIL selftest F11c: config include not treated as cannot-inspect (${ic})"
+      exit 1
+    fi
+  done
+  cnt="$(count_static_config "${f}/i6")" || exit 2
+  if [ "${cnt}" -ne 0 ]; then
+    log "FAIL selftest F11c: false positive without include"
+    exit 1
+  fi
+
+  # F12: openssl-sys の件数の報告。F3（vendored なしの openssl）は 1 以上、F4（依存なし）は 0
+  t="$(run_tree "${f}/f3" offline)" || exit 2
+  if [ "$(count_openssl_sys "${t}")" -lt 1 ]; then
+    log "FAIL selftest F12: openssl-sys not counted"
+    exit 1
+  fi
+  t="$(run_tree "${f}/f4" offline)" || exit 2
+  if [ "$(count_openssl_sys "${t}")" -ne 0 ]; then
+    log "FAIL selftest F12: openssl-sys false count"
+    exit 1
+  fi
+
+  # F12b: (*) の付記の有無で同じ package が別行になっても 1 件（feature 行・別名の package は数えない）
+  t=$'openssl-sys v0.9.0 (/x/openssl-sys)\nopenssl-sys v0.9.0 (/x/openssl-sys) (*)\nopenssl-sys feature "default"\nopenssl-sys-extras v0.1.0'
+  if [ "$(count_openssl_sys "${t}")" -ne 1 ]; then
+    log "FAIL selftest F12: duplicate openssl-sys counted"
+    exit 1
+  fi
+
+  log "selftest ok (F1-F12, F10b, F10c, F11c)"
 }
 
-selftest
-
-# 走査 A（合否）。検査不能（2）と違反（1）はここで確定し、参考の走査 B より先に返す。
-total=0
-check_member_classification
-tree="$(prod_tree "${ROOT_DIR}" locked "${PROD_FEATURES:-}")" || exit 2
-for r in R1 R2 R3; do
-  n="$(count_rule "${r}" "${tree}")" || exit 2
-  log "scan A ${r}: ${n}"
-  total=$((total + n))
-done
-if [ "${total}" -ne 0 ]; then
-  log "FAIL: vendored openssl detected in dependency resolution (DPOL-13)"
-  exit 1
-fi
+cleanup() { rm -rf "${WORK}" 2>/dev/null || true; }
 
 # scan_info <ラベル> <追加引数...>: 参考の走査。失敗しても終了コードに影響させず警告だけ出す（A の合否を上書きしない）。
 scan_info() {
@@ -315,8 +525,94 @@ scan_info() {
   fi
   return 0
 }
-# 走査 B（参考）: 本番対象のメンバーの --all-features。非既定 feature の後ろの経路。
-scan_info B --workspace --all-features "${EXCLUDE_ARGS[@]}"
-# 走査 C（参考）: 試験専用メンバーを含む全メンバーの既定 feature。
-scan_info C --workspace
-log "ok: no vendored openssl (DPOL-13)"
+# resolve_python: PY に確認済みの Python の実体を解決する。解決できない・実行できないときは検査不能（2）。
+resolve_python() {
+  # 環境を消した子（試験の env -i）でも動くよう、確認済みの Python の実体を最初に解決する。pyenv・asdf・mise の shim は HOME 等が無いと起動に失敗するため、
+  # 試験では名前（python3）ではなくこの実体を直接起動する。解決できない・実行できないときは検査不能（2）。
+  PY="$(python3 -I -c 'import sys; print(sys.executable)' 2>/dev/null)" || PY=""
+  case "${PY}" in /*) ;; *) PY="" ;; esac
+  if [ -z "${PY}" ] || [ ! -x "${PY}" ]; then
+    log "error: cannot resolve python3 executable; cannot inspect"
+    exit 2
+  fi
+}
+
+# main: 直接起動したときの本体（引数の拒否・外部コマンドの確認・自己試験・走査の順）。
+main() {
+  reject_args "$(basename "$0")" "$@"
+  # 使う外部コマンドは作業ディレクトリの作成前にすべて確かめる（EXIT トラップの rm の不足で 127 にしない）。
+  for c in cargo mktemp mkdir rm grep dirname basename python3 ln env chmod; do
+    require_cmd "${c}" || exit 2
+  done
+  # TOML は構造として読む（引用キーの Unicode エスケープを文字列検索では見落とすため）。tomllib（3.11 以上）が無ければ検査不能（2）。
+  if ! python3 -I -c 'import tomllib' >/dev/null 2>&1; then
+    log "error: python3 with tomllib (3.11+) required; cannot inspect"
+    exit 2
+  fi
+  resolve_python
+
+  # 生の診断（絶対パス・ホームのパスを含み得る mkdir・mktemp・cd・cargo・redirect の標準エラー）は出さない。
+  # 失敗した箇所は固定の英語の文で報告して終了コード 2 にする。出力の抑制は合否を変えず、終了コードで判定する。
+  if ! cd "${ROOT_DIR}" 2>/dev/null; then
+    log "error: cannot enter repository root; cannot inspect"
+    exit 2
+  fi
+
+  # 偽 crate は repo の target/ の下に作る。誰でも書ける /tmp の下だと、親の .cargo/config.toml
+  # （build.rustc-wrapper 等）を別の利用者に置かれて任意のコードが実行され得るため。
+  # 準備の失敗は検査不能（2）。set -e の 1 では「違反」と区別できないため明示する。
+  if ! mkdir -p "${ROOT_DIR}/target" 2>/dev/null; then
+    log "error: cannot create target/; cannot inspect"
+    exit 2
+  fi
+  if ! WORK="$(mktemp -d "${ROOT_DIR}/target/openssl-vendored.XXXXXX" 2>/dev/null)"; then
+    log "error: cannot create work dir; cannot inspect"
+    exit 2
+  fi
+  trap cleanup EXIT
+
+  selftest
+
+  # 走査 A（合否）。検査不能（2）と違反（1）はここで確定し、参考の走査 B より先に返す。
+  total=0
+  check_member_classification
+  tree="$(prod_tree "${ROOT_DIR}" locked "${PROD_FEATURES:-}")" || exit 2
+  # 版の記録との対応（参考。合否に入れない）。違反（R1〜R4）で終了する場合でも件数と案内が出るよう、本番の木の取得直後に出す。crate の版は OpenSSL の版ではないため出さない。
+  sys_n="$(count_openssl_sys "${tree}")"
+  if [ "${sys_n}" -ge 1 ]; then
+    log "info: openssl-sys in production tree: ${sys_n} (dependency tree only; confirm version record and final binary link mode in Hub AOPS-2)"
+  else
+    log "info: openssl-sys in production tree: 0 (nothing to record in Hub AOPS-2 from this tree; final binary link mode is confirmed in Hub AOPS-2)"
+  fi
+  for r in R1 R2 R3; do
+    n="$(count_rule "${r}" "${tree}")" || exit 2
+    log "scan A ${r}: ${n}"
+    total=$((total + n))
+  done
+  if [ "${total}" -ne 0 ]; then
+    log "FAIL: vendored openssl detected in dependency resolution (DPOL-13)"
+    exit 1
+  fi
+
+  # R4: 静的リンクを強いる設定（検査の環境変数と repo の .cargo/config*）。
+  s_env="$(count_static_env)" || exit 2
+  s_cfg="$(count_static_config "${ROOT_DIR}")" || {
+    log "error: cannot read .cargo config; cannot inspect"
+    exit 2
+  }
+  log "scan A R4: $((s_env + s_cfg))"
+  if [ $((s_env + s_cfg)) -ne 0 ]; then
+    log "FAIL: static OpenSSL link forced (DPOL-13)"
+    exit 1
+  fi
+  # 走査 B（参考）: 本番対象のメンバーの --all-features。非既定 feature の後ろの経路。
+  scan_info B --workspace --all-features "${EXCLUDE_ARGS[@]}"
+  # 走査 C（参考）: 試験専用メンバーを含む全メンバーの既定 feature。
+  scan_info C --workspace
+  log "ok: no vendored openssl (DPOL-13)"
+}
+
+# source されたときは本体を走らせない（試験が関数だけを使う）。source しても検出の経路と fail-closed の性質は変わらない。
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
