@@ -77,6 +77,16 @@ cat > "${shim_dir}/git" <<'EOF'
 if [ -n "${LOG_GIT_FILE:-}" ]; then
   printf '%s\n' "$*" >> "${LOG_GIT_FILE}"
 fi
+# MOVE_HEAD_ON_ARG を含む呼び出しの前に一度だけ、HEAD の指す参照を MOVE_HEAD_TO へ動かす（走査中の HEAD の変化の再現用）
+if [ -n "${MOVE_HEAD_ON_ARG:-}" ] && [ ! -e "${MOVE_HEAD_FLAG:-/nonexistent}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "${MOVE_HEAD_ON_ARG}" ]; then
+      : > "${MOVE_HEAD_FLAG}"
+      "${REAL_GIT}" update-ref HEAD "${MOVE_HEAD_TO}"
+      break
+    fi
+  done
+fi
 for arg in "$@"; do
   if [ "${arg}" = "${FAIL_GIT_ARG:-}" ]; then
     echo "git shim: forced failure on ${arg}" >&2
@@ -829,7 +839,7 @@ else
 fi
 snap_reads="$(grep -cE '(js|wc -c) < "[$]1"' "${SECRET_SCAN}" || true)"
 # shellcheck disable=SC2016 # 検索する文字列そのもの（展開しない）
-snap_copies="$(grep -cF 'cat -- "$1" > "${snap}"' "${SECRET_SCAN}" || true)"
+snap_copies="$(grep -cF -e 'head -c $((lock_max_bytes + 1)) -- "$1" > "${snap}"' "${SECRET_SCAN}" || true)"
 if [ "${snap_reads}" = 0 ] && [ "${snap_copies}" = 1 ]; then
   pass "secret-scan: the list is read from a single snapshot"
 else
@@ -846,11 +856,19 @@ head_sha="$(git rev-parse HEAD)"
 LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${same_bin}" check_scan "same checkout: the pinned HEAD id does not disturb a scan" 1 src/app.txt
 pin_ok=1
 for sub in "ls-tree" "cat-file" "diff"; do
-  if ! grep -E "(^| )${sub}( |$)" "${work_dir}/gitlog" | grep -q "${head_sha}"; then
+  grep -E "(^| )${sub}( |$)" "${work_dir}/gitlog" > "${work_dir}/gitlog-sub" || true
+  sub_total="$(wc -l < "${work_dir}/gitlog-sub")"
+  sub_total="${sub_total//[[:space:]]/}"
+  sub_with_id="$(grep -c "${head_sha}" "${work_dir}/gitlog-sub" || true)"
+  # 名前の一覧と本文の 2 回の diff を含め、すべての呼び出しが同じ ID を渡す（片方が基準を落とすと検出する）
+  if [ "${sub_total}" -lt 1 ] || [ "${sub_total}" -ne "${sub_with_id}" ]; then
     pin_ok=0
   fi
-  # 3 つの呼び出しのどれにも、解決し直される `HEAD` の名前が残らない
-  if grep -E "(^| )${sub}( |$)" "${work_dir}/gitlog" | grep -Eq "(^| )HEAD(:| |$)"; then
+  # どの呼び出しにも、解決し直される `HEAD` の名前が残らない
+  if grep -Eq "(^| )HEAD(:| |$)" "${work_dir}/gitlog-sub"; then
+    pin_ok=0
+  fi
+  if [ "${sub}" = diff ] && [ "${sub_total}" -lt 2 ]; then
     pin_ok=0
   fi
 done
@@ -859,6 +877,75 @@ if [ "${pin_ok}" -eq 1 ]; then
 else
   fail "secret-scan: ls-tree, cat-file and the staged diff all use the same pinned HEAD commit id" "git calls: $(cat "${work_dir}/gitlog")"
 fi
+
+# 走査中に HEAD が動いたら、古い基準の結果で合格させない（2）。本文の diff（-U0）の直前に動かす
+same_checkout_repo "${lock_ok}"
+git commit -q --allow-empty -m "chore: second"
+second_sha="$(git rev-parse HEAD)"
+git reset -q --hard HEAD~1
+stage src/app.txt "x = placeholder"
+rm -f "${work_dir}/moved"
+move_rc=0
+MOVE_HEAD_ON_ARG=-U0 MOVE_HEAD_TO="${second_sha}" MOVE_HEAD_FLAG="${work_dir}/moved" PATH="${shim_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || move_rc=$?
+if [ "${move_rc}" -eq 2 ] && grep -qxF "secret-scan: HEAD changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: HEAD moving during a staged scan is a scan failure (2)"
+else
+  fail "secret-scan: HEAD moving during a staged scan is a scan failure (2)" "got ${move_rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 未作成ブランチのまま始まり、走査中にブランチが作られた場合も 2
+new_repo
+git branch other
+other_sha="$(git rev-parse other)"
+git symbolic-ref HEAD refs/heads/unborn
+stage src/app.txt "x = placeholder"
+rm -f "${work_dir}/moved"
+move_rc=0
+MOVE_HEAD_ON_ARG=-U0 MOVE_HEAD_TO="${other_sha}" MOVE_HEAD_FLAG="${work_dir}/moved" PATH="${shim_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_ok}" > "${work_dir}/out" 2>&1 || move_rc=$?
+if [ "${move_rc}" -eq 2 ] && grep -qxF "secret-scan: HEAD changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an unborn branch created during a staged scan is a scan failure (2)"
+else
+  fail "secret-scan: an unborn branch created during a staged scan is a scan failure (2)" "got ${move_rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 一覧の大きさの上限（作業ツリー側・HEAD 側・境界）。上限は検出器の lock_max_bytes（暫定 64 KiB）
+lock_max="$(sed -n 's/^lock_max_bytes=\([0-9][0-9]*\)$/\1/p' "${SECRET_SCAN}")"
+# padded_lock <総バイト数>: 正しい JSON に末尾の空白を詰めて指定の大きさにする
+padded_lock() {
+  local base pad
+  base='{"version":2,"skills":{"vendored-a":{"source":"x"}}}'
+  pad=$(($1 - ${#base}))
+  printf '%s' "${base}"
+  head -c "${pad}" /dev/zero | tr '\000' ' '
+}
+run_big_lock() {
+  local desc="$1" rc=0
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "$2" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: skills-lock.json is too large; aborting" "${work_dir}/out" \
+    && ! grep -q "vendored\|/" "${work_dir}/out"; then
+    pass "secret-scan: ${desc}"
+  else
+    fail "secret-scan: ${desc}" "expected exit 2 with a fixed message, got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+}
+make_detector "big" "x"
+padded_lock $((lock_max + 1)) > "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+run_big_lock "skills-lock.json one byte over the size limit is rejected" "${det_bin}"
+make_detector "edge" "x"
+padded_lock "${lock_max}" > "${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+SCAN_BIN="${det_bin}" check_scan "skills-lock.json exactly at the size limit is accepted" 0
+# HEAD 側だけが上限を超える（同じ checkout。作業ツリーの一覧は小さい）
+same_checkout_repo "${lock_ok}"
+padded_lock $((lock_max + 1)) > skills-lock.json
+git add skills-lock.json
+git commit -q -m "chore: big lock"
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage src/app.txt "x = placeholder"
+run_big_lock "the committed skills-lock.json over the size limit is rejected" "${same_bin}"
 
 # 別の checkout の staged でも、差分の基準は確定した ID を使う
 new_repo; stage src/app.txt "x = ${token}"

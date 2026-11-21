@@ -48,6 +48,7 @@
 #   残る限界（TASK-6・#6000 で追跡。解消は人が方式を決める）: 除外はディレクトリ単位のため、登録済みの skill のディレクトリでは
 #   既存ファイルへの値の追記・新しく置いたファイル・他のパスからのリネームによる移動のいずれも、本文の走査から外れる。
 #   登録名の下の変更は、人のレビューで確かめる（内容に結び付けた除外は未実装）。
+#   一覧は大きさに上限を設け（暫定。超えたら 2）、走査の結果を返す前に HEAD を取り直して固定した ID と違えば 2 にする。
 # 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
 # 本文のバイト列は照合するが、圧縮・エンコードの展開と、複数行に分かれた値の復元はしない。
 # 保守的なヒューリスティックであり網羅的なスキャナの代替ではない。AAUD-30 の実行時の登録簿による走査とも別物。
@@ -385,6 +386,12 @@ parse_skills() {
   done
 }
 # parse_lock <ファイル>: 全体を解析し、検証した名前を parsed_names に入れる。不正は lock_fail（終了コード 2）。
+# 一覧の大きさの上限（暫定。bash の解析は遅いため小さく置く。値の確定は人が行う。#6000）。超えたら検査不能（2）。
+lock_max_bytes=65536
+lock_too_large() {
+  echo "secret-scan: skills-lock.json is too large; aborting" >&4
+  exit 2
+}
 parsed_names=()
 parsed_count=0
 parse_lock() {
@@ -395,8 +402,14 @@ parse_lock() {
   # 読み取りとサイズの取得が同じパスを別々に開くと、間にファイルが差し替わり得る。一度だけ一時ファイルへ複写して固定し、
   # 以降の read・wc はその複写に対してだけ行う（一時ファイルは終了時に trap で消える）。
   snap="${tmp_dir}/lock-snap"
-  if ! cat -- "$1" > "${snap}"; then
+  # 上限 + 1 バイトだけ複写し、超えていれば固定の診断で止める（巨大な一覧でフックが長時間止まらないようにする）。
+  if ! head -c $((lock_max_bytes + 1)) -- "$1" > "${snap}"; then
     lock_fail
+  fi
+  size="$(wc -c < "${snap}")"
+  size="${size//[[:space:]]/}"
+  if [ "${size}" -gt "${lock_max_bytes}" ]; then
+    lock_too_large
   fi
   IFS= read -r -d '' js < "${snap}" || true
   # NUL を含むと bash の読み取りがそこで止まり、後ろが未検証になる。読めたバイト数とサイズを突き合わせる。
@@ -500,7 +513,7 @@ resolve_head() {
   exit 2
 }
 load_skill_names() {
-  local repo_real rc name n head_names=" " keep head_ref head_entry head_mode work_present=0
+  local repo_real rc name n head_names=" " keep head_ref head_entry head_mode head_size work_present=0
   local -a work_names
   work_names=()
   if [ -e "${detector_lock}" ] || [ -L "${detector_lock}" ]; then
@@ -551,6 +564,13 @@ load_skill_names() {
     100644 | 100755) ;;
     *) lock_fail ;;
   esac
+  if ! head_size="$(g cat-file -s "${head_id}:skills-lock.json")" || [[ ! "${head_size}" =~ ^[0-9]+$ ]]; then
+    echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
+    exit 2
+  fi
+  if [ "${head_size}" -gt "${lock_max_bytes}" ]; then
+    lock_too_large
+  fi
   if ! g cat-file blob "${head_id}:skills-lock.json" > "${tmp_dir}/head-lock"; then
     echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
     exit 2
@@ -753,6 +773,17 @@ case "${cmp_rc}" in
     exit 2
     ;;
 esac
+
+# 走査中に HEAD が動いていたら、固定した ID を基準にした結果は古い。合格を返さず検査不能（2）にする
+# （未作成ブランチ・空の ID のまま始まり、走査中にブランチが作られた場合も違いに含む）。
+if [ "${head_resolved}" -eq 1 ]; then
+  pinned_head="${head_id}"
+  resolve_head
+  if [ "${head_id}" != "${pinned_head}" ]; then
+    echo "secret-scan: HEAD changed during the scan; aborting" >&4
+    exit 2
+  fi
+fi
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
 total="${env_hits}"
