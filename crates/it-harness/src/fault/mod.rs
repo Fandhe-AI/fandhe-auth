@@ -27,7 +27,7 @@ pub mod instance;
 pub mod record;
 
 pub use clock::{ClockSkewError, ClockSkewInjector, SkewedClock};
-pub use db::{DbFaultError, DbFaultProxy};
+pub use db::{DbFaultError, DbFaultProxy, StallExit, UpstreamStall};
 pub use external_store::{ExternalStoreFaultError, ExternalStoreFaultProxy};
 pub use hub_stub::{
     HubStubCallError, HubStubFaultError, HubStubFaultInjector, HubStubFinishFailure,
