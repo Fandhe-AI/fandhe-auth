@@ -71,6 +71,10 @@ mkdir -p "${shim_dir}"
 export REAL_GIT="${real_git}"
 cat > "${shim_dir}/git" <<'EOF'
 #!/bin/sh
+# LOG_GIT_FILE があれば、呼び出しの引数を 1 行ずつ記録する（HEAD の ID が同じ値で渡ることの確認用）
+if [ -n "${LOG_GIT_FILE:-}" ]; then
+  printf '%s\n' "$*" >> "${LOG_GIT_FILE}"
+fi
 for arg in "$@"; do
   if [ "${arg}" = "${FAIL_GIT_ARG:-}" ]; then
     echo "git shim: forced failure on ${arg}" >&2
@@ -563,6 +567,8 @@ check_bad_lock "skills-lock.json with a UTF-8 surrogate is rejected" "$(lock_wit
 check_bad_lock "skills-lock.json with a truncated UTF-8 sequence is rejected" "$(lock_with_source "a"$'\xe3\x81'"b")"
 # 不正なバイトの両側が、正しい列の除去で接して新しい列にならない（c2 + 正しい 3 バイト列 + 80）
 check_bad_lock "skills-lock.json with a stray UTF-8 lead around a valid sequence is rejected" "$(lock_with_source "a"$'\xc2\xe2\x82\xac\x80'"b")"
+check_bad_lock "skills-lock.json with a raw U+0001 in a string is rejected" "$(lock_with_source "a"$'\x01'"b")"
+check_bad_lock "skills-lock.json with a raw U+001F in a string is rejected" "$(lock_with_source "a"$'\x1f'"b")"
 check_bad_lock "skills-lock.json with a raw tab in a string is rejected" "$(lock_with_source "a"$'\t'"b")"
 check_bad_lock "skills-lock.json with a raw newline in a string is rejected" "$(lock_with_source "a"$'\n'"b")"
 check_bad_lock "skills-lock.json without a version is rejected" '{
@@ -645,6 +651,7 @@ check_good_lock "skills-lock.json with braces inside strings is accepted" '{
 check_good_lock "skills-lock.json packed on one line is accepted" '{"version":2,"skills":{"vendored-a":{"source":"x","n":[1,-2.5e3,true,null,{"k":[]}]}}}'
 
 check_good_lock "skills-lock.json with valid multibyte UTF-8 is accepted" "$(lock_with_source "$(printf 'caf\xc3\xa9 \xe6\x97\xa5\xe6\x9c\xac \xf0\x9f\x98\x80')")"
+check_good_lock "skills-lock.json with a raw U+0020 in a string is accepted" "$(lock_with_source "a b")"
 check_good_lock "skills-lock.json with a raw U+007F in a string is accepted" "$(lock_with_source "a"$'\x7f'"b")"
 check_good_lock "skills-lock.json with a 70-digit number is accepted" "{
   \"version\": 2,
@@ -788,6 +795,48 @@ rm -f ".git/objects/${head_sha:0:2}/${head_sha:2}"
 stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
 SCAN_BIN="${same_bin}" check_scan "same checkout: a HEAD whose commit object is missing exits 2" 2
 expect_out "same checkout: an unresolvable HEAD reports a fixed message" "secret-scan: cannot read HEAD; aborting"
+
+# HEAD のコミット ID は最初に 1 回だけ確定し、ls-tree・cat-file・staged の差分の基準に同じ ID を渡す（#6011）。
+# git の呼び出しの引数を記録し、`HEAD` の名前が残らず、3 つとも同じ ID であることを確かめる
+same_checkout_repo "${lock_ok}"
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+stage src/app.txt "x = ${token}"
+head_sha="$(git rev-parse HEAD)"
+: > "${work_dir}/gitlog"
+LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${same_bin}" check_scan "same checkout: the pinned HEAD id does not disturb a scan" 1 src/app.txt
+pin_ok=1
+for sub in "ls-tree" "cat-file" "diff"; do
+  if ! grep -E "(^| )${sub}( |$)" "${work_dir}/gitlog" | grep -q "${head_sha}"; then
+    pin_ok=0
+  fi
+  # 3 つの呼び出しのどれにも、解決し直される `HEAD` の名前が残らない
+  if grep -E "(^| )${sub}( |$)" "${work_dir}/gitlog" | grep -Eq "(^| )HEAD(:| |$)"; then
+    pin_ok=0
+  fi
+done
+if [ "${pin_ok}" -eq 1 ]; then
+  pass "secret-scan: ls-tree, cat-file and the staged diff all use the same pinned HEAD commit id"
+else
+  fail "secret-scan: ls-tree, cat-file and the staged diff all use the same pinned HEAD commit id" "git calls: $(cat "${work_dir}/gitlog")"
+fi
+
+# 別の checkout の staged でも、差分の基準は確定した ID を使う
+new_repo; stage src/app.txt "x = ${token}"
+head_sha="$(git rev-parse HEAD)"
+: > "${work_dir}/gitlog"
+LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${det_ok}" check_scan "staged: a scan from another checkout succeeds with the pinned id" 1 src/app.txt
+if grep -E "(^| )diff( |$)" "${work_dir}/gitlog" | grep -q "${head_sha}"; then
+  pass "secret-scan: the staged diff of another checkout uses the pinned HEAD commit id"
+else
+  fail "secret-scan: the staged diff of another checkout uses the pinned HEAD commit id" "git calls: $(cat "${work_dir}/gitlog")"
+fi
+
+# 未作成ブランチの staged の差分は、基準の ID を渡さない従来の挙動のまま
+new_repo
+git symbolic-ref HEAD refs/heads/unborn
+stage src/app.txt "x = ${token}"
+: > "${work_dir}/gitlog"
+LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${det_ok}" check_scan "staged: an unborn branch is scanned without a base id" 1 src/app.txt
 
 # CDPATH で相対パスの cd が別のディレクトリ（一覧の無いおとり）へ向かっても、検出器の場所を取り違えない。
 # repo 側にコミットした正しい一覧が使われれば除外され（0）、CDPATH を効かせると一覧を失って検出になる（1）。

@@ -37,7 +37,9 @@
 #   PR が自分の変更で一覧に名前を足して検査を免れる経路を作らないため（CI は保護された main の検出器を使う。
 #   #51・#6000）。パスの形（*.lock・.claude/skills/・未登録の .agents/skills/ の下）では除外しない。
 #   名前は `[a-z0-9-]` の規則に合うものだけを通し、literal の pathspec にする（glob・`..`・`/` を持ち込ませない）。
-#   skills-lock.json が無ければ除外なしで全部走査する。ファイル全体を（正しい UTF-8 かを確かめてから）JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
+#   検出器の skills-lock.json が無いときの挙動は 3 つ: (1) 別の checkout なら除外なしで全部走査する。(2) 同じ checkout なら
+#   HEAD の一覧を検証する（壊れている・通常ファイルでないときは 2。有効なら除外なしで走査する）。(3) 未作成ブランチ・
+#   HEAD に一覧が無いときは除外なし。一覧があるときは、ファイル全体を（正しい UTF-8 かを確かめてから）JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
 #   検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のときは、作業ツリー・index の一覧ではなく
 #   コミット済み（HEAD）の一覧にある名前だけを使う（未コミットの編集で除外を足せない）。HEAD にまだ無い名前は、
 #   コミットされるまで走査される（PR では CI が保護された main の検出器で改めて走査する）。
@@ -444,6 +446,31 @@ parse_lock() {
     lock_fail
   fi
 }
+# HEAD のコミット ID を 1 回だけ確定する（head_id。未作成ブランチは空）。以降の ls-tree・cat-file・staged の差分の基準は
+# すべてこの ID を使い、途中で HEAD が動いても検証した種別・読む blob・差分の基準がずれないようにする。
+# 未作成ブランチ（HEAD の指す参照そのものが無い）だけが空の ID で通る。参照があるのにコミットとして解決できない
+# （オブジェクトの欠損等）・detached HEAD の解決失敗・参照の判定の失敗は検査不能（2）。
+head_id=""
+head_resolved=0
+resolve_head() {
+  local rc head_ref
+  head_resolved=1
+  if head_id="$(g rev-parse -q --verify 'HEAD^{commit}' 2> /dev/null)" && [[ "${head_id}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+    return 0
+  fi
+  head_id=""
+  rc=0
+  head_ref="$(g symbolic-ref -q HEAD 2> /dev/null)" || rc=$?
+  if [ "${rc}" -eq 0 ] && [ -n "${head_ref}" ]; then
+    rc=0
+    g show-ref --verify -q "${head_ref}" > /dev/null 2>&1 || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+      return 0
+    fi
+  fi
+  echo "secret-scan: cannot read HEAD; aborting" >&4
+  exit 2
+}
 load_skill_names() {
   local repo_real rc name n head_names=" " keep head_ref head_entry head_mode work_present=0
   local -a work_names
@@ -476,23 +503,12 @@ load_skill_names() {
     fi
     return 0
   fi
-  if ! g rev-parse -q --verify 'HEAD^{commit}' > /dev/null 2>&1; then
-    # 未作成ブランチ（HEAD の指す参照そのものが無い）だけを除外なしで通す。参照があるのにコミットとして
-    # 解決できない（オブジェクトの欠損等）・detached HEAD の解決失敗・参照の判定の失敗は検査不能（2）。
-    rc=0
-    head_ref="$(g symbolic-ref -q HEAD 2> /dev/null)" || rc=$?
-    if [ "${rc}" -eq 0 ] && [ -n "${head_ref}" ]; then
-      rc=0
-      g show-ref --verify -q "${head_ref}" > /dev/null 2>&1 || rc=$?
-      if [ "${rc}" -eq 1 ]; then
-        return 0
-      fi
-    fi
-    echo "secret-scan: cannot read HEAD; aborting" >&4
-    exit 2
+  resolve_head
+  if [ -z "${head_id}" ]; then
+    return 0
   fi
   # HEAD の一覧が読めない・壊れているときは検査不能（2）で止める（除外なしで続行する等の方式は人が決める）。
-  if ! g ls-tree -z HEAD -- skills-lock.json > "${tmp_dir}/head-entry"; then
+  if ! g ls-tree -z "${head_id}" -- skills-lock.json > "${tmp_dir}/head-entry"; then
     echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
     exit 2
   fi
@@ -507,7 +523,7 @@ load_skill_names() {
     100644 | 100755) ;;
     *) lock_fail ;;
   esac
-  if ! g cat-file blob "HEAD:skills-lock.json" > "${tmp_dir}/head-lock"; then
+  if ! g cat-file blob "${head_id}:skills-lock.json" > "${tmp_dir}/head-lock"; then
     echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
     exit 2
   fi
@@ -530,6 +546,10 @@ load_skill_names() {
   done
 }
 load_skill_names
+# staged の差分の基準も同じ ID にする（別の checkout でまだ解決していなければここで解決する）。
+if [ "${mode}" = staged ] && [ "${head_resolved}" -eq 0 ]; then
+  resolve_head
+fi
 
 # 本文の走査の pathspec。`-- .` で始めて空にしない（bash 3.2 は set -u で空配列を展開できない）。
 # 名前ごとに literal・top・末尾 `/`（名前ちょうどの blob・前方一致の別名は外さない）で外す。
@@ -560,7 +580,11 @@ scan_diff() {
   if [ "${mode}" = tracked ]; then
     g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
       --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@"
+  elif [ -n "${head_id}" ]; then
+    g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
+      --src-prefix=a/ --dst-prefix=b/ "${head_id}" "$@"
   else
+    # 未作成ブランチ（ID 無し）は従来どおり基準を渡さない
     g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
       --src-prefix=a/ --dst-prefix=b/ "$@"
   fi
