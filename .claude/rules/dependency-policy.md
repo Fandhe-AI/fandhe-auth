@@ -87,48 +87,85 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（合否と、例外を足したならその理由）を PR 本文に書く。
 
+次のブロックは、先頭の `PROD_FEATURES=… SERVER_FEATURES=… bash -s <<'EOF'` から末尾の `EOF` までを、そのままコピーして実行する（zsh から流してもよい。中身は bash で動く）。
+先頭の 2 変数は子シェルへ渡す値で、自分の変更に合わせて右辺を書き換える（本番の feature が無いときは `PROD_FEATURES= SERVER_FEATURES=` と空を明示する。渡し忘れると止まる）。
+子シェルは外の変数を引き継がないので、渡さずに既定の空へ落とすと、本番の feature でだけ入る `rsa`・`reqwest` 等を見ないまま合格しうる。そのため既定は置かない。
+途中で `exit 2` や `set -e` で止まったとき、残りの行がシェルへ流れて実行されないよう、全体を引用符付きの heredoc で包んでいる。
+上の 2 変数のほかに手で書き換える値は無い（取得先の置き場は `mktemp -d` で毎回新しく作り、終了時に消す）。
+暫定の手順で、cargo-audit の DB の取得と記録の正式な手順は TASK-679 で決める（未定。`./github-actions.md` の契約 3）。
+
 ```bash
-# advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。使った DB の commit と取得日を記録する
+PROD_FEATURES= SERVER_FEATURES= bash -s <<'EOF'
 # 取得と監査を分ける。取得の段では監査を流さない（`cargo audit` を --no-fetch なしで流すと取得と監査が同時に走り、
 # 記録した DB の版と監査に使った版がずれうる）。
-# 取得が成功した UTC 日時と、監査に使う DB の commit を、両ツールについて記録する。
-# `%cI` は DB の commit の日時で取得日時ではないため、取得日時は取得の成功の直後に `date -u` で別に取る。
 # 失敗は後続へ素通りさせない。取得・commit の読み取り・日時の記録のどれが失敗しても、その場で止めて監査へ進まない。
 set -euo pipefail
-if ! cargo deny fetch db; then                  # cargo-deny の DB を取得する（`fetch` の対象は db・index・all）
+# 下の cargo deny は -c で一時の設定を使い、cwd の deny.toml を読まない。deny.toml（TASK-668）ができたら、
+# bans・licenses・sources が規則なしで走らないよう、止めて -c を deny.toml に替える（TASK-679）
+if [ -e deny.toml ]; then echo "error: deny.toml exists; switch -c to deny.toml (TASK-679)" >&2; exit 2; fi
+: "${PROD_FEATURES?pass PROD_FEATURES (empty string if none)}"       # 渡し忘れたら止める（空は空文字で明示する）
+: "${SERVER_FEATURES?pass SERVER_FEATURES (empty string if none)}"
+
+# 置き場は実行ごとの新しい空のディレクトリ。既定の ~/.cargo/advisory-db や前回の残りを使わない（古い DB で成功する経路を残さない）
+WORK="$(mktemp -d)"
+trap 'if [ -n "${WORK:-}" ] && [ "$WORK" != "/" ] && [ -d "$WORK" ]; then rm -rf "$WORK"; fi' EXIT   # mktemp で作った値だけを消す
+DENY_DB_PARENT="$WORK/deny-db"
+AUDIT_DB="$WORK/audit-db"
+DENY_CONFIG="$WORK/deny-db-location.toml"
+# cargo-deny が使う DB の置き場を、この新しい置き場に固定する設定（DB の場所だけ。許可・禁止の規則は含まない）
+cat > "$DENY_CONFIG" <<TOML
+[advisories]
+db-path = "$DENY_DB_PARENT"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+TOML
+
+# advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。取得日時は `%cI`（DB の commit の日時）ではなく、成功の直後に `date -u` で取る
+# （標準入力はスクリプト本体なので、各コマンドに </dev/null を付けて読み取りを防ぐ）
+if ! cargo deny fetch -c "$DENY_CONFIG" db </dev/null; then      # cargo-deny の DB を取得する（`fetch` の対象は db・index・all）
   echo "error: cargo deny fetch db failed" >&2; exit 2
 fi
-DENY_FETCHED_AT="$(date -u +%FT%TZ)"            # 取得が成功した場合だけ到達する。取得日時はここで取る
-# cargo-audit 0.22.2 の --help には取得だけの口が無い（サブコマンドは bin のみ）。cargo-audit 用の DB は、
-# 監査の直前に取得した置き場を --db で明示して渡す。置き場は実行ごとの新しい空のディレクトリにし、既定の
-# ~/.cargo/advisory-db や前回の残りを使わない（古い DB で成功する経路を残さない）。取得の具体の手順
-# （例: 空のディレクトリへの advisory-db の git clone）は TASK-679 で決める（未定）。暫定でもこの前提を外さない。
-# 取得は deny と同じ形で、失敗したら止める（AUDIT_DB は取得に成功した新しいディレクトリ）:
-#   if ! <取得の手順を AUDIT_DB へ>; then echo "error: advisory db fetch for cargo audit failed" >&2; exit 2; fi
-#   AUDIT_FETCHED_AT="$(date -u +%FT%TZ)"       # 取得が成功した場合だけ到達する
-DENY_DB_DIR=~/.cargo/advisory-dbs/advisory-db-<hash>   # cargo-deny の DB の置き場（<hash> は取得で作られた実際のディレクトリ名）
-test -d "$DENY_DB_DIR" && test -d "$AUDIT_DB"  || { echo "error: advisory db dir missing" >&2; exit 2; }
-DENY_DB_COMMIT="$(git -C "$DENY_DB_DIR" log -1 --format='%H')"    # 失敗（空・非 0）なら set -e で止まる
+DENY_FETCHED_AT="$(date -u +%FT%TZ)"                  # 取得が成功した場合だけ到達する
+# cargo-audit 0.22.2 の --help には取得だけの口が無い（サブコマンドは bin のみ）。同じ取得元を新しいディレクトリへ clone し、--db で明示して渡す
+if ! git clone --depth 1 --quiet https://github.com/rustsec/advisory-db "$AUDIT_DB" </dev/null; then
+  echo "error: advisory db fetch for cargo audit failed" >&2; exit 2
+fi
+AUDIT_FETCHED_AT="$(date -u +%FT%TZ)"                 # 取得が成功した場合だけ到達する
+
+# cargo-deny の DB は、新しい置き場の下に作られた 1 つだけを使う。ちょうど 1 つでなければ、記録する DB と監査が使う DB が一致しない
+DENY_DB_DIRS=("$DENY_DB_PARENT"/advisory-db-*)
+if [ "${#DENY_DB_DIRS[@]}" -ne 1 ] || [ ! -d "${DENY_DB_DIRS[0]}" ] || [ ! -d "$AUDIT_DB" ]; then
+  echo "error: advisory db dir missing or not unique" >&2; exit 2
+fi
+DENY_DB_COMMIT="$(git -C "${DENY_DB_DIRS[0]}" log -1 --format='%H')"    # 失敗（非 0）なら set -e で止まる
 AUDIT_DB_COMMIT="$(git -C "$AUDIT_DB" log -1 --format='%H')"
-test -n "$DENY_DB_COMMIT" && test -n "$AUDIT_DB_COMMIT"  || { echo "error: db commit not recorded" >&2; exit 2; }
-# 記録: DENY_FETCHED_AT・AUDIT_FETCHED_AT と、上の 2 つの commit（DPOL-33）。`%cI` は commit の日時で取得日時ではないため使わない
+if [ -z "$DENY_DB_COMMIT" ] || [ -z "$AUDIT_DB_COMMIT" ]; then
+  echo "error: db commit not recorded" >&2; exit 2
+fi
+# 記録: DENY_FETCHED_AT・AUDIT_FETCHED_AT と、2 つの commit（DPOL-33）。PR 本文に書く
+printf 'deny db: %s (fetched %s)\naudit db: %s (fetched %s)\n' "$DENY_DB_COMMIT" "$DENY_FETCHED_AT" "$AUDIT_DB_COMMIT" "$AUDIT_FETCHED_AT"
 # 2 つのツールが同じ DB のスナップショットを共有できるかは未確認。両方の commit を記録し、食い違えば人が判断する（共有できると断定しない）
 
 # 取得なしで流す（DPOL-33・DPOL-34）。上で記録した DB だけを使い、ここでは取得しない
-cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
-cargo audit --no-fetch --db "$AUDIT_DB" --file Cargo.lock   # 直前に取得した DB を明示して渡す。cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
-git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換えが無いこと（依存を足した変更では差分を目視で確かめる）
+cargo deny --locked check -c "$DENY_CONFIG" --disable-fetch </dev/null   # advisories・bans・licenses・sources（DB は上の設定で固定した 1 つ）
+cargo audit --no-fetch --db "$AUDIT_DB" --file Cargo.lock </dev/null   # 直前に取得した DB を明示して渡す。cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
+git --no-pager diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換えが無いこと（依存を足した変更では差分を目視で確かめる）
+
+# 実際に使った値と、ここまでの合格を出す。PR 本文に残す（trap で DB を消すため、記録に残るのは上の commit・取得日時とこの出力だけ）
+printf 'PROD_FEATURES=%s\nSERVER_FEATURES=%s\n' "$PROD_FEATURES" "$SERVER_FEATURES"
+echo "fetch+deny+audit: passed"
 
 # 以下の cargo tree -i は「一致なし」で非 0 を返すのが合格の場合があるため、終了コードではなく出力の文言で判定する（下の注）
 set +e
 
-# PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
+# PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空。実行の先頭で明示して渡す）。--all-features は使わない
 # SERVER_FEATURES: サーバー側の本番の feature だけを `<crate>/<feature>` のカンマ区切りで渡す（--workspace と併用する feature は必ずこの形。無ければ空）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa         # 合格: 「did not match any packages」（一致なし）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls  # 合格: 同上
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
-cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
-cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i rsa </dev/null         # 合格: 「did not match any packages」（一致なし）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i native-tls </dev/null  # 合格: 同上
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i openssl </dev/null     # 合格: 一致なし、または逆依存の根が webauthn-rs 系だけ
+cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys </dev/null      # 合格: 一致なし（DPOL-40。`fandhe-auth-server` は Hub の担当で、ここでは確かめない）
+cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest </dev/null     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
+exit 0   # 上の cargo tree の非 0 を終了コードにしない。合否は出力の文言と、上の passed の印で見る
+EOF
 ```
 
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
