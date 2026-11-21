@@ -22,7 +22,7 @@ tools:
 | 区分 | 内容 |
 |------|------|
 | ✅ 読む | `Cargo.toml`・`Cargo.lock`・`deny.toml`・`crates/*/Cargo.toml` |
-| ✅ 実行 | `cargo deny fetch`・`cargo audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ）・`cargo deny --locked check <検査> --disable-fetch`・`cargo audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`git diff --exit-code Cargo.lock`・`ls ~/.cargo/advisory-dbs`・`date -u +%FT%TZ`・`git -C ~/.cargo/advisory-db log -1 --format='%H %cI'`・`git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'`・`cargo deny --version`・`cargo audit --version` |
+| ✅ 実行 | `cargo deny fetch`・`cargo audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ）・`cargo deny --locked check <検査> --disable-fetch`・`cargo audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`git diff --exit-code Cargo.lock`・`ls ~/.cargo/advisory-dbs`・`date -u +%FT%TZ`・`git -C ~/.cargo/advisory-db log -1 --format='%H %cI'`・`git -C ~/.cargo/advisory-db rev-parse HEAD`・`git -C ~/.cargo/advisory-db ls-remote origin HEAD`・`git -C ~/.cargo/advisory-dbs/advisory-db-<hash> rev-parse HEAD`・`ls deny.toml`・`git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'`・`cargo deny --version`・`cargo audit --version` |
 | ❌ 禁止 | `cargo update`・`cargo add` / `remove`・`cargo install`・ファイルの編集・例外の追加・`cargo deny` / `cargo tree` を `--locked` なしで流すこと・`cargo tree` に `--all-features` を付けること |
 
 ## 遵守する規約
@@ -37,7 +37,10 @@ tools:
 ### Step 1: 前提を確かめる
 
 `Cargo.lock` の有無を確かめる。無いときは監査を流さず「前提なし（`Cargo.lock` は TASK-3 の雛形）」と報告して止まる。
-`deny.toml` は TASK-668 まで無いので、無いことを理由に止まらない。「`deny.toml` なし（TASK-668 待ち。cargo-deny の既定の設定で流した）」と報告に書く。暫定の報告の対象はルートの `Cargo.lock` だけで、`crates/trial-deps/fuzz/Cargo.lock` は未実施と記録する。厳格な設定（TASK-668）が無い間は、規約固有の検査（bans の DPOL-18・licenses の DPOL-22・DPOL-24・sources の DPOL-25）を「未評価」と書き、既定の設定で得た出力は「参考結果（規約の合否ではない）」と明示する。その結果を DPOL-34 の合格として扱わない（`../../rules/dependency-policy.md` の暫定の手順と同じ扱い）。
+`deny.toml`（ルート）の有無を `ls deny.toml` で確かめ、無くても止まらない。結果を報告に書く。
+- 無いとき: 「`deny.toml` なし（TASK-668 待ち。cargo-deny の既定の設定で流した）」と書く。厳格な設定（TASK-668）が無い間は、規約固有の検査（bans の DPOL-18・licenses の DPOL-22・DPOL-24・sources の DPOL-25）を「未評価」と書き、既定の設定で得た出力は「参考結果（規約の合否ではない）」と明示する。その結果を DPOL-34 の合格として扱わない（`../../rules/dependency-policy.md` の暫定の手順と同じ扱い）。
+- あるとき: 「`deny.toml` あり（使った設定: ルートの `deny.toml`）」と書き、既定の設定とも未評価とも書かない。bans・licenses・sources の行はその設定での結果として扱う（合否は人が決める）。
+どちらも、暫定の報告の対象はルートの `Cargo.lock` だけで、`crates/trial-deps/fuzz/Cargo.lock` は未実施と記録する。
 `cargo deny` / `cargo audit` が未導入なら、その旨を報告して止まる（導入はしない）。
 本番のビルドで有効にする feature を呼び出し元から受け取り、`PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り）と
 `SERVER_FEATURES`（本体の workspace のうち、サーバー側のビルドに入る crate の feature だけ。`--workspace` と併用するため `<crate>/<feature>` のカンマ区切りで渡す。`fandhe-auth-server` は Hub の担当で本体の workspace に無い）に置く。受け取れなければ空（既定の feature だけ）で流し、その旨を報告に書く。
@@ -56,7 +59,12 @@ cargo audit --file Cargo.lock
 
 2 つ目は cargo-audit の DB の取得を兼ねる（QP-2 の手順）ため、DPOL-33 の取得と監査の分離を満たさない暫定の手順である（正式な手順と記録の様式は TASK-679。`../../rules/dependency-policy.md` の「依存を足す・更新するときの確認手順」と同じ）。
 取得はこの 1 回だけで、以後の実行は全て取得なしで流す。報告には「暫定の手順で、DPOL-34 の合格ではない」と書く。
-使った DB の commit と取得日を記録する（DPOL-33）。取得の成否と監査結果の終了コードは分けて読む。`cargo deny fetch` は終了コード 0 を取得の成功とする。`cargo audit --file Cargo.lock` は脆弱性を検出すると非 0 で終わるため、終了コードでは取得の成否を決めず、出力に DB の取得の記録（`Fetching advisory database from` の行）があり、取得の失敗の誤り（fetch・network・git 等）が無いことで取得の成功を確かめる。`Loaded <N> security advisories` はローカルの DB の読み込みの表示で、取得の成功の証拠にしない（読み込みだけしか確かめられないときは取得日を記録せず、「取得を確認できなかった」と報告する）（検出による非 0 は取得の失敗ではなく、監査結果として別に記録する）。取得日は、各コマンドの直後に成否を確かめ、成功したツールだけその場で `date -u +%FT%TZ` を流して得た日時とし（2 つの実行の後に 1 回だけ流さない）（commit を読む `git log` より前に流す）、下の `%cI`（DB の commit の日時）とは別に書く。取得の成功を確かめられなかったツールは取得日を書かず、「取得を確認できなかった」と報告する。commit は次で読む（`<hash>` は `ls ~/.cargo/advisory-dbs` で確かめる）。
+使った DB の commit と取得日を記録する（DPOL-33）。取得の成否は、取得の開始を示す表示（`Fetching advisory database from`）やエラーの表示の有無では決めない（途中の中断・stderr の欠落でも満たされ、古いキャッシュを今回取得した DB と記録してしまうため）。終了コードと DB の実体の状態で決める（`../../rules/dependency-policy.md` の記録の項と同じ）。
+- cargo-deny: `cargo deny fetch` の終了コードが 0 で、DB の `git rev-parse HEAD` が読めたとき、終了コード 0 の直後に `date -u +%FT%TZ` を流した日時を取得日とする。
+- cargo-audit: 実行の前に `git -C ~/.cargo/advisory-db rev-parse HEAD` を読み、`cargo audit --file Cargo.lock` の後に `git -C ~/.cargo/advisory-db ls-remote origin HEAD` の commit がローカルの HEAD と一致したときだけ、その直後に `date -u +%FT%TZ` を流した日時を取得日とする。終了コードは検出でも非 0 になるため、取得の成否に使わない（検出による非 0 は監査結果として別に記録する）。
+- 確認できなかったツール（終了コード非 0・`ls-remote` の失敗・commit の不一致・HEAD を読めない）は取得日を書かず、「取得日は未記録（確認できず）」と報告し、DB の commit だけを記録する。
+- `Loaded <N> security advisories` は読み込みの表示で、取得の成功の証拠にしない。取得日は `%cI`（DB の commit の日時）とは別に書く。
+commit は次で読む（`<hash>` は `ls ~/.cargo/advisory-dbs` で確かめる）。
 
 ```bash
 git -C ~/.cargo/advisory-db log -1 --format='%H %cI'
@@ -133,11 +141,11 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 
 ## 完了条件
 
-- [ ] 前提（`Cargo.lock`・道具。`deny.toml` の有無は報告に書くだけで止まらない）を確かめた
+- [ ] 前提（`Cargo.lock`・道具。`deny.toml` は有無を確かめ、あれば使った設定を、無ければ既定設定と未評価の扱いを報告に書く。有無で止まらない）を確かめた
 - [ ] DB の取得を 1 回にし、以後の実行を取得なし（`--disable-fetch`・`--no-fetch`）で流した。cargo deny と cargo tree は `--locked`、cargo audit は `git diff --exit-code Cargo.lock` で書き換えなしを確かめた
 - [ ] 逆引きは本番の feature を明示し（`--all-features` なし）、`-e normal,build` で流した
 - [ ] 5 つの実行と 5 つの逆引きの結果を表にした（逆引きは absent・filtered・実行失敗を区別した）
-- [ ] DB の取得日をツールごとに、取得の成功を確かめた時点の日時として commit 日時と別に記録した（cargo audit は検出による非 0 と取得の成否を分けた。確認できなければその旨を報告した）
+- [ ] DB の取得日をツールごとに、取得の成功を確かめた時点の日時として commit 日時と別に記録した（cargo-deny は終了コード 0、cargo-audit は DB の HEAD と取得元の HEAD の一致で確かめ、開始ログの有無を根拠にしていない。確認できなければ「取得日は未記録」と報告した）
 - [ ] `deny.toml` が無いとき、規約固有の検査（DPOL-18・DPOL-22・DPOL-24・DPOL-25）を「未評価」とし、既定の設定の結果を参考結果と明示した
 - [ ] 例外の承認・ファイルの変更をしていない
 
@@ -148,9 +156,10 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 
 ### 実行の条件
 - cargo-deny: {版} / cargo-audit: {版}
-- advisory DB の記録（ツールごと。取得日時は取得の成功を確かめた時点の日時で、commit 日時 `%cI` とは別。取得を確認できなければ「取得を確認できなかった」と書く）:
+- advisory DB の記録（ツールごと。取得日時は終了コード・DB の実体の状態で確認した時点の日時で、commit 日時 `%cI` とは別。確認できなければ「取得日は未記録」と書く）:
   - cargo-deny: 取得確認の結果 {成功 / 確認できず} / 取得日時 {日時} / commit SHA {commit} / commit 日時 {%cI}
   - cargo-audit: 取得確認の結果 {成功 / 確認できず（検出による非 0 とは別）} / 取得日時 {日時} / commit SHA {commit} / commit 日時 {%cI}
+- deny.toml: {なし（既定の設定。bans・licenses・sources は未評価）/ あり（使った設定を明記）}
 - 監査の対象: ルートの `Cargo.lock`（`crates/trial-deps/fuzz/Cargo.lock` は未実施）
 - 逆引きで有効にした feature: {PROD_FEATURES} / {SERVER_FEATURES}（空なら既定の feature だけ）
 
