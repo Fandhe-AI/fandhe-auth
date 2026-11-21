@@ -264,7 +264,7 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 
 # index を 1 回だけ複写して固定し、以降の登録の確認・パス一覧・本文の走査はすべてその複写（GIT_INDEX_FILE）に対して行う。
 # 別々に index を開くと、間に index が書き換わったとき、登録の確認とパス一覧・本文が別の内容を見る（#6000）。
-# 走査の後に、元の index の内容（git ls-files -s）が固定時と同じことを確かめ、違えば検査不能（2）にする
+# 走査の後に、元の index の内容（git ls-files -s と intent-to-add の印。下の index_listing）が固定時と同じことを確かめ、違えば検査不能（2）にする
 # （stat 情報だけの更新では差が出ない）。index が無い（空）ときは存在しない複写のパスを指し、git は空として扱う。
 if [ -n "${GIT_INDEX_FILE:-}" ]; then
   orig_index="${GIT_INDEX_FILE}"
@@ -280,7 +280,25 @@ if [ -e "${orig_index}" ]; then
   fi
 fi
 export GIT_INDEX_FILE="${snap_index}"
-if ! g ls-files -s -z > "${tmp_dir}/index-listing-before"; then
+# 空の tree の ID は常に解決する。未作成ブランチの staged も、基準を暗黙にせず空の tree を明示して固定する
+# （基準を省くと、走査中にブランチが作られたとき名前の検査と本文の検査の基準がずれ得る）。
+# index の比較と intent-to-add の判定（空の tree との cached の差分）にも使うため、ここで先に解決する。
+empty_tree=""
+if ! empty_tree="$(g hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
+  echo "secret-scan: failed to resolve the empty tree; aborting" >&4
+  exit 2
+fi
+# index_listing <出力先>: GIT_INDEX_FILE の指す index の内容を、走査前後の比較用に書き出す。
+# ls-files -s はモード・blob ID・stage・パスだけで、intent-to-add の印を含まない（git add -N の空 blob と、実際に
+# ステージした空ファイルが同じ行になる）。intent-to-add の項目を除く cached の差分（空の tree との比較。
+# 作業ツリー・stat 情報を見ない）のパス一覧を後ろに足し、印の変化も比べる（intent-to-add の .env が走査中に
+# 実際にステージされた場合を逃さない。#6011）。区切りの NUL 2 つは、どちらの一覧の項目にも現れない。
+index_listing() {
+  g ls-files -s -z > "$1" || return 1
+  printf '\000\000' >> "$1" || return 1
+  g diff --cached --name-only -z --no-renames --ita-invisible-in-index "${empty_tree}" >> "$1" || return 1
+}
+if ! index_listing "${tmp_dir}/index-listing-before"; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
 fi
@@ -625,7 +643,7 @@ parse_git_lock() {
 # 一覧が index に無ければ index_names は空（" "）。通常ファイル（100644・100755）・単一の stage 0 以外は検査不能（2）。
 index_names=" "
 load_index_lock() {
-  local entry mode rest oid
+  local entry mode rest oid ita_head ita_path ita_more ita_re
   index_names=" "
   # 標準エラーは抑止しない（--summary では fd 2 が捨てられる。通常モードは git の診断を残す）。
   if ! g ls-files -s -z -- skills-lock.json > "${tmp_dir}/index-entry"; then
@@ -651,16 +669,36 @@ load_index_lock() {
     *) lock_fail ;;
   esac
   # git add -N（intent-to-add）の項目は、ls-files -s が空 blob の stage 0 として返す。実際には登録されていないため
-  # 未登録（一覧なし）として扱う。判定は作業ツリーとの差分で行う（intent-to-add は元の側が mode 000000 の追加として出る）。
-  # 実際にステージされた空ファイルはこの形にならず、従来どおり解析へ進んで拒否する。
+  # 未登録（一覧なし）として扱う。判定は固定した index だけで行い、作業ツリーを見ない（add -N の後に作業ツリーから
+  # 消した・書き換えた場合も結果を変えない。#6000 の index の固定・#6011）。空の tree との cached の差分で、
+  # intent-to-add の項目は --ita-invisible-in-index では現れず、--ita-visible-in-index では元の側が mode 000000 の
+  # 追加として現れる。実際にステージされた空ファイルは前者にも現れるため、従来どおり解析へ進んで拒否する。
+  # 両者の結果が食い違う（どちらにも現れない等）ときは検査不能（2）にする。
   if [ "${oid}" = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" ] \
     || [ "${oid}" = "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813" ]; then
-    if ! g diff-files --raw --no-renames -- skills-lock.json > "${tmp_dir}/index-ita"; then
+    if ! g diff --cached --raw -z --no-renames --ita-invisible-in-index "${empty_tree}" -- skills-lock.json > "${tmp_dir}/index-ita"; then
       echo "secret-scan: cannot read the staged skills-lock.json; aborting" >&4
       exit 2
     fi
-    if IFS= read -r rest < "${tmp_dir}/index-ita" && [[ "${rest}" == ":000000 "* ]]; then
-      return 0
+    if [ ! -s "${tmp_dir}/index-ita" ]; then
+      if ! g diff --cached --raw -z --no-renames --ita-visible-in-index "${empty_tree}" -- skills-lock.json > "${tmp_dir}/index-ita"; then
+        echo "secret-scan: cannot read the staged skills-lock.json; aborting" >&4
+        exit 2
+      fi
+      ita_head=""
+      ita_path=""
+      ita_more=""
+      {
+        IFS= read -r -d '' ita_head || true
+        IFS= read -r -d '' ita_path || true
+        IFS= read -r -d '' ita_more || true
+      } < "${tmp_dir}/index-ita"
+      ita_re='^:000000 100(644|755) 0+ [0-9a-f]+ A$'
+      if [[ "${ita_head}" =~ ${ita_re} ]] \
+        && [ "${ita_path}" = skills-lock.json ] && [ -z "${ita_more}" ]; then
+        return 0
+      fi
+      lock_fail
     fi
   fi
   idx_re='^[0-9a-f]{40}([0-9a-f]{24})?[[:space:]]0'
@@ -811,13 +849,7 @@ done
 # 名前の検査・除外パス・解析ループ・規則の判定を staged モードと共用できる（解析の二重実装を作らない）。
 # bash 3.2 は set -u 下で空配列の展開・長さ参照が unbound variable になるため、
 # 空になりうる配列を使わず mode で分岐し、tracked のときだけ empty_tree を渡す。
-empty_tree=""
-# 空の tree の ID は常に解決する。未作成ブランチの staged も、基準を暗黙にせず空の tree を明示して固定する
-# （基準を省くと、走査中にブランチが作られたとき名前の検査と本文の検査の基準がずれ得る）。
-if ! empty_tree="$(g hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
-  echo "secret-scan: failed to resolve the empty tree; aborting" >&4
-  exit 2
-fi
+# 空の tree の ID（empty_tree）は index の固定の前に解決済み。
 if [ "${mode}" = tracked ] || [ -z "${head_id}" ]; then
   scan_base="${empty_tree}"
 else
@@ -976,7 +1008,7 @@ if [ "${head_resolved}" -eq 1 ]; then
 fi
 
 # 走査中に元の index の内容が変わっていたら、固定した複写に基づく結果は実際の内容と食い違う。合格を返さず検査不能（2）にする。
-if ! GIT_INDEX_FILE="${orig_index}" g ls-files -s -z > "${tmp_dir}/index-listing-after" 2> /dev/null; then
+if ! GIT_INDEX_FILE="${orig_index}" index_listing "${tmp_dir}/index-listing-after" 2> /dev/null; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
 fi

@@ -87,6 +87,17 @@ if [ -n "${MOVE_HEAD_ON_ARG:-}" ] && [ ! -e "${MOVE_HEAD_FLAG:-/nonexistent}" ];
     fi
   done
 fi
+# MUTATE_INDEX_ON_ARG を含む呼び出しの前に一度だけ、元の index へ MUTATE_INDEX_ADD のパスを git add する（走査中の index の変化の再現用）。
+# 検出器は固定した複写を GIT_INDEX_FILE で指して git を呼ぶため、それを外して既定の index を書き換える。
+if [ -n "${MUTATE_INDEX_ON_ARG:-}" ] && [ ! -e "${MUTATE_INDEX_FLAG:-/nonexistent}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "${MUTATE_INDEX_ON_ARG}" ]; then
+      : > "${MUTATE_INDEX_FLAG}"
+      (unset GIT_INDEX_FILE; "${REAL_GIT}" add -- "${MUTATE_INDEX_ADD}")
+      break
+    fi
+  done
+fi
 for arg in "$@"; do
   if [ "${arg}" = "${FAIL_GIT_ARG:-}" ]; then
     echo "git shim: forced failure on ${arg}" >&2
@@ -257,9 +268,14 @@ check_scan "file name with spaces is reported correctly" 1 "dir with space/app.t
 new_repo; stage src/app.txt "x = ${token}"; mkdir -p sub/dir; cd sub/dir
 check_scan "run from a subdirectory scans the whole index" 1 src/app.txt
 
-new_repo; mkdir -p .agents/skills/vendored-a; stage .agents/skills/vendored-a/doc.md "x = ${token}"
+# 移動元は検出器と走査対象の index の両方に登録した除外の下に置き、除外の境界をまたぐ移動にする（#6011）
+new_repo; stage_lock; mkdir -p .agents/skills/vendored-a; stage .agents/skills/vendored-a/doc.md "x = ${token}"
 git commit -q -m "chore: vendored"; mkdir -p src; git mv .agents/skills/vendored-a/doc.md src/doc.md
 SCAN_BIN="${det_ok}" check_scan "file moved out of an excluded path" 1 src/doc.md
+# 除外の無い場所どうしの移動も、移動先の全行を走査する（--no-renames。リネームの検出で本文が出なくならない）
+new_repo; stage old/doc.md "x = ${token}"
+git commit -q -m "chore: add"; mkdir -p src; git mv old/doc.md src/doc.md
+check_scan "file renamed between scanned paths" 1 src/doc.md
 
 # (b) 非 UTF-8 のバイトと同じ行にあるトークン
 new_repo; stage latin1.txt "caf"$'\xe9'" ${token}"
@@ -298,7 +314,8 @@ check_scan "(d) diff.noprefix keeps file attribution" 1 app.txt
 new_repo; git config diff.mnemonicPrefix true; stage app.txt "x = ${token}"
 check_scan "(d) diff.mnemonicPrefix keeps file attribution" 1 app.txt
 
-new_repo; git config diff.renames copies; mkdir -p .agents/skills/vendored-a
+# コピー元は検出器と走査対象の index の両方に登録した除外の下に置き、除外の境界をまたぐコピーにする（#6011）
+new_repo; git config diff.renames copies; stage_lock; mkdir -p .agents/skills/vendored-a
 stage .agents/skills/vendored-a/doc.md "x = ${token}"; git commit -q -m "chore: vendored"
 cp .agents/skills/vendored-a/doc.md copy.md; git add copy.md
 SCAN_BIN="${det_ok}" check_scan "(d) diff.renames=copies does not hide a copied file" 1 copy.md
@@ -334,6 +351,11 @@ SCAN_BIN="${det_ok}" check_scan "a target index without skills-lock.json exclude
 # git add -N（intent-to-add）の skills-lock.json は未登録として扱い、無関係な変更を止めない。実際にステージした空ファイルは拒否する（#6000）
 new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add -N skills-lock.json
 SCAN_BIN="${det_ok}" check_scan "an intent-to-add skills-lock.json is treated as unregistered" 0
+# intent-to-add の判定は固定した index だけで行い、作業ツリーに依らない（add -N の後に作業ツリーから消しても未登録のまま。#6011）
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add -N skills-lock.json; rm skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "an intent-to-add skills-lock.json removed from the working tree is treated as unregistered" 0
+new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add skills-lock.json; rm skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "a really staged empty skills-lock.json removed from the working tree is still rejected" 2
 new_repo; stage src/app.txt "hello"; : > skills-lock.json; git add skills-lock.json
 SCAN_BIN="${det_ok}" check_scan "a really staged empty skills-lock.json is still rejected" 2
 
@@ -934,6 +956,20 @@ for sub in "ls-tree" "cat-file" "diff"; do
     grep -F ":skills-lock.json" "${work_dir}/gitlog-sub" > "${work_dir}/gitlog-sub2" || true
     mv "${work_dir}/gitlog-sub2" "${work_dir}/gitlog-sub"
   fi
+  # index の比較・intent-to-add の判定の diff（--ita-*-in-index）は HEAD ではなく空の tree と比べる。空の tree の ID を
+  # 渡していることを確かめてから、HEAD の ID の照合（走査の diff）から外す
+  if [ "${sub}" = diff ]; then
+    empty_sha="$(git hash-object -t tree /dev/null)"
+    grep -E -- "--ita-(in)?visible-in-index" "${work_dir}/gitlog-sub" > "${work_dir}/gitlog-ita" || true
+    ita_total="$(wc -l < "${work_dir}/gitlog-ita")"
+    ita_total="${ita_total//[[:space:]]/}"
+    ita_with_empty="$(grep -c "${empty_sha}" "${work_dir}/gitlog-ita" || true)"
+    if [ "${ita_total}" -lt 1 ] || [ "${ita_total}" -ne "${ita_with_empty}" ]; then
+      pin_ok=0
+    fi
+    grep -vE -- "--ita-(in)?visible-in-index" "${work_dir}/gitlog-sub" > "${work_dir}/gitlog-sub2" || true
+    mv "${work_dir}/gitlog-sub2" "${work_dir}/gitlog-sub"
+  fi
   sub_total="$(wc -l < "${work_dir}/gitlog-sub")"
   sub_total="${sub_total//[[:space:]]/}"
   sub_with_id="$(grep -c "${head_sha}" "${work_dir}/gitlog-sub" || true)"
@@ -986,6 +1022,27 @@ if [ "${move_rc}" -eq 2 ] && grep -qxF "secret-scan: HEAD changed during the sca
 else
   fail "secret-scan: an unborn branch created during a staged scan is a scan failure (2)" "got ${move_rc}" "output: $(cat "${work_dir}/out")"
 fi
+
+# 走査中に元の index が変わったら、固定した複写に基づく結果で合格させない（2）。本文の diff（-U0）の直前に git add する
+# run_index_mutation <説明> <走査中に add するパス>
+run_index_mutation() {
+  local rc=0
+  rm -f "${work_dir}/mutated"
+  MUTATE_INDEX_ON_ARG=-U0 MUTATE_INDEX_ADD="$2" MUTATE_INDEX_FLAG="${work_dir}/mutated" PATH="${shim_dir}:${PATH}" \
+    LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ -e "${work_dir}/mutated" ] && [ "${rc}" -eq 2 ] \
+    && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+    pass "secret-scan: $1"
+  else
+    fail "secret-scan: $1" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+}
+new_repo; stage src/app.txt "hello"; printf '%s\n' "x = placeholder" > other.txt
+run_index_mutation "a file staged during the scan is a scan failure (2)" other.txt
+# intent-to-add の空ファイルを走査中に実際にステージしても 2。ls-files -s では両者が同じ行になるため、印の変化も比べる（#6011）
+new_repo; stage src/app.txt "hello"; : > .env; git add -N .env
+check_scan "an intent-to-add .env is not part of the commit" 0
+run_index_mutation "an intent-to-add file really staged during the scan is a scan failure (2)" .env
 
 # 一覧の大きさの上限（作業ツリー側・HEAD 側・境界）。上限は検出器の lock_max_bytes（暫定 64 KiB）
 lock_max="$(sed -n 's/^lock_max_bytes=\([0-9][0-9]*\)$/\1/p' "${SECRET_SCAN}")"
@@ -1042,7 +1099,8 @@ stage src/app.txt "x = ${token}"
 : > "${work_dir}/gitlog"
 LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${det_ok}" check_scan "staged: an unborn branch is scanned against the empty tree" 1 src/app.txt
 empty_id="$(git hash-object -t tree --stdin < /dev/null)"
-grep -E "(^| )diff( |$)" "${work_dir}/gitlog" > "${work_dir}/gitlog-sub" || true
+# index の比較の diff（--ita-*-in-index。常に空の tree と比べる）は数えず、走査の 2 回の diff だけを見る
+grep -E "(^| )diff( |$)" "${work_dir}/gitlog" | grep -vE -- "--ita-(in)?visible-in-index" > "${work_dir}/gitlog-sub" || true
 sub_total="$(wc -l < "${work_dir}/gitlog-sub")"
 sub_total="${sub_total//[[:space:]]/}"
 sub_with_id="$(grep -c "${empty_id}" "${work_dir}/gitlog-sub" || true)"
