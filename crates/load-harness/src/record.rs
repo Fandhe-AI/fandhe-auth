@@ -28,6 +28,10 @@ pub const LOAD_RECORD_FORMAT: &str = "fandhe-auth-load-record/1";
 pub const MAX_REFS: usize = 8;
 /// 値の行の数の上限（仮置き）。
 pub const MAX_VALUES: usize = 64;
+/// 時刻（UNIX 秒）の上限。9999-12-31T23:59:59Z。RFC 3339 の 4 桁年に収める（仮置き）。
+pub const MAX_UNIX_SECS: u64 = 253_402_300_799;
+/// `refs` 欄で出力側が使う語。出典の ID には使わせない（出典なし・自動取得の印と取り違えない）。
+const RESERVED_REFS: [&str; 3] = ["none", "harness_config", "measured"];
 
 /// 記録の誤り。種類だけを持ち、入力の値・パス・元の誤りの文言は載せない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,7 +39,9 @@ pub enum LoadRecordError {
     InvalidName,
     InvalidRef,
     InvalidRunRecordFile,
-    InvalidValue { rule: &'static str },
+    InvalidValue(InvalidValueReason),
+    RunStartMismatch,
+    TimeOutOfRange,
     TooManyRefs,
     TooManyValues,
     DuplicateValue,
@@ -50,7 +56,11 @@ impl fmt::Display for LoadRecordError {
             Self::InvalidName => f.write_str("load record error: invalid name"),
             Self::InvalidRef => f.write_str("load record error: invalid ref"),
             Self::InvalidRunRecordFile => f.write_str("load record error: invalid run record file"),
-            Self::InvalidValue { rule } => write!(f, "load record error: invalid value ({rule})"),
+            Self::InvalidValue(r) => write!(f, "load record error: invalid value ({})", r.as_str()),
+            Self::RunStartMismatch => {
+                f.write_str("load record error: run record file and run_started_at differ")
+            }
+            Self::TimeOutOfRange => f.write_str("load record error: time out of range"),
             Self::TooManyRefs => f.write_str("load record error: too many refs"),
             Self::TooManyValues => f.write_str("load record error: too many values"),
             Self::DuplicateValue => f.write_str("load record error: duplicate value"),
@@ -62,6 +72,26 @@ impl fmt::Display for LoadRecordError {
 }
 
 impl std::error::Error for LoadRecordError {}
+
+/// 値の行が区分の規則に反した理由。固定の列挙で、入力の値を載せない（SECR-23・SECR-26）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidValueReason {
+    RefsRequired,
+    RefsForbidden,
+    ValueRequired,
+    ValueForbidden,
+}
+
+impl InvalidValueReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RefsRequired => "refs_required",
+            Self::RefsForbidden => "refs_forbidden",
+            Self::ValueRequired => "value_required",
+            Self::ValueForbidden => "value_forbidden",
+        }
+    }
+}
 
 /// 値の区分（`load.md` の 2）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,15 +143,17 @@ fn is_name(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// 値の名前（`[a-z0-9_]`・1〜64 文字）。
+/// 値の名前（`[a-z0-9_]`・1〜64 文字で、呼び出し元が渡す承認済みの語彙に含まれるもの）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct ValueName(String);
 
 impl ValueName {
+    /// 記録に出してよい名前だけを作る。語彙の外は誤りにする（自由な名前を出さない。SECR-23・SECR-26）。
+    ///
     /// # Errors
-    /// 規則を満たさないとき [`LoadRecordError::InvalidName`]。
-    pub fn new(s: &str) -> Result<Self, LoadRecordError> {
-        if is_name(s) {
+    /// 文字種・長さの規則を満たさないか、`vocabulary` に無いとき [`LoadRecordError::InvalidName`]。
+    pub fn new(s: &str, vocabulary: &[&str]) -> Result<Self, LoadRecordError> {
+        if is_name(s) && vocabulary.contains(&s) {
             Ok(Self(s.to_owned()))
         } else {
             Err(LoadRecordError::InvalidName)
@@ -142,12 +174,12 @@ pub struct RefId(String);
 
 impl RefId {
     /// # Errors
-    /// 規則を満たさないとき [`LoadRecordError::InvalidRef`]。
+    /// 規則を満たさないか、予約語（`none`・`harness_config`・`measured`）のとき [`LoadRecordError::InvalidRef`]。
     pub fn new(s: &str) -> Result<Self, LoadRecordError> {
         let ok = (1..=64).contains(&s.len())
             && s.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        if ok {
+        if ok && !RESERVED_REFS.contains(&s) {
             Ok(Self(s.to_owned()))
         } else {
             Err(LoadRecordError::InvalidRef)
@@ -178,10 +210,25 @@ impl RunRecordFile {
         let parts: Vec<&str> = rest.split('-').collect();
         let digits = |p: &&str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
         if parts.len() == 3 && parts.iter().all(digits) {
+            let started: u64 = parts[0].parse().map_err(|_| bad)?;
+            if started > MAX_UNIX_SECS {
+                return Err(bad);
+            }
             Ok(Self(s.to_owned()))
         } else {
             Err(bad)
         }
+    }
+}
+
+impl RunRecordFile {
+    /// ファイル名の先頭の数字（実行の起動秒）。
+    fn started_unix_secs(&self) -> u64 {
+        self.0
+            .strip_prefix("it-run-")
+            .and_then(|r| r.split('-').next())
+            .and_then(|d| d.parse().ok())
+            .unwrap_or(u64::MAX)
     }
 }
 
@@ -212,7 +259,8 @@ impl ComparisonValue {
         unit: ValueUnit,
         refs: Vec<RefId>,
     ) -> Result<Self, LoadRecordError> {
-        let bad = |rule| LoadRecordError::InvalidValue { rule };
+        let bad = LoadRecordError::InvalidValue;
+        use InvalidValueReason::{RefsForbidden, RefsRequired, ValueForbidden, ValueRequired};
         if refs.len() > MAX_REFS {
             return Err(LoadRecordError::TooManyRefs);
         }
@@ -223,31 +271,31 @@ impl ComparisonValue {
         match class {
             ValueClass::Requirement | ValueClass::Initial | ValueClass::PocParameter => {
                 if refs.is_empty() {
-                    return Err(bad("refs_required"));
+                    return Err(bad(RefsRequired));
                 }
                 if value.is_none() {
-                    return Err(bad("value_required"));
+                    return Err(bad(ValueRequired));
                 }
             }
             ValueClass::Undecided => {
                 if value.is_some() {
-                    return Err(bad("value_forbidden"));
+                    return Err(bad(ValueForbidden));
                 }
             }
             ValueClass::External => {
                 if value.is_some() {
-                    return Err(bad("value_forbidden"));
+                    return Err(bad(ValueForbidden));
                 }
                 if refs.is_empty() {
-                    return Err(bad("refs_required"));
+                    return Err(bad(RefsRequired));
                 }
             }
             ValueClass::TestCondition | ValueClass::Measured => {
                 if value.is_none() {
-                    return Err(bad("value_required"));
+                    return Err(bad(ValueRequired));
                 }
                 if !refs.is_empty() {
-                    return Err(bad("refs_forbidden"));
+                    return Err(bad(RefsForbidden));
                 }
             }
         }
@@ -337,6 +385,12 @@ impl LoadRecord {
         staged: &StagedRun,
         values: Vec<ComparisonValue>,
     ) -> Result<Self, LoadRecordError> {
+        if run_started_at_unix_secs > MAX_UNIX_SECS || recorded_at_unix_secs > MAX_UNIX_SECS {
+            return Err(LoadRecordError::TimeOutOfRange);
+        }
+        if run_record_file.started_unix_secs() != run_started_at_unix_secs {
+            return Err(LoadRecordError::RunStartMismatch);
+        }
         if recorded_at_unix_secs < run_started_at_unix_secs {
             return Err(LoadRecordError::ClockOrder);
         }
@@ -380,14 +434,23 @@ impl LoadRecord {
             self.run_started_at,
             std::process::id()
         ));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|_| LoadRecordError::WriteFailed)?;
-        file.write_all(self.text.as_bytes())
-            .and_then(|()| file.flush())
-            .map_err(|_| LoadRecordError::WriteFailed)?;
+        // 書き込みの途中で失敗した不完全なファイルを完成品の名前で残さない。
+        // 隠し名の一時ファイルへ書ききってから、上書きなしの hard_link で最終名へ公開する。
+        let tmp = dir.join(format!(
+            ".tmp-load-run-{}-{}-{n}",
+            self.run_started_at,
+            std::process::id()
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            file.write_all(self.text.as_bytes())?;
+            file.flush()?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::hard_link(&tmp, &path)
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result.map_err(|_| LoadRecordError::WriteFailed)?;
         Ok(path)
     }
 }

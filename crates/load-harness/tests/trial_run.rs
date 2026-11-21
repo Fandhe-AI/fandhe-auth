@@ -110,17 +110,23 @@ fn small_trial_run_writes_record_without_requirement_values() {
 
     // 性能の目標は持ち越し（AUDP-29）。要件の値として記録せず、未決を明示する。
     let target = ComparisonValue::new(
-        ValueName::new("p99_target").unwrap(),
+        ValueName::new("p99_target", &["p99_target"]).unwrap(),
         ValueClass::Undecided,
         None,
         ValueUnit::Ns,
         vec![RefId::new("AUDP-29").unwrap()],
     )
     .unwrap();
+    // 記録を組み立てる時点の時刻（起動時刻より前なら LoadRecord が拒否する）。
+    let recorded_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .max(started);
     let record = LoadRecord::new(
         &run_file,
         started,
-        started + 1,
+        recorded_at,
         &conditions,
         &staged,
         vec![target],

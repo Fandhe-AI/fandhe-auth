@@ -2,11 +2,16 @@
 //! PoC の数値・要件の値を置かない（ACPT-7）。
 
 use fandhe_auth_load_harness::{
-    CallResult, ComparisonValue, ComponentConditions, IntervalName, LOAD_RECORD_FORMAT, LoadConfig,
-    LoadRecord, LoadRecordError, LoopModel, MeasurementConditions, MetricKey, RefId, RunRecordFile,
-    StageConfig, StageLimits, StagePlan, StagedRun, StdMonotonicClock, TargetName, TargetSpec,
-    ValueClass, ValueName, ValueUnit, run_stages,
+    CallResult, ComparisonValue, ComponentConditions, IntervalName, InvalidValueReason,
+    LOAD_RECORD_FORMAT, LoadConfig, LoadRecord, LoadRecordError, LoopModel, MeasurementConditions,
+    MetricKey, RefId, RunRecordFile, StageConfig, StageLimits, StagePlan, StagedRun,
+    StdMonotonicClock, TargetName, TargetSpec, ValueClass, ValueName, ValueUnit, run_stages,
 };
+
+/// 試験用の語彙。入れた名前だけが通る。
+fn vname(n: &str) -> ValueName {
+    ValueName::new(n, &[n]).unwrap()
+}
 
 fn refs(ids: &[&str]) -> Vec<RefId> {
     ids.iter().map(|s| RefId::new(s).unwrap()).collect()
@@ -18,17 +23,11 @@ fn val(
     v: Option<u64>,
     ids: &[&str],
 ) -> Result<ComparisonValue, LoadRecordError> {
-    ComparisonValue::new(
-        ValueName::new(name).unwrap(),
-        class,
-        v,
-        ValueUnit::Ns,
-        refs(ids),
-    )
+    ComparisonValue::new(vname(name), class, v, ValueUnit::Ns, refs(ids))
 }
 
 fn invalid(r: Result<ComparisonValue, LoadRecordError>) -> bool {
-    matches!(r, Err(LoadRecordError::InvalidValue { .. }))
+    matches!(r, Err(LoadRecordError::InvalidValue(_)))
 }
 
 #[test]
@@ -71,8 +70,19 @@ fn refs_limits() {
 fn input_validation() {
     for bad in ["", "A", "a-b", "a\nb", "a\u{2028}b", "a b", &"a".repeat(65)] {
         assert_eq!(
-            ValueName::new(bad).unwrap_err(),
+            ValueName::new(bad, &[bad]).unwrap_err(),
             LoadRecordError::InvalidName
+        );
+    }
+    // 形が正しくても語彙の外は拒否する。
+    assert_eq!(
+        ValueName::new("free_text", &["p99_target"]).unwrap_err(),
+        LoadRecordError::InvalidName
+    );
+    for reserved in ["none", "harness_config", "measured"] {
+        assert_eq!(
+            RefId::new(reserved).unwrap_err(),
+            LoadRecordError::InvalidRef
         );
     }
     for bad in [
@@ -97,6 +107,8 @@ fn input_validation() {
         "it-run-a-1-2.txt",
         "it-run-0-1-2.log",
         "it-run-0-1-2-3.txt",
+        "it-run-253402300800-1-2.txt",
+        "it-run-99999999999999999999999-1-2.txt",
         "dir/it-run-0-1-2.txt",
     ] {
         assert_eq!(
@@ -153,12 +165,16 @@ fn conditions() -> MeasurementConditions {
         .unwrap()
 }
 
+fn file_at(s: u64) -> RunRecordFile {
+    RunRecordFile::new(&format!("it-run-{s}-1-1.txt")).unwrap()
+}
+
 fn file() -> RunRecordFile {
-    RunRecordFile::new("it-run-0-1-1.txt").unwrap()
+    file_at(0)
 }
 
 fn build(s: u64, r: u64, values: Vec<ComparisonValue>) -> Result<LoadRecord, LoadRecordError> {
-    LoadRecord::new(&file(), s, r, &conditions(), &staged(), values)
+    LoadRecord::new(&file_at(s), s, r, &conditions(), &staged(), values)
 }
 
 #[test]
@@ -195,6 +211,44 @@ fn rfc3339_known_values() {
 }
 
 #[test]
+fn run_start_mismatch_and_time_range() {
+    let m = LoadRecord::new(&file_at(5), 6, 6, &conditions(), &staged(), vec![]);
+    assert_eq!(m.unwrap_err(), LoadRecordError::RunStartMismatch);
+    const MAX: u64 = 253_402_300_799;
+    let t = build(MAX, MAX, vec![]).unwrap().to_string();
+    assert!(t.contains("recorded_at: 9999-12-31T23:59:59Z\n"));
+    assert_eq!(
+        build(0, MAX + 1, vec![]).unwrap_err(),
+        LoadRecordError::TimeOutOfRange
+    );
+    assert_eq!(
+        LoadRecord::new(
+            &file_at(0),
+            MAX + 1,
+            MAX + 1,
+            &conditions(),
+            &staged(),
+            vec![]
+        )
+        .unwrap_err(),
+        LoadRecordError::TimeOutOfRange
+    );
+}
+
+#[test]
+fn invalid_value_reason_is_fixed_enum() {
+    let e = val("v", ValueClass::Initial, Some(1), &[]).unwrap_err();
+    assert_eq!(
+        e,
+        LoadRecordError::InvalidValue(InvalidValueReason::RefsRequired)
+    );
+    assert_eq!(
+        e.to_string(),
+        "load record error: invalid value (refs_required)"
+    );
+}
+
+#[test]
 fn clock_order() {
     assert_eq!(
         build(10, 9, vec![]).unwrap_err(),
@@ -226,11 +280,7 @@ fn value_row_limits_and_duplicates() {
 fn debug_and_errors_do_not_leak() {
     let secret = "canary_name_zz";
     let v = val(secret, ValueClass::Initial, Some(424_242), &["CANARY-REF"]).unwrap();
-    let dbg = format!(
-        "{v:?} {:?} {:?}",
-        ValueName::new(secret).unwrap(),
-        refs(&["CANARY-REF"])
-    );
+    let dbg = format!("{v:?} {:?} {:?}", vname(secret), refs(&["CANARY-REF"]));
     let rec = build(0, 1, vec![v]).unwrap();
     let dbg = format!("{dbg} {rec:?} {:?}", file());
     for bad in [secret, "CANARY-REF", "424242", "it-run-0-1-1"] {

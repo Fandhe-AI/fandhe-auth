@@ -371,7 +371,11 @@ judgment:
 - 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial`・`poc_parameter` は出典と整数の値が必須、`undecided` は値なし、`external` は値なし・出典必須、
   `test_condition`・`measured` は整数の値が必須で出典を受けず、行には固定の印（`harness_config`・`measured`）を出す。出典は 1 行 8 件まで・重複は誤り。
   測定値・既定値を要件の値へ上げる経路は作らない。
-- 書き出し: `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。無ければ `dir` を作り、`create_new` で上書きしない。乱数・環境変数・設定ファイルを使わない。
+- 書き出し: `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。無ければ `dir` を作る。隠し名の一時ファイルへ書ききってから、上書きなしの `hard_link` で最終名へ公開する
+  （途中の失敗で不完全なファイルを完成品の名前で残さない。一時ファイルは常に消す）。乱数・環境変数・設定ファイルを使わない。
+- 入力の検査（仮置き）: `ValueName::new` は呼び出し元が渡す承認済みの語彙に含まれる名前だけを受ける。`RefId` は予約語（`none`・`harness_config`・`measured`）を拒否する。
+  `RunRecordFile` の起動秒と `run_started_at` が違えば `RunStartMismatch`。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
+  値の行の違反の理由は固定の列挙 `InvalidValueReason` で持つ（`&'static str` を公開しない）。
 - 時刻の RFC 3339 の整形は、通常の依存を 0 に保つため it-harness の `UtcTimestamp` と同じ変換を `record` に重複して持つ。
 - 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない。`Debug` は中身を出さない固定文字列にした（`SECR-23`・`SECR-26`）。
 - 試し実行（`tests/trial_run.rs`。Docker・ネットワークなし。`make test` で流れる）: it-harness の上で Hub の stub に 2 段階（並行数 1・2）の負荷をかけ、

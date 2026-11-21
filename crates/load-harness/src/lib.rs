@@ -49,8 +49,8 @@ pub use meter::{
 };
 
 pub use record::{
-    ComparisonValue, LOAD_RECORD_FORMAT, LoadRecord, LoadRecordError, RefId, RunRecordFile,
-    ValueClass, ValueName, ValueUnit,
+    ComparisonValue, InvalidValueReason, LOAD_RECORD_FORMAT, LoadRecord, LoadRecordError, RefId,
+    RunRecordFile, ValueClass, ValueName, ValueUnit,
 };
 
 pub use stage::{
