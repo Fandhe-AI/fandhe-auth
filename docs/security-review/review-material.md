@@ -40,7 +40,7 @@
 1. spec を固定の commit で取得する。この repo の `docs/spec`（submodule）が指す commit は、固定の commit と違うことがある（2026-11-21 の時点で、固定は `4987777`、submodule は `5207d5e`）。固定の commit の原文は、[`.claude/rules/spec-reference.md`](../../.claude/rules/spec-reference.md) の手順で取得した後に `git -C docs/spec show 4987777db3db59064e7fe2d1d5c7302d0f719847:<ファイルのパス>` で開く（submodule の作業ツリーは変えない。commit が無いときは先に `git -C docs/spec fetch` で取る）。
 2. QP-1 の README が引く、実行前に固定した記録の 3 節（T 表の判定の定義）と 5 節（重大度と「未対応」の数え方）で語の定義を確かめる。記録の所在は QP-1 の README から辿る。
 3. 下の「行ごとの表」に沿って、QP-1 の README、PoC の README、`04-behavior/` の順に読む。PoC-N のディレクトリは `docs/spec/03-poc/` の一覧から番号で引く（ディレクトリ名は写さない）。
-4. 対応 ID のステータス（確定／検討中）と、移管の有無を原文で確かめ直す。C-3 では、固定の commit `4987777` と、「現在の spec」としてレビューの日の spec repo の `main` の先頭を比べる（`D-2026-11-21-24` の (4)(e)）。比べた 2 つの commit と、参考の submodule の commit を記録票の前提の表の役割ごとの欄に書き、比べた結果を記録票の「C-3 の結果」の表に書く（点検 C が比べたのは `1df12ad` と `4987777` で、C-3 の比べ直しの代わりにはならない）。[scope-ids.md](scope-ids.md) の値は commit 時点の写しである。差分の記録は [gap-check.md](gap-check.md) の点検 C にある。
+4. 対応 ID のステータス（確定／検討中）と、移管の有無を原文で確かめ直す。C-3 では、固定の commit `4987777` と、「現在の spec」としてレビューの日の spec repo の `main` の先頭を比べる（`D-2026-11-21-24` の (4)(e)）。比べる直前に `git -C docs/spec fetch origin main && git -C docs/spec rev-parse --verify refs/remotes/origin/main` を実行し、返った commit を「比べた commit」とする（submodule の commit や、手元に前から残っている `origin/main` を使わない）。`fetch` が終了コード 0 で終わらなければ、C-3 の比較をしない。比べた 2 つの commit と、参考の submodule の commit を記録票の前提の表の役割ごとの欄に書き、比べた結果を記録票の「C-3 の結果」の表に書く（点検 C が比べたのは `1df12ad` と `4987777` で、C-3 の比べ直しの代わりにはならない）。[scope-ids.md](scope-ids.md) の値は commit 時点の写しである。差分の記録は [gap-check.md](gap-check.md) の点検 C にある。
 
 QP-1 の README は `docs/spec/03-poc/` の一覧から QP-1 で引く（ディレクトリ名は写さない。以下「QP-1」）。
 T 表は 1.2 節、重大は 4.1 節、中は 4.2 節、RFC 9700 の照合は 2 節にある。
