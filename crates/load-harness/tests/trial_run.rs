@@ -209,8 +209,9 @@ fn it_record_started_line(r: &fandhe_auth_it_harness::RunRecord) -> String {
 // `with_hub_stub_record` を通して書いたもの）に登録簿の値が現れないことの確認まで。it-run の記録に入るのは
 // 欄名（`&'static str`）と印（`ValueMark`）だけで、設定の値が届く経路は無い。そのため it-run の記録側の
 // 陽性対照は置かない（設定から値が届く経路が無い）。照合そのものの検出力は負荷の記録側の陽性対照で見る。
-// 署名鍵（`AssertionSigningKey`）の秘密値は登録簿に入れておらず対象外で、未確認のまま持ち越し
-// （追跡先は未定。利用者の判断待ち）。
+// 署名鍵（`AssertionSigningKey`）の秘密値は登録簿に入れておらず対象外で、未確認のまま持ち越し。
+// TODO(TASK-500): 秘密値を登録簿に入れて走査する（AAUD-30・AAUD-31。#1391）。
+// 出力の面の秘密値の扱いは TASK-518（SECR-23。#1407）。
 
 /// 実行時に乱数から作る 16 バイトの値（固定の値をソースに置かない）。`RandomState` は実行ごとに種が変わる。
 fn random_value() -> Vec<u8> {

@@ -64,7 +64,7 @@ fn val(
     ids: &[&str],
 ) -> Result<ComparisonValue, LoadRecordError> {
     // 承認済みの一覧は候補とは独立した固定の本文から読む（候補の出典から作らない。ACPT-7）。
-    // 候補が承認済みの一覧と一致する場合の試験は approval_* で確かめる。ここは区分の規則と出典の上限を見る。
+    // 要件の値・初期値は一覧と一致しても常に拒否される（requirement_and_initial_always_rejected）。ここは区分の規則と出典の上限を見る。
     let approved = list("other_item|initial|9|count|APPROVED-1\n");
     ComparisonValue::new(vname(name), class, v, ValueUnit::Ns, refs(ids), &approved)
 }
@@ -107,26 +107,33 @@ fn list(text: &str) -> ApprovedValues {
     try_list(text).unwrap()
 }
 
-/// ACPT-7・load.md 規則 4: 承認済みの一覧と一致しない値は、無関係な承認済み ID を添えても出せない。
+/// ACPT-7・load.md 規則 4: 承認一覧の置き場・形・承認の手順が決まるまで（TASK-12・#121）、
+/// 要件の値・初期値は一覧に一致する行があっても常に拒否する（fail-closed）。
 #[test]
-fn approval_must_match_name_class_value_unit_refs() {
+fn requirement_and_initial_always_rejected() {
     use ValueClass::*;
-    let ok = list("v|initial|5|ns|A-1\n");
-    assert!(approval(Initial, 5, &["A-1"], &ok).is_ok());
-    let na = LoadRecordError::InvalidValue(InvalidValueReason::NotInApprovedList);
-    assert_eq!(
-        approval(Initial, 5, &["A-1"], &ApprovedValues::default()).unwrap_err(),
-        na
-    );
-    // 数値・区分・出典・単位・項目のどれか 1 つが違っても出せない。
-    assert_eq!(approval(Initial, 6, &["A-1"], &ok).err(), Some(na));
-    assert_eq!(approval(Requirement, 5, &["A-1"], &ok).err(), Some(na));
-    assert_eq!(approval(Initial, 5, &["B-2"], &ok).err(), Some(na));
-    assert_eq!(approval(Initial, 5, &["A-1", "B-2"], &ok).err(), Some(na));
-    let other_unit = list("v|initial|5|count|A-1\n");
-    assert_eq!(approval(Initial, 5, &["A-1"], &other_unit).err(), Some(na));
-    let other_name = list("w|initial|5|ns|A-1\n");
-    assert_eq!(approval(Initial, 5, &["A-1"], &other_name).err(), Some(na));
+    let ca = LoadRecordError::InvalidValue(InvalidValueReason::ClassNotAllowed);
+    let ok = list("v|initial|5|ns|A-1\nv|requirement|5|ns|A-1\n");
+    for c in [Requirement, Initial] {
+        // 一覧に完全一致する行があっても、空の一覧でも、一致しない値でも同じ。
+        assert_eq!(approval(c, 5, &["A-1"], &ok).err(), Some(ca));
+        assert_eq!(
+            approval(c, 5, &["A-1"], &ApprovedValues::default()).err(),
+            Some(ca)
+        );
+        assert_eq!(approval(c, 6, &["B-2"], &ok).err(), Some(ca));
+        // 出典なし・値なしでも、出典の規則より先に拒否する。
+        assert_eq!(approval(c, 5, &[], &ok).err(), Some(ca));
+        assert_eq!(
+            ComparisonValue::new(vname("v"), c, None, ValueUnit::Ns, refs(&["A-1"]), &ok).err(),
+            Some(ca)
+        );
+    }
+    // 測定値・試験の条件・未決・他所有者の値は、これまでどおり通る。
+    assert!(approval(Measured, 5, &[], &ok).is_ok());
+    assert!(approval(TestCondition, 5, &[], &ok).is_ok());
+    assert!(val("v", Undecided, None, &[]).is_ok());
+    assert!(val("v", External, None, &["X-1"]).is_ok());
 }
 
 /// 承認済みの一覧は本文からだけ読む。PoC の区分・不正な行は受けない（規則 5）。
@@ -220,13 +227,17 @@ fn invalid(r: Result<ComparisonValue, LoadRecordError>) -> bool {
 fn class_rules_fail_closed() {
     use ValueClass::*;
     for c in [Requirement, Initial] {
-        assert!(invalid(val("v", c, Some(1), &[])));
-        assert!(invalid(val("v", c, None, &["X-1"])));
-        // 独立した承認一覧に無いため、区分の規則を通った後に NotInApprovedList になる。
-        assert_eq!(
-            val("v", c, Some(1), &["X-1"]).unwrap_err(),
-            LoadRecordError::InvalidValue(InvalidValueReason::NotInApprovedList)
-        );
+        // 承認の手順が決まるまで常に ClassNotAllowed（TASK-12・#121）。
+        for (v, ids) in [
+            (Some(1), &[][..]),
+            (None, &["X-1"][..]),
+            (Some(1), &["X-1"][..]),
+        ] {
+            assert_eq!(
+                val("v", c, v, ids).unwrap_err(),
+                LoadRecordError::InvalidValue(InvalidValueReason::ClassNotAllowed)
+            );
+        }
     }
     // 規則 5: PoC の数値は比べる値として置かない。
     assert_eq!(
@@ -250,16 +261,14 @@ fn class_rules_fail_closed() {
 fn refs_limits() {
     let nine: Vec<String> = (0..9).map(|i| format!("R-{i}")).collect();
     let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+    // 出典を持てる区分（external）で上限と重複を見る。要件の値・初期値は常に拒否される。
     assert_eq!(
-        val("v", ValueClass::Initial, Some(1), &nine).unwrap_err(),
+        val("v", ValueClass::External, None, &nine).unwrap_err(),
         LoadRecordError::TooManyRefs
     );
+    assert!(val("v", ValueClass::External, None, &nine[..8]).is_ok());
     assert_eq!(
-        val("v", ValueClass::Initial, Some(1), &nine[..8]).unwrap_err(),
-        LoadRecordError::InvalidValue(InvalidValueReason::NotInApprovedList)
-    );
-    assert_eq!(
-        val("v", ValueClass::Initial, Some(1), &["A", "A"]).unwrap_err(),
+        val("v", ValueClass::External, None, &["A", "A"]).unwrap_err(),
         LoadRecordError::InvalidRef
     );
 }
@@ -531,7 +540,7 @@ fn run_session_stage_error_is_reported() {
 
 #[test]
 fn invalid_value_reason_is_fixed_enum() {
-    let e = val("v", ValueClass::Initial, Some(1), &[]).unwrap_err();
+    let e = val("v", ValueClass::External, None, &[]).unwrap_err();
     assert_eq!(
         e,
         LoadRecordError::InvalidValue(InvalidValueReason::RefsRequired)
@@ -573,20 +582,19 @@ fn value_row_limits_and_duplicates() {
 #[test]
 fn debug_and_errors_do_not_leak() {
     let secret = "canary_name_zz";
-    let approved = list(&format!("{secret}|initial|424242|ns|CANARY-REF\n"));
     let v = ComparisonValue::new(
         vname(secret),
-        ValueClass::Initial,
-        Some(424_242),
+        ValueClass::External,
+        None,
         ValueUnit::Ns,
         refs(&["CANARY-REF"]),
-        &approved,
+        &ApprovedValues::default(),
     )
     .unwrap();
     let dbg = format!("{v:?} {:?} {:?}", vname(secret), refs(&["CANARY-REF"]));
     let rec = build(0, 1, vec![v]).unwrap();
     let dbg = format!("{dbg} {rec:?} {:?}", file());
-    for bad in [secret, "CANARY-REF", "424242", "it-run-0-1-1"] {
+    for bad in [secret, "CANARY-REF", "it-run-0-1-1"] {
         assert!(!dbg.contains(bad));
     }
     let e = RunRecordFile::new("bad\nlines").unwrap_err().to_string();
