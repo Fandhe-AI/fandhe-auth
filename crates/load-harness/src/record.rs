@@ -38,6 +38,11 @@ pub const MAX_VALUES: usize = 64;
 /// 時刻（UNIX 秒）の上限。9999-12-31T23:59:59Z。RFC 3339 の 4 桁年に収める（仮置き）。
 pub const MAX_UNIX_SECS: u64 = 253_402_300_799;
 /// `refs` 欄で出力側が使う語。出典の ID には使わせない（出典なし・自動取得の印と取り違えない）。
+/// 記録の全体・1 行・1 語の長さの上限（仮置き。`is_fixed_shape`）。
+const MAX_RECORD_BYTES: usize = 64 * 1024;
+const MAX_LINE_BYTES: usize = 512;
+const MAX_WORD_BYTES: usize = 64;
+
 const RESERVED_REFS: [&str; 3] = ["none", "harness_config", "measured"];
 
 /// 記録の誤り。種類だけを持ち、入力の値・パス・元の誤りの文言は載せない。
@@ -175,6 +180,24 @@ fn is_ref_shape(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         && !RESERVED_REFS.contains(&s)
+}
+
+/// 記録の本文が固定の形だけかを見る（SECR-23・SECR-26。`write_new` の出力先は追跡ツリーの外で
+/// `secret-scan` の対象に入らないため、書く前に中身を許可した文字・長さに限る）。通すのは ASCII の英数字と
+/// ` _-.:=,/`・LF だけで、1 行 512 バイト・1 語（空白区切り）64 バイト・全体 64 KiB まで。
+/// JWT・鍵・接続文字列のような長い値や、記号・非 ASCII を含む値は書かずに拒否する。
+fn is_fixed_shape(text: &str) -> bool {
+    text.len() <= MAX_RECORD_BYTES
+        && text.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b' ' | b'_' | b'-' | b'.' | b':' | b'=' | b',' | b'/' | b'\n'
+                )
+        })
+        && text
+            .split('\n')
+            .all(|l| l.len() <= MAX_LINE_BYTES && l.split(' ').all(|w| w.len() <= MAX_WORD_BYTES))
 }
 
 /// 値の名前（`[a-z0-9_]`・1〜64 文字で、呼び出し元が渡す承認済みの語彙に含まれるもの）。
@@ -766,6 +789,9 @@ impl LoadRecord {
         }
         // ACPT-7: 判定の欄は人が記入する。ハーネスは常に空で出す。
         writeln!(t, "judgment:").map_err(fmt_err)?;
+        if !is_fixed_shape(&t) {
+            return Err(LoadRecordError::Format);
+        }
         Ok(Self {
             run_started_at: run_started_at_unix_secs,
             text: t,
@@ -781,6 +807,10 @@ impl LoadRecord {
     /// 作成・書き込みに失敗したとき [`LoadRecordError::WriteFailed`]（元の誤りは載せない）。
     pub fn write_new(&self, dir: &Path) -> Result<PathBuf, LoadRecordError> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
+        // 書く直前にも固定の形を確かめる（出力先は secret-scan の対象外。何も作る前に止める）。
+        if !is_fixed_shape(&self.text) {
+            return Err(LoadRecordError::Format);
+        }
         std::fs::create_dir_all(dir).map_err(|_| LoadRecordError::WriteFailed)?;
         self.write_numbered(dir, SEQ.fetch_add(1, Ordering::Relaxed))
     }
@@ -867,6 +897,41 @@ mod tests {
             }
         }
         panic!("no free test dir name");
+    }
+
+    /// SECR-23・SECR-26: 固定の形の外（JWT の形・記号・非 ASCII・長い語・長い行）の本文は、
+    /// ファイルも作らず Format で拒否する。見本の本文は通る。
+    #[test]
+    fn write_new_rejects_text_outside_fixed_shape() {
+        assert!(is_fixed_shape("format: fandhe-auth-load-record/1\n"));
+        assert!(is_fixed_shape(
+            "run: 1.1 class=measured refs=measured n=100\njudgment:\n"
+        ));
+        let jwt_like = format!(
+            "note: {}.{}.{}\n",
+            "eyJ".to_owned() + &"a".repeat(30),
+            "b".repeat(30),
+            "c".repeat(30)
+        );
+        for bad in [
+            jwt_like,
+            format!("x: {}\n", "a".repeat(65)),
+            format!("x: {}\n", "a ".repeat(300)),
+            "x: a\\b\n".to_owned(),
+            "x: p@ss\n".to_owned(),
+            "x: \u{3042}\n".to_owned(),
+            "x: a\tb\n".to_owned(),
+            "x: a\rb\n".to_owned(),
+            "x\n".repeat(40_000),
+        ] {
+            let td = dir("load-shape");
+            let r = LoadRecord {
+                run_started_at: 0,
+                text: bad,
+            };
+            assert_eq!(r.write_new(&td.0), Err(LoadRecordError::Format));
+            assert_eq!(std::fs::read_dir(&td.0).unwrap().count(), 0);
+        }
     }
 
     /// 一時名が衝突したら WriteFailed。既存の内容を消さず、最終名も作らない。

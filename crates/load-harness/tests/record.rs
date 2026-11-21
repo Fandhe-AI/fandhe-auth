@@ -193,10 +193,20 @@ fn approved_load_does_not_block_on_fifo() {
             assert_eq!(r.err(), Some(LoadRecordError::ApprovedFile));
             h.join().unwrap();
         }
-        Err(_) => {
-            // 読み手が open で待っている。書き手として開いて待ちをほどいてから失敗させる。
-            let _w = std::fs::OpenOptions::new().write(true).open(&fifo);
-            let _ = h.join();
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            // 読み手のスレッドが結果を送らずに終わった（panic）。待たずにその理由で失敗させる。
+            h.join().expect("reader thread panicked");
+            panic!("reader thread ended without a result");
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // 読み手が open で待っている。読み書きで開く（Linux の FIFO では相手がいなくても止まらない）と
+            // 待ちがほどける。この open 自体は止まらないので、試験が無期限に待つことはない。
+            // 読み手のスレッドは join せず（FIFO の読みで待ち得るため）、書き手を閉じてから失敗させる。
+            let w = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&fifo);
+            drop(w);
             panic!("ApprovedValues::load blocked on a FIFO");
         }
     }
