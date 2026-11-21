@@ -1,15 +1,17 @@
-//! 登録→認証の E2E の共通の流れと、暫定の結果行（試験コードの中だけ。crate の公開 API にしない）。
+//! 登録→認証の E2E の共通の流れと、実行の記録の出力 `RecordSink`（試験コードの中だけ。crate の公開 API にしない）。
 //!
-//! 結果行の正式な形式・実行の回数の記録は 5/6（#105）で決める。ここは暫定の 1 行で、英語（`D-2026-11-20-13`）。
+//! 記録の形式は `fandhe_auth_e2e_harness::record`（5/6）。出力は英語（`D-2026-11-20-13`）。
 //! URL・ポート・セッション ID・authenticator ID・credential ID・署名は出さない（SECR-11・SECR-23）。
 //! 結果は〔仮想〕で、実機・Safari に数えない（ACPT-7・ACPT-8）。
 #![allow(dead_code)]
 
+use std::io::Write;
 use std::time::Duration;
 
 use fandhe_auth_e2e_harness::{
-    AuthenticatorId, Browser, CredentialRef, DriverHandle, PasskeyOperation, Protocol, Transport,
-    VirtualAuthenticatorOptions, WebAuthnErrorName, register_once,
+    AuthenticatorId, AuthenticatorKind, Browser, BrowserVersion, CredentialRef, DriverHandle,
+    E2eRunRecord, PasskeyOperation, Protocol, RecordError, RunResult, Transport,
+    VirtualAuthenticatorOptions, register_once,
 };
 
 use super::TestOrigin;
@@ -29,7 +31,7 @@ pub fn authenticator_options() -> VirtualAuthenticatorOptions {
 pub fn register(
     handle: &DriverHandle,
     origin: &TestOrigin,
-    browser: Browser,
+    sink: &mut RecordSink,
 ) -> (AuthenticatorId, CredentialRef) {
     let aid = handle
         .add_virtual_authenticator(&authenticator_options())
@@ -39,20 +41,61 @@ pub fn register(
     handle
         .set_script_timeout(Duration::from_secs(20))
         .expect("timeout");
-    let outcome = register_once(handle, &origin.origin(), "localhost").expect("register");
+    let result = register_once(handle, &origin.origin(), "localhost");
+    // credential の取得と検査は 1 回だけ行い、記録と合否の両方に同じ結果を使う。
+    let (run, check_ok) = registration_run_result(handle, &aid, &result);
+    sink.record(PasskeyOperation::Registration, run)
+        .expect("record");
+    let outcome = result.expect("register");
     assert!(outcome.succeeded(), "error_name={:?}", outcome.error_name());
     assert!(!outcome.evidence().counts_as_real_device());
     assert!(!outcome.evidence().counts_as_safari());
-    // docs/harness/e2e.md の登録成功条件: credential がちょうど 1 件で RP ID が localhost。検証の後に成功行を出す。
-    assert_one_localhost_credential(handle, &aid);
-    print_result(
-        handle,
-        PasskeyOperation::Registration,
-        browser,
-        &Verdict::Succeeded,
-    );
+    // docs/harness/e2e.md の登録成功条件: credential がちょうど 1 件で RP ID が localhost。
+    assert!(check_ok, "credential check failed");
     let cred = outcome.credential().expect("credential").clone();
     (aid, cred)
+}
+
+/// 登録の呼び出し結果と後続の検査（credential がちょうど 1 件・RP ID が `localhost`）をあわせた実行の結果と、
+/// 後続の検査を満たしたか（取得の失敗を含めて満たさなければ `false`）を返す。`credentials` の取得は呼び出し 1 回で、
+/// 取得の誤りは `HarnessError`（種類のみ）、取得後の条件の不一致だけを `CheckFailed` にする（SECR-23: 値は出さない）。
+/// 呼び出しが成功でも後続の検査を満たさなければ成功に数えない。
+pub fn registration_run_result(
+    handle: &DriverHandle,
+    aid: &AuthenticatorId,
+    result: &Result<
+        fandhe_auth_e2e_harness::RegistrationOutcome,
+        fandhe_auth_e2e_harness::E2eError,
+    >,
+) -> (RunResult, bool) {
+    let run = RunResult::from_registration(result);
+    if run != RunResult::Succeeded {
+        return (run, false);
+    }
+    match handle.credentials(aid) {
+        Ok(creds) if creds.len() == 1 && creds[0].rp_id == "localhost" => (run, true),
+        Ok(_) => (RunResult::CheckFailed, false),
+        Err(e) => (RunResult::HarnessError(e.kind()), false),
+    }
+}
+
+/// 認証の呼び出し結果と後続の検査（credential がちょうど 1 件・RP ID が `localhost`）をあわせた実行の結果と、
+/// 後続の検査を満たしたかを返す。UV 失敗の系のように呼び出しが拒否で終わる場合も検査する。
+/// 検査を満たさなければ（取得の失敗は `HarnessError`、条件の不一致は `CheckFailed`）呼び出しの結果を上書きする（SECR-23: 値は出さない）。
+pub fn authentication_run_result(
+    handle: &DriverHandle,
+    aid: &AuthenticatorId,
+    result: &Result<
+        fandhe_auth_e2e_harness::AuthenticationOutcome,
+        fandhe_auth_e2e_harness::E2eError,
+    >,
+) -> (RunResult, bool) {
+    let run = RunResult::from_authentication(result);
+    match handle.credentials(aid) {
+        Ok(creds) if creds.len() == 1 && creds[0].rp_id == "localhost" => (run, true),
+        Ok(_) => (RunResult::CheckFailed, false),
+        Err(e) => (RunResult::HarnessError(e.kind()), false),
+    }
 }
 
 /// 仮想 authenticator の credential がちょうど 1 件で、RP ID が `localhost` であることを確かめる。
@@ -63,29 +106,60 @@ pub fn assert_one_localhost_credential(handle: &DriverHandle, aid: &Authenticato
     assert!(creds[0].rp_id == "localhost", "credential rp_id mismatch");
 }
 
-pub enum Verdict {
-    Succeeded,
-    Rejected(WebAuthnErrorName),
+/// 1 つのブラウザのセッションの実行の記録を持つ。正常終了の経路では [`RecordSink::finish`] が本文の標準出力とファイルへの
+/// 新規書き込みを明示的に行い、誤りを返す。到達しなかった場合（panic の巻き戻りを含む）は `Drop` が同じ出力を試みる。
+/// `Drop` の中では panic せず、片方の出力が失敗してももう片方を試す。パスは出さない（SECR-23）。
+pub struct RecordSink {
+    record: E2eRunRecord,
+    emitted: bool,
 }
 
-/// 暫定の結果行を標準出力へ出す。ドライバが返す文字列（版を含む）は転記しない（SECR-23。IPv4 様の値が通る経路を残さない）。
-pub fn print_result(
-    _handle: &DriverHandle,
-    operation: PasskeyOperation,
-    browser: Browser,
-    verdict: &Verdict,
-) {
-    println!("{}", result_line(operation, browser, verdict));
+impl RecordSink {
+    /// 起動の後に作る。版は `handle` から取る（取れなければ `Unknown`）。
+    pub fn new(handle: &DriverHandle, browser: Browser, target: PasskeyOperation) -> Self {
+        let version = handle.browser_version().unwrap_or(BrowserVersion::Unknown);
+        Self {
+            record: E2eRunRecord::new(
+                browser,
+                version,
+                AuthenticatorKind::WebDriverVirtual,
+                target,
+            ),
+            emitted: false,
+        }
+    }
+
+    /// 実行 1 件を記録する（検査の前に呼び、失敗した実行も回数に残す）。上限超過は誤りで返す。
+    pub fn record(&mut self, op: PasskeyOperation, result: RunResult) -> Result<(), RecordError> {
+        self.record.record(op, result)
+    }
+
+    /// 試験が最後まで到達した（停止まで成功した）ことを記し、本文とファイルを出す。パスを含まない誤りを返す。
+    pub fn finish(mut self) -> Result<(), RecordError> {
+        self.record.mark_completed();
+        self.emitted = true;
+        self.emit()
+    }
+
+    fn emit(&self) -> Result<(), RecordError> {
+        // println! は失敗で panic するため、値で受ける書き込みを使う。
+        // 先頭の改行は、libtest が `--test-threads=1` でテスト名の後ろに改行なしで書く行から記録を切り離し、
+        // 記録の先頭行 `format:` を独立した行にする。
+        let printed = {
+            let mut out = std::io::stdout().lock();
+            write!(out, "\n{}", self.record)
+        };
+        let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("e2e-records");
+        let written = self.record.write_new(&dir);
+        printed.map_err(|_| RecordError::WriteFailed)?;
+        written.map(|_| ())
+    }
 }
 
-pub fn result_line(operation: PasskeyOperation, browser: Browser, verdict: &Verdict) -> String {
-    let result = match verdict {
-        Verdict::Succeeded => "succeeded".to_owned(),
-        Verdict::Rejected(n) => format!("rejected:{n:?}"),
-    };
-    let device = "authenticator=WebDriverVirtual evidence=Virtual";
-    let flags = "counts_as_real_device=false counts_as_safari=false";
-    format!(
-        "e2e-result: operation={operation:?} browser={browser:?} {device} {flags} result={result}"
-    )
+impl Drop for RecordSink {
+    fn drop(&mut self) {
+        if !self.emitted {
+            let _ = self.emit();
+        }
+    }
 }

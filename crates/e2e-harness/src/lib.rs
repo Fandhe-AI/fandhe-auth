@@ -23,6 +23,8 @@
 //! 4/6 の実体: 登録の後の認証 1 件の手順 `authentication::authenticate_once`（unix のみ）、失敗の名前の共通の列挙
 //! `webauthn_error::WebAuthnErrorName`、登録で得る credential ID の不透明な型 `CredentialRef`、確立したセッションの
 //! `browserName` の照合。結果は〔仮想〕で、サーバー側の検証は `TASK-716` 待ち。
+//! 5/6 の実体: 実行の記録の形式 `record::E2eRunRecord`（ブラウザの版の主番号・authenticator の種類・実行の回数・仮想の印）。
+//! ブラウザの版はドライバの文字列を保持せず、検査した主番号の数値だけを `BrowserVersion` で持つ。形式の説明は `docs/harness/e2e.md`。
 //! RP 側の実体は `TASK-716` 待ちで置かない。構成の下書きは `docs/harness/e2e.md`。
 
 #![forbid(unsafe_code)]
@@ -38,6 +40,7 @@ pub mod driver_process;
 #[cfg(unix)]
 pub mod firefox;
 pub mod harness;
+pub mod record;
 #[cfg(unix)]
 pub mod registration;
 pub mod scope;
@@ -56,6 +59,7 @@ pub use driver_process::DriverHandle;
 #[cfg(unix)]
 pub use firefox::{FirefoxHandle, GeckoDriverComponent, GeckoDriverConfig};
 pub use harness::{E2eConfig, E2eError, E2eErrorKind, E2eHarness, RunningE2e};
+pub use record::{BrowserVersion, E2eRunRecord, MAX_RUNS, RECORD_FORMAT, RecordError, RunResult};
 #[cfg(unix)]
 pub use registration::{RegistrationErrorName, RegistrationOutcome, register_once};
 pub use scope::PasskeyOperation;

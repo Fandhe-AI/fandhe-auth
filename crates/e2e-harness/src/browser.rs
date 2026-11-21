@@ -1,6 +1,6 @@
 //! ブラウザと仮想 authenticator の種類、および「仮想は実機・Safari に数えない」印。
 //!
-//! 呼び出し元は [`crate::harness::E2eConfig`] と実行の記録（5/6 以降）。判定は網羅の `match` で書くので、
+//! 呼び出し元は [`crate::harness::E2eConfig`] と実行の記録（[`crate::record`]）。判定は網羅の `match` で書くので、
 //! 種類を足して判定を書き忘れるとコンパイルできない（ACPT-7・ACPT-8）。
 
 /// 対象のブラウザ。Chrome と Firefox だけ。
