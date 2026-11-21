@@ -195,6 +195,7 @@ impl ClockSkewInjector {
         timeline: &mut FaultTimeline,
         skew_ms: i64,
     ) -> Result<(), ClockSkewError> {
+        // 意図: 値の誤り（InvalidParam）を AlreadyActive より先に返す順序を保つため、`prepare` と別に先に検査する。
         FaultKind::clock_skew(skew_ms).map_err(|_| ClockSkewError::InvalidParam)?;
         if self.active.is_some() {
             return Err(ClockSkewError::AlreadyActive);
@@ -245,11 +246,13 @@ impl ClockSkewInjector {
         timeline
             .record_now(old, FaultPhase::Released)
             .map_err(ClockSkewError::Record)?;
-        self.skew_ms.store(0, Ordering::SeqCst);
         self.active = None;
-        timeline
-            .record_now(new, FaultPhase::Applied)
-            .map_err(ClockSkewError::Record)?;
+        // 読み取り側に「ずれなし」の時刻を見せないため、旧い値から新しい値へ直接入れ替える。
+        // 0 へ戻すのは `Applied` の記録が拒否されたときだけ（記録と一致させる）。
+        if let Err(e) = timeline.record_now(new, FaultPhase::Applied) {
+            self.skew_ms.store(0, Ordering::SeqCst);
+            return Err(ClockSkewError::Record(e));
+        }
         self.skew_ms.store(skew_ms, Ordering::SeqCst);
         self.active = Some(new);
         Ok(())
