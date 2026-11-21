@@ -132,7 +132,7 @@ hub-stub の実装をそのまま使い、作り直さない。
 - 「TASK-7 の設定の仕組み」は `HubFaultConfig`・`FaultRule`・`CallWindow` と `set_faults` と読む。`HubStubConfig` には欄を足さない。
 - 開始は `CallWindow { first: 1, last: None }`（以降すべて）の規則を入れた設定の差し替え、解除はその規則を除いた設定の差し替え。
 - 同じ口の遅れと拒否（各最大 1 件）は 1 つの規則に合成する。hub-stub は最初に当たった 1 件だけを使うため、分けると片方が落ちる。
-- 記録（`Applied`・`Released`）が先、設定の差し替えが後。基準線・記録の拒否では状態を変えない（fail-closed。`step` の途中失敗は下記）。
+- 記録（`Applied`・`Released`）が先、設定の差し替えが後。基準線・記録の拒否では状態を変えない（fail-closed）。
 - 事象に呼び出しの記録の件数（`log_pos`）を添える。呼び出し `i` は `log_pos <= i` の事象より後・次の事象より前に起きたと読み、同じ障害を二度適用・解除しても期間と呼び出しを順序で照合できる。
 - 1 つの実行に結べる注入器は 1 つ（2 つ目の `new` は `AlreadyBound`）。`FaultTimeline` は `Clone` しない。公開の直接記録（`record_now`・`record_at`）は、結合の有無によらず Hub の stub の事象を常に拒否する（`HubStubEventOutsideInjector`）。注入器を結んだ実行の `FaultTimeline::finish` も拒否し（`InjectorBound`）、確定は `HubStubFaultInjector::finish` だけが行う。`log_pos` を付ける入口は注入器の内部だけ（`pub(crate)`）で、Hub の stub の事象は `log_pos` を必須にし（無ければ `LogPosRequired`）、Hub の stub 以外は受けず、位置の逆行は拒否する。形式の試験が要る人工の事象は、crate 内の単体試験（`#[cfg(test)]`）で組む。
 - 注入器は実行をまたいで使わない。基準線・次の実行には新しい注入器を作る（有効な規則と呼び出しの記録を持ち越さない。fail-closed）。
@@ -160,6 +160,8 @@ hub-stub の実装をそのまま使い、作り直さない。
 - `step` は `Released(旧)` → `Applied(新)` の順に記録する。同じ値・0 は `InvalidParam`。`Released` の記録が拒否されたときは状態を変えない。`Released` が成功して `Applied` の記録だけが拒否されたときは、
   記録と一致させて「解除済み（ずれなし・適用中なし）」の状態で `Record` を返す（呼び出し側は誤りの後も旧いずれが有効とは見なさない）。
 - 「記録の拒否で状態を変えない」は `apply`・`release` と `step` の `Released` の拒否に当たる。`step` の途中失敗（`Applied` の拒否）は上のとおり解除済みへ進む。
+- 1 つの実行（`FaultTimeline`）に時計の注入器は 1 つ。同じ実行へ 2 つ目が適用すると `AlreadyBound`。時計の注入器を結んだ実行では、公開の `record_now`・`record_at` で時計の事象を積めない（`ClockSkewEventOutsideInjector`）。
+  直接記録した時計の事象がある実行へは注入器を結べない。
 - 解除は開始と同じ値で記録する。二重の開始は `AlreadyActive`、無い解除は `NotActive`。`Drop`・`abandon` は記録に触らず、配布済みの `SkewedClock` が共有するずれだけを 0 へ戻す
   （実行単位で試験条件を保つ。基準線の実行へ持ち越さない。AVLB-31）。解除し忘れは `Released` が無いので `unreleased_count` に出る。
 - 記録の例: `injection: 1 applied clock_skew target=instance at=... offset_ms=... skew_ms=+1500`。記録の時刻は基準の時計のまま。

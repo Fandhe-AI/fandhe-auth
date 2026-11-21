@@ -36,6 +36,8 @@ pub enum ClockSkewError {
     InvalidParam,
     /// すでにずれを適用中。
     AlreadyActive,
+    /// 同じ実行にすでに別の時計の注入器が結ばれている（1 つの実行に時計の注入器は 1 つ）。
+    AlreadyBound,
     /// 適用中のずれが無い。
     NotActive,
     /// 適用した実行と別の実行の記録を渡された（状態も記録も変えない）。
@@ -51,6 +53,7 @@ impl fmt::Display for ClockSkewError {
         let s = match self {
             Self::InvalidParam => "invalid parameter",
             Self::AlreadyActive => "already active",
+            Self::AlreadyBound => "already bound",
             Self::NotActive => "not active",
             Self::RunMismatch => "run mismatch",
             Self::OutOfRange => "skewed time out of range",
@@ -137,6 +140,8 @@ pub struct ClockSkewInjector {
     active: Option<FaultKind>,
     /// 適用した実行の識別（`active` と同時に入れ替える）。`release`・`step` は同じ実行の記録だけを受ける。
     run_id: Option<u64>,
+    /// 結んだ実行の識別。`abandon`・`release` では消さない（同じ実行へ再び適用できる。別の実行へは結ばない）。
+    bound_run: Option<u64>,
 }
 
 impl fmt::Debug for ClockSkewInjector {
@@ -166,6 +171,7 @@ impl ClockSkewInjector {
             base: Arc::new(base),
             active: None,
             run_id: None,
+            bound_run: None,
         }
     }
 
@@ -216,13 +222,34 @@ impl ClockSkewInjector {
             return Err(ClockSkewError::AlreadyActive);
         }
         let kind = self.prepare(skew_ms)?;
+        self.bind(timeline)?;
         timeline
-            .record_now(kind, FaultPhase::Applied)
+            .record_now_with_log_pos(kind, FaultPhase::Applied, None)
             .map_err(ClockSkewError::Record)?;
         self.skew_ms.store(skew_ms, Ordering::SeqCst);
         self.active = Some(kind);
         self.run_id = Some(timeline.run_id());
         Ok(())
+    }
+
+    /// 時計の注入器をこの実行へ結ぶ（1 つの実行に 1 つ）。すでに自分が結んでいれば何もしない。
+    /// 別の実行へは結べない（`RunMismatch`）。同じ実行に別の注入器がいれば `AlreadyBound`。
+    fn bind(&mut self, timeline: &mut FaultTimeline) -> Result<(), ClockSkewError> {
+        match self.bound_run {
+            Some(id) if id == timeline.run_id() => Ok(()),
+            Some(_) => Err(ClockSkewError::RunMismatch),
+            None => {
+                if timeline
+                    .bind_clock_injector()
+                    .map_err(ClockSkewError::Record)?
+                {
+                    self.bound_run = Some(timeline.run_id());
+                    Ok(())
+                } else {
+                    Err(ClockSkewError::AlreadyBound)
+                }
+            }
+        }
     }
 
     /// 適用した実行の記録かを確かめる（別の実行なら状態も記録も変えない）。
@@ -244,7 +271,7 @@ impl ClockSkewInjector {
         };
         self.check_run(timeline)?;
         timeline
-            .record_now(kind, FaultPhase::Released)
+            .record_now_with_log_pos(kind, FaultPhase::Released, None)
             .map_err(ClockSkewError::Record)?;
         self.skew_ms.store(0, Ordering::SeqCst);
         self.active = None;
@@ -274,13 +301,13 @@ impl ClockSkewInjector {
         }
         shifted((self.base)(), skew_ms)?;
         timeline
-            .record_now(old, FaultPhase::Released)
+            .record_now_with_log_pos(old, FaultPhase::Released, None)
             .map_err(ClockSkewError::Record)?;
         self.active = None;
         self.run_id = None;
         // 読み取り側に「ずれなし」の時刻を見せないため、旧い値から新しい値へ直接入れ替える。
         // 0 へ戻すのは `Applied` の記録が拒否されたときだけ（記録と一致させる）。
-        if let Err(e) = timeline.record_now(new, FaultPhase::Applied) {
+        if let Err(e) = timeline.record_now_with_log_pos(new, FaultPhase::Applied, None) {
             self.skew_ms.store(0, Ordering::SeqCst);
             return Err(ClockSkewError::Record(e));
         }
@@ -301,6 +328,7 @@ impl Drop for ClockSkewInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::UtcTimestamp;
     use std::time::Instant;
 
     const BASE_SECS: u64 = 1_000_000;
@@ -334,14 +362,67 @@ mod tests {
         let mut inj = injector();
         let mut tl = timeline();
         inj.apply(&mut tl, 1_000).unwrap();
-        // 基準線の timeline は別の実行なので Released の前に拒否される: 状態は変わらない。
-        let mut base = FaultTimeline::baseline(Instant::now(), SystemTime::now()).unwrap();
+        // 同じ実行の記録で Released の記録が拒否される条件: offset が逆行する（record_at で先の offset を積む）。
+        // 公開の直接記録は時計の事象を拒否するので、別の種類の事象で offset を進める。
+        let at = UtcTimestamp::from_system_time(SystemTime::now()).unwrap();
+        tl.record_at(
+            FaultKind::InstanceSigterm,
+            FaultPhase::Applied,
+            at,
+            u64::MAX / 2,
+        )
+        .unwrap();
         assert!(matches!(
-            inj.step(&mut base, 2_000),
-            Err(ClockSkewError::RunMismatch)
+            inj.step(&mut tl, 2_000),
+            Err(ClockSkewError::Record(
+                FaultRecordError::OffsetWentBackwards
+            ))
         ));
         assert_eq!(inj.active_skew_ms(), Some(1_000));
         assert_eq!(inj.clock().skew_ms(), 1_000);
+        // 事象は増えていない（SIGTERM の適用と時計の適用の 2 件のまま）。
+        let rec = tl.finish(at).unwrap();
+        assert_eq!(rec.events().len(), 2);
+        assert_eq!(rec.unreleased_count(), 1);
+    }
+
+    #[test]
+    fn second_injector_and_direct_clock_events_are_rejected() {
+        let mut a = injector();
+        let mut b = injector();
+        let mut tl = timeline();
+        a.apply(&mut tl, 1_000).unwrap();
+        assert_eq!(b.apply(&mut tl, 1_000), Err(ClockSkewError::AlreadyBound));
+        assert_eq!(b.clock().skew_ms(), 0);
+        let k = FaultKind::clock_skew(1_000).unwrap();
+        assert_eq!(
+            tl.record_now(k, FaultPhase::Released),
+            Err(FaultRecordError::ClockSkewEventOutsideInjector)
+        );
+        let at = UtcTimestamp::from_system_time(SystemTime::now()).unwrap();
+        assert_eq!(
+            tl.record_at(k, FaultPhase::Applied, at, u64::MAX),
+            Err(FaultRecordError::ClockSkewEventOutsideInjector)
+        );
+        // 解除は注入器の経路で追跡どおりに通り、同じ注入器は再び適用できる。
+        a.release(&mut tl).unwrap();
+        a.apply(&mut tl, 2_000).unwrap();
+        a.release(&mut tl).unwrap();
+    }
+
+    #[test]
+    fn direct_clock_event_before_binding_is_rejected() {
+        let mut tl = timeline();
+        let k = FaultKind::clock_skew(1_000).unwrap();
+        tl.record_now(k, FaultPhase::Applied).unwrap();
+        let mut inj = injector();
+        assert_eq!(
+            inj.apply(&mut tl, 1_000),
+            Err(ClockSkewError::Record(
+                FaultRecordError::ClockSkewEventOutsideInjector
+            ))
+        );
+        assert_eq!(inj.active_skew_ms(), None);
     }
 
     #[test]

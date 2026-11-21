@@ -64,6 +64,9 @@ pub enum FaultRecordError {
     LogPosRequired,
     /// 注入器を結んだ実行の記録を、注入器を介さず確定しようとした。
     InjectorBound,
+    /// 時計のずれの注入器を結んだ実行へ公開の直接記録で時計の事象を積もうとした、または直接記録した時計の事象がある実行へ
+    /// 注入器を結ぼうとした（時計の事象は注入器の入口だけが積む）。
+    ClockSkewEventOutsideInjector,
     /// ファイルの書き込みに失敗した。
     WriteFailed,
 }
@@ -83,6 +86,7 @@ impl fmt::Display for FaultRecordError {
             Self::HubStubEventOutsideInjector => "hub stub event must go through the injector",
             Self::LogPosRequired => "hub stub event requires a log position",
             Self::InjectorBound => "timeline is bound to an injector; finish through it",
+            Self::ClockSkewEventOutsideInjector => "clock skew event must go through the injector",
             Self::WriteFailed => "write failed",
         };
         write!(f, "fault record error: {s}")
@@ -114,6 +118,8 @@ pub struct FaultEvent {
 pub struct FaultTimeline {
     run_id: u64,
     injector_bound: Arc<AtomicBool>,
+    /// 時計のずれの注入器を結んだか（1 つの実行に時計の注入器は 1 つ。取り消さない）。
+    clock_bound: bool,
     mode: RunMode,
     started_at: UtcTimestamp,
     origin: Instant,
@@ -147,6 +153,7 @@ impl FaultTimeline {
         Ok(Self {
             run_id: RUN_SEQ.fetch_add(1, Ordering::Relaxed),
             injector_bound: Arc::new(AtomicBool::new(false)),
+            clock_bound: false,
             mode,
             started_at,
             origin,
@@ -170,9 +177,28 @@ impl FaultTimeline {
         Ok(Some(Arc::clone(&self.injector_bound)))
     }
 
+    /// 時計のずれの注入器をこの実行へ結ぶ。結べたら `Ok(true)`、すでに別の注入器が結んでいれば `Ok(false)`。
+    /// 公開の直接記録で時計の事象を積んだ実行へは結べない（`ClockSkewEventOutsideInjector`。解除の対応が食い違うため）。
+    /// 結合は取り消さない（注入器を破棄しても、実行の時計の事象は残るため）。
+    pub(crate) fn bind_clock_injector(&mut self) -> Result<bool, FaultRecordError> {
+        if self.clock_bound {
+            return Ok(false);
+        }
+        if self
+            .events
+            .iter()
+            .any(|e| matches!(e.kind, FaultKind::ClockSkew { .. }))
+        {
+            return Err(FaultRecordError::ClockSkewEventOutsideInjector);
+        }
+        self.clock_bound = true;
+        Ok(true)
+    }
+
     /// ハーネスの時計で現在の時刻を押して積む。
     ///
     /// # Errors
+    /// 時計の注入器を結んだ実行の時計の事象は `ClockSkewEventOutsideInjector`。
     /// Hub の stub の事象は常に `HubStubEventOutsideInjector`（注入器の内部の入口だけが `log_pos` 付きで積む）。
     pub fn record_now(
         &mut self,
@@ -180,6 +206,7 @@ impl FaultTimeline {
         phase: FaultPhase,
     ) -> Result<(), FaultRecordError> {
         reject_hub_stub(kind)?;
+        self.reject_clock_skew_if_bound(kind)?;
         self.record_now_with_log_pos(kind, phase, None)
     }
 
@@ -210,7 +237,16 @@ impl FaultTimeline {
         offset_ms: u64,
     ) -> Result<(), FaultRecordError> {
         reject_hub_stub(kind)?;
+        self.reject_clock_skew_if_bound(kind)?;
         self.push(kind, phase, at, offset_ms, None)
+    }
+
+    /// 時計の注入器を結んだ実行では、公開の直接記録で時計の事象を積ませない（注入器の状態と記録を食い違わせない）。
+    fn reject_clock_skew_if_bound(&self, kind: FaultKind) -> Result<(), FaultRecordError> {
+        if self.clock_bound && matches!(kind, FaultKind::ClockSkew { .. }) {
+            return Err(FaultRecordError::ClockSkewEventOutsideInjector);
+        }
+        Ok(())
     }
 
     fn push(
