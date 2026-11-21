@@ -461,17 +461,23 @@ fn multi_worker_stages_really_overlap() {
         in_flight: AtomicU64::new(0),
         max: AtomicU64::new(0),
     };
+    // 対象呼び出し側で観測した最大同時実行数を段階ごとに持つ（各段階は 1 回だけ回す）。
+    let per_stage_max = [AtomicU64::new(0), AtomicU64::new(0)];
+    let current_stage = AtomicU64::new(0);
     let runs_started = AtomicU64::new(0);
     let r = run_stages(
         || {
             let k = usize::try_from(runs_started.fetch_add(1, Ordering::SeqCst)).unwrap();
             *gate.0.lock().unwrap() = (0, parties[k]);
+            current_stage.store(u64::try_from(k).unwrap(), Ordering::SeqCst);
             step_clock(10)
         },
         &spec(),
         &plan,
         || {
             ov.enter();
+            let idx = usize::try_from(current_stage.load(Ordering::SeqCst)).unwrap();
+            per_stage_max[idx].fetch_max(ov.in_flight.load(Ordering::SeqCst), Ordering::SeqCst);
             let mut g = gate.0.lock().unwrap();
             // 最初のタイムアウトで失敗を記録した後は待たない（直列の回帰で 60 秒を何度も待たないため）。
             if g.0 < g.1 && !timed_out.load(Ordering::SeqCst) {
@@ -499,6 +505,12 @@ fn multi_worker_stages_really_overlap() {
     .unwrap();
     assert!(!timed_out.load(Ordering::SeqCst));
     assert_eq!(ov.max.load(Ordering::SeqCst), 4);
+    // 段階ごとの対象呼び出し側の最大同時実行数（全体の最大だけでは第 2 段階の上限を検証できない）。
+    let target_side: Vec<u64> = per_stage_max
+        .iter()
+        .map(|m| m.load(Ordering::SeqCst))
+        .collect();
+    assert_eq!(target_side, [4, 3]);
     let observed: Vec<u64> = r
         .stages()
         .iter()
