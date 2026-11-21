@@ -361,13 +361,19 @@ SCAN_BIN="${det_ok}" check_scan "dummy under a non-excluded path is detected" 1 
 
 # 検出器の skills-lock.json が壊れていれば検査不能（fail-closed）。診断に名前・パスを出さない
 bad_n=0
+# grep_none <パターン> <ファイル>: 不一致（終了コード 1）のときだけ成功。読み取り失敗等（2 以上）は失敗にする。
+grep_none() {
+  local grc=0
+  grep -q "$1" "$2" || grc=$?
+  [ "${grc}" -eq 1 ]
+}
 # run_bad_lock <説明>: 準備済みの検出器（det_bin）が、固定の文言・終了コード 2 で止まること
 run_bad_lock() {
   local desc="$1" rc=0
   new_repo; stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
   LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_bin}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
   if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting" "${work_dir}/out" \
-    && ! grep -q "vendored\|det-bad\|/" "${work_dir}/out"; then
+    && grep_none "vendored\|det-bad\|/" "${work_dir}/out"; then
     pass "secret-scan: ${desc}"
   else
     fail "secret-scan: ${desc}" "expected exit 2 with a fixed message, got ${rc}" "output: $(cat "${work_dir}/out")"
@@ -924,7 +930,7 @@ run_big_lock() {
   local desc="$1" rc=0
   LC_ALL="${utf8_locale}" "${HOOK_BASH}" "$2" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
   if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: skills-lock.json is too large; aborting" "${work_dir}/out" \
-    && ! grep -q "vendored\|/" "${work_dir}/out"; then
+    && grep_none "vendored\|/" "${work_dir}/out"; then
     pass "secret-scan: ${desc}"
   else
     fail "secret-scan: ${desc}" "expected exit 2 with a fixed message, got ${rc}" "output: $(cat "${work_dir}/out")"

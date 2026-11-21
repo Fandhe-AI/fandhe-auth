@@ -479,22 +479,32 @@ head_resolved=0
 resolve_head() {
   local rc head_ref ref_line ref_found
   head_resolved=1
-  if head_id="$(g rev-parse -q --verify 'HEAD^{commit}' 2> /dev/null)" && [[ "${head_id}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
-    return 0
-  fi
   head_id=""
   rc=0
+  # 'HEAD^{commit}' は短縮参照名の規則で解決され、未作成ブランチでは refs/tags/HEAD 等に誤って当たる。
+  # シンボリック HEAD は先に参照先の完全名（refs/...）を取り、その完全名だけで厳密に解決する。
   head_ref="$(g symbolic-ref -q HEAD 2> /dev/null)" || rc=$?
-  if [ "${rc}" -eq 0 ] && [ -n "${head_ref}" ]; then
-    rc=0
-    g show-ref --verify -q "${head_ref}" > /dev/null 2>&1 || rc=$?
+  if [ "${rc}" -eq 1 ]; then
+    # detached HEAD（$GIT_DIR/HEAD が直接コミットを指す）。
+    if head_id="$(g rev-parse -q --verify 'HEAD^{commit}' 2> /dev/null)" && [[ "${head_id}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+      return 0
+    fi
+    head_id=""
+  elif [ "${rc}" -eq 0 ] && [ -n "${head_ref}" ]; then
+    case "${head_ref}" in
+      refs/*)
+        if head_id="$(g rev-parse -q --verify "${head_ref}^{commit}" 2> /dev/null)" && [[ "${head_id}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+          return 0
+        fi
+        head_id=""
+        rc=0
+        g show-ref --verify -q "${head_ref}" > /dev/null 2>&1 || rc=$?
+        ;;
+      *) rc=2 ;;
+    esac
     # show-ref の終了コード 1 は、参照が無い場合と壊れた参照（内容が不正）の両方で返り得る。
     # for-each-ref（packed-refs も見る）で、一致する参照が 0 件・警告なし・読み取りの成功を確かめたときだけ
     # 未作成ブランチとして扱う。壊れた参照は警告（標準エラー）か完全一致の行として現れ、検査不能（2）にする。
-    case "${head_ref}" in
-      refs/*) ;;
-      *) rc=2 ;;
-    esac
     if [ "${rc}" -eq 1 ]; then
       ref_found=0
       if g for-each-ref --format='%(refname)' "${head_ref}" > "${tmp_dir}/ref-list" 2> "${tmp_dir}/ref-err" && [ ! -s "${tmp_dir}/ref-err" ]; then
@@ -522,13 +532,20 @@ load_skill_names() {
     if [ -L "${detector_lock}" ] || [ ! -f "${detector_lock}" ] || [ ! -r "${detector_lock}" ]; then
       lock_fail
     fi
-    # 確認と open の間の差し替え（TOCTOU）対策: 開いた fd 自体を確かめ、その fd からだけ読む。
-    # <> で開くのは、FIFO への差し替えで open が読み手の到着待ちで止まらないため（通常ファイルでは書き込まない）。
-    # 開いた後の fd が通常ファイルで、パスが（リンクでなく）同じ実体であることを確かめる。違反は 2。
-    if ! exec 5<> "${detector_lock}"; then
+    # 確認と open の間の差し替え（TOCTOU）対策: 読み取り専用で open し、開いた fd 自体を確かめてからその fd だけを読む。
+    # 読み取り専用で開くのは、書き込み権限のない実行ユーザー・読み取り専用マウントでも読めるようにするため。
+    # FIFO への差し替えは、直前に通常ファイルであることを確かめた直後の極小の窓に限られる。
+    if ! exec 5< "${detector_lock}"; then
       lock_fail
     fi
-    if [ -L "${detector_lock}" ] || [ ! -f /dev/fd/5 ] || [ ! /dev/fd/5 -ef "${detector_lock}" ]; then
+    # fd が通常ファイルで、パスが（リンクでなく）同じ実体であることを確かめる。違反は 2。
+    # Linux は /dev/fd/5 が fd の実体への参照で、種別と同一性を fd から確かめられる。
+    # macOS の /dev/fd/5 は文字デバイス（fdesc）で -f が偽になるため、その場合は開いた後のパスの種別だけを確かめる。
+    if [ -L "${detector_lock}" ] || [ ! -f "${detector_lock}" ]; then
+      exec 5<&-
+      lock_fail
+    fi
+    if [ -f /dev/fd/5 ] && [ ! /dev/fd/5 -ef "${detector_lock}" ]; then
       exec 5<&-
       lock_fail
     fi
@@ -565,7 +582,7 @@ load_skill_names() {
     return 0
   fi
   # HEAD の一覧が読めない・壊れているときは検査不能（2）で止める（除外なしで続行する等の方式は人が決める）。
-  if ! g ls-tree -z "${head_id}" -- skills-lock.json > "${tmp_dir}/head-entry"; then
+  if ! g ls-tree -z "${head_id}" -- skills-lock.json > "${tmp_dir}/head-entry" 2> /dev/null; then
     echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
     exit 2
   fi
@@ -580,14 +597,14 @@ load_skill_names() {
     100644 | 100755) ;;
     *) lock_fail ;;
   esac
-  if ! head_size="$(g cat-file -s "${head_id}:skills-lock.json")" || [[ ! "${head_size}" =~ ^[0-9]+$ ]]; then
+  if ! head_size="$(g cat-file -s "${head_id}:skills-lock.json" 2> /dev/null)" || [[ ! "${head_size}" =~ ^[0-9]+$ ]]; then
     echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
     exit 2
   fi
   if [ "${head_size}" -gt "${lock_max_bytes}" ]; then
     lock_too_large
   fi
-  if ! g cat-file blob "${head_id}:skills-lock.json" > "${tmp_dir}/head-lock"; then
+  if ! g cat-file blob "${head_id}:skills-lock.json" > "${tmp_dir}/head-lock" 2> /dev/null; then
     echo "secret-scan: cannot read the committed skills-lock.json; aborting" >&4
     exit 2
   fi
