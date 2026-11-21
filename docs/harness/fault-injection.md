@@ -88,6 +88,9 @@ PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を�
 - 誤りと `Debug` にポート・アドレスを載せない（SECR-11・SECR-23）。
 - 根拠: ORST-17・ORST-2。保存先の実体は未決（Hub `ASTORE-38`）。Host への結線は `TODO(TASK-716)`。
 - 試験: `cargo test -p fandhe-auth-it-harness --test fault_external_store`（`make test` に含む）。
+  - OS の条件（#6016）: `block_returns_promptly_while_accept_is_stalled_on_upstream` は、待ち行列のあふれで SYN を捨てる Linux の既定に依るため
+    Linux 以外では `ignore` にする（macOS での確認は未検証）。`release_returns_in_time_under_reconnect_storm` は macOS で最後の往復が切れることが
+    報告されており調査中。期待は緩めず（AUDB-6）、失敗の文言に `accepted`・`refused` の差と誤りの種類を出す。
 
 ## 遮断の順序と境界の契約（#5983）
 

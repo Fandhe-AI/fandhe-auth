@@ -139,6 +139,18 @@ fn roundtrip(s: &mut TcpStream, msg: &[u8]) -> Outcome {
     }
 }
 
+/// `roundtrip` と同じ分類で、誤りがあったときは種類も返す（失敗の切り分けの文言用。比較には `Outcome` だけを使う）。
+fn roundtrip_kind(s: &mut TcpStream, msg: &[u8]) -> (Outcome, Option<ErrorKind>) {
+    if let Err(e) = s.write_all(msg) {
+        return (classify(&e), Some(e.kind()));
+    }
+    let mut buf = vec![0u8; msg.len()];
+    match s.read_exact(&mut buf) {
+        Ok(()) => (Outcome::Echoed(buf), None),
+        Err(e) => (classify(&e), Some(e.kind())),
+    }
+}
+
 fn wait_until(mut f: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -213,6 +225,11 @@ fn conn_accepted_during_block_is_cut_and_later_conn_reaches_upstream() {
 }
 
 /// 遮断中に再接続を繰り返す相手がいても、解除は期限の中で戻る。
+///
+/// macOS で最後の往復が切れる（`Disconnected`）ことが報告されている（#6016。原因は未確定で、macOS での確認は未検証）。
+/// 期待（最後の往復が `Echoed`）は変えない（AUDB-6）。失敗の文言に、最後の往復の前後の `accepted`・`refused` の差と
+/// 誤りの種類を出す。両方 0 ならカーネルの段で切れており、`refused` が増えたなら転送器が accept した後に閉じ、
+/// `accepted` が増えたなら中継の開始後に切れている。
 #[test]
 fn release_returns_in_time_under_reconnect_storm() {
     let up = echo_upstream();
@@ -238,8 +255,27 @@ fn release_returns_in_time_under_reconnect_storm() {
     storm.join().unwrap();
     r.unwrap();
     assert!(elapsed < Duration::from_secs(5), "release returned late");
+    let (a0, r0) = (p.accepted_count(), p.refused_count());
     let mut c = connect(port);
-    assert_eq!(roundtrip(&mut c, b"s"), Outcome::Echoed(b"s".to_vec()));
+    let (outcome, kind) = roundtrip_kind(&mut c, b"s");
+    if outcome != Outcome::Echoed(b"s".to_vec()) {
+        // 診断の値を安定させるため、計数が落ち着くまで短く待つ（合否には使わない。失敗したときだけ）。
+        let mut last = (p.accepted_count(), p.refused_count());
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+            let now = (p.accepted_count(), p.refused_count());
+            if now == last {
+                break;
+            }
+            last = now;
+        }
+        panic!(
+            "final roundtrip after release was {outcome:?} (io kind {kind:?}): accepted +{}, refused +{}",
+            last.0.saturating_sub(a0),
+            last.1.saturating_sub(r0)
+        );
+    }
 }
 
 #[test]
@@ -348,7 +384,10 @@ fn stalled_upstream() -> StalledUpstream {
         match TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
             Ok(s) => filled.push(s),
             Err(e) if e.kind() == ErrorKind::TimedOut => break,
-            Err(e) => panic!("unexpected connect error: {:?}", e.kind()),
+            Err(e) => panic!(
+                "cannot stall upstream connect: accept-queue overflow returned {:?} (this OS or setting resets on overflow)",
+                e.kind()
+            ),
         }
         assert!(filled.len() < 20_000, "backlog never filled");
     }
@@ -362,7 +401,15 @@ fn stalled_upstream() -> StalledUpstream {
 /// 遮断中に始めた接続・遮断は、accept のスレッドが上流への接続で固まっていても待たされない。
 /// `Applied` の記録から実際の遮断までに、上流への接続の上限（5 秒）に及ぶずれを作らない（ORST-17）。
 /// 固まった接続は遮断で切れる。
+///
+/// 上流を固める土台は、待ち行列があふれたときに SYN を黙って捨てる Linux の既定（`tcp_abort_on_overflow=0`）に依る。
+/// macOS ではあふれた接続がリセットされて土台を組めない（推定。macOS での確認は未検証。#6016）ため、Linux 以外では
+/// `ignore` にする。Linux でも土台が組めていることを `block()` の前に確かめる（中身の無い合格にしない）。
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "stalling an upstream connect relies on Linux dropping SYNs on accept-queue overflow"
+)]
 fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     let up = stalled_upstream();
     let mut p = ExternalStoreFaultProxy::start_to_port(up.port).unwrap();
@@ -370,6 +417,13 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     let mut stuck = connect(p.listen_port());
     // accept のスレッドが上流への connect に入るのを待つ（値は下限。待ちすぎても害はない）。
     thread::sleep(Duration::from_millis(300));
+    // 前提: accept のスレッドは上流への接続で止まっており、拒否も転送も始まっていない。
+    assert_eq!(
+        p.refused_count(),
+        0,
+        "upstream connect failed instead of stalling"
+    );
+    assert_eq!(p.accepted_count(), 0, "upstream connect was not stalled");
     let started = Instant::now();
     p.block(&mut tl).unwrap();
     let elapsed = started.elapsed();
