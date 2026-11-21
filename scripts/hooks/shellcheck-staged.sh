@@ -37,6 +37,12 @@ fi
 case "${max_jobs}" in
   '' | *[!0-9]*) max_jobs=4 ;;
 esac
+# 桁数を絞ってから数として読む（巨大な数字の列は比較・算術を誤らせる。先頭の 0 は 10# で 10 進として読む）
+if [ "${#max_jobs}" -gt 3 ]; then
+  max_jobs=4
+else
+  max_jobs=$((10#${max_jobs}))
+fi
 if [ "${max_jobs}" -lt 1 ]; then
   max_jobs=4
 elif [ "${max_jobs}" -gt 16 ]; then
@@ -103,6 +109,10 @@ if [ "${total}" -gt 0 ]; then
     case "${wc_size}" in
       '' | *[!0-9]*) numeric=0 ;;
     esac
+    # 15 桁を超える数は大きさとして使わない（算術の桁あふれを避ける）
+    if [ "${#wc_size}" -gt 15 ]; then
+      numeric=0
+    fi
     if [ "${got_lines}" -lt "${total}" ]; then
       parsed[got_lines]="${wc_size}"
     fi
@@ -111,7 +121,7 @@ if [ "${total}" -gt 0 ]; then
   if [ "${numeric}" -eq 1 ] && [ "${got_lines}" -eq "${want_lines}" ]; then
     i=0
     while [ "${i}" -lt "${total}" ]; do
-      sizes[i]="${parsed[i]}"
+      sizes[i]=$((10#${parsed[i]}))
       i=$((i + 1))
     done
   fi
@@ -153,6 +163,21 @@ if [ "${total}" -gt 0 ]; then
     batch_sum[best]=$((batch_sum[best] + size + 1))
     batch_members[best]="${batch_members[best]} ${idx}"
   done < "${tmp_dir}/order"
+fi
+
+# 割り振りの確認: バッチに入れた件数の合計が total と一致し、バッチ数が 1 以上 16 以下であること。
+# 違えば、一部のファイルが検査されないまま 0 で終わり得るため、検査不能（2）で止める。
+assigned=0
+b=0
+while [ "${b}" -lt "${batches}" ]; do
+  for idx in ${batch_members[b]}; do
+    assigned=$((assigned + 1))
+  done
+  b=$((b + 1))
+done
+if [ "${assigned}" -ne "${total}" ] || [ "${batches}" -gt 16 ] || { [ "${total}" -gt 0 ] && [ "${batches}" -lt 1 ]; }; then
+  echo "shellcheck-staged: internal error: ${assigned} of ${total} file(s) assigned to ${batches} batch(es)" >&2
+  exit 2
 fi
 
 # run_batch <バッチの番号>: バッチの全ファイルを 1 回の shellcheck に渡し、出力と終了コードを番号付きの一時ファイルへ書く。

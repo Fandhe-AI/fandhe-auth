@@ -438,6 +438,19 @@ fi
 sc_jobs=8
 cd "${work_dir}"
 
+# getconf が桁あふれする数字の列を返しても、比較が誤って 0 のまま素通りしない。固定値（4）に落ちて全件が検査され、0 で終わる
+# （期待は「正常に検査されて 0」。2 で止まるのではなく、検査の範囲が変わらないことを確かめる）
+sc_jobs=99999999999999999999
+sc_run a.sh b.sh c.sh d.sh e.sh
+sc_args="$(sed 's/^-- //' "${sc_log}" | tr ' ' '\n' | sort)"
+sc_calls="$(wc -l < "${sc_log}" | tr -d ' ')"
+if [ "${sc_rc}" -eq 0 ] && [ "${sc_args}" = "$(printf '%s\n' a.sh b.sh c.sh d.sh e.sh)" ] && [ "${sc_calls}" -le 4 ]; then
+  pass "shellcheck-staged: an overflowing getconf value falls back to a fixed parallel limit and every file is checked"
+else
+  fail "shellcheck-staged: an overflowing getconf value falls back to a fixed parallel limit and every file is checked" "exit ${sc_rc}, calls: ${sc_calls}" "output: $(cat "${work_dir}/out")"
+fi
+sc_jobs=8
+
 # PATH に shellcheck が無いときは、未検査で成功にせず 2 で止まる
 sc_empty_path="${work_dir}/sc-empty-path"
 mkdir -p "${sc_empty_path}"
