@@ -14,7 +14,7 @@ fn vname(n: &str) -> ValueName {
 }
 
 fn refs(ids: &[&str]) -> Vec<RefId> {
-    ids.iter().map(|s| RefId::new(s).unwrap()).collect()
+    ids.iter().map(|s| RefId::new(s, ids).unwrap()).collect()
 }
 
 fn val(
@@ -81,7 +81,7 @@ fn input_validation() {
     );
     for reserved in ["none", "harness_config", "measured"] {
         assert_eq!(
-            RefId::new(reserved).unwrap_err(),
+            RefId::new(reserved, &[reserved]).unwrap_err(),
             LoadRecordError::InvalidRef
         );
     }
@@ -95,8 +95,17 @@ fn input_validation() {
         "a\0b",
         &"a".repeat(65),
     ] {
-        assert_eq!(RefId::new(bad).unwrap_err(), LoadRecordError::InvalidRef);
+        assert_eq!(
+            RefId::new(bad, &[bad]).unwrap_err(),
+            LoadRecordError::InvalidRef
+        );
     }
+    // 信頼済みの一覧に無い出典は、文字種が正しくても拒否する（SECR-23・SECR-26）。
+    assert_eq!(
+        RefId::new("CONFIG-SECRET-1", &["AUDP-29"]).unwrap_err(),
+        LoadRecordError::InvalidRef
+    );
+    assert!(RefId::new("AUDP-29", &["AUDP-29"]).is_ok());
     assert!(RunRecordFile::new("it-run-0-1-2.txt").is_ok());
     for bad in [
         "",
@@ -109,6 +118,10 @@ fn input_validation() {
         "it-run-0-1-2-3.txt",
         "it-run-253402300800-1-2.txt",
         "it-run-99999999999999999999999-1-2.txt",
+        "it-run-00-1-2.txt",
+        "it-run-0-01-2.txt",
+        "it-run-0-1-02.txt",
+        "it-run-0-4294967296-2.txt",
         "dir/it-run-0-1-2.txt",
     ] {
         assert_eq!(
@@ -288,6 +301,46 @@ fn debug_and_errors_do_not_leak() {
     }
     let e = RunRecordFile::new("bad\nlines").unwrap_err().to_string();
     assert!(!e.contains("bad"));
-    let e = RefId::new("x\ny").unwrap_err().to_string();
+    let e = RefId::new("x\ny", &["x\ny"]).unwrap_err().to_string();
     assert!(!e.contains('x'));
+}
+
+#[test]
+fn p99_target_only_undecided_or_external() {
+    // AUDP-29: 性能の目標は未決。数値と出典を付けて要件の値にできない。
+    for c in [
+        ValueClass::Requirement,
+        ValueClass::Initial,
+        ValueClass::PocParameter,
+    ] {
+        assert_eq!(
+            val("p99_target", c, Some(1), &["AUDP-29"]).unwrap_err(),
+            LoadRecordError::InvalidValue(InvalidValueReason::ClassNotAllowed)
+        );
+    }
+    assert!(val("p99_target", ValueClass::Undecided, None, &["AUDP-29"]).is_ok());
+}
+
+#[test]
+fn write_new_collision_keeps_existing_file() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("load-collision");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rec = build(0, 1, vec![]).unwrap();
+    // 通し番号はこのプロセスで共有されるため、衝突しうる一時ファイル名を範囲で先に置く。
+    let pid = std::process::id();
+    let canaries: Vec<_> = (0..64)
+        .map(|n| dir.join(format!(".tmp-load-run-0-{pid}-{n}")))
+        .collect();
+    for c in &canaries {
+        std::fs::write(c, b"keep").unwrap();
+    }
+    let r = rec.write_new(&dir);
+    for c in &canaries {
+        assert_eq!(std::fs::read(c).unwrap(), b"keep");
+        std::fs::remove_file(c).unwrap();
+    }
+    // 衝突した場合は WriteFailed、しなかった場合は書けている。どちらでも既存は残る。
+    if let Ok(p) = r {
+        std::fs::remove_file(p).unwrap();
+    }
 }

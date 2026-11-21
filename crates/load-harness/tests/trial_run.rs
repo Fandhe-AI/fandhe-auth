@@ -114,15 +114,14 @@ fn small_trial_run_writes_record_without_requirement_values() {
         ValueClass::Undecided,
         None,
         ValueUnit::Ns,
-        vec![RefId::new("AUDP-29").unwrap()],
+        vec![RefId::new("AUDP-29", &["AUDP-29"]).unwrap()],
     )
     .unwrap();
-    // 記録を組み立てる時点の時刻（起動時刻より前なら LoadRecord が拒否する）。
+    // 記録を組み立てる時点の実測時刻。逆行していれば LoadRecord が ClockOrder で拒否する（補正しない）。
     let recorded_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs()
-        .max(started);
+        .as_secs();
     let record = LoadRecord::new(
         &run_file,
         started,

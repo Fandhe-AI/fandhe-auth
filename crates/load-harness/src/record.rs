@@ -80,6 +80,7 @@ pub enum InvalidValueReason {
     RefsForbidden,
     ValueRequired,
     ValueForbidden,
+    ClassNotAllowed,
 }
 
 impl InvalidValueReason {
@@ -89,6 +90,7 @@ impl InvalidValueReason {
             Self::RefsForbidden => "refs_forbidden",
             Self::ValueRequired => "value_required",
             Self::ValueForbidden => "value_forbidden",
+            Self::ClassNotAllowed => "class_not_allowed",
         }
     }
 }
@@ -143,6 +145,11 @@ fn is_name(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
+/// 項目ごとの許容する区分（AUDP-29）。性能の目標は持ち越しで、`undecided`（値なし）か `external` 以外にしない。
+/// ここに無い名前は区分を限らない（区分ごとの規則は別に検査する）。
+const NAME_CLASS_RULES: [(&str, &[ValueClass]); 1] =
+    [("p99_target", &[ValueClass::Undecided, ValueClass::External])];
+
 /// 値の名前（`[a-z0-9_]`・1〜64 文字で、呼び出し元が渡す承認済みの語彙に含まれるもの）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct ValueName(String);
@@ -168,18 +175,20 @@ impl fmt::Debug for ValueName {
     }
 }
 
-/// 出典の ID（ASCII 英数字・`-`・`_`・1〜64 文字）。
+/// 出典の ID（ASCII 英数字・`-`・`_`・1〜64 文字で、呼び出し元が渡す信頼済みの一覧に完全一致するもの）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct RefId(String);
 
 impl RefId {
+    /// 信頼済みの一覧（spec の ID 等）と完全一致するものだけを受ける。任意の文字列を出典として出さない（SECR-23・SECR-26）。
+    ///
     /// # Errors
-    /// 規則を満たさないか、予約語（`none`・`harness_config`・`measured`）のとき [`LoadRecordError::InvalidRef`]。
-    pub fn new(s: &str) -> Result<Self, LoadRecordError> {
+    /// 規則を満たさない・予約語（`none`・`harness_config`・`measured`）・`trusted` に無いとき [`LoadRecordError::InvalidRef`]。
+    pub fn new(s: &str, trusted: &[&str]) -> Result<Self, LoadRecordError> {
         let ok = (1..=64).contains(&s.len())
             && s.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        if ok && !RESERVED_REFS.contains(&s) {
+        if ok && !RESERVED_REFS.contains(&s) && trusted.contains(&s) {
             Ok(Self(s.to_owned()))
         } else {
             Err(LoadRecordError::InvalidRef)
@@ -210,8 +219,12 @@ impl RunRecordFile {
         let parts: Vec<&str> = rest.split('-').collect();
         let digits = |p: &&str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
         if parts.len() == 3 && parts.iter().all(digits) {
+            // it-harness の生成元と同じ型（秒 u64・pid u32・通し番号 u64）で解析し、再整形した名前と完全一致を確かめる
+            // （先頭ゼロ・型に収まらない数値は生成されない名前として拒否する）。
             let started: u64 = parts[0].parse().map_err(|_| bad)?;
-            if started > MAX_UNIX_SECS {
+            let pid: u32 = parts[1].parse().map_err(|_| bad)?;
+            let seq: u64 = parts[2].parse().map_err(|_| bad)?;
+            if started > MAX_UNIX_SECS || format!("it-run-{started}-{pid}-{seq}.txt") != s {
                 return Err(bad);
             }
             Ok(Self(s.to_owned()))
@@ -260,13 +273,20 @@ impl ComparisonValue {
         refs: Vec<RefId>,
     ) -> Result<Self, LoadRecordError> {
         let bad = LoadRecordError::InvalidValue;
-        use InvalidValueReason::{RefsForbidden, RefsRequired, ValueForbidden, ValueRequired};
+        use InvalidValueReason::{
+            ClassNotAllowed, RefsForbidden, RefsRequired, ValueForbidden, ValueRequired,
+        };
         if refs.len() > MAX_REFS {
             return Err(LoadRecordError::TooManyRefs);
         }
         let uniq: BTreeSet<&str> = refs.iter().map(|r| r.0.as_str()).collect();
         if uniq.len() != refs.len() {
             return Err(LoadRecordError::InvalidRef);
+        }
+        if let Some((_, allowed)) = NAME_CLASS_RULES.iter().find(|(n, _)| *n == name.0.as_str())
+            && !allowed.contains(&class)
+        {
+            return Err(bad(ClassNotAllowed));
         }
         match class {
             ValueClass::Requirement | ValueClass::Initial | ValueClass::PocParameter => {
@@ -441,15 +461,21 @@ impl LoadRecord {
             self.run_started_at,
             std::process::id()
         ));
+        // 一時ファイルを作れた場合だけ後処理で消す。名前の衝突で作れなかったときは、
+        // 既存のファイルを消さない（`create_new` の失敗経路で `remove_file` を呼ばない）。
+        let mut created = false;
         let result = (|| {
             let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            created = true;
             file.write_all(self.text.as_bytes())?;
             file.flush()?;
             file.sync_all()?;
             drop(file);
             std::fs::hard_link(&tmp, &path)
         })();
-        let _ = std::fs::remove_file(&tmp);
+        if created {
+            let _ = std::fs::remove_file(&tmp);
+        }
         result.map_err(|_| LoadRecordError::WriteFailed)?;
         Ok(path)
     }

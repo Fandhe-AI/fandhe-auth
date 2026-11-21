@@ -373,7 +373,8 @@ judgment:
   測定値・既定値を要件の値へ上げる経路は作らない。
 - 書き出し: `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。無ければ `dir` を作る。隠し名の一時ファイルへ書ききってから、上書きなしの `hard_link` で最終名へ公開する
   （途中の失敗で不完全なファイルを完成品の名前で残さない。一時ファイルは常に消す）。乱数・環境変数・設定ファイルを使わない。
-- 入力の検査（仮置き）: `ValueName::new` は呼び出し元が渡す承認済みの語彙に含まれる名前だけを受ける。`RefId` は予約語（`none`・`harness_config`・`measured`）を拒否する。
+- 入力の検査（仮置き）: `ValueName::new` は呼び出し元が渡す承認済みの語彙に含まれる名前だけを受ける。`RefId::new` は呼び出し元が渡す信頼済みの出典の一覧（spec の ID 等）に完全一致するものだけを受け、予約語（`none`・`harness_config`・`measured`）を拒否する。
+  `p99_target` は `undecided`・`external` 以外の区分を `ClassNotAllowed` で拒否する（`AUDP-29`）。`RunRecordFile` は生成元と同じ整数型で解析し、再整形した名前と一致しない名前（先頭ゼロ等）を拒否する。
   `RunRecordFile` の起動秒と `run_started_at` が違えば `RunStartMismatch`。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
   値の行の違反の理由は固定の列挙 `InvalidValueReason` で持つ（`&'static str` を公開しない）。
 - 時刻の RFC 3339 の整形は、通常の依存を 0 に保つため it-harness の `UtcTimestamp` と同じ変換を `record` に重複して持つ。
