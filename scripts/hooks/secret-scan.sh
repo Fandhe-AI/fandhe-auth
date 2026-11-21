@@ -522,7 +522,23 @@ load_skill_names() {
     if [ -L "${detector_lock}" ] || [ ! -f "${detector_lock}" ] || [ ! -r "${detector_lock}" ]; then
       lock_fail
     fi
-    parse_lock "${detector_lock}"
+    # 確認と open の間の差し替え（TOCTOU）対策: 開いた fd 自体を確かめ、その fd からだけ読む。
+    # <> で開くのは、FIFO への差し替えで open が読み手の到着待ちで止まらないため（通常ファイルでは書き込まない）。
+    # 開いた後の fd が通常ファイルで、パスが（リンクでなく）同じ実体であることを確かめる。違反は 2。
+    if ! exec 5<> "${detector_lock}"; then
+      lock_fail
+    fi
+    if [ -L "${detector_lock}" ] || [ ! -f /dev/fd/5 ] || [ ! /dev/fd/5 -ef "${detector_lock}" ]; then
+      exec 5<&-
+      lock_fail
+    fi
+    # 上限 + 1 バイトだけ複写する（超過は parse_lock が固定の診断で止める）。
+    if ! head -c $((lock_max_bytes + 1)) <&5 > "${tmp_dir}/work-lock"; then
+      exec 5<&-
+      lock_fail
+    fi
+    exec 5<&-
+    parse_lock "${tmp_dir}/work-lock"
     work_names=(${parsed_names[@]+"${parsed_names[@]}"})
     work_present=1
   fi
@@ -618,24 +634,20 @@ done
 # bash 3.2 は set -u 下で空配列の展開・長さ参照が unbound variable になるため、
 # 空になりうる配列を使わず mode で分岐し、tracked のときだけ empty_tree を渡す。
 empty_tree=""
-if [ "${mode}" = tracked ]; then
-  if ! empty_tree="$(g hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
-    echo "secret-scan: failed to resolve the empty tree; aborting" >&4
-    exit 2
-  fi
+# 空の tree の ID は常に解決する。未作成ブランチの staged も、基準を暗黙にせず空の tree を明示して固定する
+# （基準を省くと、走査中にブランチが作られたとき名前の検査と本文の検査の基準がずれ得る）。
+if ! empty_tree="$(g hash-object -t tree --stdin < /dev/null)" || [ -z "${empty_tree}" ]; then
+  echo "secret-scan: failed to resolve the empty tree; aborting" >&4
+  exit 2
+fi
+if [ "${mode}" = tracked ] || [ -z "${head_id}" ]; then
+  scan_base="${empty_tree}"
+else
+  scan_base="${head_id}"
 fi
 scan_diff() {
-  if [ "${mode}" = tracked ]; then
-    g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "${empty_tree}" "$@"
-  elif [ -n "${head_id}" ]; then
-    g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "${head_id}" "$@"
-  else
-    # 未作成ブランチ（ID 無し）は従来どおり基準を渡さない
-    g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-      --src-prefix=a/ --dst-prefix=b/ "$@"
-  fi
+  g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
+    --src-prefix=a/ --dst-prefix=b/ "${scan_base}" "$@"
 }
 
 # git の出力は一度ファイルへ書き出してから読む。`done <<< "$(git ...)"` やパイプでは git の失敗が

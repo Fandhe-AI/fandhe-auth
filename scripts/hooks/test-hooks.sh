@@ -958,12 +958,39 @@ else
   fail "secret-scan: the staged diff of another checkout uses the pinned HEAD commit id" "git calls: $(cat "${work_dir}/gitlog")"
 fi
 
-# 未作成ブランチの staged の差分は、基準の ID を渡さない従来の挙動のまま
+# 未作成ブランチの staged の差分は、空の tree の ID を明示して固定する（名前の検査と本文の検査の 2 回とも）
 new_repo
 git symbolic-ref HEAD refs/heads/unborn
 stage src/app.txt "x = ${token}"
 : > "${work_dir}/gitlog"
-LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${det_ok}" check_scan "staged: an unborn branch is scanned without a base id" 1 src/app.txt
+LOG_GIT_FILE="${work_dir}/gitlog" PATH="${shim_dir}:${PATH}" SCAN_BIN="${det_ok}" check_scan "staged: an unborn branch is scanned against the empty tree" 1 src/app.txt
+empty_id="$(git hash-object -t tree --stdin < /dev/null)"
+grep -E "(^| )diff( |$)" "${work_dir}/gitlog" > "${work_dir}/gitlog-sub" || true
+sub_total="$(wc -l < "${work_dir}/gitlog-sub")"
+sub_total="${sub_total//[[:space:]]/}"
+sub_with_id="$(grep -c "${empty_id}" "${work_dir}/gitlog-sub" || true)"
+if [ "${sub_total}" -ge 2 ] && [ "${sub_total}" -eq "${sub_with_id}" ]; then
+  pass "secret-scan: both staged diffs of an unborn branch pass the empty tree id"
+else
+  fail "secret-scan: both staged diffs of an unborn branch pass the empty tree id" "git calls: $(cat "${work_dir}/gitlog")"
+fi
+
+# 一覧が通常ファイルでない（FIFO）・リンクのときは、止まらずに 2
+same_checkout_repo "${lock_ok}"
+rm -f skills-lock.json
+stage src/app.txt "x = placeholder"
+fifo_dir="."
+rm -f "${fifo_dir}/skills-lock.json"
+if mkfifo "${fifo_dir}/skills-lock.json" 2> /dev/null; then
+  fifo_rc=0
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 < /dev/null || fifo_rc=$?
+  if [ "${fifo_rc}" -eq 2 ]; then
+    pass "secret-scan: a FIFO in place of the list is rejected without hanging (2)"
+  else
+    fail "secret-scan: a FIFO in place of the list is rejected without hanging (2)" "got ${fifo_rc}" "output: $(cat "${work_dir}/out")"
+  fi
+  rm -f "${fifo_dir}/skills-lock.json"
+fi
 
 # CDPATH で相対パスの cd が別のディレクトリ（一覧の無いおとり）へ向かっても、検出器の場所を取り違えない。
 # repo 側にコミットした正しい一覧が使われれば除外され（0）、CDPATH を効かせると一覧を失って検出になる（1）。
