@@ -55,7 +55,25 @@ if ! tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shellcheck-staged.XXXXXX")"; then
   exit 2
 fi
 trap 'rm -rf "${tmp_dir}"' EXIT
-trap 'exit 2' INT TERM
+# 中断（INT・TERM）では、起動済みのバッチに停止を伝え、終わりを待ってから 2 で終わる（EXIT の trap が一時領域を消す）。
+# バッチの子は自分の shellcheck を止めてから終わる（run_batch の trap）。起動前なら pids は空で、何もしない。
+pids=()
+launched=0
+# shellcheck disable=SC2329 # trap から呼ばれる
+on_signal() {
+  local k=0
+  while [ "${k}" -lt "${launched}" ]; do
+    kill "${pids[k]}" 2> /dev/null || true
+    k=$((k + 1))
+  done
+  k=0
+  while [ "${k}" -lt "${launched}" ]; do
+    wait "${pids[k]}" 2> /dev/null || true
+    k=$((k + 1))
+  done
+  exit 2
+}
+trap on_signal INT TERM
 
 # 重複を除いた引数を files に集める（名前の完全一致。引数は高々数百件で、二重の走査で足りる）。
 # 空の名前は検査に回さず、検査不能として扱う（名前の無いまま 0 で終わる経路を作らない）。
@@ -183,7 +201,7 @@ fi
 # run_batch <バッチの番号>: バッチの全ファイルを 1 回の shellcheck に渡し、出力と終了コードを番号付きの一時ファイルへ書く。
 # 番号は親が持ち、ファイル名は引数のまま `--` の後ろへ置く（名前を sh のコードに埋めない）。
 run_batch() {
-  local rc idx n=0 args=()
+  local rc idx n=0 args=() sc_pid
   for idx in ${batch_members[$1]}; do
     args[n]="${files[idx]}"
     n=$((n + 1))
@@ -194,7 +212,13 @@ run_batch() {
     echo 2 > "${tmp_dir}/$1.rc"
     return 0
   fi
-  if shellcheck -- "${args[@]}" > "${tmp_dir}/$1.out" 2>&1; then
+  # 検査は背景で起動して pid を持ち、停止（TERM・INT）を受けたら止めてから終わる（孫の shellcheck を残さない）。
+  # 止められた場合は .rc を書かず、親が「結果が無い」として扱う。
+  sc_pid=""
+  trap '[ -z "${sc_pid}" ] || kill "${sc_pid}" 2> /dev/null; [ -z "${sc_pid}" ] || wait "${sc_pid}" 2> /dev/null; exit 2' TERM INT
+  shellcheck -- "${args[@]}" > "${tmp_dir}/$1.out" 2>&1 &
+  sc_pid=$!
+  if wait "${sc_pid}"; then
     rc=0
   else
     rc=$?
@@ -203,11 +227,11 @@ run_batch() {
 }
 
 # バッチは全部いっぺんに起動する（数は max_jobs 以下）。結果は wait の戻り値ではなく .rc から読む。
-pids=()
 b=0
 while [ "${b}" -lt "${batches}" ]; do
   run_batch "${b}" &
   pids[b]=$!
+  launched=$((b + 1))
   b=$((b + 1))
 done
 b=0

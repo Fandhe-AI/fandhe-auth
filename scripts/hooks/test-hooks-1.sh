@@ -269,17 +269,24 @@ check_bad_lock "skills-lock.json with an unexpected top-level key is rejected" '
 
 # ---------------------------------------------------------------- shellcheck-staged.sh（pre-commit の shellcheck の並列実行）
 # 本物の shellcheck には頼らず（macOS の CI にあるとは限らない）、PATH 先頭に置いた偽物で呼び方と集約を確かめる。
-# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。呼ばれた引数の全件を順に見て、名前に bad を含むファイルは 3 行を出し（終了コード 1）、err を含むものは 1 行を出して（終了コード 2。shellcheck 自身の失敗。1 より優先）、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とす。
+# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。呼び出しは call と arg:<値>（1 引数 1 行）で記録する。呼ばれた引数の全件を順に見て、名前に bad を含むファイルは 3 行を出し（終了コード 1）、err を含むものは 1 行を出して（終了コード 2。shellcheck 自身の失敗。1 より優先）、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とし、hang を含むものは自分の pid を SC_PIDFILE へ書いて 30 秒眠る。
 sc_shim_dir="${work_dir}/sc-shim"
 mkdir -p "${sc_shim_dir}"
 cat > "${sc_shim_dir}/shellcheck" <<'EOF'
 #!/bin/sh
-printf '%s\n' "$*" >> "${SC_LOG}"
+# 1 回の呼び出しを「call」の行と、引数 1 つにつき 1 行の「arg:<値>」で記録する（空白を含む引数の境界を見分けるため）。
+# 並列の呼び出しの記録が混ざらないよう、1 回の書き込みで追記する。
+rec="$(printf 'call\n'; printf 'arg:%s\n' "$@")"
+printf '%s\n' "${rec}" >> "${SC_LOG}"
 rc=0
 for arg in "$@"; do
   case "${arg}" in
     *slow*) sleep 0.3 ;;
     *die*) kill -9 "${PPID}" ;;
+    *hang*)
+      echo "$$" > "${SC_PIDFILE}"
+      exec sleep 30
+      ;;
     *err*)
       echo "${arg}: could not be read"
       rc=2
@@ -318,6 +325,15 @@ sc_run() {
   fi
 }
 
+# 記録の読み方: sc_ncalls = 呼び出しの回数、sc_files = 渡された引数（-- を除く）を 1 行 1 つで並べ替えたもの、
+# sc_groups = 呼び出しごとの引数を | でつないだ行を並べ替えたもの（引数の境界が行の境界に対応する）。
+sc_ncalls() { grep -c '^call$' "${sc_log}" || true; }
+sc_dashes() { grep -c '^arg:--$' "${sc_log}" || true; }
+sc_files() { grep '^arg:' "${sc_log}" | sed 's/^arg://' | grep -vx -e '--' | sort || true; }
+sc_groups() {
+  awk '/^call$/ { if (g != "") print g; g = ""; next } { sub(/^arg:/, ""); if ($0 == "--") next; g = (g == "" ? $0 : g "|" $0) } END { if (g != "") print g }' "${sc_log}" | sort
+}
+
 sc_run
 if [ "${sc_rc}" -eq 0 ] && [ ! -s "${sc_log}" ] && [ ! -s "${work_dir}/out" ]; then
   pass "shellcheck-staged: no arguments exits 0 without starting shellcheck"
@@ -326,7 +342,7 @@ else
 fi
 
 sc_run a.sh b.sh c.sh
-if [ "${sc_rc}" -eq 0 ] && [ "$(sort "${sc_log}")" = "$(printf '%s\n' '-- a.sh' '-- b.sh' '-- c.sh')" ] && [ ! -s "${work_dir}/out" ]; then
+if [ "${sc_rc}" -eq 0 ] && [ "$(sc_files)" = "$(printf '%s\n' a.sh b.sh c.sh)" ] && [ "$(sc_ncalls)" = "$(sc_dashes)" ] && [ ! -s "${work_dir}/out" ]; then
   pass "shellcheck-staged: every file passing exits 0 and each file is checked once"
 else
   fail "shellcheck-staged: every file passing exits 0 and each file is checked once" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
@@ -335,7 +351,7 @@ fi
 # 失敗したファイルがあれば非 0。ほかのファイルも検査され、出力はファイル単位でまとまり、引数の順に並ぶ
 sc_run a.sh slow-bad1.sh c.sh bad2.sh
 sc_want="$(printf '%s\n' 'slow-bad1.sh: begin' 'slow-bad1.sh: middle' 'slow-bad1.sh: end' 'bad2.sh: begin' 'bad2.sh: middle' 'bad2.sh: end')"
-if [ "${sc_rc}" -eq 1 ] && [ "$(cat "${work_dir}/out")" = "${sc_want}" ] && [ "$(wc -l < "${sc_log}" | tr -d ' ')" = "4" ]; then
+if [ "${sc_rc}" -eq 1 ] && [ "$(cat "${work_dir}/out")" = "${sc_want}" ] && [ "$(sc_ncalls)" = "4" ]; then
   pass "shellcheck-staged: a failing file exits 1, the others are still checked and output is grouped per batch in batch order"
 else
   fail "shellcheck-staged: a failing file exits 1, the others are still checked and output is grouped per batch in batch order" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
@@ -351,7 +367,7 @@ fi
 
 # 空白を含むファイル名は 1 つの引数のまま渡る（空の引数で起動しない）
 sc_run "dir with space/my file.sh" "-dash.sh"
-if [ "${sc_rc}" -eq 0 ] && [ "$(sort "${sc_log}")" = "$(printf '%s\n' '-- -dash.sh' '-- dir with space/my file.sh')" ]; then
+if [ "${sc_rc}" -eq 0 ] && [ "$(sc_ncalls)" = "2" ] && [ "$(sc_dashes)" = "2" ] && [ "$(sc_files)" = "$(printf '%s\n' '-dash.sh' 'dir with space/my file.sh')" ]; then
   pass "shellcheck-staged: file names with spaces or a leading dash are passed intact after --"
 else
   fail "shellcheck-staged: file names with spaces or a leading dash are passed intact after --" "exit ${sc_rc}, calls: $(cat "${sc_log}")"
@@ -359,7 +375,7 @@ fi
 
 # 同じ名前の引数（lefthook は glob が 2 つあると両方に一致するファイルを 2 回渡す）は 1 回だけ検査する
 sc_run a.sh b.sh a.sh "x y.sh" "x y.sh" b.sh
-if [ "${sc_rc}" -eq 0 ] && [ "$(sort "${sc_log}")" = "$(printf '%s\n' '-- a.sh' '-- b.sh' '-- x y.sh')" ]; then
+if [ "${sc_rc}" -eq 0 ] && [ "$(sc_ncalls)" = "3" ] && [ "$(sc_files)" = "$(printf '%s\n' a.sh b.sh 'x y.sh')" ]; then
   pass "shellcheck-staged: duplicate arguments are checked once"
 else
   fail "shellcheck-staged: duplicate arguments are checked once" "exit ${sc_rc}, calls: $(cat "${sc_log}")"
@@ -408,8 +424,8 @@ for sc_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26
 done
 sc_jobs=4
 sc_run "${sc_many[@]}"
-sc_calls="$(wc -l < "${sc_log}" | tr -d ' ')"
-sc_args="$(sed 's/^-- //' "${sc_log}" | tr ' ' '\n' | sort)"
+sc_calls="$(sc_ncalls)"
+sc_args="$(sc_files)"
 sc_want_args="$(printf '%s\n' "${sc_many[@]}" | sort)"
 if [ "${sc_rc}" -eq 0 ] && [ "${sc_calls}" -ge 1 ] && [ "${sc_calls}" -le 4 ] && [ "${sc_args}" = "${sc_want_args}" ]; then
   pass "shellcheck-staged: 30 files with 4 jobs start shellcheck at most 4 times and pass every file exactly once"
@@ -429,8 +445,8 @@ head -c 500 /dev/zero > mid2.sh
 head -c 400 /dev/zero > small.sh
 sc_jobs=2
 sc_run small.sh "mid one.sh" mid2.sh big.sh
-sc_want="$(printf '%s\n' '-- big.sh small.sh' '-- mid one.sh mid2.sh')"
-if [ "${sc_rc}" -eq 0 ] && [ "$(sort "${sc_log}")" = "${sc_want}" ]; then
+sc_want="$(printf '%s\n' 'big.sh|small.sh' 'mid one.sh|mid2.sh' | sort)"
+if [ "${sc_rc}" -eq 0 ] && [ "$(sc_groups)" = "${sc_want}" ]; then
   pass "shellcheck-staged: files are split into batches of similar total size (largest first)"
 else
   fail "shellcheck-staged: files are split into batches of similar total size (largest first)" "exit ${sc_rc}" "calls: $(cat "${sc_log}")"
@@ -442,8 +458,8 @@ cd "${work_dir}"
 # （期待は「正常に検査されて 0」。2 で止まるのではなく、検査の範囲が変わらないことを確かめる）
 sc_jobs=99999999999999999999
 sc_run a.sh b.sh c.sh d.sh e.sh
-sc_args="$(sed 's/^-- //' "${sc_log}" | tr ' ' '\n' | sort)"
-sc_calls="$(wc -l < "${sc_log}" | tr -d ' ')"
+sc_args="$(sc_files)"
+sc_calls="$(sc_ncalls)"
 if [ "${sc_rc}" -eq 0 ] && [ "${sc_args}" = "$(printf '%s\n' a.sh b.sh c.sh d.sh e.sh)" ] && [ "${sc_calls}" -le 4 ]; then
   pass "shellcheck-staged: an overflowing getconf value falls back to a fixed parallel limit and every file is checked"
 else
@@ -473,6 +489,47 @@ if [ "${sc_rc}" -eq 2 ] && [ ! -s "${sc_log}" ] && grep -qF "shellcheck could no
   pass "shellcheck-staged: an unopenable output file exits 2 (not treated as a finding)"
 else
   fail "shellcheck-staged: an unopenable output file exits 2 (not treated as a finding)" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
+fi
+
+# 中断（TERM）では、起動済みのバッチの shellcheck まで止め、2 で終わる（止めずに孫の shellcheck を残さない）。
+# 偽の shellcheck が pid を書いて眠っている間に親へ TERM を送り、終わった後にその pid のプロセスが残っていないことを確かめる
+sc_pidfile="${work_dir}/sc.pid"
+rm -f "${sc_pidfile}"
+: > "${sc_log}"
+SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh a.sh > "${work_dir}/out" 2>&1 &
+sc_script_pid=$!
+sc_waited=0
+while [ ! -s "${sc_pidfile}" ] && [ "${sc_waited}" -lt 100 ]; do
+  sleep 0.1
+  sc_waited=$((sc_waited + 1))
+done
+sc_t0="${SECONDS}"
+kill -TERM "${sc_script_pid}" 2> /dev/null || true
+if wait "${sc_script_pid}"; then
+  sc_rc=0
+else
+  sc_rc=$?
+fi
+sc_stop_secs=$((SECONDS - sc_t0))
+sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
+sc_alive=1
+if [ -n "${sc_fake_pid}" ]; then
+  sc_waited=0
+  while kill -0 "${sc_fake_pid}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
+    sleep 0.1
+    sc_waited=$((sc_waited + 1))
+  done
+  if kill -0 "${sc_fake_pid}" 2> /dev/null; then
+    kill -9 "${sc_fake_pid}" 2> /dev/null || true
+  else
+    sc_alive=0
+  fi
+fi
+# 偽物は 30 秒眠るため、止まるまでに 10 秒以上かかったなら、停止が伝わらず眠りの終わりを待っただけ
+if [ "${sc_rc}" -eq 2 ] && [ -n "${sc_fake_pid}" ] && [ "${sc_alive}" -eq 0 ] && [ "${sc_stop_secs}" -lt 10 ]; then
+  pass "shellcheck-staged: a TERM stops the running shellcheck and exits 2"
+else
+  fail "shellcheck-staged: a TERM stops the running shellcheck and exits 2" "exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_alive}, seconds to stop: ${sc_stop_secs}" "output: $(cat "${work_dir}/out")"
 fi
 
 # PATH に shellcheck が無いときは、未検査で成功にせず 2 で止まる
