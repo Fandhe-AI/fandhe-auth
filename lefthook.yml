@@ -24,7 +24,7 @@ pre-commit:
         - ".claude/skills/**"
       run: editorconfig-checker {staged_files}
 
-    # staged のシェルスクリプトを shellcheck する。ファイルごとに並列で流し、時間予算に収める
+    # staged のシェルスクリプトを shellcheck する。バッチに分けて並列で流し、時間予算に収める
     # （実体は scripts/hooks/shellcheck-staged.sh。.claude/rules/git-hooks.md）
     - name: "lint: shellcheck (staged *.sh)"
       glob:

@@ -269,19 +269,20 @@ check_bad_lock "skills-lock.json with an unexpected top-level key is rejected" '
 
 # ---------------------------------------------------------------- shellcheck-staged.sh（pre-commit の shellcheck の並列実行）
 # 本物の shellcheck には頼らず（macOS の CI にあるとは限らない）、PATH 先頭に置いた偽物で呼び方と集約を確かめる。
-# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。名前に bad を含むファイルは 3 行を出して 1 で終わり、err を含むものは 1 行を出して 2 で終わり（shellcheck 自身の失敗）、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とす。
+# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。呼ばれた引数の全件を順に見て、名前に bad を含むファイルは 3 行を出し（終了コード 1）、err を含むものは 1 行を出して（終了コード 2。shellcheck 自身の失敗。1 より優先）、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とす。
 sc_shim_dir="${work_dir}/sc-shim"
 mkdir -p "${sc_shim_dir}"
 cat > "${sc_shim_dir}/shellcheck" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "${SC_LOG}"
+rc=0
 for arg in "$@"; do
   case "${arg}" in
     *slow*) sleep 0.3 ;;
     *die*) kill -9 "${PPID}" ;;
     *err*)
       echo "${arg}: could not be read"
-      exit 2
+      rc=2
       ;;
   esac
   case "${arg}" in
@@ -289,19 +290,28 @@ for arg in "$@"; do
       echo "${arg}: begin"
       echo "${arg}: middle"
       echo "${arg}: end"
-      exit 1
+      if [ "${rc}" -eq 0 ]; then
+        rc=1
+      fi
       ;;
   esac
 done
-exit 0
+exit "${rc}"
 EOF
+# 並列数（バッチ数の上限）を固定するため、getconf も偽物にする（SC_JOBS を返す）
+cat > "${sc_shim_dir}/getconf" <<'EOF'
+#!/bin/sh
+echo "${SC_JOBS:-8}"
+EOF
+chmod +x "${sc_shim_dir}/getconf"
 chmod +x "${sc_shim_dir}/shellcheck"
 SC_STAGED="${HOOKS_DIR}/shellcheck-staged.sh"
 sc_log="${work_dir}/sc.log"
+sc_jobs=8
 # sc_run <引数...>: 偽の shellcheck を先頭に置いて入口を起動する。終了コードは sc_rc、出力は ${work_dir}/out、呼び出しの記録は sc_log。
 sc_run() {
   : > "${sc_log}"
-  if SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" "$@" > "${work_dir}/out" 2>&1; then
+  if SC_JOBS="${sc_jobs}" SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" "$@" > "${work_dir}/out" 2>&1; then
     sc_rc=0
   else
     sc_rc=$?
@@ -326,9 +336,9 @@ fi
 sc_run a.sh slow-bad1.sh c.sh bad2.sh
 sc_want="$(printf '%s\n' 'slow-bad1.sh: begin' 'slow-bad1.sh: middle' 'slow-bad1.sh: end' 'bad2.sh: begin' 'bad2.sh: middle' 'bad2.sh: end')"
 if [ "${sc_rc}" -eq 1 ] && [ "$(cat "${work_dir}/out")" = "${sc_want}" ] && [ "$(wc -l < "${sc_log}" | tr -d ' ')" = "4" ]; then
-  pass "shellcheck-staged: a failing file exits 1, the others are still checked and output is grouped per file in argument order"
+  pass "shellcheck-staged: a failing file exits 1, the others are still checked and output is grouped per batch in batch order"
 else
-  fail "shellcheck-staged: a failing file exits 1, the others are still checked and output is grouped per file in argument order" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
+  fail "shellcheck-staged: a failing file exits 1, the others are still checked and output is grouped per batch in batch order" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
 fi
 
 # 1 件だけの検査で失敗しても非 0（失敗するファイルが 1 件だけの場合）
@@ -391,17 +401,42 @@ else
   fail "shellcheck-staged: a missing TMPDIR exits 2" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-# 件数が並列数の上限を超えても、全件が 1 回ずつ検査される
+# 件数が並列数の上限を超えても、shellcheck の起動はバッチ数（上限）以下で、全件がちょうど 1 回ずつ渡る（起動の回数をファイル数に比例させない）
 sc_many=()
 for sc_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
   sc_many+=("f${sc_i}.sh")
 done
+sc_jobs=4
 sc_run "${sc_many[@]}"
-if [ "${sc_rc}" -eq 0 ] && [ "$(wc -l < "${sc_log}" | tr -d ' ')" = "30" ] && [ "$(sort -u "${sc_log}" | wc -l | tr -d ' ')" = "30" ]; then
-  pass "shellcheck-staged: more files than the parallel limit are all checked once"
+sc_calls="$(wc -l < "${sc_log}" | tr -d ' ')"
+sc_args="$(sed 's/^-- //' "${sc_log}" | tr ' ' '\n' | sort)"
+sc_want_args="$(printf '%s\n' "${sc_many[@]}" | sort)"
+if [ "${sc_rc}" -eq 0 ] && [ "${sc_calls}" -ge 1 ] && [ "${sc_calls}" -le 4 ] && [ "${sc_args}" = "${sc_want_args}" ]; then
+  pass "shellcheck-staged: 30 files with 4 jobs start shellcheck at most 4 times and pass every file exactly once"
 else
-  fail "shellcheck-staged: more files than the parallel limit are all checked once" "exit ${sc_rc}, calls: $(wc -l < "${sc_log}")"
+  fail "shellcheck-staged: 30 files with 4 jobs start shellcheck at most 4 times and pass every file exactly once" "exit ${sc_rc}, calls: ${sc_calls}" "args: $(printf '%s' "${sc_args}" | tr '\n' ' ')"
 fi
+sc_jobs=8
+
+# 大きいファイルから順に、合計の小さいバッチへ入れる（貪欲法）。大きさは wc -c の 1 回の起動で取り、空白を含む名前も対応が崩れない。
+# 大きさ 1000・600・500・400 を 2 バッチに分けると、{1000, 400} と {600, 500} になる。
+sc_dir="${work_dir}/sc-sizes"
+mkdir -p "${sc_dir}"
+cd "${sc_dir}"
+head -c 1000 /dev/zero > big.sh
+head -c 600 /dev/zero > "mid one.sh"
+head -c 500 /dev/zero > mid2.sh
+head -c 400 /dev/zero > small.sh
+sc_jobs=2
+sc_run small.sh "mid one.sh" mid2.sh big.sh
+sc_want="$(printf '%s\n' '-- big.sh small.sh' '-- mid one.sh mid2.sh')"
+if [ "${sc_rc}" -eq 0 ] && [ "$(sort "${sc_log}")" = "${sc_want}" ]; then
+  pass "shellcheck-staged: files are split into batches of similar total size (largest first)"
+else
+  fail "shellcheck-staged: files are split into batches of similar total size (largest first)" "exit ${sc_rc}" "calls: $(cat "${sc_log}")"
+fi
+sc_jobs=8
+cd "${work_dir}"
 
 # PATH に shellcheck が無いときは、未検査で成功にせず 2 で止まる
 sc_empty_path="${work_dir}/sc-empty-path"
