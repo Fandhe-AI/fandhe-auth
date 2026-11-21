@@ -416,6 +416,12 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     let started = Instant::now();
     p.block(&mut tl).unwrap();
     let blocked_in = started.elapsed();
+    // ORST-17: 遮断と停止点を維持した状態で、client が切られていることを確かめる（解除後の世代検査に頼らない）。
+    assert_eq!(
+        roundtrip(&mut stuck, b"t"),
+        Outcome::Disconnected,
+        "stalled conn is cut by the block"
+    );
     // 世代の検査だけを対象にするため、現在の遮断状態を外してから停止点を開ける。
     let started = Instant::now();
     p.release_block(&mut tl).unwrap();
@@ -447,14 +453,18 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     // 遮断前の接続のバイトは上流へ届かない（読めるのは EOF か切断だけ）。
     let mut buf = [0u8; 1];
     match upstream_conn.read(&mut buf) {
-        Ok(0) | Err(_) => {}
+        Ok(0) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::UnexpectedEof
+            ) => {}
+        Err(e) => panic!("unexpected upstream read error: {:?}", e.kind()),
         Ok(n) => panic!("bytes from the severed conn reached upstream: {n}"),
     }
-    assert_eq!(
-        roundtrip(&mut stuck, b"t"),
-        Outcome::Disconnected,
-        "stalled conn is cut by the block"
-    );
     assert!(wait_until(|| p.refused_count() >= 1));
     assert_eq!(p.accepted_count(), 0, "stalled conn was relayed");
 }

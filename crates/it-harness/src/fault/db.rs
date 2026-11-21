@@ -152,8 +152,9 @@ impl UpstreamStall {
     }
 
     /// 転送器が停止点に入るのを待つ。入れば `true`、上限までに入らなければ `false`。
+    /// `timeout` は 24 時間に丸める（巨大な値で `Instant` の加算がパニックしない）。
     pub fn wait_entered(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + timeout.min(Duration::from_secs(86_400));
         let mut g = self
             .inner
             .state
@@ -724,6 +725,12 @@ fn connect_upstream(accepted: Accepted, shared: &Shared, upstream: &Upstream) ->
     shared.upstream_attempts.fetch_add(1, Ordering::SeqCst);
     if let Some(stall) = &shared.stall {
         stall.hold(&shared.stop);
+        // 停止の通知で戻った場合は、上流へつながず閉じる（`stop()`・`Drop` を `connect_timeout` で待たせない）。
+        if shared.stop.load(Ordering::SeqCst) {
+            shared.sever_conn(id);
+            refuse(&accepted.client, shared);
+            return None;
+        }
     }
     let Ok(up) = TcpStream::connect_timeout(&addr, UPSTREAM_CONNECT_TIMEOUT) else {
         shared.sever_conn(id);
