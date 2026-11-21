@@ -24,7 +24,8 @@ const done = arguments[arguments.length - 1];
 const rpId = arguments[0];
 const expectedOrigin = arguments[1];
 (async () => {
-    // 'call' の間だけ、例外を WebAuthn 呼び出し自体の拒否として name で返す。前後の処理の例外は固定名 HarnessScript にする。
+    // 'call' の間（呼び出しが返した Promise の待ち）だけ、例外をブラウザの拒否として name で返す。
+    // 呼び出し前・呼び出しの同期的な失敗（API の不在等）・呼び出し後の処理の例外は固定名 HarnessScript にする。
     let phase = 'pre';
     try {
         // 登録の前に、今のページが試験用の origin であることを確かめる（別の origin で create() を呼ばない）。
@@ -44,8 +45,11 @@ const expectedOrigin = arguments[1];
             attestation: 'none',
             timeout: 60000
         }};
+        // 同期的な呼び出しの失敗（navigator.credentials が無い等）はブラウザの拒否ではないため、Promise を得るまで phase を 'invoke' にする。
+        phase = 'invoke';
+        const pending = navigator.credentials.create(opts);
         phase = 'call';
-        const cred = await navigator.credentials.create(opts);
+        const cred = await pending;
         phase = 'post';
         const cd = JSON.parse(new TextDecoder().decode(cred.response.clientDataJSON));
         done({
@@ -172,6 +176,23 @@ mod tests {
         let shown = format!("{o:?} {:?}", o.error_name());
         assert!(!shown.contains("leaky-value-123"), "{shown}");
         assert_eq!(o.error_name(), Some(RegistrationErrorName::Other));
+    }
+
+    #[test]
+    fn script_marks_call_phase_only_after_synchronous_invocation() {
+        // 同期的な呼び出しの失敗（API の不在）をブラウザの拒否（rejected:Type 等）に数えない。
+        let invoke = REGISTER_SCRIPT.find("phase = 'invoke'").unwrap();
+        let call_fn = REGISTER_SCRIPT
+            .find("navigator.credentials.create(opts)")
+            .unwrap();
+        let call = REGISTER_SCRIPT.find("phase = 'call'").unwrap();
+        assert!(invoke < call_fn && call_fn < call);
+        assert_eq!(
+            REGISTER_SCRIPT
+                .matches("navigator.credentials.create(")
+                .count(),
+            1
+        );
     }
 
     #[test]

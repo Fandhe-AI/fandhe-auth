@@ -79,6 +79,25 @@ pub fn registration_run_result(
     }
 }
 
+/// 認証の呼び出し結果と後続の検査（credential がちょうど 1 件・RP ID が `localhost`）をあわせた実行の結果と、
+/// 後続の検査を満たしたかを返す。UV 失敗の系のように呼び出しが拒否で終わる場合も検査する。
+/// 検査を満たさなければ（取得の失敗は `HarnessError`、条件の不一致は `CheckFailed`）呼び出しの結果を上書きする（SECR-23: 値は出さない）。
+pub fn authentication_run_result(
+    handle: &DriverHandle,
+    aid: &AuthenticatorId,
+    result: &Result<
+        fandhe_auth_e2e_harness::AuthenticationOutcome,
+        fandhe_auth_e2e_harness::E2eError,
+    >,
+) -> (RunResult, bool) {
+    let run = RunResult::from_authentication(result);
+    match handle.credentials(aid) {
+        Ok(creds) if creds.len() == 1 && creds[0].rp_id == "localhost" => (run, true),
+        Ok(_) => (RunResult::CheckFailed, false),
+        Err(e) => (RunResult::HarnessError(e.kind()), false),
+    }
+}
+
 /// 仮想 authenticator の credential がちょうど 1 件で、RP ID が `localhost` であることを確かめる。
 pub fn assert_one_localhost_credential(handle: &DriverHandle, aid: &AuthenticatorId) {
     let creds = handle.credentials(aid).expect("credentials");
