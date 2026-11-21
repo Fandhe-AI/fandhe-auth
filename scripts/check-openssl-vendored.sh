@@ -26,9 +26,12 @@
 # 動的リンクと版の記録の対応（TASK-667 (2/4)・DPOL-13）:
 #   R4: 静的リンクを強いる設定が無いこと（合否）。openssl-sys の build script は環境変数 OPENSSL_STATIC と <TARGET>_OPENSSL_STATIC を見て、
 #       `0` 以外なら静的にリンクする。`vendored` でなくても配備先の OpenSSL へ動的にリンクしない道になるため、検査の環境変数と
-#       repo の `.cargo/config.toml`・`.cargo/config` の `OPENSSL_STATIC` を値によらず違反にする（安全側）。名前と値は出さず件数だけ出す。
-#   報告: 本番の依存の木の openssl-sys の件数を出す（参考。合否に入れない）。1 件以上なら配備先の OpenSSL へ動的にリンクし、
-#       版の記録は Hub の `AOPS-2`（本体は記録を持たない。D-2026-10-30-1）。0 件なら本体から `AOPS-2` に載せるものは無い。
+#       repo の `.cargo/config.toml`・`.cargo/config` の `[env]` のキー（TOML を構造として読み、引用キーのエスケープを復号した後の名前）の
+#       `OPENSSL_STATIC` と `<TARGET>_OPENSSL_STATIC` を値によらず違反にする（安全側）。コメントや他の設定値の中の文字列は数えない。
+#       TOML が読めない・不正なら検査不能（2）。名前と値は出さず件数だけ出す。
+#   報告: 本番の依存の木の openssl-sys の件数（package ごと。(*) の付記は除いて重複排除）を出す（参考。合否に入れない）。
+#       依存の木だけではリンク方式（動的か静的か）を断定できない。1 件以上なら版の記録の要否と最終バイナリのリンク方式の確認は
+#       Hub の `AOPS-2` で行う（本体は記録を持たない。D-2026-10-30-1）。0 件なら本体の依存の木から `AOPS-2` に載せるものは無い。
 #   限界: 親ディレクトリ・CARGO_HOME の cargo 設定と --config の指定は呼び出し側の環境のため見ない。配備先に静的ライブラリしか無い場合と
 #       最終バイナリのリンクの実機での確認（ldd 等）は Hub の担当（`AOPS-2`）。
 #
@@ -41,9 +44,14 @@ source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 # 使う外部コマンドは作業ディレクトリの作成前にすべて確かめる（EXIT トラップの rm の不足で 127 にしない）。
-for c in cargo mktemp mkdir rm grep dirname basename sort; do
+for c in cargo mktemp mkdir rm grep dirname basename sort python3; do
   require_cmd "${c}" || exit 2
 done
+# TOML は構造として読む（引用キーの Unicode エスケープを文字列検索では見落とすため）。tomllib（3.11 以上）が無ければ検査不能（2）。
+if ! python3 -I -c 'import tomllib' >/dev/null 2>&1; then
+  log "error: python3 with tomllib (3.11+) required; cannot inspect"
+  exit 2
+fi
 
 # 生の診断（絶対パス・ホームのパスを含み得る mkdir・mktemp・cd・cargo・redirect の標準エラー）は出さない。
 # 失敗した箇所は固定の英語の文で報告して終了コード 2 にする。出力の抑制は合否を変えず、終了コードで判定する。
@@ -184,24 +192,52 @@ count_static_env() {
   echo "${n}"
 }
 
-# count_static_config <root>: <root>/.cargo/config.toml・config の `OPENSSL_STATIC` を含む行数を返す（R4。値が 0 でも数える＝安全側）。
-# 読めないファイルは検査不能（2）。
+# count_static_config <root>: <root>/.cargo/config.toml・config の `[env]` のキーのうち OPENSSL_STATIC か _OPENSSL_STATIC で終わるものの数を返す
+# （R4。値が 0 でも数える＝安全側）。TOML を tomllib で構造として読み、復号後のキー名で判定する。コメント・他の値の文字列は数えない。
+# 読めない・TOML として不正なファイルは検査不能（2）。python の診断（パスを含み得る）は出さない。
 count_static_config() {
   local f n=0 c
   for f in "$1/.cargo/config.toml" "$1/.cargo/config"; do
     [ -e "${f}" ] || continue
     [ -r "${f}" ] || return 2
-    c="$(grep -c 'OPENSSL_STATIC' "${f}" 2>/dev/null || true)"
+    c="$(python3 -I -c '
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as fh:
+        d = tomllib.load(fh)
+except Exception:
+    sys.exit(2)
+e = d.get("env", {})
+n = 0
+if isinstance(e, dict):
+    n = sum(1 for k in e if k == "OPENSSL_STATIC" or k.endswith("_OPENSSL_STATIC"))
+print(n)
+' "${f}" 2>/dev/null)" || return 2
+    case "${c}" in '' | *[!0-9]*) return 2 ;; esac
     n=$((n + c))
   done
   echo "${n}"
 }
 
-# count_openssl_sys <tree>: 木に出る openssl-sys の package の数（feature 行ごとの重複は除く）。参考の報告用。
+# count_openssl_sys <tree>: 木に出る openssl-sys の package の数。参考の報告用。feature 行は数えず、(*)（重複の省略印）等の
+# 末尾の付記を除いてから重複を排除する（付記の有無で同じ package が別行になり水増しされるのを防ぐ）。
 count_openssl_sys() {
-  local lines
-  lines="$(printf '%s\n' "$1" | grep -E '^openssl-sys v' | sort -u || true)"
-  if [ -z "${lines}" ]; then echo 0; else printf '%s\n' "${lines}" | grep -c .; fi
+  local line key seen=$'\n' n=0
+  while IFS= read -r line; do
+    case "${line}" in 'openssl-sys v'*) ;; *) continue ;; esac
+    key="${line}"
+    while :; do
+      case "${key}" in
+        *' (*)') key="${key% (*)}" ;;
+        *' (proc-macro)') key="${key% (proc-macro)}" ;;
+        *) break ;;
+      esac
+    done
+    case "${seen}" in *$'\n'"${key}"$'\n'*) continue ;; esac
+    seen="${seen}${key}"$'\n'
+    n=$((n + 1))
+  done <<<"$1"
+  echo "${n}"
 }
 
 # mkpkg <dir> <name> <Cargo.toml の追加本文>: path 依存の偽 crate を作る。[workspace] は repo の workspace に取り込まれないため。
@@ -339,17 +375,30 @@ selftest() {
   if ! mkdir -p "${f}/c1/.cargo" "${f}/c2/.cargo" "${f}/c3/.cargo" "${f}/c4" 2>/dev/null ||
     ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/c1/.cargo/config.toml" ||
     ! printf '[env]\nOPENSSL_STATIC = { value = "1", force = true }\n' 2>/dev/null >"${f}/c2/.cargo/config.toml" ||
-    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c3/.cargo/config.toml"; then
+    ! printf '[env]\nOTHER = "1"\n' 2>/dev/null >"${f}/c3/.cargo/config.toml" ||
+    ! mkdir -p "${f}/c5/.cargo" "${f}/c6/.cargo" "${f}/c7/.cargo" "${f}/c8/.cargo" 2>/dev/null ||
+    ! printf '[env]\n"OPENSSL_\\u0053TATIC" = "1"\n' 2>/dev/null >"${f}/c5/.cargo/config.toml" ||
+    ! printf '# OPENSSL_STATIC = "1"\n[env]\nOTHER = "OPENSSL_STATIC"\n' 2>/dev/null >"${f}/c6/.cargo/config.toml" ||
+    ! printf 'env.X86_OPENSSL_STATIC = "0"\n' 2>/dev/null >"${f}/c7/.cargo/config.toml" ||
+    ! printf '[env\nOPENSSL_STATIC = 1\n' 2>/dev/null >"${f}/c8/.cargo/config.toml"; then
     log "error: cannot write fixture (f11); cannot inspect"
     exit 2
   fi
-  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0; do
+  for cfg in c1:ge1 c2:ge1 c3:eq0 c4:eq0 c5:ge1 c6:eq0 c7:ge1; do
     cnt="$(count_static_config "${f}/${cfg%%:*}")" || exit 2
     if { [ "${cfg##*:}" = "eq0" ] && [ "${cnt}" -ne 0 ]; } || { [ "${cfg##*:}" = "ge1" ] && [ "${cnt}" -lt 1 ]; }; then
       log "FAIL selftest F11: static config check wrong (${cfg%%:*})"
       exit 1
     fi
   done
+
+  # F11b: TOML として不正な設定は検査不能（2）で止まる（構文・読み取りの失敗を 0 件に丸めない）
+  rc=0
+  count_static_config "${f}/c8" >/dev/null 2>&1 || rc=$?
+  if [ "${rc}" -ne 2 ]; then
+    log "FAIL selftest F11: invalid config not treated as cannot-inspect"
+    exit 1
+  fi
 
   # F12: openssl-sys の件数の報告。F3（vendored なしの openssl）は 1 以上、F4（依存なし）は 0
   t="$(run_tree "${f}/f3" offline)" || exit 2
@@ -360,6 +409,13 @@ selftest() {
   t="$(run_tree "${f}/f4" offline)" || exit 2
   if [ "$(count_openssl_sys "${t}")" -ne 0 ]; then
     log "FAIL selftest F12: openssl-sys false count"
+    exit 1
+  fi
+
+  # F12b: (*) の付記の有無で同じ package が別行になっても 1 件（feature 行・別名の package は数えない）
+  t=$'openssl-sys v0.9.0 (/x/openssl-sys)\nopenssl-sys v0.9.0 (/x/openssl-sys) (*)\nopenssl-sys feature "default"\nopenssl-sys-extras v0.1.0'
+  if [ "$(count_openssl_sys "${t}")" -ne 1 ]; then
+    log "FAIL selftest F12: duplicate openssl-sys counted"
     exit 1
   fi
 
@@ -396,9 +452,9 @@ fi
 # 版の記録との対応（参考。合否に入れない）。crate の版は OpenSSL の版ではないため出さない。
 sys_n="$(count_openssl_sys "${tree}")"
 if [ "${sys_n}" -ge 1 ]; then
-  log "info: openssl-sys in production tree: ${sys_n} (links host OpenSSL dynamically; version record is Hub AOPS-2)"
+  log "info: openssl-sys in production tree: ${sys_n} (dependency tree only; confirm version record and final binary link mode in Hub AOPS-2)"
 else
-  log "info: openssl-sys in production tree: 0 (no OpenSSL linked by production members; nothing to record in Hub AOPS-2)"
+  log "info: openssl-sys in production tree: 0 (nothing to record in Hub AOPS-2 from this tree; final binary link mode is confirmed in Hub AOPS-2)"
 fi
 
 # scan_info <ラベル> <追加引数...>: 参考の走査。失敗しても終了コードに影響させず警告だけ出す（A の合否を上書きしない）。
