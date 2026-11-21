@@ -182,10 +182,11 @@
 ### 6. 結果 3: 出所や検証の記録を確かめられない部品（受入基準 (b)）
 
 - `aws-lc-rs`・`jsonwebtoken`・`webauthn-rs`: 版ごとの配布元と上流リポジトリは調査済みで 6a に記録した。未確認なのは、採用版とその版を含む `Cargo.lock` に対する source・checksum・advisory の照合である（lock に無く測れない。`ring` は本体に未導入だが lock に収録済みで結果 1 に記録がある）。
+  あわせて、3 候補それぞれの外部の監査・形式検証・認証・保守状況（メンテナの活動、既知の advisory の有無、yanked の有無）は未調査である。確認した資料は 6a の crates.io の配布ページ・上流リポジトリの URL の記録だけで、監査報告・RustSec の記録・リリース履歴は読んでいない（`DPOL-47` の判定材料としては不足。人が判定する前に〔資料〕として URL と確認日を添えて別に記録する）。
 - 署名の実装の選び（`aws-lc-rs` か `ring` か）: 未定。
 - TOTP の本番の crate: 未定（`TASK-762`）。
 - 乱数の実装（`Rng`）: 組込み先が実装し、本体からは見えない（`HOST-2`）。
-- 結果 1 の 8 crate それぞれの、外部の監査・形式検証・認証・保守状況の記録: 本節では調べていない。確認するなら〔資料〕として URL と確認日を添えて別に記録する。
+- 結果 1 の 8 crate と、未導入の 3 候補（`aws-lc-rs`・`jsonwebtoken`・`webauthn-rs`）それぞれの、外部の監査・形式検証・認証・保守状況の記録: 本節では調べていない（11 crate すべて未調査）。確認するなら〔資料〕として URL と確認日を添えて別に記録する。
 - `untrusted`・`getrandom`・`rand_core`・`rand_xorshift`・`chacha20` の spec 上の個別の記録: 確かめた範囲では見つからない（他の crate の依存先として現れるだけ）。
 - `getrandom` 0.2 系の最新の版: `cargo search` は最新の 1 件（0.4.3）しか返さず確かめていない。
 - `cargo deny` の結果（ライセンス・bans・sources）: 未実行（`deny.toml` 未作成。`TASK-668`）。
@@ -218,7 +219,8 @@
 | `grep -c '^name = ' Cargo.lock` | 0 | `69` |
 | `cargo info aws-lc-rs`・`cargo info jsonwebtoken`・`cargo info webauthn-rs` | 0 | 6a の表のとおり |
 
-結果は結果 1 と同じ（lock は動いていない）。
+この表で確認できたのは、4 crate の `dependencies[]` が 0 件であること、結果 1・2 で引いた版の逆依存の根の 1 行目、5 名の `name` 一致 0 件、`name` 行数 69 の範囲である。
+`Cargo.lock` 全体の同一性、および結果 1 の source・checksum・advisory の再確認は、本表では示していない（比較したコミットと比較コマンドの出力を記録していない。未検証）。
 
 ### 6c. 最新安定版の確認状況（K11）
 
