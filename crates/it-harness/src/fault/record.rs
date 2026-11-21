@@ -64,6 +64,13 @@ pub enum FaultRecordError {
     LogPosRequired,
     /// 注入器を結んだ実行の記録を、注入器を介さず確定しようとした。
     InjectorBound,
+    /// 時計のずれの注入器を結んだ実行の記録を、時計の注入器を介さず確定しようとした（共有のずれが残るため）。
+    ClockInjectorBound,
+    /// 注入器を結んだ実行と別の実行の記録を渡された（記録は消費しない）。
+    RunMismatch,
+    /// 時計のずれの注入器を結んだ実行へ公開の直接記録で時計の事象を積もうとした、または直接記録した時計の事象がある実行へ
+    /// 注入器を結ぼうとした（時計の事象は注入器の入口だけが積む）。
+    ClockSkewEventOutsideInjector,
     /// ファイルの書き込みに失敗した。
     WriteFailed,
 }
@@ -83,6 +90,9 @@ impl fmt::Display for FaultRecordError {
             Self::HubStubEventOutsideInjector => "hub stub event must go through the injector",
             Self::LogPosRequired => "hub stub event requires a log position",
             Self::InjectorBound => "timeline is bound to an injector; finish through it",
+            Self::ClockInjectorBound => "timeline is bound to a clock injector; finish through it",
+            Self::RunMismatch => "run mismatch",
+            Self::ClockSkewEventOutsideInjector => "clock skew event must go through the injector",
             Self::WriteFailed => "write failed",
         };
         write!(f, "fault record error: {s}")
@@ -114,6 +124,8 @@ pub struct FaultEvent {
 pub struct FaultTimeline {
     run_id: u64,
     injector_bound: Arc<AtomicBool>,
+    /// 時計のずれの注入器を結んだか（1 つの実行に時計の注入器は 1 つ。取り消さない）。
+    clock_bound: bool,
     mode: RunMode,
     started_at: UtcTimestamp,
     origin: Instant,
@@ -147,6 +159,7 @@ impl FaultTimeline {
         Ok(Self {
             run_id: RUN_SEQ.fetch_add(1, Ordering::Relaxed),
             injector_bound: Arc::new(AtomicBool::new(false)),
+            clock_bound: false,
             mode,
             started_at,
             origin,
@@ -170,9 +183,43 @@ impl FaultTimeline {
         Ok(Some(Arc::clone(&self.injector_bound)))
     }
 
+    /// 時計のずれの注入器をこの実行へ結べるかを確かめる（状態は変えない）。結べるなら `Ok(true)`、すでに別の注入器が
+    /// 結んでいれば `Ok(false)`。公開の直接記録で時計の事象を積んだ実行へは結べない（`ClockSkewEventOutsideInjector`。
+    /// 解除の対応が食い違うため）。
+    pub(crate) fn check_clock_bindable(&self) -> Result<bool, FaultRecordError> {
+        if self.clock_bound {
+            return Ok(false);
+        }
+        if self
+            .events
+            .iter()
+            .any(|e| matches!(e.kind, FaultKind::ClockSkew { .. }))
+        {
+            return Err(FaultRecordError::ClockSkewEventOutsideInjector);
+        }
+        Ok(true)
+    }
+
+    /// 時計のずれの注入器の結合を確定する。初回の `Applied` の記録が成功した後にだけ呼ぶ（記録の拒否で結合が残らないように）。
+    /// 結合は取り消さない（注入器を破棄しても、実行の時計の事象は残るため）。
+    pub(crate) fn commit_clock_bound(&mut self) {
+        self.clock_bound = true;
+    }
+
+    /// 時計の注入器を結んでいるか。
+    pub(crate) fn is_clock_bound(&self) -> bool {
+        self.clock_bound
+    }
+
+    /// Hub の stub の注入器を結んでいるか。
+    pub(crate) fn is_injector_bound(&self) -> bool {
+        self.injector_bound.load(Ordering::SeqCst)
+    }
+
     /// ハーネスの時計で現在の時刻を押して積む。
     ///
     /// # Errors
+    /// 時計の注入器を結んだ実行の時計の事象は `ClockSkewEventOutsideInjector`。
     /// Hub の stub の事象は常に `HubStubEventOutsideInjector`（注入器の内部の入口だけが `log_pos` 付きで積む）。
     pub fn record_now(
         &mut self,
@@ -180,6 +227,7 @@ impl FaultTimeline {
         phase: FaultPhase,
     ) -> Result<(), FaultRecordError> {
         reject_hub_stub(kind)?;
+        self.reject_clock_skew_if_bound(kind)?;
         self.record_now_with_log_pos(kind, phase, None)
     }
 
@@ -210,7 +258,16 @@ impl FaultTimeline {
         offset_ms: u64,
     ) -> Result<(), FaultRecordError> {
         reject_hub_stub(kind)?;
+        self.reject_clock_skew_if_bound(kind)?;
         self.push(kind, phase, at, offset_ms, None)
+    }
+
+    /// 時計の注入器を結んだ実行では、公開の直接記録で時計の事象を積ませない（注入器の状態と記録を食い違わせない）。
+    fn reject_clock_skew_if_bound(&self, kind: FaultKind) -> Result<(), FaultRecordError> {
+        if self.clock_bound && matches!(kind, FaultKind::ClockSkew { .. }) {
+            return Err(FaultRecordError::ClockSkewEventOutsideInjector);
+        }
+        Ok(())
     }
 
     fn push(
@@ -283,10 +340,14 @@ impl FaultTimeline {
     ///
     /// # Errors
     /// 注入器を結んだ実行は `InjectorBound`（注入器が有効なまま残らないよう、`HubStubFaultInjector::finish` が確定する）。
+    /// 時計の注入器を結んだ実行は `ClockInjectorBound`（`ClockSkewInjector::finish`、両方なら `HubStubFaultInjector::finish_with_clock`）。
     /// 失敗のときは `FaultFinishFailure` にタイムラインを入れて返す（蓄積した事象を失わず、正しい経路で再試行できる）。
     pub fn finish(self, recorded_at: UtcTimestamp) -> Result<FaultRecord, Box<FaultFinishFailure>> {
         let checked = if self.injector_bound.load(Ordering::SeqCst) {
             Err(FaultRecordError::InjectorBound)
+        } else if self.clock_bound {
+            // 時計の注入器を結んだ実行は、共有のずれを戻す `ClockSkewInjector::finish` から確定する（AVLB-31）。
+            Err(FaultRecordError::ClockInjectorBound)
         } else {
             self.check_finishable()
         };

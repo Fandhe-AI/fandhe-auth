@@ -28,6 +28,7 @@ use serde_json::Value;
 
 use crate::component::E2eComponentKind;
 use crate::harness::{E2eError, E2eErrorKind};
+use crate::record::BrowserVersion;
 use crate::virtual_authenticator::VirtualAuthenticatorOptions;
 use crate::webdriver::{AuthenticatorId, CredentialSummary, WebDriverClient, WebDriverSession};
 
@@ -84,7 +85,7 @@ pub(crate) struct DriverSpec {
 
 struct Live {
     session: WebDriverSession,
-    browser_version: String,
+    browser_version: BrowserVersion,
 }
 
 /// ブラウザの操作の入口。起動前・停止後は `NotRunning`。
@@ -105,12 +106,12 @@ impl DriverHandle {
         self.session().is_ok()
     }
 
-    /// ブラウザの版（実行の記録用。記録の形は 5/6）。
-    pub fn browser_version(&self) -> Result<String, E2eError> {
+    /// ブラウザの版（実行の記録用。主番号だけ。[`crate::record`]）。
+    pub fn browser_version(&self) -> Result<BrowserVersion, E2eError> {
         let guard = self.0.lock().map_err(|_| err(E2eErrorKind::NotRunning))?;
         guard
             .as_ref()
-            .map(|l| l.browser_version.clone())
+            .map(|l| l.browser_version)
             .ok_or_else(|| err(E2eErrorKind::NotRunning))
     }
 
