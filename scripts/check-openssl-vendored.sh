@@ -31,6 +31,7 @@
 #       TOML が読めない・不正なら検査不能（2）。名前と値は出さず件数だけ出す。
 #       PKG_CONFIG_ALL_STATIC も存在だけで静的を選ぶため同じく違反にする（上流が読む名前の正確な一覧と、多めに数える分は count_static_env のコメント）。同じ .cargo に config と config.toml が
 #       共存する場合は両方を検査する（片方が消えると残りが有効になるため。dependency-policy.md の配置禁止に合わせ、優先順位で無視される側も見ない道を作らない）。
+#       `include` のキー（Cargo の設定の読み込み。どの形でも）がある設定は、読み込み先を追わず検査不能（2。"include is not supported"）。
 #       `[env]` が存在してテーブルでない（`env = []` 等）場合は検査不能（2）。
 #   報告: 本番の依存の木の openssl-sys の件数（package ごと。(*) の付記は除いて重複排除）を出す（参考。合否に入れない）。
 #       依存の木だけではリンク方式（動的か静的か）を断定できない。1 件以上なら版の記録の要否と最終バイナリのリンク方式の確認は
@@ -184,13 +185,14 @@ print(n)
 # （R4。値が 0 でも数える＝安全側）。TOML を tomllib で構造として読み、復号後のキー名で判定する。コメント・他の値の文字列は数えない。
 # 読めない・TOML として不正なファイルは検査不能（2）。python の診断（パスを含み得る）は出さない。
 count_static_config() {
-  local f c n=0
+  local f c rc n=0
   # 優先順位で片方が無視されても、消えると残りが有効になるため、存在する両方のファイルを検査する（安全側）。
   for f in "$1/.cargo/config" "$1/.cargo/config.toml"; do
     # リンク切れのシンボリックリンクは -e が偽になるため -L も見て、読み取り検査（失敗は 2）へ進める。
     [ -e "${f}" ] || [ -L "${f}" ] || continue
     {
     [ -r "${f}" ] || return 2
+    rc=0
     c="$(python3 -I -c '
 import sys, tomllib
 try:
@@ -198,12 +200,20 @@ try:
         d = tomllib.load(fh)
 except Exception:
     sys.exit(2)
+# Cargo の include（文字列・配列・テーブルの配列・テーブル。どの形でもキー名は include）は読み込み先を追わず、検査不能（3 を bash が 2 にする）。
+if "include" in d:
+    sys.exit(3)
 e = d.get("env", {})
 if not isinstance(e, dict):
     sys.exit(2)
 n = sum(1 for k in e if k in ("OPENSSL_STATIC", "PKG_CONFIG_ALL_STATIC") or k.endswith(("_OPENSSL_STATIC", "_PKG_CONFIG_ALL_STATIC")) or k.startswith(("OPENSSL_STATIC_", "PKG_CONFIG_ALL_STATIC_")))
 print(n)
-' "${f}" 2>/dev/null)" || return 2
+' "${f}" 2>/dev/null)" || rc=$?
+    if [ "${rc}" -eq 3 ]; then
+      log "error: cargo config include is not supported (loaded files are not followed); cannot inspect"
+      return 2
+    fi
+    [ "${rc}" -eq 0 ] || return 2
     case "${c}" in '' | *[!0-9]*) return 2 ;; esac
     n=$((n + c))
     }
@@ -362,7 +372,7 @@ selftest() {
   local fk
   for fk in empty junk; do
     if ! mkdir -p "${f}/fakepy-${fk}" 2>/dev/null ||
-      ! { [ "${fk}" = empty ] && printf '#!/bin/sh\nexit 0\n' || printf '#!/bin/sh\necho x1\nexit 0\n'; } 2>/dev/null >"${f}/fakepy-${fk}/python3" ||
+      ! { printf '#!/bin/sh\n: >%q\n' "${f}/fakepy-${fk}/ran"; [ "${fk}" = empty ] && printf 'exit 0\n' || printf 'echo x1\nexit 0\n'; } 2>/dev/null >"${f}/fakepy-${fk}/python3" ||
       ! chmod +x "${f}/fakepy-${fk}/python3" 2>/dev/null; then
       log "error: cannot write fixture (f10b); cannot inspect"
       exit 2
@@ -371,6 +381,11 @@ selftest() {
     ( PY="${f}/fakepy-${fk}/python3"; count_static_env env -i ) >/dev/null 2>&1 || rc=$?
     if [ "${rc}" -ne 2 ]; then
       log "FAIL selftest F10b: fake python output (${fk}) not treated as cannot-inspect"
+      exit 1
+    fi
+    # 偽の Python が実際に起動したことを目印で確かめる（noexec の場所での起動失敗も 2 になり、空振りで通るのを防ぐ）。
+    if [ ! -f "${f}/fakepy-${fk}/ran" ]; then
+      log "FAIL selftest F10b: fake python (${fk}) did not run (noexec target dir?); cannot trust selftest"
       exit 1
     fi
   done
@@ -434,6 +449,32 @@ selftest() {
     fi
   done
 
+  # F11c: .cargo/config の include（文字列・配列・テーブルの配列・テーブル）は読み込み先を追わず検査不能（2）。include が無ければ従来どおり（0 件）
+  local ic
+  mkdir -p "${f}/i1/.cargo" "${f}/i2/.cargo" "${f}/i3/.cargo" "${f}/i4/.cargo" "${f}/i5/.cargo" "${f}/i6/.cargo" 2>/dev/null || { log "error: cannot write fixture (f11c); cannot inspect"; exit 2; }
+  if ! printf 'include = "extra.toml"\n' >"${f}/i1/.cargo/config.toml" 2>/dev/null ||
+    ! printf 'include = ["a.toml", "b.toml"]\n' >"${f}/i2/.cargo/config.toml" 2>/dev/null ||
+    ! printf '[[include]]\npath = "a.toml"\noptional = true\n' >"${f}/i3/.cargo/config.toml" 2>/dev/null ||
+    ! printf '[include]\npath = "a.toml"\n' >"${f}/i4/.cargo/config" 2>/dev/null ||
+    ! printf 'include = [{ path = "a.toml" }]\n' >"${f}/i5/.cargo/config.toml" 2>/dev/null ||
+    ! printf '[env]\nOTHER = "1"\n' >"${f}/i6/.cargo/config.toml" 2>/dev/null; then
+    log "error: cannot write fixture (f11c); cannot inspect"
+    exit 2
+  fi
+  for ic in i1 i2 i3 i4 i5; do
+    rc=0
+    count_static_config "${f}/${ic}" >/dev/null 2>&1 || rc=$?
+    if [ "${rc}" -ne 2 ]; then
+      log "FAIL selftest F11c: config include not treated as cannot-inspect (${ic})"
+      exit 1
+    fi
+  done
+  cnt="$(count_static_config "${f}/i6")" || exit 2
+  if [ "${cnt}" -ne 0 ]; then
+    log "FAIL selftest F11c: false positive without include"
+    exit 1
+  fi
+
   # F12: openssl-sys の件数の報告。F3（vendored なしの openssl）は 1 以上、F4（依存なし）は 0
   t="$(run_tree "${f}/f3" offline)" || exit 2
   if [ "$(count_openssl_sys "${t}")" -lt 1 ]; then
@@ -453,7 +494,7 @@ selftest() {
     exit 1
   fi
 
-  log "selftest ok (F1-F12, F10b, F10c)"
+  log "selftest ok (F1-F12, F10b, F10c, F11c)"
 }
 
 cleanup() { rm -rf "${WORK}" 2>/dev/null || true; }
