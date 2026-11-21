@@ -1419,6 +1419,73 @@ check_bad_lock "skills-lock.json with a short unicode escape after a long string
 check_bad_lock "skills-lock.json with a long number followed by a letter is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${long_d}x}}}"
 check_bad_lock "skills-lock.json with a long number followed by a bare exponent is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{\"k\":${long_d}e}}}"
 check_bad_lock "skills-lock.json with a trailing garbage after long spaces is rejected" "{\"version\":2,\"skills\":{\"vendored-a\":{}}}${long_ws}x"
+# 窓の境目の総当たり: 先頭の空白を 0〜70 バイトずつずらし、次の字句（先頭が 985〜1055 バイト目）が 1024 バイトの境目をまたぐ位置をすべて通す。
+# 窓の大きさは変えず、入力の側をずらす。受理するはずのものは受理（0）、拒否するはずのものは固定の文言・終了コード 2 になること。
+# 1 件ごとに検出器を 1 回走らせるため、1 つの検出器と 1 つの repo を使い回し、結果は字句ごとに 1 件の試験にまとめる。
+make_detector "brute" "x"
+brute_lock_path="${det_bin%/scripts/hooks/secret-scan.sh}/skills-lock.json"
+new_repo; stage src/app.txt "hello"
+brute_head='{"version":2,"skills":{"vendored-a":{"k":'
+brute_total=0
+# brute_sweep <説明> <期待する終了コード> <種別: str|raw> <字句> <字句の後ろ>
+# str: "k":"<a を並べて字句を境目の付近に置く><字句><字句の後ろ>   raw: "k":<空白を並べて字句を境目の付近に置く><字句><字句の後ろ>
+brute_sweep() {
+  local desc="$1" want="$2" kind="$3" tok="$4" tail="$5" n rc fill_len bad="" cnt=0 lead body
+  for n in $(seq 0 70); do
+    lead="$(rep_chars ' ' "${n}")"
+    if [ "${kind}" = str ]; then
+      fill_len=$((985 - ${#brute_head} - 1))
+      body="\"$(rep_chars a "${fill_len}")${tok}${tail}"
+    else
+      fill_len=$((985 - ${#brute_head}))
+      body="$(rep_chars ' ' "${fill_len}")${tok}${tail}"
+    fi
+    printf '%s' "${lead}${brute_head}${body}}}}" > "${brute_lock_path}"
+    rc=0
+    LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_bin}" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+    cnt=$((cnt + 1))
+    brute_total=$((brute_total + 1))
+    if [ "${rc}" -ne "${want}" ]; then
+      bad="${bad} ${n}"
+    elif [ "${want}" -eq 2 ] && ! grep -qxF "secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting" "${work_dir}/out"; then
+      bad="${bad} ${n}"
+    fi
+  done
+  if [ -z "${bad}" ]; then
+    pass "secret-scan: window boundary sweep (${cnt} offsets): ${desc}"
+  else
+    fail "secret-scan: window boundary sweep: ${desc}" "expected exit ${want} at leading-space counts:${bad}"
+  fi
+}
+brute_start="${SECONDS}"
+brute_sweep "an escaped quote is accepted" 0 str '\"x' '"'
+brute_sweep "a multibyte character is accepted" 0 str 'éx' '"'
+brute_sweep "a unicode escape is accepted" 0 str '\u00e9x' '"'
+brute_sweep "a closing quote is accepted" 0 str '' '"'
+brute_sweep "a number with a signed exponent is accepted" 0 raw '1e+5' ''
+brute_sweep "a number with a fraction is accepted" 0 raw '1.5' ''
+brute_sweep "a literal true is accepted" 0 raw 'true' ''
+brute_sweep "an invalid escape is rejected" 2 str '\x' 'y"'
+brute_sweep "a short unicode escape is rejected" 2 str '\u12' '"'
+brute_sweep "a bare exponent is rejected" 2 raw '1e+' ''
+brute_sweep "a fraction without digits is rejected" 2 raw '1.' ''
+brute_sweep "a truncated literal is rejected" 2 raw 'tru' ''
+printf '# window boundary sweep: %s detector runs, %s seconds\n' "${brute_total}" "$((SECONDS - brute_start))"
+# 深さの上限: 配列で入れ子にした先の {"k":1} の深さが 31 なら受理、32 なら拒否（値は深さ + 1 で読むため。1 段の object の早道も同じ上限）
+depth_lock() {
+  printf '{"version":2,"skills":{"vendored-a":{"k":%s{"k":1}%s}}}' "$(rep_chars '[' "$1")" "$(rep_chars ']' "$1")"
+}
+make_detector "depth31" "$(depth_lock 28)"
+new_repo; stage src/app.txt "hello"
+SCAN_BIN="${det_bin}" SCAN_ARG=--tracked check_scan "skills-lock.json with an object at depth 31 is accepted" 0
+check_bad_lock "skills-lock.json with an object at depth 32 is rejected" "$(depth_lock 29)"
+# 1 段の object の早道に当たる形でも、不正な値は拒否する
+check_bad_lock "skills-lock.json with an uppercase literal is rejected" '{"version":2,"skills":{"vendored-a":{"k":TRUE}}}'
+check_bad_lock "skills-lock.json with a leading-zero number in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k":01}}}'
+check_bad_lock "skills-lock.json with a fraction without digits in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k":1.}}}'
+check_bad_lock "skills-lock.json with a bare minus in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k":-}}}'
+check_bad_lock "skills-lock.json with a bare exponent in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k":1e}}}'
+check_bad_lock "skills-lock.json with a missing colon in a flat object is rejected" '{"version":2,"skills":{"vendored-a":{"k" 1}}}'
 # 作業ツリー・index・HEAD の一覧が同じ内容なら解析結果を再利用するが、内容が違えば版ごとに解析する（除外は共通部分だけ）
 same_checkout_repo "${lock_ok}"
 printf '%s\n' '{"version":2,"skills":{"vendored-a":{"source":"example/skills"}}}' > skills-lock.json
