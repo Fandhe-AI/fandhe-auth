@@ -87,6 +87,8 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 
 この手順は暫定で、cargo-audit の DB の取得が監査を兼ねており DPOL-33 の取得と監査の分離を満たさない。正式な手順と記録の様式は TASK-679、`deny.toml` は TASK-668 で決める。
 この手順の合格を DPOL-34 の合格とは扱わない。
+`deny.toml`（TASK-668）が無い間は、既定の設定で bans・licenses・sources が成功しても DPOL-18・DPOL-22・DPOL-24・DPOL-25 への適合は確かめられない。
+この 4 つの規約は PR 本文に「未評価」と書き、既定の設定の出力は「参考結果（規約の合否ではない）」として記録する（`dependency-auditor` Agent の手順と同じ）。
 
 ルートで次を実行し（`dependency-auditor` Agent も同じ手順で流す）、結果（合否と、例外を足したならその理由）を PR 本文に書く。
 
@@ -96,6 +98,7 @@ cargo deny fetch
 cargo audit --file Cargo.lock        # cargo-audit の DB の取得を兼ねる（QP-2 の手順）
 git -C ~/.cargo/advisory-db log -1 --format='%H %cI'                  # cargo-audit の DB の commit と日時
 git -C ~/.cargo/advisory-dbs/advisory-db-<hash> log -1 --format='%H %cI'  # cargo-deny の DB の commit と日時
+date -u +%FT%TZ                      # 取得に成功した後の日時（取得日。上の %cI は DB の commit 日時で取得日ではない）
 
 # 取得なしで流す（DPOL-33・DPOL-34）
 cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
@@ -111,6 +114,8 @@ cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,bu
 cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i reqwest     # 合格: 一致なし（HOST-7・HOST-9。名前は reqwest だけ。上の「feature」の限界を参照）
 ```
 
+- advisory DB の「取得日」（DPOL-33）は、取得が成功したことを確かめた時点の日時で、`git log` の `%cI`（DB の commit の日時）とは別に記録する。
+  取得（`cargo deny fetch`・`cargo audit --file Cargo.lock`）の成功を確かめられなかったときは、取得日を書かず、取得を確認できなかったと報告する。
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
   「一致なし」と読むのは、stderr を取得でき、指定した `-i` の対象（例: `rsa`）についての `did not match any packages` の診断だけのとき。
