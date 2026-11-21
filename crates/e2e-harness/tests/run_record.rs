@@ -48,23 +48,29 @@ fn counts_appear_for_both_operations_even_when_zero() {
     .unwrap();
     r.record(PasskeyOperation::Authentication, RunResult::CheckFailed)
         .unwrap();
+    r.record(PasskeyOperation::Authentication, RunResult::PreflightFailed)
+        .unwrap();
+    r.record(PasskeyOperation::Authentication, RunResult::HarnessTimedOut)
+        .unwrap();
     let t = r.to_string();
+    assert!(t.contains("run: 5 Authentication preflight_failed\n"));
+    assert!(t.contains("run: 6 Authentication harness_timeout\n"));
     assert!(t.contains("run: 1 Registration succeeded\n"));
     assert!(t.contains("run: 2 Authentication rejected:NotAllowed\n"));
     assert!(t.contains("run: 3 Authentication harness_error:CommandFailed\n"));
     assert!(t.contains("run: 4 Authentication check_failed\n"));
     assert!(t.contains(
-        "count: Registration runs=1 succeeded=1 rejected=0 check_failed=0 harness_error=0\n"
+        "count: Registration runs=1 succeeded=1 rejected=0 check_failed=0 harness_error=0 preflight_failed=0 harness_timeout=0\n"
     ));
     assert!(t.contains(
-        "count: Authentication runs=3 succeeded=0 rejected=1 check_failed=1 harness_error=1\n"
+        "count: Authentication runs=5 succeeded=0 rejected=1 check_failed=1 harness_error=1 preflight_failed=1 harness_timeout=1\n"
     ));
     let empty = rec(Browser::Firefox).to_string();
     assert!(empty.contains(
-        "count: Registration runs=0 succeeded=0 rejected=0 check_failed=0 harness_error=0\n"
+        "count: Registration runs=0 succeeded=0 rejected=0 check_failed=0 harness_error=0 preflight_failed=0 harness_timeout=0\n"
     ));
     assert!(empty.contains(
-        "count: Authentication runs=0 succeeded=0 rejected=0 check_failed=0 harness_error=0\n"
+        "count: Authentication runs=0 succeeded=0 rejected=0 check_failed=0 harness_error=0 preflight_failed=0 harness_timeout=0\n"
     ));
 }
 
@@ -92,7 +98,10 @@ fn run_limit_is_enforced() {
 
 #[test]
 fn write_new_never_overwrites_and_errors_carry_no_path() {
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("run-record-test");
+    // プロセスごとに独立したディレクトリを使い、並行実行の他のプロセスと共有しない。
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("run-record-{}", std::process::id()));
+    let dir = base.join("out");
     let r = rec(Browser::Chrome);
     let a = r.write_new(&dir).unwrap();
     let b = r.write_new(&dir).unwrap();
@@ -102,7 +111,7 @@ fn write_new_never_overwrites_and_errors_carry_no_path() {
     let _ = std::fs::remove_file(&b);
 
     // 出力先がファイルのときは失敗し、誤りの表示にパスが出ない。
-    let file = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("run-record-not-a-dir");
+    let file = base.join("not-a-dir");
     std::fs::write(&file, b"x").unwrap();
     let e = r.write_new(&file).unwrap_err();
     assert_eq!(e, RecordError::WriteFailed);
@@ -110,6 +119,7 @@ fn write_new_never_overwrites_and_errors_carry_no_path() {
     assert!(!shown.contains("run-record"));
     assert!(!shown.contains('/'));
     let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]

@@ -47,7 +47,7 @@ impl BrowserVersion {
     /// ドライバが返した `browserVersion` を解釈する。呼び出し元は `WebDriverClient::new_session` で、
     /// セッション ID が手元にあるここで検査する。
     ///
-    /// 次のどれかなら `Unknown`: 空・32 バイト超・`[0-9a-z.]` 以外を含む・先頭が「1〜4 桁の数字 + `.`」でない・
+    /// 次のどれかなら `Unknown`: 空・32 バイト超・`[0-9a-z.]` 以外を含む・文法（主番号 + 1 つ以上の `.` 区間。各区間は数字で始まり空でない）に合わない・
     /// 主番号が 0・全体・主番号の文字列・表示する正規形のどれかがセッション ID と等しい。
     /// `Known` はこの関数だけが作る（variant は `non_exhaustive` で、crate の外から範囲外の値を作れない）。
     pub(crate) fn from_driver(raw: &str, session_id: &str) -> Self {
@@ -59,9 +59,20 @@ impl BrowserVersion {
         {
             return Self::Unknown;
         }
-        let Some((head, _)) = raw.split_once('.') else {
+        // 文法: `<主番号>(.<区間>)+`。主番号は 1〜4 桁の数字。区間は空でなく、数字で始まり `[0-9a-z]` だけ
+        // （`0a1`・`0esr` のような末尾の印を許す）。末尾まで検査し、`157.`・`157.invalid` は Unknown にする。
+        let mut parts = raw.split('.');
+        let head = parts.next().unwrap_or("");
+        let mut rest = 0usize;
+        for seg in parts {
+            if seg.is_empty() || !seg.as_bytes()[0].is_ascii_digit() {
+                return Self::Unknown;
+            }
+            rest += 1;
+        }
+        if rest == 0 {
             return Self::Unknown;
-        };
+        }
         if head.is_empty() || head.len() > 4 || !head.bytes().all(|b| b.is_ascii_digit()) {
             return Self::Unknown;
         }
@@ -96,6 +107,10 @@ pub enum RunResult {
     CheckFailed,
     /// ハーネス側の誤り（ドライバの命令の失敗等）。
     HarnessError(E2eErrorKind),
+    /// 呼び出しの前の確認（origin の一致）で止めた。ブラウザの WebAuthn は呼ばれていない。
+    PreflightFailed,
+    /// ハーネス自身の期限が先に切れた。ブラウザが返した拒否ではない。
+    HarnessTimedOut,
 }
 
 impl RunResult {
@@ -103,7 +118,12 @@ impl RunResult {
         if succeeded {
             Self::Succeeded
         } else if let Some(n) = name {
-            Self::Rejected(n)
+            // ハーネス自身が付ける固定名は、ブラウザの拒否と区別して数える。
+            match n {
+                WebAuthnErrorName::OriginMismatch => Self::PreflightFailed,
+                WebAuthnErrorName::HarnessTimeout => Self::HarnessTimedOut,
+                n => Self::Rejected(n),
+            }
         } else {
             Self::CheckFailed
         }
@@ -139,6 +159,8 @@ impl fmt::Display for RunResult {
             Self::Rejected(n) => write!(f, "rejected:{n:?}"),
             Self::CheckFailed => f.write_str("check_failed"),
             Self::HarnessError(k) => write!(f, "harness_error:{k:?}"),
+            Self::PreflightFailed => f.write_str("preflight_failed"),
+            Self::HarnessTimedOut => f.write_str("harness_timeout"),
         }
     }
 }
@@ -245,16 +267,19 @@ impl E2eRunRecord {
                 .and_then(|n| n.to_str())
                 .unwrap_or("e2e-run")
         ));
+        // 自分で新規に作れた partial だけを後片付けする（既存のファイルは他の書き手のもので、消さない）。
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+            .map_err(|_| RecordError::WriteFailed)?;
         let written = (|| -> std::io::Result<()> {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&partial)?;
             f.write_all(self.to_string().as_bytes())?;
             f.sync_all()?;
             // hard_link は既存の最終ファイルがあれば失敗する（上書きしない）。
             fs::hard_link(&partial, &path)
         })();
+        drop(f);
         let _ = fs::remove_file(&partial);
         written.map_err(|_| RecordError::WriteFailed)?;
         Ok(path)
@@ -301,13 +326,15 @@ impl fmt::Display for E2eRunRecord {
             let total = self.runs.iter().filter(|(o, _)| *o == op).count();
             writeln!(
                 f,
-                "count: {} runs={} succeeded={} rejected={} check_failed={} harness_error={}",
+                "count: {} runs={} succeeded={} rejected={} check_failed={} harness_error={} preflight_failed={} harness_timeout={}",
                 op_key(op),
                 total,
                 of(|r| matches!(r, RunResult::Succeeded)),
                 of(|r| matches!(r, RunResult::Rejected(_))),
                 of(|r| matches!(r, RunResult::CheckFailed)),
                 of(|r| matches!(r, RunResult::HarnessError(_))),
+                of(|r| matches!(r, RunResult::PreflightFailed)),
+                of(|r| matches!(r, RunResult::HarnessTimedOut)),
             )?;
         }
         writeln!(
@@ -356,6 +383,28 @@ mod tests {
         assert_eq!(v("0012.5", "12"), BrowserVersion::Unknown);
         assert_eq!(v("0012.5", "0012"), BrowserVersion::Unknown);
         assert_eq!(v("0012.5", "s"), k(12));
+        for bad in ["157.", "157.invalid", "157..1", "157.0.", "157.a1"] {
+            assert_eq!(v(bad, "s"), BrowserVersion::Unknown, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn classify_separates_harness_names_from_browser_rejections() {
+        use WebAuthnErrorName as N;
+        assert_eq!(RunResult::classify(true, None), RunResult::Succeeded);
+        assert_eq!(
+            RunResult::classify(false, Some(N::NotAllowed)),
+            RunResult::Rejected(N::NotAllowed)
+        );
+        assert_eq!(
+            RunResult::classify(false, Some(N::OriginMismatch)),
+            RunResult::PreflightFailed
+        );
+        assert_eq!(
+            RunResult::classify(false, Some(N::HarnessTimeout)),
+            RunResult::HarnessTimedOut
+        );
+        assert_eq!(RunResult::classify(false, None), RunResult::CheckFailed);
     }
 
     #[test]

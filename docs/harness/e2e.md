@@ -126,15 +126,17 @@ PKEY の振る舞いを満たしたとは主張しない。
 | `counts_as_real_device`・`counts_as_safari` | 常に `false`（`ACPT-7`・`ACPT-8`。型から導き、外から上書きできない） |
 | `target_operation` | その試験が対象とする操作 |
 | `completed` | 試験が最後まで到達したら `true`。到達しなければ `false` で、実行した分の回数は残る |
-| `run` | 実行の順に 1 行ずつ。`<通し番号> <操作> succeeded｜rejected:<名前>｜check_failed｜harness_error:<種類>` |
-| `count` | 操作ごと（登録・認証の 2 つ。0 件でも出す）の実行の回数と結果ごとの件数 |
+| `run` | 実行の順に 1 行ずつ。`<通し番号> <操作> succeeded｜rejected:<名前>｜check_failed｜harness_error:<種類>｜preflight_failed｜harness_timeout`。`preflight_failed`（呼び出し前の origin 確認で止めた）と `harness_timeout`（ハーネス自身の期限切れ）はブラウザの拒否（`rejected`）に数えない |
+| `count` | 操作ごと（登録・認証の 2 つ。0 件でも出す）の実行の回数と結果ごとの件数（`succeeded`・`rejected`・`check_failed`・`harness_error`・`preflight_failed`・`harness_timeout`） |
 | `note` | 仮想の結果を実機・Safari に数えない旨 |
 
 - 回数の単位は 1 セッション内の `register_once`・`authenticate_once` の呼び出し（認証の試験の中の登録、UV 失敗の試験の対照の認証も数える）。
   試験の関数・target をまたぐ合算は crate では行わず、ファイルが 1 セッションに 1 つなので読み手が合算する。
-- ブラウザの版は主番号（1〜4 桁の数字）だけを出す。ドライバの文字列は保持せず、空・文字種外・32 バイト超・先頭が「数字 + `.`」でない・
+- ブラウザの版は主番号（1〜4 桁の数字）だけを出す。ドライバの文字列は保持せず、空・文字種外・32 バイト超・文法（1〜4 桁の主番号 + 1 つ以上の `.` 区間。各区間は数字で始まり `[0-9a-z]` のみで空でない。`157.`・`157.invalid` は不可）に合わない・
   セッション ID と一致するものは `unknown` にする。記録に出る値は列挙の名前・数値・定数だけで、URL・ポート・セッション ID・各種 ID・署名・パスは入らない（`SECR-11`・`SECR-23`）。
 - 記録は実行の事実の出力で、合否の判定でも spec の「確定」でもない。結果は〔仮想〕で、実機・Safari の結果は別タスク（`TASK-784`・`TASK-75`〜`78`）である。
+- 出力先 `e2e-records/` は起動をまたいで追記され、過去の起動のファイルが残る。集計は、その起動の標準出力（`RecordSink` が本文を出す）を正とするか、
+  起動の前に `e2e-records/` を空にする、または起動の開始時刻（ファイル名の unix 秒）以降のファイルだけを読む。
 - 偽のドライバを使う単体の試験は記録をファイルに書かない（E2E の実行回数に数えない）。
 - 日時はファイル名の秒で代え、source の revision・ドライバの版は入れていない（未決）。
 
