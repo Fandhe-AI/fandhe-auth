@@ -3,7 +3,7 @@ paths:
   - ".github/workflows/**"
 description: >
   .github/workflows/ を編集する際の方針。runner 選択（public = GitHub ホステッド、ai-review の
-  codex 専用 self-hosted runner は例外）、必須チェックと集約ジョブ ci-complete（組織の ruleset が固定して要求する間の `trust-root-secret-scan.yml` の例外を含む）、発火条件・concurrency・
+  codex 専用 self-hosted runner は例外）、必須チェックと集約ジョブ ci-complete（先行配置の期間と、組織の ruleset が固定して要求する間の `trust-root-secret-scan.yml` の例外を含む）、発火条件・concurrency・
   paths フィルタの書き方、ジョブ追加時のチェックリスト（外部ツールの版と SHA256 の規則と、Rust の toolchain の
   例外を含む）、キャッシュ方針（容量 10 GB・保存は main の push のみ・キー設計・効果の計測）、所要時間の計測方法と
   棚卸し結果を規定する。
@@ -97,12 +97,26 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
     skipped は明示的に許容したもの（`pr-title` の push イベント時）に限る
 - **例外: `trust-root-secret-scan.yml` は `ci-complete` の `needs` に入れない**（集約の対象の外）。組織の ruleset が固定した commit SHA で要求する workflow は
   `ci.yml` とは別の workflow で、ruleset が直接要求するため、`needs` で束ねられない。置き場所をこの repo にしたのは `D-2026-11-22-4`、仕組みは `D-2026-11-21-19`。
-  この例外は `D-2026-11-22-4`（置き場所を `fandhe-auth` に移す利用者の決定）に伴う記録で、承認済みの例外ではない
-  - 例外が成り立つのは、次の条件をすべて満たす間だけ
+  この例外は利用者が承認した（2026-11-22。承認は人が行う。ACPT-7）。spec への記録は #5985 で追跡する。承認の範囲は、次の (a)・(b) の 2 つの期間に限る
+  - (a) 先行配置の期間（`trust-root-secret-scan.yml` を `main` に入れたマージから、組織の ruleset の固定先を `trust-root-secret-scan.yml` に切り替えるまで）
+    - この workflow は必須の検査として働かない。ファイルはあるが、ruleset が固定していない
+    - (a) の間に同じ名前の check が PR に出ても、必須の検査の合格と読まない
+    - 普通の PR では発火しない前提である（前提は未試験。下の発火の経路の記述を参照）
+    - (a) の間の守りは、組織の ruleset が別の repo の workflow を固定して要求していれば、その workflow だけである。
+      ruleset の状態はこの規約では言わない（下の (a)・(b) のどちらでもない間の記述と同じ立場）
+    - `ci.yml` の secret scan は PR が書き換えられるので、守りに数えない（「既知の限界」。`D-2026-11-21-18`）
+    - この期間は `ci-complete` の `needs` にも入れず、必須の検査としても扱わない
+    - (a) の見直しの期限は未定（決める人は利用者。#5985）
+  - (b) 次の条件をすべて満たす間
     - 組織の ruleset（Require workflows to pass）が、この repo のこのファイルを commit SHA で固定して要求している
     - その ruleset が active で、bypass が空である
     - その ruleset の対象の条件に、この repo と既定ブランチ（`main`）が入っている
-  - 条件が崩れたときは、この workflow は必須の検査として働かない。ruleset の固定先が別の repo やファイルを指している間も同じ。
+  - 終了の条件: 次のいずれかで、この例外は終わる。終わったら、扱いを利用者に確かめる
+    - 固定先の切り替えをやめて、`trust-root-secret-scan.yml` を消すとき
+    - (b) の後に、ruleset の固定を外すとき（固定先を別の所へ移すときを含む。同じファイルで固定の SHA を上げる操作は含まない。その操作は spec に記録する手順に従う）
+    - 切り替えた後に (b) の条件を満たさないとき（最初から満たされない場合を含む。例: Evaluate への変更・bypass の追加・対象から外れること・Disabled）。
+      組織の owner が気づいたら利用者に知らせる。この repo からは検出できない
+  - (a)・(b) のどちらでもない間（条件が崩れたとき）は、この workflow は必須の検査として働かない。ruleset の固定先が別の repo やファイルを指している間も同じ。
     ruleset が今このファイルを固定しているとは、この規約では言わない（固定先の確認は組織の owner の操作で、マージ時点で別の repo を指していることがある）
   - 適用範囲は `trust-root-secret-scan.yml` だけ。ほかの workflow に広げるのは、利用者の承認を待つ（承認は人が行う。ACPT-7）
   - 普通の `pull_request` で発火しないのは前提つき（以下は未試験の読み）。`on.pull_request.branches` の値（`trust-root-required-only-never-matches`）は有効なブランチ名で、
@@ -143,7 +157,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
 - **例外: `trust-root-secret-scan.yml` は `pull_request.types` を指定しない**（既定の `opened`・`synchronize`・`reopened` のまま。利用者の選択、2026-11-22）。`ci.yml` の `edited` を足した指定とは揃えない
   - 理由: 中身を試験した版から変えないため。head の走査は head の tree 全体にかかる（外れるのは、登録済みの skill のディレクトリ〔固定した版の一覧と head の一覧の共通部分。#6000〕と、submodule の中〔検出器の範囲外。`scripts/hooks/secret-scan.sh` の冒頭〕）ので、
     PR が足した中身は、その範囲を除き base に関係なく走査される
-  - 組織の ruleset の対象は既定のブランチだけと読む。これは上の例外の条件（対象の条件に既定のブランチ〔`main`〕が入っている）を引く形で、この repo からは確かめられない
+  - 組織の ruleset の対象は既定のブランチだけと読む。これは上の (b) の条件（対象の条件に既定のブランチ〔`main`〕が入っている）を引く形で、この repo からは確かめられない
   - base を切り替えても、マージ結果の走査が古くなるだけと読めるのは、その head で ruleset の実行が既にあるときに限る（`main` が進んだときと同じ種類のこと。未試験の読み）。
     別のブランチを base にして開いた PR を `main` に切り替えた場合は、ruleset の実行が一度も無いことがありうる。その場合の結果は未試験で、2 通りある
     - 必須の検査が待ちになり、マージが止まる（fail-closed）
@@ -162,10 +176,10 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
 ## ジョブ・ワークフローを追加するときのチェックリスト
 
 1. 新規ワークフローを作らず、まず既存の `ci.yml` へのジョブ追加で済むか検討する（同じトリガーなら `ci.yml` に集約）
-    - 例外: `trust-root-secret-scan.yml`。組織の ruleset が workflow のファイルを固定して要求する間は、`ci.yml` に入れられない（要求されうる）（「必須チェックと集約ジョブ」の例外）
+    - 例外: `trust-root-secret-scan.yml`。(a) 先行配置の期間と、(b) 組織の ruleset が workflow のファイルを固定して要求する間は、`ci.yml` に入れられない（要求されうる）（「必須チェックと集約ジョブ」の例外）
 2. 追加したジョブを `ci-complete` の `needs` に必ず加える（漏れると未検査のままマージ可能になる）。条件付きで skip
     するジョブは、許容する条件を `ci-complete` の jq 式に明示する
-    - 例外: `trust-root-secret-scan.yml` は `needs` に入れない（「必須チェックと集約ジョブ」の例外の条件が満たされる間だけ）
+    - 例外: `trust-root-secret-scan.yml` は `needs` に入れない。(a)・(b) の期間の間だけ（「必須チェックと集約ジョブ」の節の例外）
 3. 処理は `make <target>` / `scripts/*.sh` を呼ぶ。CI 側に複数行のロジックを書かない
     （ツール導入のように CI 固有のステップは例外。secret-scan ジョブの走査対象の取得も例外で、理由は「秘密情報の検査ジョブ」の節を参照）
     - 例外: `trust-root-secret-scan.yml` の検出器と走査対象の取得の step は workflow に置く。取得の前に検出器（`scripts/`）が無いため（「秘密情報の検査ジョブ」の節の `scripts/` に置かない理由と同じ趣旨）。取得後の走査は `scripts/secret-scan-ci.sh` を呼ぶ
@@ -378,7 +392,7 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
 - 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
 - 既知の限界: `ci.yml` のジョブの定義（この節の `secret scan (tracked files)`・`ci-complete`）は、今も PR が書き換えられる（`D-2026-11-21-18`。#5985 で追跡。人の担当）
   - これを補うのが、組織の ruleset が固定した SHA で要求する `trust-root-secret-scan.yml`（`D-2026-11-21-19`・`D-2026-11-22-4`）。
-    補えるのは「必須チェックと集約ジョブ」の節の例外の条件が満たされている間だけ。条件が崩れている間は補えない
+    補えるのは「必須チェックと集約ジョブ」の節の (b) の条件が満たされている間だけ。(a) の間と、(a)・(b) のどちらでもない間は補えない
   - 検出器と除外の一覧（`skills-lock.json`）は、ruleset が固定した commit から取る。新しい skill の文書は、固定の SHA を上げるまで走査される（安全側）
   - 固定先（参照先の repo・パス・SHA）の変え方（確かめる事項と手順）の正本は spec に記録する（未記録。#5985 で追跡）。初回の切り替え（参照先を別の repo からこの repo へ移す）も含む。ここにも `trust-root-secret-scan.yml` のヘッダにも写さない
   - spec に手順が記録され、その〔実機〕の試験に人が合格と判定した記録ができるまで、組織の owner は固定先（repo・パス・SHA）を変えない。初回の切り替えも含む（ACPT-7）
