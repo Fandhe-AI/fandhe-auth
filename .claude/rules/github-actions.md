@@ -380,5 +380,6 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
   - これを補うのが、組織の ruleset が固定した SHA で要求する `trust-root-secret-scan.yml`（`D-2026-11-21-19`・`D-2026-11-22-4`）。
     補えるのは「必須チェックと集約ジョブ」の節の例外の条件が満たされている間だけ。条件が崩れている間は補えない
   - 検出器と除外の一覧（`skills-lock.json`）は、ruleset が固定した commit から取る。新しい skill の文書は、固定の SHA を上げるまで走査される（安全側）
-  - 固定の SHA の上げ方（確かめる事項と手順）は `trust-root-secret-scan.yml` のヘッダのコメントが正。ここに写さない
+  - 固定先（参照先の repo・パス・SHA）の変え方（確かめる事項と手順）の正本は spec に記録する（未記録。#5985 で追跡）。初回の切り替え（参照先を別の repo からこの repo へ移す）も含む。ここにも `trust-root-secret-scan.yml` のヘッダにも写さない
+  - spec に手順が記録され、その〔実機〕の試験に人が合格と判定した記録ができるまで、組織の owner は固定先（repo・パス・SHA）を変えない。初回の切り替えも含む（ACPT-7）
   - fork からの PR での動きは未試験
