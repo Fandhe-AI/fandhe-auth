@@ -113,7 +113,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # macOS は通る実行でも 10 分近くかかることがあり、runner の混雑で 10 分を超えて取り消された実行がある（TASK-6）。
+    # macOS だけ 15 分にし、ubuntu は 10 分のままにする。
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 15 || 10 }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
