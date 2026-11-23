@@ -269,15 +269,29 @@ check_bad_lock "skills-lock.json with an unexpected top-level key is rejected" '
 
 # ---------------------------------------------------------------- shellcheck-staged.sh（pre-commit の shellcheck の並列実行）
 # 本物の shellcheck には頼らず（macOS の CI にあるとは限らない）、PATH 先頭に置いた偽物で呼び方と集約を確かめる。
-# 偽物は呼び出しを 1 行ずつ SC_LOG へ記録する。呼び出しは call と arg:<値>（1 引数 1 行）で記録する。呼ばれた引数の全件を順に見て、名前に bad を含むファイルは 3 行を出し（終了コード 1）、err を含むものは 1 行を出して（終了コード 2。shellcheck 自身の失敗。1 より優先）、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とし、hang を含むものは自分の pid を SC_PIDFILE へ書いて 30 秒眠る。
+# 偽物は呼び出しを 1 行ずつ、呼び出しごとの別ファイル（${SC_LOG}.d/ の下）へ記録する。呼び出しは call と arg:<値>（1 引数 1 行）で記録する。呼ばれた引数の全件を順に見て、名前に bad を含むファイルは 3 行を出し（終了コード 1）、err を含むものは 1 行を出して（終了コード 2。shellcheck 自身の失敗。1 より優先）、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とし、hang を含むものは自分の pid を SC_PIDFILE へ書いて 30 秒眠る。
 sc_shim_dir="${work_dir}/sc-shim"
 mkdir -p "${sc_shim_dir}"
 cat > "${sc_shim_dir}/shellcheck" <<'EOF'
 #!/bin/sh
 # 1 回の呼び出しを「call」の行と、引数 1 つにつき 1 行の「arg:<値>」で記録する（空白を含む引数の境界を見分けるため）。
-# 並列の呼び出しの記録が混ざらないよう、1 回の書き込みで追記する。
-rec="$(printf 'call\n'; printf 'arg:%s\n' "$@")"
-printf '%s\n' "${rec}" >> "${SC_LOG}"
+# 並列の呼び出しの記録が混ざらないよう（共有の 1 ファイルへの追記は macOS で行の途中で混ざった。#6076）、呼び出しごとに別のファイルへ書く。
+# 名前は pid と連番で、noclobber の排他的な作成で確保する（pid が再利用されても既存の記録を上書きしない）。
+# 確保できない・書けないときは、記録の欠落を成功と取り違えないよう 99 で落とす。
+# 記録先が渡っていないときは、記録せずに通る経路を作らないよう 99 で落とす。
+[ -n "${SC_LOG:-}" ] || exit 99
+sc_n=0
+while :; do
+  sc_f="${SC_LOG}.d/$$.${sc_n}"
+  if (set -C; : > "${sc_f}") 2> /dev/null; then
+    break
+  fi
+  sc_n=$((sc_n + 1))
+  if [ "${sc_n}" -gt 1000 ]; then
+    exit 99
+  fi
+done
+{ printf 'call\n' && printf 'arg:%s\n' "$@"; } > "${sc_f}" || exit 99
 rc=0
 for arg in "$@"; do
   case "${arg}" in
@@ -315,14 +329,40 @@ chmod +x "${sc_shim_dir}/shellcheck"
 SC_STAGED="${HOOKS_DIR}/shellcheck-staged.sh"
 sc_log="${work_dir}/sc.log"
 sc_jobs=8
+# 記録は呼び出しごとのファイル（${sc_log}.d/）に書かれる。sc_reset で空に作り直し、入口の終了後に sc_collect で sc_log へ連結する
+# （1 呼び出し = 1 ファイルなので、連結しても各呼び出しの記録は途中で混ざらない）。読むのは入口が終わった後だけ。
+# 連結後の sc_log が空なら呼び出しは 0 件。連結の失敗は 0 件と取り違えないよう止める。
+sc_reset() {
+  rm -rf "${sc_log}.d"
+  mkdir "${sc_log}.d"
+  : > "${sc_log}"
+}
+sc_collect() {
+  # 記録の置き場が読めない・辿れないときは、0 件と取り違えず 2 で止める。予約だけで中身の無い記録（偽物の書き込み途中の失敗）も同じ
+  if [ ! -d "${sc_log}.d" ] || [ ! -r "${sc_log}.d" ] || [ ! -x "${sc_log}.d" ]; then
+    echo "test-hooks: cannot read the shellcheck call records" >&2
+    exit 2
+  fi
+  : > "${sc_log}"
+  for sc_rec in "${sc_log}.d"/*; do
+    if [ -e "${sc_rec}" ]; then
+      if [ ! -s "${sc_rec}" ]; then
+        echo "test-hooks: empty shellcheck call record" >&2
+        exit 2
+      fi
+      cat "${sc_rec}" >> "${sc_log}" || exit 2
+    fi
+  done
+}
 # sc_run <引数...>: 偽の shellcheck を先頭に置いて入口を起動する。終了コードは sc_rc、出力は ${work_dir}/out、呼び出しの記録は sc_log。
 sc_run() {
-  : > "${sc_log}"
+  sc_reset
   if SC_JOBS="${sc_jobs}" SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" "$@" > "${work_dir}/out" 2>&1; then
     sc_rc=0
   else
     sc_rc=$?
   fi
+  sc_collect
 }
 
 # 記録の読み方: sc_ncalls = 呼び出しの回数、sc_files = 渡された引数（-- を除く）を 1 行 1 つで並べ替えたもの、
@@ -406,6 +446,7 @@ else
 fi
 
 # 一時領域を作れない（TMPDIR が存在しない）ときは、指摘ありの 1 ではなく検査不能の 2 で止まる
+sc_reset
 if SC_LOG="${sc_log}" TMPDIR="${work_dir}/no-such-dir" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" a.sh > "${work_dir}/out" 2>&1; then
   sc_rc=0
 else
@@ -479,12 +520,13 @@ printf '%s\n' "${d}"
 EOF
 chmod +x "${sc_mk_dir}/mktemp"
 sc_real_mktemp="$(command -v mktemp)"
-: > "${sc_log}"
+sc_reset
 if SC_REAL_MKTEMP="${sc_real_mktemp}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_mk_dir}:${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" a.sh > "${work_dir}/out" 2>&1; then
   sc_rc=0
 else
   sc_rc=$?
 fi
+sc_collect
 if [ "${sc_rc}" -eq 2 ] && [ ! -s "${sc_log}" ] && grep -qF "shellcheck could not check a.sh (exit 2)" "${work_dir}/out"; then
   pass "shellcheck-staged: an unopenable output file exits 2 (not treated as a finding)"
 else
@@ -495,7 +537,7 @@ fi
 # 偽の shellcheck が pid を書いて眠っている間に親へ TERM を送り、終わった後にその pid のプロセスが残っていないことを確かめる
 sc_pidfile="${work_dir}/sc.pid"
 rm -f "${sc_pidfile}"
-: > "${sc_log}"
+sc_reset
 SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh a.sh > "${work_dir}/out" 2>&1 &
 sc_script_pid=$!
 sc_waited=0
