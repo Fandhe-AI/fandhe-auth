@@ -56,7 +56,7 @@ Hub が組み込むライブラリ（本体）で、型・判定・拡張契約�
 | --- | --- | --- |
 | P0 | トークン・鍵・パスワード・復旧コード・接続文字列をコード・サンプル・試験記録・ログ・コメント・PR・Issue に入れる | SECR-23・24・26・27（`SECR-25` は → Hub `ARUN-78`）・`security.md` |
 | P0 | URL のクエリに秘密値を載せる設計を作る（`POST`・ヘッダ・一度だけの短期限の経路を使う） | `SECR-25`（→ Hub `ARUN-78`。本体の規則から外れたため ID だけで引く）・`secret-values.md` |
-| P0 | 実機の名前・ホームのパス・内部のアドレス・個人情報の混入（文書・rules・コメントを含む） | 04-behavior/README.md の (d)・`security.md` |
+| P0 | 実機の名前・ホームのパス・内部のアドレス・個人情報の混入（文書・rules・コメントを含む） | 実機の名前・ホームのパス・内部のアドレスは 04-behavior/README.md の (d)・`security.md`、個人情報は `security.md` |
 | P0 | 本人確認・passkey の検証・復旧・権限付与・管理者承認の判定に LLM・検索を通す経路 | HAPR-1・SECR-28 |
 | P0 | 検証を外す feature・設定・環境変数・要求ヘッダ（`no_gate`・`unchecked` 等）、試験専用のログイン分岐 | DPOL-28・30〜32・CSRF-7・`coding-rust.md` |
 | P0 | `rsa`・`openssl` の直接宣言・`vendored`・`native-tls` を本番の依存に入れる。`openssl` の逆依存の根が `webauthn-rs` 系以外、配備先の OpenSSL への動的リンクでない構成。`jsonwebtoken` の `rust_crypto` feature | DPOL-10・11・13（`DPOL-12` は → Hub `AOPS-2`）・17・18・21・46 |
