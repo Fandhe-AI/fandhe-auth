@@ -123,6 +123,17 @@ if [ -n "${FAIL_GIT_BOTH1:-}" ]; then
     exit 128
   fi
 fi
+# MAX_GIT_ARG_BYTES: 各引数の長さ + 1 + ポインタ 8 バイトの合計が上限を超える呼び出しを、macOS の E2BIG の代わりに失敗させる（#6053）
+if [ -n "${MAX_GIT_ARG_BYTES:-}" ]; then
+  arg_total=0
+  for arg in "$@"; do
+    arg_total=$((arg_total + ${#arg} + 9))
+  done
+  if [ "${arg_total}" -gt "${MAX_GIT_ARG_BYTES}" ]; then
+    echo "git shim: argument list too long" >&2
+    exit 126
+  fi
+fi
 for arg in "$@"; do
   if [ "${arg}" = "${FAIL_GIT_ARG:-}" ]; then
     echo "git shim: forced failure on ${arg}" >&2

@@ -38,7 +38,8 @@
 #   だけを除外にする（PR が登録を削除した名前は走査される。対象の index に一覧が無ければ除外は 0 件）。
 #   PR が自分の変更で一覧に名前を足して検査を免れる経路を作らないため（CI は保護された main の検出器を使う。
 #   #51・#6000）。パスの形（*.lock・.claude/skills/・未登録の .agents/skills/ の下）では除外しない。
-#   名前は `[a-z0-9-]` の規則に合うものだけを通し、literal の pathspec にする（glob・`..`・`/` を持ち込ませない）。
+#   名前は `[a-z0-9-]` の規則に合うものだけを通す。除外は `.agents/skills/` 全体を 1 個の exclude で外し、内側は git の列挙のうち
+#   登録名の下でないものを literal の正の pathspec でチャンクに分けて渡す（引数の長さが登録名の数に比例しない。#6053）。
 #   検出器の skills-lock.json が無いときの挙動は 3 つ: (1) 別の checkout なら除外なしで全部走査する。(2) 同じ checkout なら
 #   HEAD の一覧を検証する（壊れている・通常ファイルでないときは 2。有効なら除外なしで走査する）。(3) 未作成ブランチ・
 #   HEAD に一覧が無いときは除外なし。一覧があるときは、ファイル全体を（正しい UTF-8 かを確かめてから）JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
@@ -1123,11 +1124,17 @@ if [ "${mode}" = staged ] && [ "${head_resolved}" -eq 0 ]; then
   resolve_head
 fi
 
-# 本文の走査の pathspec。`-- .` で始めて空にしない（bash 3.2 は set -u で空配列を展開できない）。
-# 名前ごとに literal・top・末尾 `/`（名前ちょうどの blob・前方一致の別名は外さない）で外す。
-body_pathspec=(-- .)
+# 本文の走査の pathspec（#6053）。登録名ごとに exclude を並べると、引数の長さが登録名の数に比例し、
+# 一覧の上限（64 KiB）の内側でも macOS の引数の上限（256 KiB）を超えて git を起動できなくなる。
+# そこで `.agents/skills/` 全体を 1 個の exclude で外し、その内側は git に列挙させたパスのうち「登録名の下でないもの」だけを
+# literal の正の pathspec でチャンクに分けて渡す。引数の長さは登録名の数に依らない。チャンクの上限は呼び出しの回数だけを変え、
+# 走査の範囲には効かない。bash 3.2 は set -u で空配列を展開できないため、配列は `--` から始めて空にしない。
+skills_dir_spec=':(literal,top).agents/skills/'
+body_chunk_max_bytes=65536
+# 登録名を空白区切りの集合にする（名前は `[a-z0-9-]` の規則を通過済みで、空白を含まない）。
+skill_set=" "
 for name in ${skill_names[@]+"${skill_names[@]}"}; do
-  body_pathspec+=(":(exclude,literal,top).agents/skills/${name}/")
+  skill_set="${skill_set}${name} "
 done
 
 # 利用者の git 設定で出力形式が変わると追加行・ファイル名を取りこぼすため固定する。
@@ -1201,9 +1208,72 @@ if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
 fi
 
 # 2. 追加行のみを走査する（削除行を対象にすると漏洩済み値の除去コミットを妨げる）
-if ! scan_diff -U0 --diff-filter=ACMR "${body_pathspec[@]}" > "${tmp_dir}/diff"; then
-  echo "secret-scan: failed to read diff; aborting" >&4
-  exit 2
+if [ "${skill_set}" = " " ]; then
+  # 登録名が 0 件: 除外なしで 1 回だけ読む。
+  if ! scan_diff -U0 --diff-filter=ACMR -- . > "${tmp_dir}/diff"; then
+    echo "secret-scan: failed to read diff; aborting" >&4
+    exit 2
+  fi
+else
+  # (1) `.agents/skills/` の内側を git に列挙させる（下の exclude と同じ pathspec の正の形なので、
+  #     除外される集合と一致する。bash の前方一致で内側を決めない）。
+  if ! scan_diff --name-only -z --diff-filter=ACMR -- "${skills_dir_spec}" > "${tmp_dir}/inside"; then
+    echo "secret-scan: failed to list files under the skills directory; aborting" >&4
+    exit 2
+  fi
+  # (2) 外側（`.agents/skills/` の外）の本文。引数は固定長。
+  if ! scan_diff -U0 --diff-filter=ACMR -- . ":(exclude,literal,top).agents/skills/" > "${tmp_dir}/diff"; then
+    echo "secret-scan: failed to read diff; aborting" >&4
+    exit 2
+  fi
+  # (3) 内側のうち、走査するパスをチャンクに分けて読み足す。除外するのは「`.agents/skills/<登録名>/` の下」だけで、
+  #     判定に迷う形（`.agents/skills/` で始まらない・直下のファイル・規則に合わない区画・未登録・前方一致の別名）は走査する。
+  #     D/F が衝突する細工された index では同じパスが 2 回現れ得るが、件数が多めに数えられる側（検出の向き）に倒れる。
+  chunk=(--)
+  chunk_n=0
+  chunk_bytes=0
+  flush_chunk() {
+    if [ "${chunk_n}" -gt 0 ]; then
+      if ! scan_diff -U0 --diff-filter=ACMR "${chunk[@]}" >> "${tmp_dir}/diff"; then
+        echo "secret-scan: failed to read diff; aborting" >&4
+        exit 2
+      fi
+    fi
+    chunk=(--)
+    chunk_n=0
+    chunk_bytes=0
+  }
+  skills_prefix=".agents/skills/"
+  while IFS= read -r -d '' path; do
+    skip=0
+    case "${path}" in
+      "${skills_prefix}"*)
+        rest="${path#"${skills_prefix}"}"
+        case "${rest}" in
+          */*)
+            seg="${rest%%/*}"
+            if [[ "${seg}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+              case "${skill_set}" in
+                *" ${seg} "*) skip=1 ;;
+              esac
+            fi
+            ;;
+        esac
+        ;;
+    esac
+    if [ "${skip}" -eq 0 ]; then
+      spec=":(literal,top)${path}"
+      # 各引数の長さ + 終端 1 + ポインタ 8 バイトで数える（LC_ALL=C なのでバイト数）。
+      add=$((${#spec} + 9))
+      if [ "${chunk_n}" -gt 0 ] && [ $((chunk_bytes + add)) -gt "${body_chunk_max_bytes}" ]; then
+        flush_chunk
+      fi
+      chunk+=("${spec}")
+      chunk_n=$((chunk_n + 1))
+      chunk_bytes=$((chunk_bytes + add))
+    fi
+  done < "${tmp_dir}/inside"
+  flush_chunk
 fi
 
 # bash の read は NUL を保持できず（実装により NUL 以降を切る・NUL だけを捨てる）、NUL を含む行で

@@ -306,4 +306,95 @@ else
 fi
 
 
+# ---- 除外の一覧の大きさと引数の長さ（#6053）
+# 登録名ごとの exclude を並べると、有効な一覧（64 KiB 以内）でも引数が macOS の上限を超えて git を起動できなくなる。
+# 実際の上限は CI の macOS で踏み、ここでは shim の MAX_GIT_ARG_BYTES で模す。
+big_chars="0 1 2 3 4 5 6 7 8 9 a b c d e f g h i j k l m n o p q r s t u v w x y z"
+big_body=""
+big_n=0
+for c1 in ${big_chars}; do
+  big_body+="${q}${c1}${q}:{},"
+  for c2 in ${big_chars}; do
+    big_body+="${q}${c1}${c2}${q}:{},"
+  done
+done
+for c1 in ${big_chars}; do
+  for c2 in ${big_chars}; do
+    for c3 in ${big_chars}; do
+      [ "${#big_body}" -gt 64800 ] && break 3
+      big_body+="${q}${c1}${c2}${c3}${q}:{},"
+      big_n=$((big_n + 1))
+    done
+  done
+done
+lock_big="{${q}version${q}:2,${q}skills${q}:{${big_body%,}}}"
+if [ "${#lock_big}" -le 65536 ] && [ "${big_n}" -gt 4000 ]; then
+  pass "secret-scan: big lock fixture is within the size limit and has many names"
+else
+  fail "secret-scan: big lock fixture is within the size limit and has many names" "size ${#lock_big}, names ${big_n}"
+fi
+make_detector big "${lock_big}"
+big_bin="${det_bin}"
+
+big_repo() {
+  new_repo
+  printf '%s\n' "${lock_big}" > skills-lock.json
+  git add -- skills-lock.json
+  stage .agents/skills/aa/SKILL.md "x = ${token}"
+  stage .agents/skills/zzzz/x.md "x = ${token}"
+  stage src/app.txt "x = ${token}"
+}
+big_expect() {
+  expect_out "$1: unregistered name under the skills dir is reported" "  .agents/skills/zzzz/x.md"
+  expect_out "$1: outside file is reported" "  src/app.txt"
+  expect_out "$1: registered name under the skills dir is excluded (2 findings)" "secret-scan: total: 2 finding(s) in 2 file(s)"
+}
+big_repo
+PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=131072 SCAN_BIN="${big_bin}" check_scan "big lock (staged): arguments stay short" 1 src/app.txt
+big_expect "big lock (staged)"
+git commit -q -m "test: big lock"
+SCAN_ARG=--tracked
+PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=131072 SCAN_BIN="${big_bin}" check_scan "big lock (--tracked): arguments stay short" 1 src/app.txt
+big_expect "big lock (--tracked)"
+SCAN_ARG=
+
+# チャンクが 2 つ以上になる配置: 未登録の名前の下に大量の無害なパスと、先頭・末尾の token のファイル
+make_detector small "${lock_ok}"
+small_bin="${det_bin}"
+chunk_repo() {
+  new_repo
+  stage_lock
+  stage .agents/skills/unreg/a-first.txt "x = ${token}"
+  stage .agents/skills/unreg/z-last.txt "x = ${token}"
+  local blob i
+  blob="$(printf 'harmless\n' | git hash-object -w --stdin)"
+  {
+    for ((i = 0; i < 1500; i++)); do
+      printf '100644 %s\t.agents/skills/unreg/f-%0100d.txt\n' "${blob}" "${i}"
+    done
+  } | git update-index --add --index-info
+}
+chunk_repo
+PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=100000 SCAN_BIN="${small_bin}" check_scan "many paths are split into chunks" 1 .agents/skills/unreg/z-last.txt
+expect_out "chunked scan counts each file once" "secret-scan: total: 2 finding(s) in 2 file(s)"
+chunk_repo
+FAIL_GIT_BOTH1=-U0 FAIL_GIT_BOTH2=":(literal,top).agents/skills/unreg/z-last.txt" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a failing chunk call is not scannable (exit 2)" 2
+expect_out "a failing chunk call reports the diff failure" "secret-scan: failed to read diff; aborting"
+chunk_repo
+FAIL_GIT_BOTH1=--name-only FAIL_GIT_BOTH2=":(literal,top).agents/skills/" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a failing inside listing is not scannable (exit 2)" 2
+expect_out "a failing inside listing reports its own message" "secret-scan: failed to list files under the skills directory; aborting"
+
+# 区画の形が紛らわしいパスは除外せず走査する
+new_repo; stage_lock
+stage ".agents/skills/vendored-a vendored-b/x.md" "x = ${token}"
+stage ".agents/skills/vendored-*/x.md" "x = ${token}"
+stage ".agents/skills/vendored-[ab]/x.md" "x = ${token}"
+nl_blob="$(printf 'x = %s\n' "${token}" | git hash-object -w --stdin)"
+printf '100644 %s 0\t.agents/skills/vendored-a\n/x.md\0' "${nl_blob}" | git update-index --add -z --index-info
+SCAN_BIN="${small_bin}" check_scan "odd path segments are scanned, not excluded" 1
+expect_out "all four odd paths are counted" "secret-scan: total: 4 finding(s) in 4 file(s)"
+new_repo; stage_lock; stage .agents/skills "x = ${token}"
+SCAN_BIN="${small_bin}" check_scan "a file named like the skills dir is scanned" 1 .agents/skills
+
+
 finish "part 5"
