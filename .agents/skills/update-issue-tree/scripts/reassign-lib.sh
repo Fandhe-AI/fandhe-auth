@@ -19,7 +19,7 @@
 #   導入形態（本リポジトリのソース／vendoring／symlink 経由）によらず対の実体が組み合う。
 #
 # **このファイルで set -euo pipefail を使ってはならない。** set -e があると reassign_one 内で
-# 失敗した bash 起動の時点でシェルが即終了し、直後の `status=$?` 退避に到達しない。
+# 失敗した bash 起動の時点でシェルが即終了し、直後の `rc=$?` 退避に到達しない。
 # 「非ゼロ終了を握り潰さない」ために入れたつもりの設定が、まさにその見落としを再発させる
 # （Issue #335 で修正した欠陥と同型）。呼び出し側フェンスでも同様に使わない。
 
@@ -27,7 +27,15 @@
 # `${BASH_SOURCE[0]%/*}` を使ってはならない——`source reassign-lib.sh` のようにスラッシュを
 # 含まない形で source された場合、パターンが一致せずファイル名がそのまま残って不正なディレクトリになる。
 # 絶対パス化することで、source 後に呼び出し側が cd しても解決済みのパスが壊れない。
-REASSIGN_LIB_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || return 1
+# zsh で source すると BASH_SOURCE が空になり、dirname が "." を返してカレントディレクトリを
+# 自身の位置と取り違える。そのときは SKILL.md のフェンスが source の前に設定する REASSIGN_LIB
+# （このファイルのパス）を使い、どちらも空なら推測せずに止める。
+REASSIGN_LIB_SELF="${BASH_SOURCE[0]:-${REASSIGN_LIB:-}}"
+if [[ -z "${REASSIGN_LIB_SELF}" ]]; then
+  echo "エラー: reassign-lib.sh 自身の位置を解決できない（BASH_SOURCE も REASSIGN_LIB も空）" >&2
+  return 1
+fi
+REASSIGN_LIB_DIR=$(cd -- "$(dirname -- "${REASSIGN_LIB_SELF}")" && pwd) || return 1
 REASSIGN_SCRIPT="${REASSIGN_LIB_DIR}/reassign-sub-issue.sh"
 
 if [[ ! -f "${REASSIGN_SCRIPT}" ]]; then
@@ -54,7 +62,7 @@ fi
 # **stderr を捕捉していなければ呼び出し側はこの判定を実行できない**。そのためファイルへ
 # 捕捉し、判定した後に必ず再出力する（診断情報を握り潰さない）。
 reassign_one() {
-  local err status
+  local err rc
   err=$(mktemp) || return 2
   # 実行ビットの有無に関わらず bash 経由で起動する（上記の理由により、
   # 直接実行 "${REASSIGN_SCRIPT}" に依存すると Permission denied になり得るため）
@@ -62,16 +70,16 @@ reassign_one() {
   # echo を最後のコマンドにすると終了ステータスが常に 0 になり、実行基盤が
   # 「最終ステータス」で成否を判定した場合に非ゼロ終了を見落とす。
   # 直後に $? を退避してから出力する（Issue #335）。
-  status=$?
+  rc=$?
   # 捕捉した stderr は必ず再出力する（判定のために捕捉しただけであり、隠さない）
   cat "${err}" >&2
-  echo "exit=${status}"
-  if (( status == 2 )) && grep -qF 'reason=cross-repository-parent' "${err}"; then
+  echo "exit=${rc}"
+  if (( rc == 2 )) && grep -qF 'reason=cross-repository-parent' "${err}"; then
     rm -f "${err}"
     return 9
   fi
   rm -f "${err}"
-  return "${status}"
+  return "${rc}"
 }
 
 # 計画配列の存在と型を検証する（fail-closed）。Step 3 / Step 4 の両方が呼ぶ。
@@ -93,9 +101,10 @@ require_plan_array() {
     echo "対象 0 件と区別できないため停止する。対象が無い場合も ${name}=() と明示すること" >&2
     return 1
   fi
-  # declare -p の 2 番目のフィールドが属性（例: -a / -ar / -- / -A）。
-  # 添字配列は小文字 a、連想配列は大文字 A で区別される
-  attrs=$(declare -p "${name}" | awk '{print $2}')
+  # declare -p の名前より前の、- で始まるフィールドが属性（例: -a / -ar / -- / -A）。
+  # 添字配列は小文字 a、連想配列は大文字 A で区別される。zsh で source すると関数の中では
+  # `typeset -g -a NAME=(…)` のように属性が複数のフィールドに分かれるので、つないで判定する
+  attrs=$(declare -p "${name}" | awk 'NR == 1 { s = ""; for (i = 2; i <= NF && $i ~ /^-/; i++) s = s $i; print s }')
   case "${attrs}" in
     -*a*) return 0 ;;
     *)
