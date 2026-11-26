@@ -252,11 +252,14 @@ fi
 # 秘密値の形のダミーを仕込んだコミットは検出（1）。作業ツリーが空でも HEAD の内容を走査する
 stage leaked.txt "x = ${token}"
 git commit -q -m "chore: leak"
+head_want="$(git -C "${ci_src}" rev-parse HEAD)"
 make_ci_target "${ci_src}" "${ci_target}"
 rc=0
 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
 if [ "${rc}" -eq 1 ] && grep -qxF -- "secret-scan: total: 1 finding(s) in 1 file(s)" "${work_dir}/out" \
-  && grep -qF -- "run the trusted detector from the protected main tip" "${work_dir}/out" \
+  && grep -qF -- "check out the trusted detector and exclusion list at the commit this job used" "${work_dir}/out" \
+  && grep -qF -- "not the main tip" "${work_dir}/out" \
+  && grep -qF -- "GIT_INDEX_FILE=<new file> git read-tree ${head_want}" "${work_dir}/out" \
   && grep -qF -- "do not run make or any script from the scanned commit" "${work_dir}/out" \
   && ! grep -qF -- "check out the scanned commit" "${work_dir}/out" && ! grep -qF -- "run: make secret-scan" "${work_dir}/out" \
   && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then

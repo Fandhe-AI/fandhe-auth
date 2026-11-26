@@ -142,6 +142,16 @@ if ! GIT_INDEX_FILE="${tmp_index}" g -C "${target}" read-tree "${head_sha}" > /d
   exit 2
 fi
 
+# 再走査の案内を出す。案内する検出器・除外一覧は、この実行が使った信頼済みの版（本スクリプトのあるリポジトリの HEAD）に揃える。
+# 保護された main の先端ではない（trust-root-secret-scan.yml は組織の ruleset が固定した SHA の版を使うため）。
+# secret-scan.sh --tracked はコミットを引数に取らず index を走査するので、走査したコミットから専用の一時 index を作って渡す。
+# 出す値は公開してよい 2 つの sha だけ（秘密値・パスを含まない）。
+rescan_hint() {
+  local trusted_sha
+  trusted_sha="$(g -C "${ROOT_DIR}" rev-parse --verify "HEAD^{commit}" 2> /dev/null)" || trusted_sha="unknown"
+  echo "secret-scan-ci: to see file names and diagnostics, check out the trusted detector and exclusion list at the commit this job used (${trusted_sha}), not the main tip; then, with the scanned repository as the working directory, build a dedicated index from the scanned commit (${head_sha}) with GIT_INDEX_FILE=<new file> git read-tree ${head_sha}, and run <trusted checkout>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE; do not run make or any script from the scanned commit" >&2
+}
+
 # 検出器の終了状態は 0 = 検出なし / 1 = 検出 / 2 = 検査不能。それ以外（起動失敗・シグナル等）も検査不能に畳む。
 rc=0
 # cd の失敗（終了状態 1 になり「検出」と取り違えられる）は、サブシェルの中で検査不能（2）にする。
@@ -184,7 +194,8 @@ case "${rc}" in
     fi
     ;;
   1)
-    echo "secret-scan-ci: findings reported; details are withheld on the public log. To see file names and diagnostics, run the trusted detector from the protected main tip (scripts/hooks/secret-scan.sh --tracked, without --summary) with the scanned commit given only as data; do not run make or any script from the scanned commit" >&2
+    echo "secret-scan-ci: findings reported; details are withheld on the public log." >&2
+    rescan_hint
     exit 1
     ;;
   *)
@@ -192,7 +203,8 @@ case "${rc}" in
     # 値・パス・git の生の診断は通さない（SECR-23）。失敗は無視する（既に検査不能（2）で終える）。
     secret_scan_fixed_diagnostics > "${work_dir}/allowed-diag" 2> /dev/null || true
     grep -aFx -f "${work_dir}/allowed-diag" "${out}" >&2 2> /dev/null || true
-    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log. To see file names and diagnostics, run the trusted detector from the protected main tip (scripts/hooks/secret-scan.sh --tracked, without --summary) with the scanned commit given only as data; do not run make or any script from the scanned commit" >&2
+    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log." >&2
+    rescan_hint
     exit 2
     ;;
 esac
