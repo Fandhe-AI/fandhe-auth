@@ -61,21 +61,39 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 pids=()
 launched=0
 pending_signal=0
-# stop_job <pid>: 子に TERM を送り、続けて CONT を送る。一時停止中（SIGSTOP 等）の子は CONT が無いと TERM を受け取れず、wait で止まる。
-stop_job() {
-  kill "$1" 2> /dev/null || true
-  kill -CONT "$1" 2> /dev/null || true
-}
-# is_running_job <pid>: bash のジョブ表で「まだ生きている」（実行中または一時停止中）の子だけ真にする。bash は明示の wait の前にも終了した子を回収するため、
+# job_state <pid>: bash のジョブ表での子の状態を job_state_result に入れる（running・stopped・none）。bash は明示の wait の前にも終了した子を回収するため、
 # 保持している pid が回収済み（pid が再利用されうる）のことがある。kill の前にこれで自分の子だと確かめる（#6063・TASK-6）。
+# jobs は現在のシェルで実行する（command substitution やパイプラインのサブシェルは、bash 3.2 等で空のジョブ表を見る）。出力はファイルへのリダイレクトで受ける。
 # 確認と kill の間の窓は残るが、回収済みの pid を無条件に狙う経路は無くなる。
-is_running_job() {
-  local running
-  running=" $(jobs -rp 2> /dev/null | tr '\n' ' ') $(jobs -sp 2> /dev/null | tr '\n' ' ') "
-  case "${running}" in
-    *" $1 "*) return 0 ;;
-  esac
-  return 1
+job_state_result=none
+job_state() {
+  local f="${tmp_dir}/jobs.$1" line
+  job_state_result=none
+  jobs -rp > "${f}" 2> /dev/null || true
+  while read -r line; do
+    if [ "${line}" = "$1" ]; then
+      job_state_result=running
+    fi
+  done < "${f}"
+  if [ "${job_state_result}" = none ]; then
+    jobs -sp > "${f}" 2> /dev/null || true
+    while read -r line; do
+      if [ "${line}" = "$1" ]; then
+        job_state_result=stopped
+      fi
+    done < "${f}"
+  fi
+  rm -f "${f}"
+}
+# stop_job <pid>: ジョブ表で確かめた子を止める。CONT を先に、TERM を最後に 1 回だけ送る。
+# 一時停止中（SIGSTOP 等）の子は CONT が無いと TERM を受け取れず wait で止まる（非対話の bash は停止を検知しないため、状態では分けず必ず CONT を送る）。
+# TERM の後には何も送らないので、TERM で終わった子の pid が再利用されても、誤って別のプロセスへ信号を送らない。
+stop_job() {
+  job_state "$1"
+  if [ "${job_state_result}" != none ]; then
+    kill -CONT "$1" 2> /dev/null || true
+    kill "$1" 2> /dev/null || true
+  fi
 }
 # shellcheck disable=SC2329 # trap から呼ばれる
 on_signal() {
@@ -83,7 +101,7 @@ on_signal() {
   trap '' INT TERM HUP
   local k=0
   while [ "${k}" -lt "${launched}" ]; do
-    if [ -n "${pids[k]}" ] && is_running_job "${pids[k]}"; then
+    if [ -n "${pids[k]}" ]; then
       stop_job "${pids[k]}"
     fi
     k=$((k + 1))
@@ -230,9 +248,7 @@ batch_stop() {
   # 停止処理中の別の信号で再入すると、回収直後の pid へ kill を送り得る。冒頭で対象の信号を無視する。
   trap '' TERM INT HUP
   if [ -n "${sc_pid}" ]; then
-    if is_running_job "${sc_pid}"; then
-      stop_job "${sc_pid}"
-    fi
+    stop_job "${sc_pid}"
     wait "${sc_pid}" 2> /dev/null || true
     sc_pid=""
   fi

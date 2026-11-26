@@ -588,23 +588,75 @@ for sc_sig in TERM HUP TERM-STOPPED; do
     sc_waited=$((sc_waited + 1))
   done
   # 偽物が exec して sleep になるまで待ってから信号を送る（exec 前に送ると、停止の対象が sleep でなくシェルになり、確認が曖昧になる）
+  # 起動・sleep への exec・SIGSTOP の送信・停止状態のどれかを確認できなければ、信号を送らず試験の失敗として扱う（退行を見逃さない）。
+  sc_setup_err=""
   sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
-  sc_waited=0
-  while [ -n "${sc_fake_pid}" ] && ! sc_is_fake_sleep "${sc_fake_pid}" && [ "${sc_waited}" -lt 50 ]; do
-    sleep 0.1
-    sc_waited=$((sc_waited + 1))
-  done
-  if [ "${sc_stop_child}" -eq 1 ] && [ -n "${sc_fake_pid}" ]; then
+  if [ -z "${sc_fake_pid}" ]; then
+    sc_setup_err="the fake shellcheck did not start"
+  else
+    sc_waited=0
+    while ! sc_is_fake_sleep "${sc_fake_pid}" && [ "${sc_waited}" -lt 50 ]; do
+      sleep 0.1
+      sc_waited=$((sc_waited + 1))
+    done
+    if ! sc_is_fake_sleep "${sc_fake_pid}"; then
+      sc_setup_err="the fake shellcheck did not become sleep"
+    fi
+  fi
+  if [ -z "${sc_setup_err}" ] && [ "${sc_stop_child}" -eq 1 ]; then
     # 一時停止中の子を持つ中断（停止中の子は CONT が無いと TERM を受け取れない）
-    kill -STOP "${sc_fake_pid}" 2> /dev/null || true
-    sleep 0.3
+    if ! kill -STOP "${sc_fake_pid}" 2> /dev/null; then
+      sc_setup_err="SIGSTOP could not be sent to the fake shellcheck"
+    else
+      sc_waited=0
+      sc_state=""
+      while [ "${sc_waited}" -lt 30 ]; do
+        sc_state="$(ps -p "${sc_fake_pid}" -o stat= 2> /dev/null || true)"
+        sc_state="${sc_state#"${sc_state%%[![:space:]]*}"}"
+        case "${sc_state}" in
+          T*) break ;;
+        esac
+        sleep 0.1
+        sc_waited=$((sc_waited + 1))
+      done
+      case "${sc_state}" in
+        T*) ;;
+        *) sc_setup_err="the fake shellcheck did not reach the stopped state" ;;
+      esac
+    fi
+  fi
+  if [ -n "${sc_setup_err}" ]; then
+    # 管理下のプロセスだけを後始末する（偽物は自分で起動した子孫。眠りは 30 秒で終わる）
+    if [ -n "${sc_fake_pid}" ]; then
+      kill -CONT "${sc_fake_pid}" 2> /dev/null || true
+    fi
+    kill -KILL "${sc_script_pid}" 2> /dev/null || true
+    wait "${sc_script_pid}" 2> /dev/null || true
+    fail "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2" "setup failed: ${sc_setup_err}" "output: $(cat "${work_dir}/out")"
+    continue
   fi
   sc_t0="${SECONDS}"
   kill -"${sc_sig}" "${sc_script_pid}" 2> /dev/null || true
+  # 期限（20 秒）付きで終了を待つ。無期限の wait にすると、停止が伝わらない退行で試験が止まる。
+  sc_waited=0
+  while kill -0 "${sc_script_pid}" 2> /dev/null && [ "${sc_waited}" -lt 200 ]; do
+    sleep 0.1
+    sc_waited=$((sc_waited + 1))
+  done
+  sc_timed_out=0
+  if kill -0 "${sc_script_pid}" 2> /dev/null; then
+    sc_timed_out=1
+    # 期限切れ: 試験が管理するプロセスだけを後始末して失敗にする
+    kill -CONT "${sc_fake_pid}" 2> /dev/null || true
+    kill -KILL "${sc_script_pid}" 2> /dev/null || true
+  fi
   if wait "${sc_script_pid}"; then
     sc_rc=0
   else
     sc_rc=$?
+  fi
+  if [ "${sc_timed_out}" -eq 1 ]; then
+    sc_rc=124
   fi
   sc_stop_secs=$((SECONDS - sc_t0))
   sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
