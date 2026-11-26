@@ -357,6 +357,12 @@ git add .agents/skills/vendored-a/SKILL.md
 SCAN_BIN="${same_bin}" check_scan "dropped skill: a body also modified in the commit" 1 .agents/skills/vendored-a/SKILL.md
 expect_out "dropped skill: modified body is not counted twice" "secret-scan: total: 2 finding(s) in 1 file(s)"
 
+# 作業ツリーだけで登録を消した未ステージの変更は、無関係なコミットを止めない（HEAD と index だけで判定する）
+dropped_repo
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+stage unrelated.txt "harmless = 1"
+SCAN_BIN="${same_bin}" check_scan "dropped skill: an unstaged drop does not scan the existing body" 0
+
 # 外れた名前の差分の git の失敗は検査不能（2）
 dropped_repo
 printf '%s\n' "${lock_only_b}" > skills-lock.json

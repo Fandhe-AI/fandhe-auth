@@ -1128,10 +1128,16 @@ load_skill_names() {
   for n in ${parsed_names[@]+"${parsed_names[@]}"}; do
     head_names="${head_names}${n} "
   done
-  # 登録を外した名前の候補は、HEAD の一覧の名前だけ（#6054）。作業ツリーだけに足した名前（HEAD に無い）は
-  # 登録されていたことが無いため候補にしない（足しただけで無関係なコミットが全行走査で止まるのを避ける）。
-  # 作業ツリーの一覧が無い（git rm 等）ときも、HEAD の名前は全行を走査する。
-  dropped_cand="${head_names}"
+  # 登録を外した名前の候補は、HEAD に登録があり index で消えた名前だけ（#6054）。判定は HEAD と index だけで行い、
+  # 作業ツリーの有無は見ない（作業ツリーだけで登録を消した未ステージの変更では、今回のコミットに含まれない
+  # 既存の本文を全行走査して無関係なコミットを止めない）。作業ツリーだけに足した名前（HEAD に無い）も候補にしない。
+  dropped_cand=" "
+  for n in ${parsed_names[@]+"${parsed_names[@]}"}; do
+    case "${index_names}" in
+      *" ${n} "*) ;;
+      *) dropped_cand="${dropped_cand}${n} " ;;
+    esac
+  done
   if [ "${work_present}" -eq 0 ]; then
     set_dropped
     return 0
