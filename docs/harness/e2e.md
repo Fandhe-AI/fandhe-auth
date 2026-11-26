@@ -1,6 +1,6 @@
 # passkey の E2E ハーネス: 構成の下書き
 
-`TASK-11`（passkey の E2E ハーネス。MS-1）の構成の下書き。1/6（#101）で範囲と枠を置き、4/6（#104）で登録の後の認証と失敗の場合を足した。
+`TASK-11`（passkey の E2E ハーネス。MS-1）の構成の下書き。1/6（#101）で範囲と枠を置き、4/6（#104）で登録の後の認証と失敗の場合を足し、6/6（#106）で使い方と実機の確認との境目を足した。
 仕様は spec の `TASK-11` で引く（本文は写さない）。この文書は下書きで、crate の名前・置き場は仮称、人が確定する。
 
 ## 目的と範囲
@@ -145,6 +145,73 @@ PKEY の振る舞いを満たしたとは主張しない。
 - 偽のドライバを使う単体の試験は記録をファイルに書かない（E2E の実行回数に数えない）。
 - 日時はファイル名の秒で代え、source の revision・ドライバの版は入れていない（未決）。
 
+## 使い方（6/6）
+
+形式・名前・節立ては仮置きで、人が確認する。正本の見本は `crates/e2e-harness/tests/chrome_registration.rs`・`tests/chrome_authentication.rs`
+（Firefox は `tests/firefox_registration.rs`・`tests/firefox_authentication.rs`）で、ここには手順の骨格だけを書く（値の詳細は見本を見る。ずれを防ぐため）。
+
+### 前提
+
+- unix（Linux・macOS 等）に限る。非 unix では対象の試験が 0 件になり、入口のスクリプトが失敗にする。
+- Chrome は chromedriver と Chrome、Firefox は geckodriver と Firefox（仮想 authenticator の WebDriver のエンドポイントを使える組み合わせ。
+  記録のある組み合わせは `scripts/e2e-firefox.sh` と Makefile の説明を見る。版の値はここに写さない）。
+- ドライバが無ければ黙って飛ばさず失敗する（`DPOL-30`〜`32`）。環境の有無で自動に飛ばす分岐は作らない。
+
+### 試験の置き場
+
+ドライバを使う試験は `crates/e2e-harness/tests/*.rs` に置き、`#[ignore]` を付けて `cfg(unix)` に限る。共通の流れと記録は
+`tests/support/passkey.rs`（`register`・`authentication_run_result`・`RecordSink`。crate の公開 API ではない）と `tests/support/`（試験用 origin の `TestOrigin`）にある。
+ハーネスは試験専用で、どの crate からも依存しない（`LIB-2`・`LIB-4`）。他の crate からの辺を足すときは、許可表（`scripts/check-crate-deps.sh`）の人の確認が要る。
+
+### 組み立ての手順（見本の流れと対応）
+
+1. `TestOrigin::start()` で試験用 origin を起こす。
+2. `ChromeDriverComponent::new(ChromeDriverConfig::new("chromedriver"))`（Firefox は `GeckoDriverComponent`・`GeckoDriverConfig`）を作り、`Box` に入れる前に `handle()` を取る。
+3. `E2eHarness::start(E2eConfig::new(PasskeyOperation::.., Browser::..).with(Box::new(driver)))` で起動する。
+    起動順・逆順の停止・`Drop` の停止は「起動と停止の契約」の節を見る。
+4. `RecordSink::new(&handle, Browser::.., PasskeyOperation::..)` で記録を開く。
+5. 登録は `support::passkey::register`（仮想 authenticator を `VirtualAuthenticatorOptions` で足し、`register_once` を呼ぶ）。
+    認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)`。結果は `sink.record(..)` で記録に足す。options の値は PoC の値（`QP-1`）で要件の値ではない。
+6. 成否と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
+7. `running.stop()` で停止し、`sink.finish()` で記録を出す。
+
+失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
+
+### 実行の方法
+
+- `make test`: ドライバ不要。偽のドライバを使う単体・枠の試験だけが流れ、E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
+- `make e2e-chrome`（`scripts/e2e-chrome.sh`）・`make e2e-firefox`（`scripts/e2e-firefox.sh`）: `#[ignore]` の登録・認証の試験を target ごとに流す。
+  引数は受け付けない。target ごとに 1 件以上通らなければ失敗する。CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
+
+### 記録の読み方
+
+形式は「実行の記録の形式（5/6）」の節を見る。出力は標準出力と `target/` の下の `e2e-records/`。
+出力先は起動をまたいで追記されるので、集計はその起動の標準出力だけを正とするか、起動ごとに空の専用の出力先を使う。
+
+### 守ること
+
+- URL・ポート・セッション ID・authenticator ID・credential ID・署名・パスを記録・誤り・ログに出さない（`SECR-11`・`SECR-23`）。試験で値を出す行を足さない。
+- 検証を外す意味の起動 flag・pref・feature を足さない（`DPOL-30`〜`32`）。Firefox で足りない場合も推測で足さず、人に確かめる。
+- 通信はループバックのドライバと試験用 origin だけにする。RP ID の完全一致の検査を外さない（A10）。
+- 期待と違う結果は期待を緩めず、記録して人に確かめる（`AUDB-6` の趣旨）。
+- 記録は実行の事実で、合否の判定でも spec の「確定」でもない（`ACPT-7`）。
+
+### この段で使えないもの
+
+- RelyingParty の実体（サーバー側の登録・認証応答の検証）: `TASK-716` の完了待ち。このため `PKEY` の振る舞いを満たしたとは主張しない。
+- 画面の E2E（Hub の `ASCR`）、適合性試験の実行環境（Hub の `ARUN-20`）、Safari（`Browser` に変種が無い）。
+
+## 実機の確認との境目（6/6）
+
+- このハーネスが扱うのは Chrome・Firefox の WebDriver の仮想 authenticator（`AuthenticatorKind::WebDriverVirtual`・`Evidence::Virtual`）だけで、結果は〔仮想〕。
+- Safari と実機の authenticator（同期 passkey・セキュリティキーを含む）での確認は**別のタスク**で、このハーネスの範囲外。
+  `TASK-784`（`CG2-2`）と、旧構成の手順を受ける `TASK-75`〜`TASK-78` で扱う。手順・機材・記録票の中身はここに写さず、spec を ID で引く。
+- 仮想の合格を実機・Safari の合格に数えない（`ACPT-7`・`ACPT-8`）。記録の `counts_as_real_device`・`counts_as_safari` は型から導く常に `false` で、外から上書きできない。
+  このハーネスの記録を、実機のタスクの記録票の結果の欄に入れる材料にしない。
+- 実機の確認の実施と結果の判定・記録は人が行う。〔仮想〕の合格で〔実機〕〔人の操作〕の項目を確定にしない（`ACPT-7`）。
+- この repo の状況: Chrome（Chromium 157）では登録・認証・失敗の場合を実行して通った〔仮想〕。Firefox は作業環境に geckodriver・Firefox が無く未実行（未検証）。
+  どちらも実機・Safari の結果ではない。
+
 ## 試験用ページと origin の置き場（人が決める）
 
 本体は画面も HTTP の受付も持たない（`library-boundary.md`、Hub の `ASCR`・`ARUN-20`）。候補は次の 3 つ。
@@ -216,7 +283,7 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 | 3/6（#103） | Firefox の結線と識別子の規則（`LGUI-35` → `ASCR-65`） |
 | 4/6（#104） | 登録の後の認証を両ブラウザで通す。失敗する場合の試験。暫定の結果行。3/6 のレビューの持ち越し（`browserName` の照合など） |
 | 5/6（#105） | 実行の記録の形式（ブラウザの版の主番号・authenticator の種類・回数・仮想の印）。暫定の結果行を置き換え |
-| 6/6（#106） | 使い方の文書と、実機の確認は別タスクである旨 |
+| 6/6（#106） | 使い方の文書と、実機の確認は別タスクである旨（本段。「使い方（6/6）」「実機の確認との境目（6/6）」の節） |
 
 ## 未決・人の確認待ち
 
@@ -241,6 +308,8 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
   4/6 の「転記しない」方針を改めた範囲を含む）。回数の単位を 1 セッションとし合算は読み手が行うこと。上限 10,000 件の値。
   日時・source の revision・ドライバの版を入れていないこと（it-harness への辺、または `DPOL-32` の読みが要る）。`Drop` で巻き戻る間に記録を書く作り。
   Firefox での実行と記録（geckodriver と Firefox のある環境での `make e2e-firefox`）は人の作業
+- 6/6 の追加（すべて仮置き。人が確認する）: 使い方の節立て・「実機の確認との境目」の節の置き方、見本を既存の `tests/chrome_*.rs`・`tests/firefox_*.rs` とし専用のサンプルの試験を足さなかったこと
+- 6/6 の未達: Firefox での `make e2e-firefox` の実行と記録は人の作業のまま。RelyingParty の実体は `TASK-716` 待ちで、`TASK-11` はそれまで未達の部分を持つ
 - Chrome の起動 flag は `--headless=new` だけ（`DPOL-30` の走査語に掛かる flag は足していない）
 - it-harness・最小の組込み先への辺（足す段で許可表を人に確かめる）
 
