@@ -253,11 +253,23 @@ fi
 stage leaked.txt "x = ${token}"
 git commit -q -m "chore: leak"
 head_want="$(git -C "${ci_src}" rev-parse HEAD)"
+# 案内の試験は、この repo の作業ツリーの状態に左右されないよう、検出器をコミットした複製（det_root）の入口で流す
+det_root="${work_dir}/det-root"
+mkdir -p "${det_root}/scripts/hooks"
+cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${det_root}/scripts/"
+cp "${SECRET_SCAN}" "${det_root}/scripts/hooks/secret-scan.sh"
+if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${det_root}/skills-lock.json"; fi
+git -C "${det_root}" -c init.defaultBranch=main init -q
+git -C "${det_root}" add -A
+git -C "${det_root}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m "chore: detector copy"
+det_sha="$(git -C "${det_root}" rev-parse HEAD)"
 make_ci_target "${ci_src}" "${ci_target}"
 rc=0
-LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_root}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
 if [ "${rc}" -eq 1 ] && grep -qxF -- "secret-scan: total: 1 finding(s) in 1 file(s)" "${work_dir}/out" \
-  && grep -qF -- "check out the trusted detector and exclusion list at the commit this job used" "${work_dir}/out" \
+  && grep -qF -- "check out the trusted detector and exclusion list at the commit this job used (${det_sha})" "${work_dir}/out" \
+  && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
+  && grep -qF -- "never paste or upload its output to a public log, PR or issue" "${work_dir}/out" \
   && grep -qF -- "not the main tip" "${work_dir}/out" \
   && grep -qF -- "GIT_NO_REPLACE_OBJECTS=1 GIT_INDEX_FILE=<new file> git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree ${head_want}" "${work_dir}/out" \
   && grep -qF -- "every existing GIT_* variable unset for both commands below" "${work_dir}/out" \
@@ -269,6 +281,21 @@ if [ "${rc}" -eq 1 ] && grep -qxF -- "secret-scan: total: 1 finding(s) in 1 file
 else
   fail "secret-scan-ci: a target without a working tree reports a planted dummy (exit 1, no value or path)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
+
+# 検出器が未コミットの変更を持つとき、案内は sha の取得を勧めず、作業ツリーの版が要ると伝える（sha では再現できない）
+printf '\n# local edit\n' >> "${det_root}/scripts/hooks/secret-scan.sh"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_root}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qF -- "use the detector and exclusion list exactly as this run used them" "${work_dir}/out" \
+  && grep -qF -- "does not reproduce them" "${work_dir}/out" \
+  && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+  && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
+  && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
+  pass "secret-scan-ci: an uncommitted detector change switches the rescan hint to the working-tree version"
+else
+  fail "secret-scan-ci: an uncommitted detector change switches the rescan hint to the working-tree version" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+git -C "${det_root}" checkout -q -- scripts/hooks/secret-scan.sh
 
 # 絶対パスへの解決（cd）が失敗しても、mktemp が作った一時領域を残さない（EXIT トラップが消せること）
 cd_tmp_fail_env="${work_dir}/cd-tmp-fail.sh"

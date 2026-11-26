@@ -145,11 +145,24 @@ fi
 # 再走査の案内を出す。案内する検出器・除外一覧は、この実行が使った信頼済みの版（本スクリプトのあるリポジトリの HEAD）に揃える。
 # 保護された main の先端ではない（trust-root-secret-scan.yml は組織の ruleset が固定した SHA の版を使うため）。
 # secret-scan.sh --tracked はコミットを引数に取らず index を走査するので、走査したコミットから専用の一時 index を作って渡す。
+# ただし検出器・除外一覧が作業ツリーでコミットと違うときは、sha では再現できないので、その旨の案内に切り替える。
+# 詳細付きの再走査はファイル名・git の生の診断を出すため、非公開の端末で行い出力を公開の場へ出さないよう明記する（SECR-23）。
 # 出す値は公開してよい 2 つの sha だけ（秘密値・パスを含まない）。
 rescan_hint() {
-  local trusted_sha
+  local trusted_sha dirty detector_src tail_text private_text
   trusted_sha="$(g -C "${ROOT_DIR}" rev-parse --verify "HEAD^{commit}" 2> /dev/null)" || trusted_sha="unknown"
-  echo "secret-scan-ci: to see file names and diagnostics, check out the trusted detector and exclusion list at the commit this job used (${trusted_sha}), not the main tip; then, with the scanned repository as the working directory and every existing GIT_* variable unset for both commands below, as this entry does (e.g. env -u GIT_DIR -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_NAMESPACE; list others with env | grep ^GIT_), build a dedicated index from the scanned commit (${head_sha}) with GIT_NO_REPLACE_OBJECTS=1 GIT_INDEX_FILE=<new file> git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree ${head_sha}, and run <trusted checkout>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE; do not run make or any script from the scanned commit" >&2
+  # 検出器（scripts/hooks/secret-scan.sh）と除外一覧（skills-lock.json）は作業ツリーのファイルを使う。どちらかが
+  # コミットと違う（未コミットの変更・未追跡）か、比較できないときは、sha では再現できないので、版の案内を切り替える（fail-closed）。
+  dirty="$(g -C "${ROOT_DIR}" status --porcelain --untracked-files=all -- scripts/hooks/secret-scan.sh skills-lock.json 2> /dev/null && printf x)" || dirty="unknown"
+  if [ "${trusted_sha}" = "unknown" ] || [ "${dirty}" != "x" ]; then
+    detector_src="use the detector and exclusion list exactly as this run used them: the working-tree copies of scripts/hooks/secret-scan.sh and skills-lock.json in the repository of this entry differ from, or cannot be compared with, the commit (${trusted_sha}), so that commit does not reproduce them; keep copies of both files from that working tree (do not rely on the commit or the main tip)"
+    tail_text="run <detector copy>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE, with skills-lock.json beside it as in the original layout"
+  else
+    detector_src="check out the trusted detector and exclusion list at the commit this job used (${trusted_sha}), not the main tip"
+    tail_text="run <trusted checkout>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE"
+  fi
+  private_text="Run this rescan only in a private local terminal: without --summary it prints file names and raw git diagnostics, which can contain secret values (SECR-23); never run it in a public CI job and never paste or upload its output to a public log, PR or issue."
+  echo "secret-scan-ci: to see file names and diagnostics, ${detector_src}; then, with the scanned repository as the working directory and every existing GIT_* variable unset for both commands below, as this entry does (e.g. env -u GIT_DIR -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_NAMESPACE; list others with env | grep ^GIT_), build a dedicated index from the scanned commit (${head_sha}) with GIT_NO_REPLACE_OBJECTS=1 GIT_INDEX_FILE=<new file> git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree ${head_sha}, and ${tail_text}; do not run make or any script from the scanned commit. ${private_text}" >&2
 }
 
 # 検出器の終了状態は 0 = 検出なし / 1 = 検出 / 2 = 検査不能。それ以外（起動失敗・シグナル等）も検査不能に畳む。
