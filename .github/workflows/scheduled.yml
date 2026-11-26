@@ -8,15 +8,15 @@
 # 定期の依存の監査・advisory DB の取得日の記録・警報の結線は TASK-681（#1046）。警報の経路は Hub の AOPS-3。
 # 結線の契約は .claude/rules/github-actions.md の「PR ごとの実行と定期の実行の振り分け」。
 #
-# 例外（承認待ち）: PR の検査を担わない定期ジョブに限り、ci-complete の needs に入れず、必須チェックにも登録しない。
+# 例外（利用者が承認済み。2026-11-26）: PR の検査を担わない定期ジョブに限り、ci-complete の needs に入れず、必須チェックにも登録しない。
 # 集約できない理由は needs が別ワークフローを参照できないこと、必須に登録しない理由は PR で起動せずチェックが報告されないこと。
-# 範囲は workflow_dispatch の枠と、承認後に足す schedule の両方。人の承認は未取得で、本ファイルの追加は承認前の先行配置（承認済みではない）。
+# 承認の範囲は、本ファイルが workflow_dispatch だけで動く間に限る。schedule などの発火を足すとき（TASK-681）は例外を見直す（承認は人が行う。ACPT-7）。
 # 道具の版と SHA256 の宣言は ci.yml の env の 1 か所だけで、ここに複製しない（共有の方法は TASK-681 で決める）。
 name: Scheduled
 
 on:
-  # 例外の承認が記録されるまで schedule は有効にしない（手動の workflow_dispatch だけ）。
-  # 承認後に schedule（1 日 1 回・UTC。時刻は人が決める）を足す。足すのは TASK-681 の結線と一緒（承認は人が行う。ACPT-7）。
+  # 例外の承認の範囲は workflow_dispatch だけで動く間（手動の workflow_dispatch だけ）。
+  # schedule（1 日 1 回・UTC。時刻は人が決める）は TASK-681 の結線と一緒に、例外を見直してから足す（承認は人が行う。ACPT-7）。
   workflow_dispatch:
 
 permissions: {}
