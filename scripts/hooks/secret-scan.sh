@@ -54,6 +54,7 @@
 #   index は最初に 1 回だけ複写して固定し、登録の確認・パス一覧・本文の走査はすべてその複写から行う。走査の後に元の
 #   index の内容が固定時と違えば 2 にする（登録の確認と本文が別の index を見る経路を作らない）。
 #   固定時にあった index が終了時に無いときも 2（登録 0 件でも）。index がシンボリックリンクなら、開始時も終了時も辿らず 2。
+#   終了時に index のパスを git の解決で取り直し、開始時と違えば（親ディレクトリのシンボリックリンクの付け替え等）2（#6034）。
 #   複写の前に通常ファイルであることを確かめる（FIFO 等は複写せず 2。確認と cp の間の差し替えは窓を狭めるだけで、止まり得る。0 は返さない）。
 #   外部コマンド（git・readlink・mktemp・rm・cp・head・wc・sleep・tr・cmp）は使う前に確かめ、欠けていれば 2。
 # 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
@@ -290,7 +291,23 @@ trap cleanup_tmp EXIT
 # git は相対パスの GIT_INDEX_FILE を、起動時の作業ディレクトリではなく作業ツリーのルートを基準に読む（git が先にルートへ移るため）。
 # 自前で基準を決めると、git が読む index と別のファイルを固定し得る（無ければ空として 0 を返す fail-open。#6011）。
 # `$(...)` は末尾の改行を落とすため、番兵（x）を付けて受けてから外す。
-if ! orig_index="$(g rev-parse --path-format=absolute --git-path index && printf x)"; then
+# 呼び出し元の GIT_INDEX_FILE（設定の有無と値）は、下で固定した複写へ上書きする前に控える。終了時に同じ条件で解決し直すため（#6034）。
+caller_index_set=0
+caller_index=""
+if [ -n "${GIT_INDEX_FILE+x}" ]; then
+  caller_index_set=1
+  caller_index="${GIT_INDEX_FILE}"
+fi
+# resolve_index_path: 呼び出し元の GIT_INDEX_FILE の条件で、git 自身の解決による元の index の絶対パスを標準出力へ出す。
+# 開始時の固定と終了時の再確認の両方で使う（定義を 1 か所にして、2 つの解決が食い違う余地を作らない）。パスは表に出さない。
+resolve_index_path() {
+  if [ "${caller_index_set}" -eq 1 ]; then
+    GIT_INDEX_FILE="${caller_index}" g rev-parse --path-format=absolute --git-path index && printf x
+  else
+    (unset GIT_INDEX_FILE; g rev-parse --path-format=absolute --git-path index && printf x)
+  fi
+}
+if ! orig_index="$(resolve_index_path)"; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
 fi
@@ -1323,6 +1340,20 @@ fi
 index_cmp_rc=0
 cmp -s "${tmp_dir}/index-listing-before" "${tmp_dir}/index-listing-after" || index_cmp_rc=$?
 if [ "${index_cmp_rc}" -ne 0 ]; then
+  echo "secret-scan: the index changed during the scan; aborting" >&4
+  exit 2
+fi
+# 親ディレクトリのシンボリックリンクの付け替え（#6034）: orig_index は git がリンクを解いた実体で、上の複写も一覧もその実体から
+# 取っている。走査中に index の親ディレクトリのリンクが別の場所へ付け替わると、実体は古いままで一覧が一致し、git が実際に
+# 読む index（新しい側）の追加分を見ないまま 0 を返し得る。複写の後に git 自身の解決をやり直し、開始時と 1 バイトでも違えば 2 にする。
+# 確認の後の付け替えは窓として残る（HEAD の取り直しと同じ。窓を狭めるだけで、0 を返す経路は増やさない）。パスは出さない。
+if ! resolved_after="$(resolve_index_path)"; then
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
+fi
+resolved_after="${resolved_after%x}"
+resolved_after="${resolved_after%$'\n'}"
+if [ "${resolved_after}" != "${orig_index}" ]; then
   echo "secret-scan: the index changed during the scan; aborting" >&4
   exit 2
 fi
