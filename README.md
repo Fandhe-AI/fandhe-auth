@@ -196,7 +196,7 @@ Linux・macOS（標準の bash 3.2 を含む）について実行します。`sc
 
 - ruleset の required status checks には `ci-complete`（と ai-review の `codex / *`）を登録する。
   ruleset・マージ設定の導入は `setup-repo-guards` スキルの手順に従う
-- CI にジョブを追加したら `ci-complete` の `needs` にも必ず追加する
+- `ci.yml` にジョブを追加したら `ci-complete` の `needs` にも必ず追加する（`scheduled.yml` の定期ジョブの扱いは `.claude/rules/github-actions.md` の「PR ごとの実行と定期の実行の振り分け」の節を参照）
 - runner 方針（public は GitHub ホステッド、ai-review の review ジョブのみ self-hosted の例外）・発火条件・
   ジョブ追加時のチェックリスト・キャッシュ方針は `.claude/rules/github-actions.md` に定義している
 

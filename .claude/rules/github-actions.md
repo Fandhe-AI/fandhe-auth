@@ -55,7 +55,7 @@ MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・
     - 承認日: 2026-11-26
     - 見直し: `schedule` などの発火を足すとき（TASK-681）
   - `ci-complete` で束ねない代わりの失敗の検知経路: 今は実装に在る経路は無く、GitHub の既定の通知だけ（下の「失敗の通知」の項。失敗時の通知・Issue 起票の結線は `scheduled.yml` に無い）。運用の警報への結線は TASK-681（Hub の `AOPS-3`）で、結線までは定期ジョブの失敗を人が Actions の画面で確かめる。この経路で足りるかは、見直しのときに人が判断する
-- `workflow_dispatch` は main 以外の ref でも流せる。check 名は必須のものと違うのでマージの判定には使われない（読み。〔実機〕では未確認）。
+- `workflow_dispatch` は、ワークフローのファイルがデフォルトブランチ（main）にあるときだけ起動できる（GitHub の公式の手順書。PR ブランチにしか `scheduled.yml` が無いあいだは手動で起動できない）。起動できる状態では main 以外の ref も指定して流せる。check 名は必須のものと違うのでマージの判定には使われない（読み。〔実機〕では未確認）。
 - 失敗の通知は GitHub の既定だけで、運用の警報には結線していない。
 - schedule は default ブランチ（main）の定義で動く。活動の無い public の repo では GitHub が止めることがある。
 - cron の時刻と頻度は暫定で、人が決める（見直しは TASK-681）。
