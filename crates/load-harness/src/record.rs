@@ -181,6 +181,17 @@ impl ValueUnit {
     }
 }
 
+/// 値の名前の検査（形式 → 語彙の完全一致）。`ValueName::new` が固定語彙で呼ぶ。語彙を引数にするのは、
+/// 形式の検査だけの退行を、語彙に入れた不正な候補で試験が検出できるようにするため（SECR-23）。
+fn name_in(s: &str, vocab: &[&str]) -> bool {
+    is_name(s) && vocab.contains(&s)
+}
+
+/// 出典の ID の検査（形式 → 語彙の完全一致）。`RefId::new` が固定語彙で呼ぶ。理由は [`name_in`] と同じ。
+fn ref_in(s: &str, vocab: &[&str]) -> bool {
+    is_ref_shape(s) && vocab.contains(&s)
+}
+
 fn is_name(s: &str) -> bool {
     (1..=64).contains(&s.len())
         && s.bytes()
@@ -244,7 +255,7 @@ impl ValueName {
     /// # Errors
     /// 文字種・長さの規則を満たさないか、固定語彙 [`VALUE_NAMES`] に無いとき [`LoadRecordError::InvalidName`]。
     pub fn new(s: &str) -> Result<Self, LoadRecordError> {
-        if is_name(s) && VALUE_NAMES.contains(&s) {
+        if name_in(s, &VALUE_NAMES) {
             Ok(Self(s.to_owned()))
         } else {
             Err(LoadRecordError::InvalidName)
@@ -269,7 +280,7 @@ impl RefId {
     /// # Errors
     /// 規則を満たさない・予約語（`none`・`harness_config`・`measured`）・固定語彙に無いとき [`LoadRecordError::InvalidRef`]。
     pub fn new(s: &str) -> Result<Self, LoadRecordError> {
-        if is_ref_shape(s) && REF_IDS.contains(&s) {
+        if ref_in(s, &REF_IDS) {
             Ok(Self(s.to_owned()))
         } else {
             Err(LoadRecordError::InvalidRef)
@@ -970,40 +981,7 @@ mod tests {
         }
     }
 
-    /// 排他的に新規作成したディレクトリ。既存のものは消さず、自分が作ったものだけを Drop で片付ける。
-    struct TestDir(PathBuf);
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn dir(name: &str) -> TestDir {
-        static N: AtomicU64 = AtomicU64::new(0);
-        for _ in 0..100 {
-            // 共有の一時ディレクトリでなく、Cargo の出力先（試験の実行ファイルの隣）に置く。
-            // ソースツリーの固定パスにせず、出力先を別の書き込み可能な場所へ変えた構成にも追従する。
-            let base = std::env::current_exe()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("test-tmp");
-            std::fs::create_dir_all(&base).unwrap();
-            let d = base.join(format!(
-                "{name}-{}-{}",
-                std::process::id(),
-                N.fetch_add(1, Ordering::Relaxed)
-            ));
-            // create_dir は既存なら失敗する。別の名前で作り直し、既存を消さない。
-            match std::fs::create_dir(&d) {
-                Ok(()) => return TestDir(d),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => panic!("create test dir: {e}"),
-            }
-        }
-        panic!("no free test dir name");
-    }
+    use super::name_tests::TestDir;
 
     /// 許可文字・長さの網。境界の値（64/65・1024/1025・1 MiB/+1）で、通る側と止まる側の両方を確かめる。
     #[test]
@@ -1049,21 +1027,21 @@ mod tests {
     #[test]
     fn write_new_rejects_text_outside_shape() {
         for bad in [format!("x: {}\n", "a".repeat(65)), "x: p@ss\n".to_owned()] {
-            let td = dir("load-shape");
+            let td = TestDir::new("load-shape");
             let r = LoadRecord {
                 run_started_at: 0,
                 text: bad,
             };
-            assert_eq!(r.write_new(&td.0), Err(LoadRecordError::Format));
-            assert_eq!(std::fs::read_dir(&td.0).unwrap().count(), 0);
+            assert_eq!(r.write_new(td.path()), Err(LoadRecordError::Format));
+            assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
         }
     }
 
     /// 一時名が衝突したら WriteFailed。既存の内容を消さず、最終名も作らない。
     #[test]
     fn tmp_name_collision_fails_and_keeps_existing() {
-        let td = dir("load-collision-tmp");
-        let d = td.0.clone();
+        let td = TestDir::new("load-collision-tmp");
+        let d = td.path().to_owned();
         let pid = std::process::id();
         let tmp = d.join(format!(".tmp-load-run-0-{pid}-7"));
         std::fs::write(&tmp, b"keep").unwrap();
@@ -1078,8 +1056,8 @@ mod tests {
     /// 最終名が衝突したら WriteFailed。既存の内容は保たれ、一時ファイルは残らない。
     #[test]
     fn final_name_collision_fails_and_keeps_existing() {
-        let td = dir("load-collision-final");
-        let d = td.0.clone();
+        let td = TestDir::new("load-collision-final");
+        let d = td.path().to_owned();
         let pid = std::process::id();
         let fin = d.join(format!("load-run-0-{pid}-9.txt"));
         std::fs::write(&fin, b"keep").unwrap();

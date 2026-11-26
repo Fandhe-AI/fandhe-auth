@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     BoundedText, MAX_RECORD_BYTES, REF_IDS, RESERVED_REFS, RefId, VALUE_NAMES, ValueName, compose,
-    is_name, is_ref_shape,
+    is_name, is_ref_shape, name_in, ref_in,
 };
 use crate::{
     ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
@@ -23,7 +23,7 @@ use std::fmt::{self, Write as _};
 
 /// 排他的に新規作成したディレクトリ。既存のもの（中断した試験の残り・PID の再利用で重なる名前）は
 /// 消さず、自分が作ったものだけを Drop で片付ける。
-struct TestDir(PathBuf);
+pub(super) struct TestDir(PathBuf);
 
 impl Drop for TestDir {
     fn drop(&mut self) {
@@ -32,7 +32,7 @@ impl Drop for TestDir {
 }
 
 impl TestDir {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
         // 共有の一時ディレクトリでなく、Cargo の出力先（試験の実行ファイルの隣）に置く。
         // ソースツリーの固定パスにせず、出力先を別の書き込み可能な場所へ変えた構成にも追従する。
@@ -59,7 +59,7 @@ impl TestDir {
         panic!("no free test dir name");
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         &self.0
     }
 }
@@ -327,6 +327,40 @@ fn shape_checks_reject_bad_candidates_directly() {
     }
     assert!(is_ref_shape("AUDP-29"));
     assert!(is_ref_shape(&"a".repeat(64)));
+}
+
+/// 形式検査と語彙照合を分けて見る。不正な候補を語彙に含めて `name_in`・`ref_in`（`new` が呼ぶ処理）へ渡すため、
+/// 形式検査の呼び出しを外すと、語彙に一致して通ってしまい、この試験が落ちる（SECR-23）。
+#[test]
+fn constructors_check_shape_independently_of_vocab() {
+    let long = "a".repeat(65);
+    let bad_names = ["", "A", "a-b", "a\nb", "a\u{2028}b", "a b", long.as_str()];
+    assert!(!name_in("free_text", &["p99_target"]), "語彙の外は拒否");
+    assert!(name_in("p99_target", &["p99_target"]));
+    for bad in bad_names {
+        assert!(
+            !name_in(bad, &[bad]),
+            "name_in must reject {bad:?} by shape"
+        );
+    }
+    let bad_refs = [
+        "",
+        "a\nb",
+        "a\u{2028}b",
+        "a\u{2029}b",
+        "a,b",
+        "a b",
+        "a\0b",
+        "none",
+        "harness_config",
+        "measured",
+        long.as_str(),
+    ];
+    assert!(!ref_in("CONFIG-SECRET-1", &["AUDP-29"]), "語彙の外は拒否");
+    assert!(ref_in("AUDP-29", &["AUDP-29"]));
+    for bad in bad_refs {
+        assert!(!ref_in(bad, &[bad]), "ref_in must reject {bad:?} by shape");
+    }
 }
 
 #[test]
