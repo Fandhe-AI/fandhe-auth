@@ -65,7 +65,8 @@ pending_signal=0
 # 保持している pid が回収済み（pid が再利用されうる）のことがある。信号を送る前に、生きた自分の子だと確かめる（#6063・TASK-6）。
 # ジョブ表は 1 回の `jobs -l` で取る（実行中と停止中を別々の一覧で見ると、その間に状態が変わった子をどちらにも見つけられない）。
 # 状態名は bash が翻訳するため、`jobs` は LC_ALL=C で実行して ASCII の名前で照合する（git-hooks.md の (b)）。
-# owned = Running か Stopped のジョブとして載っている、none = 載っていない・終了済み（Running・Stopped 以外の空でない状態語。信号で死んだ子の Hangup・Interrupt 等を含む）、
+# 前提は、非対話の bash で LC_ALL=C を使うこと（状態語の照合は ASCII の英語名に限る）。
+# owned = Running・Stopped*・Suspended* のジョブとして載っている、none = 載っていない・終了済み（Running・Stopped・Suspended 以外の空でない状態語。信号で死んだ子の Hangup・Interrupt 等を含む）、
 # unknown = 一覧を取れない・読めない・一致した pid の状態語が空（所有を確かめられない）。
 # jobs は現在のシェルで実行する（command substitution やパイプラインのサブシェルは、bash 3.2 等で空のジョブ表を見る）。出力はファイルへのリダイレクトで受け、
 # >| で開くため継承した noclobber に左右されない。確認と kill の間の窓は残るが、回収済みの pid を無条件に狙う経路は無くなる。
@@ -82,7 +83,8 @@ job_state() {
   while read -r _jn jp js _jrest; do
     if [ "${jp}" = "$1" ]; then
       case "${js}" in
-        Running | Stopped*) job_state_result=owned ;;
+        # Suspended*: macOS/BSD では、ジョブ制御が有効な bash の `jobs -l` が停止中の子を Suspended・Suspended (signal) と出しうる
+        Running | Stopped* | Suspended*) job_state_result=owned ;;
         # 状態語が空（行が崩れている）なら解釈できない。それ以外は、信号で死んだ子の状態語（Hangup・Interrupt・Segmentation fault 等）も含め終了済みとして扱う
         '') job_state_result=unknown ;;
         *) job_state_result=none ;;
