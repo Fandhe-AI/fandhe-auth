@@ -123,6 +123,15 @@ if [ -n "${FAIL_GIT_BOTH1:-}" ]; then
     exit 128
   fi
 fi
+# COUNT_GIT_LOG: `diff` を引数に含む呼び出し（scan_diff）1 回ごとに 1 行を追記する（起動の回数がファイル数に依らないことの確認用。#6053）
+if [ -n "${COUNT_GIT_LOG:-}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "diff" ]; then
+      echo diff >> "${COUNT_GIT_LOG}"
+      break
+    fi
+  done
+fi
 # MAX_GIT_ARG_BYTES: 各引数の長さ + 1 + ポインタ 8 バイトの合計が上限を超える呼び出しを、macOS の E2BIG の代わりに失敗させる（#6053）
 if [ -n "${MAX_GIT_ARG_BYTES:-}" ]; then
   arg_total=0

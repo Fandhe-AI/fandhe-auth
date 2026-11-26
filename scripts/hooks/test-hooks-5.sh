@@ -419,5 +419,53 @@ expect_out "all four odd paths are counted" "secret-scan: total: 4 finding(s) in
 new_repo; stage_lock; stage .agents/skills "x = ${token}"
 SCAN_BIN="${small_bin}" check_scan "a file named like the skills dir is scanned" 1 .agents/skills
 
+# git の起動回数（scan_diff）は、登録名の下のパスを含むとき（除外のフィルタが動くとき）も、ファイルの数に依らず一定
+count_repo() {
+  local n="$1" blob i
+  new_repo
+  stage_lock
+  stage .agents/skills/vendored-a/x.md "x = ${token}"
+  stage src/app.txt "x = ${token}"
+  blob="$(printf 'harmless\n' | git hash-object -w --stdin)"
+  {
+    for ((i = 0; i < n; i++)); do
+      printf '100644 %s\t.agents/skills/unreg/f-%d.txt\n' "${blob}" "${i}"
+    done
+  } | git update-index --add --index-info
+}
+count_log="${work_dir}/git-diff-count.log"
+count_repo 3
+rm -f -- "${count_log}"
+COUNT_GIT_LOG="${count_log}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "few files with a registered path (counting git diff calls)" 1 src/app.txt
+expect_out "the registered path is excluded in the counted run" "secret-scan: total: 1 finding(s) in 1 file(s)"
+count_few="$(wc -l < "${count_log}" | tr -d ' ')"
+count_repo 800
+rm -f -- "${count_log}"
+COUNT_GIT_LOG="${count_log}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "many files with a registered path (counting git diff calls)" 1 src/app.txt
+expect_out "the registered path is excluded in the many-files run" "secret-scan: total: 1 finding(s) in 1 file(s)"
+count_many="$(wc -l < "${count_log}" | tr -d ' ')"
+rm -f -- "${count_log}"
+if [ "${count_few}" -ge 1 ] && [ "${count_few}" -eq "${count_many}" ]; then
+  pass "secret-scan: git diff call count does not depend on the number of files (${count_few})"
+else
+  fail "secret-scan: git diff call count does not depend on the number of files" "few ${count_few}, many ${count_many}"
+fi
+
+# 非 ASCII のパスの登録名の下の区画は、core.quotePath が true でも false でも除外される（一覧は生のパス、ヘッダは引用されない）
+for qp in true false; do
+  new_repo; stage_lock
+  git config core.quotePath "${qp}"
+  stage ".agents/skills/vendored-a/caf$(printf '\303\251').md" "x = ${token}"
+  SCAN_BIN="${small_bin}" check_scan "non-ASCII path under a registered name is excluded (core.quotePath=${qp})" 0
+  stage ".agents/skills/unreg/caf$(printf '\303\251').md" "x = ${token}"
+  SCAN_BIN="${small_bin}" check_scan "non-ASCII path under an unregistered name is scanned (core.quotePath=${qp})" 1
+  expect_out "only the unregistered non-ASCII path is counted (core.quotePath=${qp})" "secret-scan: total: 1 finding(s) in 1 file(s)"
+done
+
+# ヘッダが引用される登録名の下のパス（二重引用符）は、落とさず走査する（2 にしない。検出があれば 1）
+new_repo; stage_lock
+stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
+SCAN_BIN="${small_bin}" check_scan "a quoted header under a registered name is scanned, not an error" 1
+expect_out "the quoted-header path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
 
 finish "part 5"

@@ -113,7 +113,7 @@ fi
 # 確認より前に外部コマンドを呼ばない（`command -v` はシェルの組み込み）。lib.sh は検出器の複製だけで動くよう読み込まない。
 # 欠けたコマンドは「失敗の吸収」になり得る（例: 監視の sleep を起動できず、待ち時間なしで読み取りを打ち切る）。
 # 固定の文言は fd 4 へ出す（--summary でも出る）。使うコマンドを足したら、この一覧にも足す（試験が踏む経路の漏れを検出する。踏まない経路は検出できない）。
-for _c in git readlink mktemp rm cp head wc sleep tr cmp awk mv; do
+for _c in git readlink mktemp rm cp head wc sleep tr cmp awk cat; do
   if ! command -v "${_c}" > /dev/null 2>&1; then
     echo "secret-scan: required command not found on PATH: ${_c}; aborting" >&4
     exit 2
@@ -1147,6 +1147,9 @@ done
 #   --text: .gitattributes の binary・-diff 属性で本文が検査から外れるのを防ぐ（PR 内の属性変更で
 #     検査を回避させない。SECR-23）。NUL を含むファイルも本文を走査する（fail-closed）
 #   --no-renames: リネームを削除 + 追加として扱い、移動先の全行を走査する（除外パスからの移動も含む）
+#   core.quotePath=false: 非 ASCII のパスをヘッダで 8 進に引用させない（引用すると一覧の生のパスとヘッダが食い違い、
+#     登録名の下の区画を落とせない。設定が true でも false でも同じ形にする。制御文字・二重引用符・バックスラッシュは
+#     設定に依らず引用され、その区画は突き合わせで落とさず走査する）
 #   --src-prefix / --dst-prefix: diff.noprefix・diff.mnemonicPrefix でヘッダが `+++ b/` 以外になる
 # --tracked では空の tree と index の差分を取る。追跡ファイルの全行が追加行になるため、
 # 名前の検査・除外パス・解析ループ・規則の判定を staged モードと共用できる（解析の二重実装を作らない）。
@@ -1159,7 +1162,7 @@ else
   scan_base="${head_id}"
 fi
 scan_diff() {
-  g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames --submodule=short \
+  g -c core.quotePath=false diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames --submodule=short \
     --src-prefix=a/ --dst-prefix=b/ "${scan_base}" "$@"
 }
 
@@ -1261,45 +1264,43 @@ fi
 # bash の read は NUL を保持できず（実装により NUL 以降を切る・NUL だけを捨てる）、NUL を含む行で
 # 後ろの秘密値や NUL で分割された語を見落とし得る（fail-open）。走査の前に NUL を取り除いた版と
 # 空白へ置き換えた版を作り、NUL を含む場合は両方を走査する（行番号は同じ。同じ行は二重に数えない）。
-if ! tr -d '\000' < "${tmp_dir}/diff" > "${tmp_dir}/diff.del"; then
-  echo "secret-scan: failed to normalize diff; aborting" >&4
-  exit 2
-fi
-if ! tr '\000' ' ' < "${tmp_dir}/diff" > "${tmp_dir}/diff.sp"; then
-  echo "secret-scan: failed to normalize diff; aborting" >&4
-  exit 2
-fi
 
-# NUL の有無はフィルタの前に確定する（フィルタ後の diff.del は元の diff と常に違うため、後で比べると二重に走査する）。
+# NUL の有無は元の diff で確定する（フィルタ後の diff.del は元の diff と常に違うため、後で比べると二重に走査する）。
+# 0 = NUL なし・1 = あり・それ以外は後段で検査不能（2）。
 cmp_rc=0
-cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del" || cmp_rc=$?
+# shellcheck disable=SC2094 # どちらも読むだけで、書き込みはしない
+tr -d '\000' < "${tmp_dir}/diff" | cmp -s - "${tmp_dir}/diff" || cmp_rc=$?
 
-# 登録名の下の区画を落とす（#6053）。NUL を除いた版と空白へ置き換えた版の両方に同じ処理をかける（行の構造は同じ）。
-# 区画の数が一覧のファイル数と違う、または落とす区画のヘッダ（`diff --git a/<パス> b/<パス>`。--no-renames のため同じパス）が
-# 一覧の n 番目のパスと一致しなければ（git が引用・エスケープするタブ・二重引用符・非 ASCII のパス、diff.orderFile 等の順序の変更）、
-# 対応が取れないため落とさず走査する（走査する側に倒す）。区画の数が違うときだけ検査不能（2）にする。元の diff（NUL の有無の判定用）は触らない。
-if [ "${body_skip_filter}" -eq 1 ]; then
-  for sk_f in diff.del diff.sp; do
-    if ! LC_ALL=C awk -v want="${skip_total}" '
+# 登録名の下の区画を落とす（#6053）。除外は正規化の流れの中（パイプ）で行い、除外対象の本文を正規化した複製として一時領域に残さない。
+# 区画の数が一覧のファイル数と違えば（git の出力と一覧の対応が崩れている）検査不能（2）にする。
+# 落とす区画のヘッダ（`diff --git a/<パス> b/<パス>`。--no-renames のため同じパス）が一覧の n 番目のパスと一致しない区画
+# （git が引用・エスケープするタブ・二重引用符・バックスラッシュ・制御文字のパス、diff.orderFile 等の順序の変更）は、
+# 対応が取れないため落とさず走査する（走査する側に倒す。2 にはしない）。
+filter_sections() {
+  if [ "${body_skip_filter}" -eq 1 ]; then
+    LC_ALL=C awk -v want="${skip_total}" '
       NR == FNR { flag[FNR] = $0; next }
       /^diff --git / {
         sec++
         drop = (substr(flag[sec], 1, 1) == "1")
-        # 生のパスのヘッダと一致しない区画（git が引用・エスケープする名前、順序の違い）は落とさず走査する（fail-closed）
         if (drop && $0 != "diff --git a/" substr(flag[sec], 2) " b/" substr(flag[sec], 2)) drop = 0
       }
       !drop { print }
       END { if (sec != want) exit 3 }
-    ' "${tmp_dir}/skip-flags" "${tmp_dir}/${sk_f}" > "${tmp_dir}/${sk_f}.f"; then
-      echo "secret-scan: failed to filter diff; aborting" >&4
-      exit 2
-    fi
-    if ! mv -- "${tmp_dir}/${sk_f}.f" "${tmp_dir}/${sk_f}"; then
-      echo "secret-scan: failed to filter diff; aborting" >&4
-      exit 2
-    fi
-  done
+    ' "${tmp_dir}/skip-flags" -
+  else
+    cat
+  fi
+}
+if ! tr -d '\000' < "${tmp_dir}/diff" | filter_sections > "${tmp_dir}/diff.del"; then
+  echo "secret-scan: failed to normalize diff; aborting" >&4
+  exit 2
 fi
+if ! tr '\000' ' ' < "${tmp_dir}/diff" | filter_sections > "${tmp_dir}/diff.sp"; then
+  echo "secret-scan: failed to normalize diff; aborting" >&4
+  exit 2
+fi
+rm -f -- "${tmp_dir}/diff"
 
 # scan_pass <file>: `+++ b/<path>` のファイルヘッダは `diff --git` から最初の `@@` までの間でだけ解釈する。
 # hunk 内の追加行の本文が `++ b/...`・`++...` で始まると diff 上は `+++...` になるため、
