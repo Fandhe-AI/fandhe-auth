@@ -242,14 +242,56 @@ else
   fail "secret-scan: an index with a too-long name (not ENOENT) is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-# T10: index のパスが /dev/tcp 風でも、不在の確認で開かない（外向き通信・接続の誤りを出さない）（#6047）
+# T10: index のパスが有効な /dev/tcp 風でも、不在の確認で開かない（接続の試行を待ち受け側で観測する）（#6047）
+# 127.0.0.1 の待ち受けを立て、その実ポートを /dev/tcp のパスに入れる。ファイルを開く（Bash の TCP リダイレクト）実装だと待ち受けが接続を受け、印ができる。
+new_repo; stage src/app.txt "hello"
+t10_listen="${work_dir}/t10-listen.py"
+cat > "${t10_listen}" <<'EOF10'
+import socket, sys, time
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+s.listen(5)
+s.settimeout(0.2)
+with open(sys.argv[1], "w") as f:
+    f.write(str(s.getsockname()[1]))
+end = time.time() + 120
+while time.time() < end:
+    try:
+        c, _ = s.accept()
+    except socket.timeout:
+        continue
+    open(sys.argv[2], "w").close()
+    c.close()
+EOF10
+rm -f "${work_dir}/t10-port" "${work_dir}/t10-conn"
+python3 -I "${t10_listen}" "${work_dir}/t10-port" "${work_dir}/t10-conn" &
+t10_pid=$!
+for _ in $(seq 1 50); do
+  [ -s "${work_dir}/t10-port" ] && break
+  sleep 0.1
+done
+t10_port="$(cat "${work_dir}/t10-port" 2> /dev/null || true)"
+rc=0
+if [ -n "${t10_port}" ]; then
+  GIT_INDEX_FILE="/dev/tcp/127.0.0.1/${t10_port}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  sleep 0.5
+fi
+kill "${t10_pid}" 2> /dev/null || true
+wait "${t10_pid}" 2> /dev/null || true
+if [ -n "${t10_port}" ] && [ ! -e "${work_dir}/t10-conn" ] && [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: a valid /dev/tcp-like index path is never opened (no connection reaches the listener)"
+else
+  fail "secret-scan: a valid /dev/tcp-like index path is never opened (no connection reaches the listener)" "port ${t10_port:-none} rc ${rc} conn $([ -e "${work_dir}/t10-conn" ] && echo yes || echo no)" "output: $(cat "${work_dir}/out" 2> /dev/null)"
+fi
+
+# T10b: 未作成の代替 index "-"（作業ツリーのルート基準）は標準入力と取り違えず、空の index として扱う（#6047）
 new_repo; stage src/app.txt "hello"
 rc=0
-GIT_INDEX_FILE="/dev/tcp/127.0.0.1/9/index" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
-if ! grep -qiE "connect|refused|/dev/tcp" "${work_dir}/out" && [ "${rc}" -ne 1 ]; then
-  pass "secret-scan: a /dev/tcp-like index path is never opened (no connection attempt)"
+GIT_INDEX_FILE="-" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 < /dev/null || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: a missing alternate index named '-' is treated as empty, not stdin"
 else
-  fail "secret-scan: a /dev/tcp-like index path is never opened (no connection attempt)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fail "secret-scan: a missing alternate index named '-' is treated as empty, not stdin" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 # run_watched <秒数> <コマンド...>: コマンドを背景で実行し、時間内に終わらなければ kill して 124 を返す（timeout コマンドは macOS 標準に無い）。
@@ -257,10 +299,14 @@ fi
 run_watched() {
   local limit="$1" pid i=0
   shift
+  # 監視対象を独立したプロセスグループで起動し（set -m）、打ち切りと終了後の取り残しの掃除をグループ全体へ行う。
+  set -m
   "$@" &
   pid=$!
+  set +m
   while kill -0 "${pid}" 2> /dev/null; do
     if [ "${i}" -ge $((limit * 10)) ]; then
+      kill -9 -- "-${pid}" 2> /dev/null || true
       kill -9 "${pid}" 2> /dev/null || true
       wait "${pid}" 2> /dev/null || true
       rc=124
@@ -271,7 +317,23 @@ run_watched() {
   done
   rc=0
   wait "${pid}" || rc=$?
+  kill -9 -- "-${pid}" 2> /dev/null || true
 }
+
+# T10c: run_watched は打ち切り時に孫プロセスも含めて終了させる（フック本体の PID だけを kill すると子が残る）
+t10c_pidfile="${work_dir}/t10c-pid"
+rm -f "${t10c_pidfile}"
+rc=0
+# shellcheck disable=SC2016 # 子の bash に展開させる（意図）
+run_watched 1 bash -c 'sleep 30 & echo $! > "$1"; wait' _ "${t10c_pidfile}" > /dev/null 2>&1
+sleep 0.3
+t10c_child="$(cat "${t10c_pidfile}" 2> /dev/null || true)"
+if [ "${rc}" -eq 124 ] && [ -n "${t10c_child}" ] && ! kill -0 "${t10c_child}" 2> /dev/null; then
+  pass "run_watched: a timeout also ends the child processes of the watched command"
+else
+  [ -z "${t10c_child}" ] || kill -9 "${t10c_child}" 2> /dev/null || true
+  fail "run_watched: a timeout also ends the child processes of the watched command" "rc ${rc} child ${t10c_child:-none}"
+fi
 
 # T11: FIFO を index にしても止まらず 2 で終わる（通常ファイルの確認で止まる経路）。打ち切りは run_watched で行う
 new_repo; stage src/app.txt "hello"

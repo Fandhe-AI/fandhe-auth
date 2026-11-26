@@ -320,4 +320,112 @@ else
   echo "ok - install-msrv: skipped (cargo, jq or python3 with tomllib not found)"
 fi
 
+# 登録を外した名前の既存の本文は、skills-lock.json だけの変更でも staged で全行を走査する（#6054）。
+# 準備: vendored-a・vendored-b の本文に検出対象をコミットしておく（登録中は除外されるのでコミット時は 0）。
+dropped_repo() {
+  same_checkout_repo "${lock_ok}"
+  stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+  stage .agents/skills/vendored-b/SKILL.md "y = ${token}"
+  SCAN_BIN="${same_bin}" check_scan "dropped-skill setup: registered names are excluded when committed" 0
+  git commit -q -m "chore: add skill bodies"
+}
+lock_only_b='{"version":2,"skills":{"vendored-b":{"source":"x"}}}'
+
+dropped_repo
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+git add skills-lock.json
+SCAN_BIN="${same_bin}" check_scan "dropped skill: a lock-only change scans the existing body" 1 .agents/skills/vendored-a/SKILL.md
+expect_out "dropped skill: counted once, sibling stays excluded" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
+dropped_repo
+git rm -q --cached skills-lock.json
+rm -f skills-lock.json
+SCAN_BIN="${same_bin}" check_scan "dropped skill: a list deleted from index and working tree scans every former name" 1 .agents/skills/vendored-a/SKILL.md
+expect_out "dropped skill: both former names counted once" "secret-scan: total: 2 finding(s) in 2 file(s)"
+
+dropped_repo
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+git add skills-lock.json
+git rm -q -r --cached .agents/skills/vendored-a
+SCAN_BIN="${same_bin}" check_scan "dropped skill: removing the files in the same commit scans nothing" 0
+
+dropped_repo
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+git add skills-lock.json
+printf '%s\n' "z = ${token}" >> .agents/skills/vendored-a/SKILL.md
+git add .agents/skills/vendored-a/SKILL.md
+SCAN_BIN="${same_bin}" check_scan "dropped skill: a body also modified in the commit" 1 .agents/skills/vendored-a/SKILL.md
+expect_out "dropped skill: modified body is not counted twice" "secret-scan: total: 2 finding(s) in 1 file(s)"
+
+# 作業ツリーだけで登録を消した未ステージの変更は、無関係なコミットを止めない（HEAD と index だけで判定する）
+dropped_repo
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+stage unrelated.txt "harmless = 1"
+SCAN_BIN="${same_bin}" check_scan "dropped skill: an unstaged drop does not scan the existing body" 0
+
+# 外れた名前の差分の git の失敗は検査不能（2）
+dropped_repo
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+git add skills-lock.json
+rc=0
+PATH="${shim_dir}:${PATH}" FAIL_GIT_ARG=":(literal,top).agents/skills/vendored-a/" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "secret-scan: dropped skill: a failing body diff exits 2"
+else
+  fail "secret-scan: dropped skill: a failing body diff exits 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# 外れた名前の差分は固定した index の複写を読む。外れた名前が無い通常のコミットでは呼ばない
+dropped_repo
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+git add skills-lock.json
+real_index="$(git rev-parse --git-path index)"
+rm -f "${work_dir}/gitlog"
+PATH="${shim_dir}:${PATH}" LOG_GIT_INDEX="${work_dir}/gitlog" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || true
+extra_log="$(grep -F ":(literal,top).agents/skills/vendored-a/" "${work_dir}/gitlog" || true)"
+extra_idx="${extra_log%%$'\t'*}"
+# 通常の本文の差分（-U0 を持つ、追加の差分以外の diff。--name-only の一覧ではない）と同じ固定コピーを指す（未指定の "-"・実の index では通らない）
+main_idx="$(grep -vF ":(literal,top)" "${work_dir}/gitlog" | grep -F -- "-U0" | head -n 1 | cut -f1 || true)"
+if [ -n "${extra_log}" ] && [ "${extra_idx}" != "-" ] && [ "${extra_idx}" != "${real_index}" ] && [ -n "${main_idx}" ] && [ "${extra_idx}" = "${main_idx}" ]; then
+  pass "secret-scan: dropped skill: the extra diff reads the pinned index copy"
+else
+  fail "secret-scan: dropped skill: the extra diff reads the pinned index copy" "log: $(cat "${work_dir}/gitlog" 2> /dev/null)"
+fi
+dropped_repo
+stage plain.txt "ok"
+rm -f "${work_dir}/gitlog"
+rc=0
+PATH="${shim_dir}:${PATH}" LOG_GIT_INDEX="${work_dir}/gitlog" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ] && [ -s "${work_dir}/gitlog" ] && ! grep -qF ":(literal,top)" "${work_dir}/gitlog"; then
+  pass "secret-scan: no dropped name means no extra body diff"
+else
+  fail "secret-scan: no dropped name means no extra body diff" "log: $(cat "${work_dir}/gitlog" 2> /dev/null)"
+fi
+
+# 作業ツリーの skills-lock.json だけに足した名前（HEAD に無い）は、外れた名前として扱わない
+dropped_repo
+printf '%s\n' '{"version":2,"skills":{"vendored-a":{"source":"x"},"vendored-b":{"source":"x"},"vendored-c":{"source":"x"}}}' > skills-lock.json
+# skills-lock.json はステージしない（index には入れず、作業ツリーだけの追加にする）
+stage plain.txt "ok"
+rm -f "${work_dir}/gitlog"
+rc=0
+PATH="${shim_dir}:${PATH}" LOG_GIT_INDEX="${work_dir}/gitlog" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ] && [ -s "${work_dir}/gitlog" ] && ! grep -qF ":(literal,top)" "${work_dir}/gitlog"; then
+  pass "secret-scan: a name added only to the working tree adds no extra body diff"
+else
+  fail "secret-scan: a name added only to the working tree adds no extra body diff" "exit ${rc}" "log: $(cat "${work_dir}/gitlog" 2> /dev/null)"
+fi
+
+# 別の checkout（検出器と走査対象が違う repo）の staged でも、対象側の skills-lock.json だけで外れた名前の既存の本文を走査する
+new_repo
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+stage .agents/skills/vendored-b/SKILL.md "y = ${token}"
+git add skills-lock.json
+git commit -q -m "chore: add skill bodies"
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+git add skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "dropped skill: another checkout scans the dropped body when only skills-lock.json is staged" 1 .agents/skills/vendored-a/SKILL.md
+expect_out "dropped skill: another checkout counts the dropped name once, sibling stays excluded" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
 finish "part 7"

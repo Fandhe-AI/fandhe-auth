@@ -26,7 +26,8 @@
 # 出力の契約（SECR-23・値を出さず件数で判定する）: 規則 ID ごとの件数・合計件数・該当ファイル名だけを出す。
 # 一致した行・値・値の一部・長さは出さない。0 件なら終了コード 0、1 件以上なら 1。
 #
-# 走査範囲: 追加行のみ（削除行は漏洩済み値の除去コミットを妨げないため対象外）。
+# 走査範囲: 追加行のみ（削除行は漏洩済み値の除去コミットを妨げないため対象外）。例外として、登録を外した名前の
+# `.agents/skills/<名前>/` は staged でも固定した index の全行を走査する（空の tree との差分。#6054）。
 # 本文は `git diff --text` で受けるため、.gitattributes の binary・-diff 属性や NUL を含むファイルも走査する。
 # NUL は取り除いた版と空白へ置き換えた版の両方で照合する。照合できるのは上の規則表の形式（行内の文字列）だけで、
 # 圧縮・エンコード（base64 等）・複数行に分割された値・規則に無い形の値は検出できない。
@@ -54,6 +55,7 @@
 #   index は最初に 1 回だけ複写して固定し、登録の確認・パス一覧・本文の走査はすべてその複写から行う。走査の後に元の
 #   index の内容が固定時と違えば 2 にする（登録の確認と本文が別の index を見る経路を作らない）。
 #   固定時にあった index が終了時に無いときも 2（登録 0 件でも）。index がシンボリックリンクなら、開始時も終了時も辿らず 2。
+#   終了時に index のパスを git の解決で取り直し、開始時と違えば（親ディレクトリのシンボリックリンクの付け替え等）2（#6034）。
 #   複写の前に通常ファイルであることを確かめる（FIFO 等は複写せず 2。確認と cp の間の差し替えは窓を狭めるだけで、止まり得る。0 は返さない）。
 #   外部コマンド（git・readlink・mktemp・rm・cp・head・wc・sleep・tr・cmp）は使う前に確かめ、欠けていれば 2。
 # 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
@@ -290,7 +292,23 @@ trap cleanup_tmp EXIT
 # git は相対パスの GIT_INDEX_FILE を、起動時の作業ディレクトリではなく作業ツリーのルートを基準に読む（git が先にルートへ移るため）。
 # 自前で基準を決めると、git が読む index と別のファイルを固定し得る（無ければ空として 0 を返す fail-open。#6011）。
 # `$(...)` は末尾の改行を落とすため、番兵（x）を付けて受けてから外す。
-if ! orig_index="$(g rev-parse --path-format=absolute --git-path index && printf x)"; then
+# 呼び出し元の GIT_INDEX_FILE（設定の有無と値）は、下で固定した複写へ上書きする前に控える。終了時に同じ条件で解決し直すため（#6034）。
+caller_index_set=0
+caller_index=""
+if [ -n "${GIT_INDEX_FILE+x}" ]; then
+  caller_index_set=1
+  caller_index="${GIT_INDEX_FILE}"
+fi
+# resolve_index_path: 呼び出し元の GIT_INDEX_FILE の条件で、git 自身の解決による元の index の絶対パスを標準出力へ出す。
+# 開始時の固定と終了時の再確認の両方で使う（定義を 1 か所にして、2 つの解決が食い違う余地を作らない）。パスは表に出さない。
+resolve_index_path() {
+  if [ "${caller_index_set}" -eq 1 ]; then
+    GIT_INDEX_FILE="${caller_index}" g rev-parse --path-format=absolute --git-path index && printf x
+  else
+    (unset GIT_INDEX_FILE; g rev-parse --path-format=absolute --git-path index && printf x)
+  fi
+}
+if ! orig_index="$(resolve_index_path)"; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
 fi
@@ -338,8 +356,14 @@ index_absent_confirmed() {
 # 照会の間に FIFO が現れると書き手を待って止まる、の 2 点を避ける）。誤りの種類は strerror の文言の末尾で見る
 # （LC_ALL=C 固定。文言は誤りの種類で決まり、パスの内容に左右されない末尾）。差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
 path_enoent_confirmed() {
-  local err rc=0
-  err="$(LC_ALL=C stat -- "$1" 2>&1 >/dev/null)" || rc=$?
+  local err rc=0 p="$1"
+  # 先頭が "/" でない相対パスには "./" を付ける。GNU stat は "--" の後でも単独の "-" を標準入力として扱い、
+  # 未作成の代替 index "-" を誤って「ある」と読むため（#6047）。
+  case "${p}" in
+    /*) ;;
+    *) p="./${p}" ;;
+  esac
+  err="$(LC_ALL=C stat -- "${p}" 2>&1 >/dev/null)" || rc=$?
   [ "${rc}" -ne 0 ] || return 1
   case "${err}" in
     *": No such file or directory") return 0 ;;
@@ -395,13 +419,6 @@ elif ! index_absent_confirmed; then
   # 「無い」と読んだ理由が ENOENT と確かめられない（権限の変化等）。空として扱わず 2（#6047）。
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
-fi
-# 終了時の再解決（index_paths_unchanged）のため、固定前の GIT_INDEX_FILE の有無と値を控える。
-orig_gif_set=0
-orig_gif=""
-if [ "${GIT_INDEX_FILE+set}" = set ]; then
-  orig_gif_set=1
-  orig_gif="${GIT_INDEX_FILE}"
 fi
 export GIT_INDEX_FILE="${snap_index}"
 # 空の tree の ID は常に解決する。未作成ブランチの staged も、基準を暗黙にせず空の tree を明示して固定する
@@ -1053,6 +1070,31 @@ load_index_lock() {
     index_names="${index_names}${n} "
   done
 }
+# 登録を外した名前（#6054。staged の本文の走査だけで使う）。除外の側（skill_names）には入れず、走査を足す側にだけ使う。
+# staged の本文は HEAD との差分の追加行だけなので、skills-lock.json だけの変更では、除外から外れた名前の既存の本文が
+# 差分に出ない（fail-open）。外れた名前の `.agents/skills/<名前>/` は、固定した index の全行を空の tree との差分で別に走査する。
+dropped_names=()
+dropped_cand=" "
+# set_dropped: 候補（dropped_cand。空白区切り）のうち、除外（skill_names）に残っていない名前を dropped_names に集める。
+# 名前は parse_lock で `[a-z0-9-]` に検証済みのものだけ。重複は除く。
+set_dropped() {
+  local c in_skill
+  dropped_names=()
+  for c in ${dropped_cand}; do
+    in_skill=0
+    for n in ${skill_names[@]+"${skill_names[@]}"}; do
+      if [ "${n}" = "${c}" ]; then
+        in_skill=1
+      fi
+    done
+    if [ "${in_skill}" -eq 0 ]; then
+      case " ${dropped_names[*]+${dropped_names[*]}} " in
+        *" ${c} "*) ;;
+        *) dropped_names+=("${c}") ;;
+      esac
+    fi
+  done
+}
 load_skill_names() {
   local repo_real rc name n head_names=" " keep head_ref head_entry head_mode work_present=0 lock_pid lock_wd lock_rc
   local -a work_names
@@ -1130,6 +1172,9 @@ load_skill_names() {
         *" ${name} "*) skill_names+=("${name}") ;;
       esac
     done
+    # 検出器の一覧にあり、対象の index で外れた名前は全行を走査する（HEAD の実際の除外より広いが、走査を増やす向き）。
+    dropped_cand=" ${work_names[*]+${work_names[*]}} "
+    set_dropped
     return 0
   fi
   # 検出器と走査対象が同じ checkout（ローカルの pre-commit・make secret-scan）のとき、作業ツリーの
@@ -1159,12 +1204,23 @@ load_skill_names() {
     *) lock_fail ;;
   esac
   parse_git_lock head "${head_id}:skills-lock.json" "${tmp_dir}/head-lock"
-  if [ "${work_present}" -eq 0 ]; then
-    return 0
-  fi
   for n in ${parsed_names[@]+"${parsed_names[@]}"}; do
     head_names="${head_names}${n} "
   done
+  # 登録を外した名前の候補は、HEAD に登録があり index で消えた名前だけ（#6054）。判定は HEAD と index だけで行い、
+  # 作業ツリーの有無は見ない（作業ツリーだけで登録を消した未ステージの変更では、今回のコミットに含まれない
+  # 既存の本文を全行走査して無関係なコミットを止めない）。作業ツリーだけに足した名前（HEAD に無い）も候補にしない。
+  dropped_cand=" "
+  for n in ${parsed_names[@]+"${parsed_names[@]}"}; do
+    case "${index_names}" in
+      *" ${n} "*) ;;
+      *) dropped_cand="${dropped_cand}${n} " ;;
+    esac
+  done
+  if [ "${work_present}" -eq 0 ]; then
+    set_dropped
+    return 0
+  fi
   skill_names=()
   for name in ${work_names[@]+"${work_names[@]}"}; do
     keep=0
@@ -1179,6 +1235,7 @@ load_skill_names() {
       skill_names+=("${name}")
     fi
   done
+  set_dropped
 }
 load_skill_names
 # staged の差分の基準も同じ ID にする（別の checkout でまだ解決していなければここで解決する）。
@@ -1191,6 +1248,18 @@ fi
 body_pathspec=(-- .)
 for name in ${skill_names[@]+"${skill_names[@]}"}; do
   body_pathspec+=(":(exclude,literal,top).agents/skills/${name}/")
+done
+# 登録を外した名前（#6054）は staged で HEAD との差分から外し、空の tree との差分（固定した index の全行）で別に走査する
+# （二重に数えない）。tracked・未作成ブランチは元々全行の差分なので使わない。
+dropped_pathspec=(--)
+dropped_count=0
+if [ "${mode}" = tracked ] || [ -z "${head_id}" ]; then
+  dropped_names=()
+fi
+for name in ${dropped_names[@]+"${dropped_names[@]}"}; do
+  body_pathspec+=(":(exclude,literal,top).agents/skills/${name}/")
+  dropped_pathspec+=(":(literal,top).agents/skills/${name}/")
+  dropped_count=$((dropped_count + 1))
 done
 
 # 利用者の git 設定で出力形式が変わると追加行・ファイル名を取りこぼすため固定する。
@@ -1210,9 +1279,14 @@ if [ "${mode}" = tracked ] || [ -z "${head_id}" ]; then
 else
   scan_base="${head_id}"
 fi
-scan_diff() {
+scan_diff_base() {
+  local base="$1"
+  shift
   g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
-    --src-prefix=a/ --dst-prefix=b/ "${scan_base}" "$@"
+    --src-prefix=a/ --dst-prefix=b/ "${base}" "$@"
+}
+scan_diff() {
+  scan_diff_base "${scan_base}" "$@"
 }
 
 # git の出力は一度ファイルへ書き出してから読む。`done <<< "$(git ...)"` やパイプでは git の失敗が
@@ -1267,6 +1341,14 @@ fi
 if ! scan_diff -U0 --diff-filter=ACMR "${body_pathspec[@]}" > "${tmp_dir}/diff"; then
   echo "secret-scan: failed to read diff; aborting" >&4
   exit 2
+fi
+# 登録を外した名前の既存の本文（#6054）。外れた名前があるときだけ呼ぶ（正の pathspec が空だと index 全体になる）。
+# 区画は `diff --git` で始まるため、上の差分の後ろへ足せば以降の解析・集計を共用できる。
+if [ "${dropped_count}" -gt 0 ]; then
+  if ! scan_diff_base "${empty_tree}" -U0 --diff-filter=ACMR "${dropped_pathspec[@]}" >> "${tmp_dir}/diff"; then
+    echo "secret-scan: failed to read diff; aborting" >&4
+    exit 2
+  fi
 fi
 
 # bash の read は NUL を保持できず（実装により NUL 以降を切る・NUL だけを捨てる）、NUL を含む行で
@@ -1366,31 +1448,44 @@ esac
 # （監視付きの複写・ロックの取得はしない。git-hooks.md の (f)）。
 # index_paths_unchanged: 固定前と同じ環境で index の経路（解く前・解いた後）を取り直し、開始時の値と同じときだけ 0 を返す（#6047）。
 # 親ディレクトリのシンボリックリンクの参照先が走査中に変わると、末尾だけを見る index_is_link では検出できず、
-# 古い index を 2 回比べて 0 を返し得る。取得の失敗・食い違いは 1（2 にする）。パスを出力しない。
+# 古い index を 2 回比べて 0 を返し得る。取得の失敗は 1、解いた後の食い違いは 2、解く前の食い違いは 3（どれも呼び出し側が 2 で止める）。パスを出力しない。
 # shellcheck disable=SC2030,SC2031 # 固定前の環境で取り直すため、サブシェルの中でだけ GIT_INDEX_FILE を戻す（意図）
 index_paths_unchanged() {
   local now_abs now_raw
-  now_abs="$(
-    if [ "${orig_gif_set}" -eq 1 ]; then export GIT_INDEX_FILE="${orig_gif}"; else unset GIT_INDEX_FILE; fi
-    g rev-parse --path-format=absolute --git-path index && printf x
-  )" || return 1
+  now_abs="$(resolve_index_path)" || return 1
   now_raw="$(
-    if [ "${orig_gif_set}" -eq 1 ]; then export GIT_INDEX_FILE="${orig_gif}"; else unset GIT_INDEX_FILE; fi
+    if [ "${caller_index_set}" -eq 1 ]; then export GIT_INDEX_FILE="${caller_index}"; else unset GIT_INDEX_FILE; fi
     g rev-parse --git-path index && printf x
   )" || return 1
   now_abs="${now_abs%x}"
   now_abs="${now_abs%$'\n'}"
   now_raw="${now_raw%x}"
   now_raw="${now_raw%$'\n'}"
-  [ "${now_abs}" = "${orig_index}" ] && [ "${now_raw}" = "${raw_index}" ]
+  # 解いた後のパスが開始時と違う（親ディレクトリのリンクの付け替え。#6034）ときは 2、解く前のパスだけが違うときは 3
+  # （呼び出し側で診断文を分ける。どちらも 2 で止める）。
+  [ "${now_abs}" = "${orig_index}" ] || return 2
+  [ "${now_raw}" = "${raw_index}" ] || return 3
+  return 0
 }
 # verify_index_unchanged <複写先> <一覧の出力先>
 verify_index_unchanged() {
   local copy="$1" listing="$2" cmp_rc=0
-  if ! index_paths_unchanged; then
-    echo "secret-scan: cannot snapshot the index; aborting" >&4
-    exit 2
-  fi
+  local paths_rc=0
+  index_paths_unchanged || paths_rc=$?
+  case "${paths_rc}" in
+    0) ;;
+    2)
+      # 解いた後のパスの食い違いは、複写できない（実体と git が読む index がずれた）ことと走査中の変化の両方を示す。
+      # 既存の 2 系統の診断（#6034 の「変化」・#6047 の「複写不能」）を満たすため、固定の 2 行を出す。
+      echo "secret-scan: cannot snapshot the index; aborting" >&4
+      echo "secret-scan: the index changed during the scan; aborting" >&4
+      exit 2
+      ;;
+    *)
+      echo "secret-scan: cannot snapshot the index; aborting" >&4
+      exit 2
+      ;;
+  esac
   if index_is_link; then
     # 走査中にリンクへ替わった（固定時はリンクでなかった）。辿らず 2。
     echo "secret-scan: cannot snapshot the index; aborting" >&4
