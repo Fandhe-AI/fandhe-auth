@@ -549,7 +549,7 @@ else
   fail "shellcheck-staged: an inherited noclobber still opens the output file once and starts shellcheck" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
 fi
 
-# 後始末の kill -9 は、pid が偽物の shellcheck（exec した sleep）のままのときだけ送る（pid の再利用で無関係のプロセスを落とさない）。
+# pid が偽物の shellcheck（exec した sleep）になったかを見る（待ち合わせ専用。kill には使わない）。
 sc_is_fake_sleep() {
   sc_comm="$(ps -p "$1" -o comm= 2> /dev/null)" || return 1
   sc_comm="${sc_comm#"${sc_comm%%[![:space:]]*}"}"
@@ -564,7 +564,15 @@ sc_is_fake_sleep() {
 # 偽の shellcheck が pid を書いて眠っている間に親へ信号を送り、終わった後にその pid のプロセスが残っていないことを確かめる
 # INT は試験しない（背景で起動したシェルでは INT が無視された状態で始まり、trap できない）。
 # HUP を trap できないシェルでは、30 秒待たずに注記を出して飛ばす。
-for sc_sig in TERM HUP; do
+for sc_sig in TERM HUP TERM-STOPPED; do
+  sc_stop_child=0
+  if [ "${sc_sig}" = "TERM-STOPPED" ]; then
+    sc_sig=TERM
+    sc_stop_child=1
+    sc_label="a TERM with a stopped shellcheck"
+  else
+    sc_label="a ${sc_sig}"
+  fi
   if [ "${sc_sig}" = "HUP" ] && [ "$("${HOOK_BASH}" -c 'trap "exit 7" HUP; kill -HUP $$; exit 0' > /dev/null 2>&1; echo $?)" != "7" ]; then
     echo "NOTE: skipping the HUP stop test (HUP cannot be trapped in this shell)"
     continue
@@ -586,6 +594,11 @@ for sc_sig in TERM HUP; do
     sleep 0.1
     sc_waited=$((sc_waited + 1))
   done
+  if [ "${sc_stop_child}" -eq 1 ] && [ -n "${sc_fake_pid}" ]; then
+    # 一時停止中の子を持つ中断（停止中の子は CONT が無いと TERM を受け取れない）
+    kill -STOP "${sc_fake_pid}" 2> /dev/null || true
+    sleep 0.3
+  fi
   sc_t0="${SECONDS}"
   kill -"${sc_sig}" "${sc_script_pid}" 2> /dev/null || true
   if wait "${sc_script_pid}"; then
@@ -596,7 +609,7 @@ for sc_sig in TERM HUP; do
   sc_stop_secs=$((SECONDS - sc_t0))
   sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
   # 停止の確認: 消滅（kill -0 の失敗）を確かめられたときだけ停止済みとする。ps の失敗・別名は停止の証拠にしない。
-  # 強制終了は、まだ生きていて偽物の sleep と確認できたときだけ送る（pid の再利用で無関係のプロセスを落とさない）。
+  # 強制終了は送らない（pid の再利用で無関係のプロセスを落とさない）。
   sc_alive=1
   if [ -n "${sc_fake_pid}" ]; then
     sc_waited=0
@@ -605,18 +618,17 @@ for sc_sig in TERM HUP; do
       sc_waited=$((sc_waited + 1))
     done
     if kill -0 "${sc_fake_pid}" 2> /dev/null; then
-      if sc_is_fake_sleep "${sc_fake_pid}"; then
-        kill -9 "${sc_fake_pid}" 2> /dev/null || true
-      fi
+      # 強制終了は送らない（pid が再利用された無関係のプロセスに届き得る）。偽物は 30 秒で自然に終わる。
+      :
     else
       sc_alive=0
     fi
   fi
   # 偽物は 30 秒眠るため、止まるまでに 10 秒以上かかったなら、停止が伝わらず眠りの終わりを待っただけ
   if [ "${sc_rc}" -eq 2 ] && [ -n "${sc_fake_pid}" ] && [ "${sc_alive}" -eq 0 ] && [ "${sc_stop_secs}" -lt 10 ]; then
-    pass "shellcheck-staged: a ${sc_sig} stops the running shellcheck and exits 2"
+    pass "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2"
   else
-    fail "shellcheck-staged: a ${sc_sig} stops the running shellcheck and exits 2" "exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_alive}, seconds to stop: ${sc_stop_secs}" "output: $(cat "${work_dir}/out")"
+    fail "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2" "exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_alive}, seconds to stop: ${sc_stop_secs}" "output: $(cat "${work_dir}/out")"
   fi
 done
 

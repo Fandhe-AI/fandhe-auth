@@ -61,12 +61,17 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 pids=()
 launched=0
 pending_signal=0
-# is_running_job <pid>: bash のジョブ表で「まだ実行中」の子だけ真にする。bash は明示の wait の前にも終了した子を回収するため、
+# stop_job <pid>: 子に TERM を送り、続けて CONT を送る。一時停止中（SIGSTOP 等）の子は CONT が無いと TERM を受け取れず、wait で止まる。
+stop_job() {
+  kill "$1" 2> /dev/null || true
+  kill -CONT "$1" 2> /dev/null || true
+}
+# is_running_job <pid>: bash のジョブ表で「まだ生きている」（実行中または一時停止中）の子だけ真にする。bash は明示の wait の前にも終了した子を回収するため、
 # 保持している pid が回収済み（pid が再利用されうる）のことがある。kill の前にこれで自分の子だと確かめる（#6063・TASK-6）。
 # 確認と kill の間の窓は残るが、回収済みの pid を無条件に狙う経路は無くなる。
 is_running_job() {
   local running
-  running=" $(jobs -rp 2> /dev/null | tr '\n' ' ') "
+  running=" $(jobs -rp 2> /dev/null | tr '\n' ' ') $(jobs -sp 2> /dev/null | tr '\n' ' ') "
   case "${running}" in
     *" $1 "*) return 0 ;;
   esac
@@ -79,7 +84,7 @@ on_signal() {
   local k=0
   while [ "${k}" -lt "${launched}" ]; do
     if [ -n "${pids[k]}" ] && is_running_job "${pids[k]}"; then
-      kill "${pids[k]}" 2> /dev/null || true
+      stop_job "${pids[k]}"
     fi
     k=$((k + 1))
   done
@@ -226,7 +231,7 @@ batch_stop() {
   trap '' TERM INT HUP
   if [ -n "${sc_pid}" ]; then
     if is_running_job "${sc_pid}"; then
-      kill "${sc_pid}" 2> /dev/null || true
+      stop_job "${sc_pid}"
     fi
     wait "${sc_pid}" 2> /dev/null || true
     sc_pid=""
