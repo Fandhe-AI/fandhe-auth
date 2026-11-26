@@ -64,11 +64,15 @@ pending_signal=0
 # job_state <pid>: bash のジョブ表での子の状態を job_state_result に入れる（owned・none・unknown）。bash は明示の wait の前にも終了した子を回収するため、
 # 保持している pid が回収済み（pid が再利用されうる）のことがある。信号を送る前に、生きた自分の子だと確かめる（#6063・TASK-6）。
 # ジョブ表は 1 回の `jobs -l` で取る（実行中と停止中を別々の一覧で見ると、その間に状態が変わった子をどちらにも見つけられない）。
-# owned = Running か Stopped のジョブとして載っている、none = 載っていない・終了済み、unknown = 一覧を取れない・読めない（所有を確かめられない）。
+# 状態名は bash が翻訳するため、`jobs` は LC_ALL=C で実行して ASCII の名前で照合する（git-hooks.md の (b)）。
+# owned = Running か Stopped のジョブとして載っている、none = 載っていない・終了済み（Done・Exit・Terminated・Killed）、
+# unknown = 一覧を取れない・読めない・一致した pid の状態を解釈できない（所有を確かめられない）。
 # jobs は現在のシェルで実行する（command substitution やパイプラインのサブシェルは、bash 3.2 等で空のジョブ表を見る）。出力はファイルへのリダイレクトで受け、
 # >| で開くため継承した noclobber に左右されない。確認と kill の間の窓は残るが、回収済みの pid を無条件に狙う経路は無くなる。
 job_state_result=none
 job_state() {
+  # 関数の局所の LC_ALL: 戻ると元のロケールに戻る
+  local LC_ALL=C
   local f="${tmp_dir}/jobs.$1" _jn jp js _jrest
   job_state_result=none
   if ! jobs -l >| "${f}" 2> /dev/null; then
@@ -78,7 +82,9 @@ job_state() {
   while read -r _jn jp js _jrest; do
     if [ "${jp}" = "$1" ]; then
       case "${js}" in
-        Running | Stopped) job_state_result=owned ;;
+        Running | Stopped*) job_state_result=owned ;;
+        Done* | Exit* | Terminated* | Killed*) job_state_result=none ;;
+        *) job_state_result=unknown ;;
       esac
     fi
   done < "${f}" || job_state_result=unknown
@@ -87,16 +93,24 @@ job_state() {
 }
 # stop_job <pid>: ジョブ表で自分の子と確かめられたものだけを止める。CONT を先に、TERM を最後に 1 回だけ送る。
 # 一時停止中（SIGSTOP 等）の子は CONT が無いと TERM を受け取れず wait で止まる（非対話の bash は停止を検知しないため、状態では分けず必ず CONT を送る）。
-# TERM の後には何も送らないので、TERM で終わった子の pid が再利用されても、誤って別のプロセスへ信号を送らない。
+# 信号を送るたびに、直前に job_state で生きた自分の子だと確かめ直す。CONT で子が終わって回収されると pid が再利用されうるため、TERM の前にも確かめる。
+# 確認と送信の間の窓は bash では閉じられないが、回収済みの pid を無条件に狙う経路は無い。TERM の後には何も送らない。
 # 所有を確かめられない（unknown）ときは、無関係のプロセスを止めないよう何も送らず、診断を出して 1 を返す。
 # 呼び出し側は、1 のとき wait へ進まない（停止していない子を無期限に待たない）。
 stop_job() {
   job_state "$1"
   case "${job_state_result}" in
-    owned)
-      kill -CONT "$1" 2> /dev/null || true
-      kill "$1" 2> /dev/null || true
+    owned) ;;
+    unknown)
+      echo "shellcheck-staged: cannot confirm ownership of child ${1}; no signal sent and not waiting" >&2
+      return 1
       ;;
+    *) return 0 ;;
+  esac
+  kill -CONT "$1" 2> /dev/null || true
+  job_state "$1"
+  case "${job_state_result}" in
+    owned) kill "$1" 2> /dev/null || true ;;
     unknown)
       echo "shellcheck-staged: cannot confirm ownership of child ${1}; no signal sent and not waiting" >&2
       return 1

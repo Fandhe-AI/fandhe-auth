@@ -581,6 +581,8 @@ sc_signal_owned() {
 # sc_kill_job <信号> <pid>: この試験のシェルのジョブ表に、生きた（Running・Stopped）ジョブとして残る pid にだけ信号を送る。
 # ジョブ表は 1 回の `jobs -l` で取る（bash が回収済みの pid は再利用されうるため、起動時に控えた pid へ無条件に送らない）。確かめられなければ送らず 1 を返す。
 sc_kill_job() {
+  # 状態名は bash が翻訳するため、関数の局所の LC_ALL=C で ASCII の名前にして照合する（git-hooks.md の (b)）
+  local LC_ALL=C
   sc_kj_file="${work_dir}/kj-jobs"
   sc_kj_ok=1
   jobs -l >| "${sc_kj_file}" 2> /dev/null || return 1
@@ -593,6 +595,33 @@ sc_kill_job() {
   done < "${sc_kj_file}"
   rm -f "${sc_kj_file}"
   [ "${sc_kj_ok}" -eq 0 ] || return 1
+  kill -"$1" "$2" 2> /dev/null
+}
+
+# sc_reap <pid>: 試験が起動したスクリプトを強制停止して回収する。消滅を確かめられたときだけ wait し（0）、
+# 確かめられなければ wait せず 1 を返す（残り続ける対象を無期限に待たない）。既に回収済みで一覧に無い場合も、消滅していれば 0。
+sc_reap() {
+  sc_kj_note=""
+  sc_kill_job KILL "$1" || true
+  sc_rp_waited=0
+  while kill -0 "$1" 2> /dev/null && [ "${sc_rp_waited}" -lt 50 ]; do
+    sleep 0.1
+    sc_rp_waited=$((sc_rp_waited + 1))
+  done
+  if kill -0 "$1" 2> /dev/null; then
+    sc_kj_note="; could not confirm the forced stop of pid ${1} (not waiting)"
+    return 1
+  fi
+  wait "$1" 2> /dev/null || true
+  return 0
+}
+
+# sc_orphan_signal <信号> <pid> <起動時の開始時刻>: 孤児の偽物へ、送るたびに開始時刻の一致と sleep であることを確かめてから送る
+# （CONT の後に終わって pid が再利用されても、TERM が別のプロセスへ届かない）。
+sc_orphan_signal() {
+  [ -n "$3" ] || return 1
+  [ "$(ps -p "$2" -o lstart= 2> /dev/null || true)" = "$3" ] || return 1
+  sc_is_fake_sleep "$2" || return 1
   kill -"$1" "$2" 2> /dev/null
 }
 
@@ -670,9 +699,8 @@ for sc_sig in TERM HUP TERM-STOPPED; do
     if [ -n "${sc_fake_pid}" ]; then
       sc_signal_owned CONT "${sc_script_pid}" "${sc_fake_pid}" || true
     fi
-    sc_kill_job KILL "${sc_script_pid}" || true
-    wait "${sc_script_pid}" 2> /dev/null || true
-    fail "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2" "setup failed: ${sc_setup_err}" "output: $(cat "${work_dir}/out")"
+    sc_reap "${sc_script_pid}" || true
+    fail "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2" "setup failed: ${sc_setup_err}${sc_kj_note}" "output: $(cat "${work_dir}/out")"
     continue
   fi
   sc_t0="${SECONDS}"
@@ -684,19 +712,20 @@ for sc_sig in TERM HUP TERM-STOPPED; do
     sc_waited=$((sc_waited + 1))
   done
   sc_timed_out=0
+  sc_kj_note=""
   if kill -0 "${sc_script_pid}" 2> /dev/null; then
     sc_timed_out=1
     # 期限切れ: 試験が管理するプロセスだけを後始末して失敗にする
     sc_signal_owned CONT "${sc_script_pid}" "${sc_fake_pid}" || true
-    sc_kill_job KILL "${sc_script_pid}" || true
+    sc_reap "${sc_script_pid}" || true
   fi
-  if wait "${sc_script_pid}"; then
+  if [ "${sc_timed_out}" -eq 1 ]; then
+    # 回収は sc_reap が済ませた（確かめられなければ wait していない）
+    sc_rc=124
+  elif wait "${sc_script_pid}"; then
     sc_rc=0
   else
     sc_rc=$?
-  fi
-  if [ "${sc_timed_out}" -eq 1 ]; then
-    sc_rc=124
   fi
   sc_stop_secs=$((SECONDS - sc_t0))
   sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
@@ -715,8 +744,8 @@ for sc_sig in TERM HUP TERM-STOPPED; do
       # （pid の再利用で無関係のプロセスへ送らない）。ps で確かめられなければ送らず、偽物は 30 秒で自然に終わる。
       sc_now_start="$(ps -p "${sc_fake_pid}" -o lstart= 2> /dev/null || true)"
       if [ -n "${sc_fake_start}" ] && [ "${sc_now_start}" = "${sc_fake_start}" ] && sc_is_fake_sleep "${sc_fake_pid}"; then
-        kill -CONT "${sc_fake_pid}" 2> /dev/null || true
-        kill -TERM "${sc_fake_pid}" 2> /dev/null || true
+        sc_orphan_signal CONT "${sc_fake_pid}" "${sc_fake_start}" || true
+        sc_orphan_signal TERM "${sc_fake_pid}" "${sc_fake_start}" || true
       fi
     else
       sc_alive=0
@@ -726,7 +755,7 @@ for sc_sig in TERM HUP TERM-STOPPED; do
   if [ "${sc_rc}" -eq 2 ] && [ -n "${sc_fake_pid}" ] && [ "${sc_alive}" -eq 0 ] && [ "${sc_stop_secs}" -lt 10 ]; then
     pass "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2"
   else
-    fail "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2" "exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_alive}, seconds to stop: ${sc_stop_secs}" "output: $(cat "${work_dir}/out")"
+    fail "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2" "exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_alive}, seconds to stop: ${sc_stop_secs}${sc_kj_note}" "output: $(cat "${work_dir}/out")"
   fi
 done
 
