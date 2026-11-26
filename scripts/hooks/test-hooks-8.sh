@@ -197,4 +197,49 @@ else
   fail "secret-scan: an index whose parent directory does not exist is an empty index" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# T8: 開始時に無かった index の解く前の経路が、走査中に別の（index を持つ）ディレクトリを指すよう替わったら 2（#6047）
+new_repo; stage src/app.txt "hello"
+t8_dir="${work_dir}/t8"
+mkdir -p "${t8_dir}/real1" "${t8_dir}/real2"
+cp "$(git rev-parse --git-path index)" "${t8_dir}/real2/index"
+ln -s "${t8_dir}/real1" "${t8_dir}/lnk"
+git8b_dir="${work_dir}/git8b-shim"
+mkdir -p "${git8b_dir}"
+cat > "${git8b_dir}/git" <<'EOF9'
+#!/bin/sh
+# 本文の diff（-U0）の呼び出しの前に一度だけ、リンクの参照先を差し替える
+if [ ! -e "${T8_FLAG}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "-U0" ]; then
+      : > "${T8_FLAG}"
+      ln -sfn "${T8_TO}" "${T8_LINK}"
+      break
+    fi
+  done
+fi
+exec "${REAL_GIT}" "$@"
+EOF9
+chmod +x "${git8b_dir}/git"
+rm -f "${work_dir}/t8-flag"
+rc=0
+GIT_INDEX_FILE="${t8_dir}/lnk/index" T8_FLAG="${work_dir}/t8-flag" T8_TO="${t8_dir}/real2" T8_LINK="${t8_dir}/lnk" PATH="${git8b_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/t8-flag" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a missing index whose reference path was retargeted during the scan is a scan failure (2)"
+else
+  fail "secret-scan: a missing index whose reference path was retargeted during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T9: 名前が長すぎる index（ENAMETOOLONG）は、祖先が検索できても ENOENT ではないため空として扱わず 2（#6047）
+new_repo; stage src/app.txt "hello"
+t9_name="$(printf 'a%.0s' $(seq 1 300))"
+rc=0
+GIT_INDEX_FILE="${work_dir}/${t9_name}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index with a too-long name (not ENOENT) is a scan failure (2)"
+else
+  fail "secret-scan: an index with a too-long name (not ENOENT) is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 finish "part 8"
