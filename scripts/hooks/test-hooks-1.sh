@@ -278,6 +278,7 @@ cat > "${sc_shim_dir}/shellcheck" <<'EOF'
 # 並列の呼び出しの記録が混ざらないよう（共有の 1 ファイルへの追記は macOS で行の途中で混ざった。#6076）、呼び出しごとに別のファイルへ書く。
 # 名前は pid と連番で、noclobber の排他的な作成で確保する（pid が再利用されても既存の記録を上書きしない）。
 # 確保できない・書けないときは、記録の欠落を成功と取り違えないよう 99 で落とす。
+# 確保した後の書き込みは >| で行う（環境から受け継いだ noclobber でも、予約済みのファイルへ書けるように。#6063）。
 # 記録先が渡っていないときは、記録せずに通る経路を作らないよう 99 で落とす。
 [ -n "${SC_LOG:-}" ] || exit 99
 sc_n=0
@@ -291,14 +292,14 @@ while :; do
     exit 99
   fi
 done
-{ printf 'call\n' && printf 'arg:%s\n' "$@"; } > "${sc_f}" || exit 99
+{ printf 'call\n' && printf 'arg:%s\n' "$@"; } >| "${sc_f}" || exit 99
 rc=0
 for arg in "$@"; do
   case "${arg}" in
     *slow*) sleep 0.3 ;;
     *die*) kill -9 "${PPID}" ;;
     *hang*)
-      echo "$$" > "${SC_PIDFILE}"
+      echo "$$" >| "${SC_PIDFILE}"
       exec sleep 30
       ;;
     *err*)
@@ -527,52 +528,86 @@ else
   sc_rc=$?
 fi
 sc_collect
-if [ "${sc_rc}" -eq 2 ] && [ ! -s "${sc_log}" ] && grep -qF "shellcheck could not check a.sh (exit 2)" "${work_dir}/out"; then
+if [ "${sc_rc}" -eq 2 ] && [ ! -s "${sc_log}" ] && grep -qF "cannot open the output file of batch 0; a.sh was not checked" "${work_dir}/out" && ! grep -qF "shellcheck could not check a.sh" "${work_dir}/out"; then
   pass "shellcheck-staged: an unopenable output file exits 2 (not treated as a finding)"
 else
   fail "shellcheck-staged: an unopenable output file exits 2 (not treated as a finding)" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
 fi
 
-# 中断（TERM）では、起動済みのバッチの shellcheck まで止め、2 で終わる（止めずに孫の shellcheck を残さない）。
-# 偽の shellcheck が pid を書いて眠っている間に親へ TERM を送り、終わった後にその pid のプロセスが残っていないことを確かめる
-sc_pidfile="${work_dir}/sc.pid"
-rm -f "${sc_pidfile}"
+# 受け継いだ noclobber（SHELLOPTS）でも、出力先は 1 回だけ開くので shellcheck は起動され、0 で終わる。
+# 先に作ってから開き直す実装では、2 回目に開けず bash が shellcheck を起動せずに 1 を返す（#6063）。
 sc_reset
-SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh a.sh > "${work_dir}/out" 2>&1 &
-sc_script_pid=$!
-sc_waited=0
-while [ ! -s "${sc_pidfile}" ] && [ "${sc_waited}" -lt 100 ]; do
-  sleep 0.1
-  sc_waited=$((sc_waited + 1))
-done
-sc_t0="${SECONDS}"
-kill -TERM "${sc_script_pid}" 2> /dev/null || true
-if wait "${sc_script_pid}"; then
+if env SHELLOPTS=noclobber SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" a.sh > "${work_dir}/out" 2>&1; then
   sc_rc=0
 else
   sc_rc=$?
 fi
-sc_stop_secs=$((SECONDS - sc_t0))
-sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
-sc_alive=1
-if [ -n "${sc_fake_pid}" ]; then
+sc_collect
+if [ "${sc_rc}" -eq 0 ] && [ "$(sc_ncalls)" = "1" ] && [ ! -s "${work_dir}/out" ]; then
+  pass "shellcheck-staged: an inherited noclobber still opens the output file once and starts shellcheck"
+else
+  fail "shellcheck-staged: an inherited noclobber still opens the output file once and starts shellcheck" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
+fi
+
+# 後始末の kill -9 は、pid が偽物の shellcheck（exec した sleep）のままのときだけ送る（pid の再利用で無関係のプロセスを落とさない）。
+sc_is_fake_sleep() {
+  sc_comm="$(ps -p "$1" -o comm= 2> /dev/null)" || return 1
+  sc_comm="${sc_comm#"${sc_comm%%[![:space:]]*}"}"
+  sc_comm="${sc_comm%"${sc_comm##*[![:space:]]}"}"
+  case "${sc_comm}" in
+    sleep | */sleep) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 中断（TERM・HUP）では、起動済みのバッチの shellcheck まで止め、2 で終わる（止めずに孫の shellcheck を残さない）。
+# 偽の shellcheck が pid を書いて眠っている間に親へ信号を送り、終わった後にその pid のプロセスが残っていないことを確かめる
+# INT は試験しない（背景で起動したシェルでは INT が無視された状態で始まり、trap できない）。
+# HUP を trap できないシェルでは、30 秒待たずに注記を出して飛ばす。
+for sc_sig in TERM HUP; do
+  if [ "${sc_sig}" = "HUP" ] && [ "$("${HOOK_BASH}" -c 'trap "exit 7" HUP; kill -HUP $$; exit 0' > /dev/null 2>&1; echo $?)" != "7" ]; then
+    echo "NOTE: skipping the HUP stop test (HUP cannot be trapped in this shell)"
+    continue
+  fi
+  sc_pidfile="${work_dir}/sc.pid"
+  rm -f "${sc_pidfile}"
+  sc_reset
+  SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh a.sh > "${work_dir}/out" 2>&1 &
+  sc_script_pid=$!
   sc_waited=0
-  while kill -0 "${sc_fake_pid}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
+  while [ ! -s "${sc_pidfile}" ] && [ "${sc_waited}" -lt 100 ]; do
     sleep 0.1
     sc_waited=$((sc_waited + 1))
   done
-  if kill -0 "${sc_fake_pid}" 2> /dev/null; then
-    kill -9 "${sc_fake_pid}" 2> /dev/null || true
+  sc_t0="${SECONDS}"
+  kill -"${sc_sig}" "${sc_script_pid}" 2> /dev/null || true
+  if wait "${sc_script_pid}"; then
+    sc_rc=0
   else
-    sc_alive=0
+    sc_rc=$?
   fi
-fi
-# 偽物は 30 秒眠るため、止まるまでに 10 秒以上かかったなら、停止が伝わらず眠りの終わりを待っただけ
-if [ "${sc_rc}" -eq 2 ] && [ -n "${sc_fake_pid}" ] && [ "${sc_alive}" -eq 0 ] && [ "${sc_stop_secs}" -lt 10 ]; then
-  pass "shellcheck-staged: a TERM stops the running shellcheck and exits 2"
-else
-  fail "shellcheck-staged: a TERM stops the running shellcheck and exits 2" "exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_alive}, seconds to stop: ${sc_stop_secs}" "output: $(cat "${work_dir}/out")"
-fi
+  sc_stop_secs=$((SECONDS - sc_t0))
+  sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
+  sc_alive=1
+  if [ -n "${sc_fake_pid}" ]; then
+    sc_waited=0
+    while kill -0 "${sc_fake_pid}" 2> /dev/null && sc_is_fake_sleep "${sc_fake_pid}" && [ "${sc_waited}" -lt 30 ]; do
+      sleep 0.1
+      sc_waited=$((sc_waited + 1))
+    done
+    if kill -0 "${sc_fake_pid}" 2> /dev/null && sc_is_fake_sleep "${sc_fake_pid}"; then
+      kill -9 "${sc_fake_pid}" 2> /dev/null || true
+    else
+      sc_alive=0
+    fi
+  fi
+  # 偽物は 30 秒眠るため、止まるまでに 10 秒以上かかったなら、停止が伝わらず眠りの終わりを待っただけ
+  if [ "${sc_rc}" -eq 2 ] && [ -n "${sc_fake_pid}" ] && [ "${sc_alive}" -eq 0 ] && [ "${sc_stop_secs}" -lt 10 ]; then
+    pass "shellcheck-staged: a ${sc_sig} stops the running shellcheck and exits 2"
+  else
+    fail "shellcheck-staged: a ${sc_sig} stops the running shellcheck and exits 2" "exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_alive}, seconds to stop: ${sc_stop_secs}" "output: $(cat "${work_dir}/out")"
+  fi
+done
 
 # PATH に shellcheck が無いときは、未検査で成功にせず 2 で止まる
 sc_empty_path="${work_dir}/sc-empty-path"
