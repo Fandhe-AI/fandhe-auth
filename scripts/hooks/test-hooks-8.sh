@@ -11,7 +11,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-lib.sh"
 cd "${work_dir}"
 
 # shellcheck source=./test-hooks-sc-lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-sc-lib.sh"
+source "${HOOKS_DIR}/test-hooks-sc-lib.sh"
 
 sc_run
 if [ "${sc_rc}" -eq 0 ] && [ ! -s "${sc_log}" ] && [ ! -s "${work_dir}/out" ]; then

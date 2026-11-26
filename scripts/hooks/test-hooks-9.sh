@@ -10,7 +10,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-lib.sh"
 cd "${work_dir}"
 
 # shellcheck source=./test-hooks-sc-lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-sc-lib.sh"
+source "${HOOKS_DIR}/test-hooks-sc-lib.sh"
 
 # 並列数の決め方: getconf の出力からバッチ数（= shellcheck の起動の回数）が決まる。20 件なので期待は min(上限, 20)
 sc_expect_batches 3 3 "shellcheck-staged: getconf 3 gives 3 batches (the value is used, not the fixed 4)"

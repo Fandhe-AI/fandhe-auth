@@ -18,9 +18,11 @@ cat > "${sc_shim_dir}/shellcheck" <<'EOF'
 # 記録先が渡っていないときは、記録せずに通る経路を作らないよう 99 で落とす。
 [ -n "${SC_LOG:-}" ] || exit 99
 # 同期モード（SC_SYNC_DIR と SC_BARRIER の両方が空でないときだけ。並列に進むことと同時実行の上限を確かめる）。片方だけなら 99 で落とす。
-# 開始の印（start.*。消さない）と実行中の印（run.*）を作り、その時点の run.* の件数を数える。
-# start.* が SC_BARRIER 件になるまで最大約 10 秒待ち（待ちきれなければ timeout.<pid> を作って先へ進む）、少し眠ってからもう一度 run.* を数える。
-# 2 回の大きい方を seen.* に書いて run.* を消す。バッチ数と同じ障壁は、全バッチが同時に起動したときだけ待たずに抜けられる。
+# 開始の印（start.*。id の確保用で消さない）と実行中の印（run.*）を作り、run.* を作り終えた印（ready.*。消さない）を置く。
+# 2 段の同期をとる。(1) ready.* が SC_BARRIER 件になるまで待つ（全員が run.* を作ってから観測を始める）。
+# 少し眠ってから run.* を数えて seen.* に書き、観測を終えた印（done.*。消さない）を置く。
+# (2) done.* が SC_BARRIER 件になるまで待ち（全員が観測を終えるまで run.* を保持する）、run.* を消す。
+# どちらも最大約 10 秒待ち、待ちきれなければ timeout.<pid> を作って先へ進む。
 # 記録は ${SC_LOG}.d/ の call / arg の行とは別のファイルに置く（記録の読み取りを乱さない）。
 if [ -n "${SC_SYNC_DIR:-}" ] || [ -n "${SC_BARRIER:-}" ]; then
   if [ -z "${SC_SYNC_DIR:-}" ] || [ -z "${SC_BARRIER:-}" ]; then
@@ -38,14 +40,11 @@ if [ -n "${SC_SYNC_DIR:-}" ] || [ -n "${SC_BARRIER:-}" ]; then
     fi
   done
   : > "${SC_SYNC_DIR}/run.${sy_id}" || exit 99
-  sy_seen=0
-  for sy_f in "${SC_SYNC_DIR}"/run.*; do
-    [ -e "${sy_f}" ] && sy_seen=$((sy_seen + 1))
-  done
+  : > "${SC_SYNC_DIR}/ready.${sy_id}" || exit 99
   sy_tries=0
   while :; do
     sy_started=0
-    for sy_f in "${SC_SYNC_DIR}"/start.*; do
+    for sy_f in "${SC_SYNC_DIR}"/ready.*; do
       [ -e "${sy_f}" ] && sy_started=$((sy_started + 1))
     done
     if [ "${sy_started}" -ge "${SC_BARRIER}" ]; then
@@ -59,14 +58,28 @@ if [ -n "${SC_SYNC_DIR:-}" ] || [ -n "${SC_BARRIER:-}" ]; then
     sleep 0.05
   done
   sleep 0.2
-  sy_now=0
+  sy_seen=0
   for sy_f in "${SC_SYNC_DIR}"/run.*; do
-    [ -e "${sy_f}" ] && sy_now=$((sy_now + 1))
+    [ -e "${sy_f}" ] && sy_seen=$((sy_seen + 1))
   done
-  if [ "${sy_now}" -gt "${sy_seen}" ]; then
-    sy_seen="${sy_now}"
-  fi
   printf '%s\n' "${sy_seen}" > "${SC_SYNC_DIR}/seen.${sy_id}" || exit 99
+  : > "${SC_SYNC_DIR}/done.${sy_id}" || exit 99
+  sy_tries=0
+  while :; do
+    sy_finished=0
+    for sy_f in "${SC_SYNC_DIR}"/done.*; do
+      [ -e "${sy_f}" ] && sy_finished=$((sy_finished + 1))
+    done
+    if [ "${sy_finished}" -ge "${SC_BARRIER}" ]; then
+      break
+    fi
+    sy_tries=$((sy_tries + 1))
+    if [ "${sy_tries}" -gt 200 ]; then
+      : > "${SC_SYNC_DIR}/timeout.$$" || exit 99
+      break
+    fi
+    sleep 0.05
+  done
   rm -f "${SC_SYNC_DIR}/run.${sy_id}"
 fi
 sc_n=0
