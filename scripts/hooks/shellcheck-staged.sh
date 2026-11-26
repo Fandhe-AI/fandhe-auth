@@ -61,62 +61,48 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 pids=()
 launched=0
 pending_signal=0
-# job_state <pid>: bash のジョブ表での子の状態を job_state_result に入れる（running・stopped・none）。bash は明示の wait の前にも終了した子を回収するため、
-# 保持している pid が回収済み（pid が再利用されうる）のことがある。kill の前にこれで自分の子だと確かめる（#6063・TASK-6）。
-# jobs は現在のシェルで実行する（command substitution やパイプラインのサブシェルは、bash 3.2 等で空のジョブ表を見る）。出力はファイルへのリダイレクトで受ける。
-# 確認と kill の間の窓は残るが、回収済みの pid を無条件に狙う経路は無くなる。
+# job_state <pid>: bash のジョブ表での子の状態を job_state_result に入れる（owned・none・unknown）。bash は明示の wait の前にも終了した子を回収するため、
+# 保持している pid が回収済み（pid が再利用されうる）のことがある。信号を送る前に、生きた自分の子だと確かめる（#6063・TASK-6）。
+# ジョブ表は 1 回の `jobs -l` で取る（実行中と停止中を別々の一覧で見ると、その間に状態が変わった子をどちらにも見つけられない）。
+# owned = Running か Stopped のジョブとして載っている、none = 載っていない・終了済み、unknown = 一覧を取れない・読めない（所有を確かめられない）。
+# jobs は現在のシェルで実行する（command substitution やパイプラインのサブシェルは、bash 3.2 等で空のジョブ表を見る）。出力はファイルへのリダイレクトで受け、
+# >| で開くため継承した noclobber に左右されない。確認と kill の間の窓は残るが、回収済みの pid を無条件に狙う経路は無くなる。
 job_state_result=none
-# job_scan <file> <pid>: 一覧のファイルに pid があれば 0、無ければ 1、ファイルを開けなければ 2（set -e で中断せず、呼び出し側が分岐する）。
-job_scan() {
-  local line found=1
-  while read -r line; do
-    if [ "${line}" = "$2" ]; then
-      found=0
-    fi
-  done < "$1" || return 2
-  return "${found}"
-}
-# 一覧の出力・読み取りに失敗したら unknown にする（stop_job は所有を確かめられない子へも CONT と TERM を送り、中断の後始末を止めない。
-# 保持している pid は wait で回収するまで pids に残るもので、窓は上の注記のとおり）。出力先は >| で開き、継承した noclobber に左右されない。
 job_state() {
-  local fr="${tmp_dir}/jobs-r.$1" fs="${tmp_dir}/jobs-s.$1" rc
+  local f="${tmp_dir}/jobs.$1" _jn jp js _jrest
   job_state_result=none
-  if ! jobs -rp >| "${fr}" 2> /dev/null; then
+  if ! jobs -l >| "${f}" 2> /dev/null; then
     job_state_result=unknown
     return 0
   fi
-  if job_scan "${fr}" "$1"; then
-    job_state_result=running
-  else
-    rc=$?
-    if [ "${rc}" -ne 1 ]; then
-      job_state_result=unknown
+  while read -r _jn jp js _jrest; do
+    if [ "${jp}" = "$1" ]; then
+      case "${js}" in
+        Running | Stopped) job_state_result=owned ;;
+      esac
     fi
-  fi
-  if [ "${job_state_result}" = none ]; then
-    if ! jobs -sp >| "${fs}" 2> /dev/null; then
-      job_state_result=unknown
-    elif job_scan "${fs}" "$1"; then
-      job_state_result=stopped
-    else
-      rc=$?
-      if [ "${rc}" -ne 1 ]; then
-        job_state_result=unknown
-      fi
-    fi
-  fi
-  # 一覧の削除の失敗で set -e が中断の後始末（CONT・TERM）を飛ばさない
-  rm -f "${fr}" "${fs}" || true
+  done < "${f}" || job_state_result=unknown
+  # 一覧の削除の失敗で set -e が中断の後始末を飛ばさない
+  rm -f "${f}" || true
 }
-# stop_job <pid>: ジョブ表で確かめた子を止める。CONT を先に、TERM を最後に 1 回だけ送る。
+# stop_job <pid>: ジョブ表で自分の子と確かめられたものだけを止める。CONT を先に、TERM を最後に 1 回だけ送る。
 # 一時停止中（SIGSTOP 等）の子は CONT が無いと TERM を受け取れず wait で止まる（非対話の bash は停止を検知しないため、状態では分けず必ず CONT を送る）。
 # TERM の後には何も送らないので、TERM で終わった子の pid が再利用されても、誤って別のプロセスへ信号を送らない。
+# 所有を確かめられない（unknown）ときは、無関係のプロセスを止めないよう何も送らず、診断を出して 1 を返す。
+# 呼び出し側は、1 のとき wait へ進まない（停止していない子を無期限に待たない）。
 stop_job() {
   job_state "$1"
-  if [ "${job_state_result}" != none ]; then
-    kill -CONT "$1" 2> /dev/null || true
-    kill "$1" 2> /dev/null || true
-  fi
+  case "${job_state_result}" in
+    owned)
+      kill -CONT "$1" 2> /dev/null || true
+      kill "$1" 2> /dev/null || true
+      ;;
+    unknown)
+      echo "shellcheck-staged: cannot confirm ownership of child ${1}; no signal sent and not waiting" >&2
+      return 1
+      ;;
+  esac
+  return 0
 }
 # shellcheck disable=SC2329 # trap から呼ばれる
 on_signal() {
@@ -127,7 +113,8 @@ on_signal() {
   local k=0
   while [ "${k}" -lt "${launched}" ]; do
     if [ -n "${pids[k]}" ]; then
-      stop_job "${pids[k]}"
+      # 所有を確かめられない子には送らず、待ちからも外す（無期限の wait を避ける）
+      stop_job "${pids[k]}" || pids[k]=""
     fi
     k=$((k + 1))
   done
@@ -275,8 +262,9 @@ batch_stop() {
   # どの後始末の失敗でも停止と回収を続け、最後の exit 2 に必ず届く
   set +e
   if [ -n "${sc_pid}" ]; then
-    stop_job "${sc_pid}"
-    wait "${sc_pid}" 2> /dev/null || true
+    if stop_job "${sc_pid}"; then
+      wait "${sc_pid}" 2> /dev/null || true
+    fi
     sc_pid=""
   fi
   exit 2

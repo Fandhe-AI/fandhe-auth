@@ -577,6 +577,24 @@ sc_signal_owned() {
   return 1
 }
 
+# sc_kill_job <信号> <pid>: この試験のシェルのジョブ表に、生きた（Running・Stopped）ジョブとして残る pid にだけ信号を送る。
+# ジョブ表は 1 回の `jobs -l` で取る（bash が回収済みの pid は再利用されうるため、起動時に控えた pid へ無条件に送らない）。確かめられなければ送らず 1 を返す。
+sc_kill_job() {
+  sc_kj_file="${work_dir}/kj-jobs"
+  sc_kj_ok=1
+  jobs -l >| "${sc_kj_file}" 2> /dev/null || return 1
+  while read -r _kj_n sc_kj_pid sc_kj_state _kj_rest; do
+    if [ "${sc_kj_pid}" = "$2" ]; then
+      case "${sc_kj_state}" in
+        Running | Stopped) sc_kj_ok=0 ;;
+      esac
+    fi
+  done < "${sc_kj_file}"
+  rm -f "${sc_kj_file}"
+  [ "${sc_kj_ok}" -eq 0 ] || return 1
+  kill -"$1" "$2" 2> /dev/null
+}
+
 # 中断（TERM・HUP）では、起動済みのバッチの shellcheck まで止め、2 で終わる（止めずに孫の shellcheck を残さない）。
 # 偽の shellcheck が pid を書いて眠っている間に親へ信号を送り、終わった後にその pid のプロセスが残っていないことを確かめる
 # INT は試験しない（背景で起動したシェルでは INT が無視された状態で始まり、trap できない）。
@@ -651,13 +669,13 @@ for sc_sig in TERM HUP TERM-STOPPED; do
     if [ -n "${sc_fake_pid}" ]; then
       sc_signal_owned CONT "${sc_script_pid}" "${sc_fake_pid}" || true
     fi
-    kill -KILL "${sc_script_pid}" 2> /dev/null || true
+    sc_kill_job KILL "${sc_script_pid}" || true
     wait "${sc_script_pid}" 2> /dev/null || true
     fail "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2" "setup failed: ${sc_setup_err}" "output: $(cat "${work_dir}/out")"
     continue
   fi
   sc_t0="${SECONDS}"
-  kill -"${sc_sig}" "${sc_script_pid}" 2> /dev/null || true
+  sc_kill_job "${sc_sig}" "${sc_script_pid}" || true
   # 期限（20 秒）付きで終了を待つ。無期限の wait にすると、停止が伝わらない退行で試験が止まる。
   sc_waited=0
   while kill -0 "${sc_script_pid}" 2> /dev/null && [ "${sc_waited}" -lt 200 ]; do
@@ -669,7 +687,7 @@ for sc_sig in TERM HUP TERM-STOPPED; do
     sc_timed_out=1
     # 期限切れ: 試験が管理するプロセスだけを後始末して失敗にする
     sc_signal_owned CONT "${sc_script_pid}" "${sc_fake_pid}" || true
-    kill -KILL "${sc_script_pid}" 2> /dev/null || true
+    sc_kill_job KILL "${sc_script_pid}" || true
   fi
   if wait "${sc_script_pid}"; then
     sc_rc=0
