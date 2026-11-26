@@ -27,7 +27,11 @@ case "${CP8_MODE:-}:${last}" in
     ;;
   head-final:*/index-final)
     "${REAL_CP}" "$@" || exit $?
-    (unset GIT_INDEX_FILE; "${REAL_GIT}" commit -q --allow-empty --no-verify -m moved)
+    # 事前に用意したコミットへ update-ref で切り替える。失敗したら完了の印を作らず、原因を標準エラーに残す
+    if ! (unset GIT_INDEX_FILE; "${REAL_GIT}" update-ref HEAD "${CP8_HEAD_TO}"); then
+      echo "cp8 shim: update-ref failed" >&2
+      exit 1
+    fi
     : > "${CP8_FLAG}.final"
     exit 0
     ;;
@@ -145,9 +149,13 @@ fi
 
 # T5: 2 回目の index 検証の途中に HEAD が動いたら 2（検証の後にも HEAD を照合する）
 new_repo; stage src/app.txt "hello"
+t5_first="$(git rev-parse HEAD)"
+git commit -q --allow-empty -m "chore: second"
+t5_second="$(git rev-parse HEAD)"
+git reset -q --hard "${t5_first}"
 rm -f "${work_dir}/cp8-flag" "${work_dir}/cp8-flag.first" "${work_dir}/cp8-flag.final"
 rc=0
-CP8_MODE=head-final CP8_FLAG="${work_dir}/cp8-flag" PATH="${cp8_dir}:${PATH}" \
+CP8_MODE=head-final CP8_HEAD_TO="${t5_second}" CP8_FLAG="${work_dir}/cp8-flag" PATH="${cp8_dir}:${PATH}" \
   LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
 if [ -e "${work_dir}/cp8-flag.final" ] && [ "${rc}" -eq 2 ] \
   && grep -qxF "secret-scan: HEAD changed during the scan; aborting" "${work_dir}/out"; then
