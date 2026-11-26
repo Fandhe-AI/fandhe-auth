@@ -305,6 +305,37 @@ else
   fail "scan-canary: passes without a grep error" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# ---- index の固定: 親ディレクトリのシンボリックリンクの付け替え（#6034。part 3 の index の節の続き）
+# --path-format=absolute は親ディレクトリのリンクも解いた実体を返す。実体から複写し直すだけでは、走査中の付け替えで
+# git が実際に読む index が別のディレクトリへ移っても、一覧が一致して 0 を返し得る。終了時に git 自身の解決をやり直して比べる。
+new_repo; stage src/app.txt "hello"
+mkdir -p "${work_dir}/idx-a" "${work_dir}/idx-b" "${work_dir}/idx-c"
+cp -- "$(git rev-parse --path-format=absolute --git-path index)" "${work_dir}/idx-a/index"
+cp -- "${work_dir}/idx-a/index" "${work_dir}/idx-b/index"
+cp -- "${work_dir}/idx-a/index" "${work_dir}/idx-c/index"
+printf '%s\n' "x = ${token}" > leak.txt
+GIT_INDEX_FILE="${work_dir}/idx-b/index" git add -- leak.txt
+if GIT_INDEX_FILE="${work_dir}/idx-b/index" git diff --cached --name-only HEAD | grep -qxF "leak.txt"; then
+  pass "secret-scan: the swap target index really contains the leak (precondition)"
+else
+  fail "secret-scan: the swap target index really contains the leak (precondition)" "leak.txt not staged in idx-b"
+fi
+ln -sfn "${work_dir}/idx-a" "${work_dir}/idx-link"
+GIT_INDEX_FILE="${work_dir}/idx-link/index" check_scan "an index reached through a symlinked parent directory is scanned when the link is not swapped" 0
+for swap_to in idx-b idx-c; do
+  ln -sfn "${work_dir}/idx-a" "${work_dir}/idx-link"
+  rm -f "${work_dir}/deleted"
+  rc=0
+  DELETE_INDEX_ON_ARG=-U0 DELETE_INDEX_PATH="${work_dir}/idx-link" DELETE_INDEX_SYMLINK_TO="${work_dir}/${swap_to}" DELETE_INDEX_FLAG="${work_dir}/deleted" \
+    GIT_INDEX_FILE="${work_dir}/idx-link/index" PATH="${shim_dir}:${PATH}" LC_ALL="${utf8_locale}" run_bounded "${HOOK_BASH}" "${SECRET_SCAN}" || rc=$?
+  if [ -e "${work_dir}/deleted" ] && [ "${rc}" -eq 2 ] \
+    && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+    pass "secret-scan: a parent-directory symlink of the index swapped to ${swap_to} during the scan is a scan failure (2)"
+  else
+    fail "secret-scan: a parent-directory symlink of the index swapped to ${swap_to} during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+done
+
 
 # ---- 除外の一覧の大きさと引数の長さ（#6053）
 # 登録名ごとの exclude を並べると、有効な一覧（64 KiB 以内）でも引数が macOS の上限を超えて git を起動できなくなる。
@@ -383,10 +414,13 @@ expect_out "a failing file listing reports its own message" "secret-scan: failed
 
 # diff.submodule=log が設定されていても、gitlink を含む index で区画の対応が崩れず走査できる（--submodule=short の明示）
 new_repo; stage_lock
+# 設定を有効にしたまま、登録名の下の除外（区画を落とす分岐）と未登録の名前の検出を同時に確かめる（登録名の区画が無いと除外の経路を通らない）
 git update-index --add --cacheinfo 160000,1111111111111111111111111111111111111111,docs/spec
+stage .agents/skills/vendored-a/x.md "x = ${token}"
 stage .agents/skills/unreg/x.md "x = ${token}"
 git config diff.submodule log
-SCAN_BIN="${small_bin}" check_scan "diff.submodule=log does not break the section count" 1 .agents/skills/unreg/x.md
+SCAN_BIN="${small_bin}" check_scan "diff.submodule=log keeps the registered exclusion and the unregistered detection" 1 .agents/skills/unreg/x.md
+expect_out "diff.submodule=log counts only the unregistered path" "secret-scan: total: 1 finding(s) in 1 file(s)"
 git config --unset diff.submodule
 
 # 登録名の下の変更と gitlink が同じ diff にあっても、登録名の下だけが落ち、未登録の名前は走査される（区画の対応と突き合わせの経路）
