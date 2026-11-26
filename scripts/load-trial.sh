@@ -20,14 +20,16 @@ cd "${ROOT_DIR}"
 main_test="small_trial_run_writes_record_without_requirement_values"
 rc=0
 out="$(FANDHE_AUTH_LOAD_TRIAL_PRINT=1 cargo test -p fandhe-auth-load-harness --test trial_run --locked -- --exact "${main_test}" --show-output)" || rc=$?
-# 試験の失敗は契約どおり 1 に揃える（cargo の 101 等を伝播しない）
+# 試験の失敗は契約どおり 1 に揃える（cargo の 101 等を伝播しない）。
+# 失敗時は捕捉した出力（libtest の診断・記録の本文を含みうる）を再掲しない。照合を通っていない本文を出さない（fail-closed。SECR-23）。
+# コンパイルの診断などは cargo が標準エラーへ直接出す
 if [ "${rc}" -ne 0 ]; then
-  printf '%s\n' "${out}"
-  echo "error: load trial test failed" >&2
+  echo "error: load trial test failed (the captured test output is not printed; run the test directly to inspect)" >&2
   exit 1
 fi
 if ! printf '%s\n' "${out}" | grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;'; then
-  printf '%s\n' "${out}"
+  # 件数の行（libtest の固定の形）だけを出し、本文は出さない
+  printf '%s\n' "${out}" | grep -E '^test result:' >&2 || true
   echo "error: expected exactly one passed load trial main test (0 ignored)" >&2
   exit 1
 fi

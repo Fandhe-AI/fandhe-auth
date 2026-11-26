@@ -60,7 +60,10 @@ const META: [&str; 6] = [
 
 #[test]
 fn small_trial_run_writes_record_without_requirement_values() {
-    let hub = HubStubComponent::new(hub_config());
+    // 照合の登録簿は、stub へ実際に渡す設定そのもの（同じインスタンス）から、渡す前に作る。
+    let cfg = hub_config();
+    let registry = stdout_registry(&cfg);
+    let hub = HubStubComponent::new(cfg);
     let handle = hub.handle();
     let running = Harness::start(HarnessConfig::new().with(Box::new(hub))).unwrap();
     let key = AssertionSigningKey::generate("kid-load-trial.test").unwrap();
@@ -131,7 +134,11 @@ fn small_trial_run_writes_record_without_requirement_values() {
     let record = LoadRecord::new(&evidence, recorded_at, vec![target]).unwrap();
     let path = record.write_new(&dir).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(text, record.to_string());
+    // 失敗診断に記録の本文を出さないため、本文を含む比較は固定の文言にする（SECR-23）。
+    assert!(
+        text == record.to_string(),
+        "written record differs from Display"
+    );
 
     let name = path.file_name().unwrap().to_str().unwrap();
     let pid = std::process::id();
@@ -139,11 +146,17 @@ fn small_trial_run_writes_record_without_requirement_values() {
     assert!(it_path.parent() == path.parent() && it_path.exists());
 
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines[0], "format: fandhe-auth-load-record/1");
-    assert_eq!(lines[1], format!("run_record_file: {it_name}"));
-    assert_eq!(
-        lines[2],
-        format!("run_started_at: {}", it_record_started_line(&it_record))
+    assert!(
+        lines[0] == "format: fandhe-auth-load-record/1",
+        "format line differs"
+    );
+    assert!(
+        lines[1] == format!("run_record_file: {it_name}"),
+        "run_record_file line differs"
+    );
+    assert!(
+        lines[2] == format!("run_started_at: {}", it_record_started_line(&it_record)),
+        "run_started_at line differs"
     );
     let count = |p: &str| lines.iter().filter(|l| l.starts_with(p)).count();
     assert_eq!(count("stage:"), 2);
@@ -172,9 +185,12 @@ fn small_trial_run_writes_record_without_requirement_values() {
         if META.iter().any(|m| l.starts_with(m)) {
             continue;
         }
-        assert!(l.contains(" class=") && l.contains(" refs="), "{l}");
+        assert!(
+            l.contains(" class=") && l.contains(" refs="),
+            "a record line lacks class= or refs="
+        );
     }
-    assert_eq!(*lines.last().unwrap(), "judgment:");
+    assert!(*lines.last().unwrap() == "judgment:", "last line differs");
     assert!(text.ends_with('\n'));
 
     // 設定の目印・出力先のパスが出ない。
@@ -188,7 +204,10 @@ fn small_trial_run_writes_record_without_requirement_values() {
     // 上書きしない: 同じ記録をもう一度書くと別名の新しいファイルになる。
     let path2 = record.write_new(&dir).unwrap();
     assert_ne!(path, path2);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    assert!(
+        std::fs::read_to_string(&path).unwrap() == text,
+        "re-written record differs"
+    );
 
     running.stop().unwrap();
     std::fs::remove_file(&path).unwrap();
@@ -201,18 +220,19 @@ fn small_trial_run_writes_record_without_requirement_values() {
     if std::env::var_os("FANDHE_AUTH_LOAD_TRIAL_PRINT").is_some_and(|v| v == "1") {
         // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 3 欄に入れた値の全文）の
         // 生・base64・base64url・16 進の各形と JWT の形で走査する。一致したら本文を出さず失敗させる。
-        let body = printable_body(&text, &stdout_registry()).unwrap();
+        let body = printable_body(&text, &registry).unwrap();
         println!("{body}");
     }
 }
 
 /// 標準出力へ出す本文の走査用の登録簿: 主試験が stub の設定の 3 欄へ入れた値の全文。
-fn stdout_registry() -> Vec<Vec<u8>> {
-    let cfg = hub_config();
+/// 渡す設定の文字列の欄 4 つ（`client_id`・`public_host`・`jwks_uri`・`logout_receiver_uri`）をすべて入れる。
+fn stdout_registry(cfg: &HubStubConfig) -> Vec<Vec<u8>> {
     vec![
         cfg.client_id.get().clone().into_bytes(),
         cfg.public_host.get().clone().into_bytes(),
         cfg.jwks_uri.get().clone().into_bytes(),
+        cfg.logout_receiver_uri.get().clone().into_bytes(),
     ]
 }
 
@@ -562,6 +582,22 @@ fn matcher_detects_registered_hex_written_through_write_new() {
         n >= 1,
         "registered hex value written via write_new not detected"
     );
+}
+
+/// 標準出力用の登録簿はログアウトの受信 URI を含み、その符号化した形（base64・base64url・16 進）を含む本文を拒否する。
+/// 登録簿から外れていると、平文の目印（`HOST_MARK`）の無い符号化の表現が照合から漏れる（SECR-23）。
+#[test]
+fn stdout_registry_covers_logout_receiver_uri_in_encoded_forms() {
+    let cfg = hub_config();
+    let registry = stdout_registry(&cfg);
+    assert_eq!(registry.len(), 4);
+    let uri = cfg.logout_receiver_uri.get().clone().into_bytes();
+    assert!(registry.contains(&uri));
+    for f in forms(&uri) {
+        let text = format!("note: {}\n", String::from_utf8(f).unwrap());
+        assert!(printable_body(&text, &registry).is_err());
+        assert!(printable_body(&text, &[]).is_ok());
+    }
 }
 
 /// 出力の走査（`printable_body`）は、登録簿の値の各形・JWT の形が混ざった本文を出さず、通常の本文は通す。
