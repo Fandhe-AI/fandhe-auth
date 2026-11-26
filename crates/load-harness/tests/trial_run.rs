@@ -203,7 +203,7 @@ fn small_trial_run_writes_record_without_requirement_values() {
 
     // 上書きしない: 同じ記録をもう一度書くと別名の新しいファイルになる。
     let path2 = record.write_new(&dir).unwrap();
-    assert_ne!(path, path2);
+    assert!(path != path2, "write_new reused the same file name");
     assert!(
         std::fs::read_to_string(&path).unwrap() == text,
         "re-written record differs"
@@ -218,14 +218,14 @@ fn small_trial_run_writes_record_without_requirement_values() {
     // `make load-trial`（`FANDHE_AUTH_LOAD_TRIAL_PRINT=1`・--show-output）で明示的に選んだときだけ本文を出す。
     // 通常の `make test` では出さない（失敗時に本文が CI ログへ残らない。SECR-23）。
     if std::env::var_os("FANDHE_AUTH_LOAD_TRIAL_PRINT").is_some_and(|v| v == "1") {
-        // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 3 欄に入れた値の全文）の
+        // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 4 欄に入れた値の全文）の
         // 生・base64・base64url・16 進の各形と JWT の形で走査する。一致したら本文を出さず失敗させる。
         let body = printable_body(&text, &registry).unwrap();
         println!("{body}");
     }
 }
 
-/// 標準出力へ出す本文の走査用の登録簿: 主試験が stub の設定の 3 欄へ入れた値の全文。
+/// 標準出力へ出す本文の走査用の登録簿: 主試験が stub の設定の 4 欄へ入れた値の全文。
 /// 渡す設定の文字列の欄 4 つ（`client_id`・`public_host`・`jwks_uri`・`logout_receiver_uri`）をすべて入れる。
 fn stdout_registry(cfg: &HubStubConfig) -> Vec<Vec<u8>> {
     vec![
@@ -258,7 +258,7 @@ fn it_record_started_line(r: &fandhe_auth_it_harness::RunRecord) -> String {
 //
 // AAUD-30・AAUD-31 の方法（登録簿の各値を生・base64・base64url・16 進の形で出力に掛け、一致の件数を数える）を
 // ハーネスの出力に当てはめたもので、AAUD-30・AAUD-31 を満たしたものではない（実環境の走査は Hub〔`AOPS-73`〕）。
-// 対象は「stub の設定の 3 欄から負荷の記録へ値が流れないこと」の回帰の検出と、it-run の記録（設定の入る口
+// 対象は「stub の設定の 4 欄から負荷の記録へ値が流れないこと」の回帰の検出と、it-run の記録（設定の入る口
 // `with_hub_stub_record` を通して書いたもの）に登録簿の値が現れないことの確認まで。it-run の記録に入るのは
 // 欄名（`&'static str`）と印（`ValueMark`）だけで、設定の値が届く経路は無い。そのため it-run の記録側の
 // 陽性対照は置かない（設定から値が届く経路が無い）。照合そのものの検出力は負荷の記録側の陽性対照で見る。
@@ -477,27 +477,30 @@ fn write_record_for(cfg: HubStubConfig, interval: &str) -> Written {
     out
 }
 
-/// 登録簿と、その値を呼び出し元の入力（接続の設定の 3 欄）へ入れた構成。
-/// 登録簿は、乱数の 3 値（設定には 16 進で入る）と、3 欄に入れた文字列そのものの全文 3 件の計 6 件。
+/// 登録簿と、その値を呼び出し元の入力（接続の設定の 4 欄）へ入れた構成。
+/// 登録簿は、乱数の 4 値（設定には 16 進で入る）と、4 欄に入れた文字列そのものの全文 4 件の計 8 件。
 fn canary_registry_and_config() -> (Vec<Vec<u8>>, HubStubConfig) {
-    let raw: Vec<Vec<u8>> = (0..3).map(|_| random_value()).collect();
+    let raw: Vec<Vec<u8>> = (0..4).map(|_| random_value()).collect();
     let client_id = hex(&raw[0], false);
     let public_host = format!("{}.example.test", hex(&raw[1], false));
     let jwks_uri = format!("https://{}/jwks", hex(&raw[2], false));
+    let logout_receiver_uri = format!("https://{}/logout", hex(&raw[3], false));
     let mut registry = raw;
     registry.extend([
         client_id.clone().into_bytes(),
         public_host.clone().into_bytes(),
         jwks_uri.clone().into_bytes(),
+        logout_receiver_uri.clone().into_bytes(),
     ]);
     let mut cfg = hub_config();
     cfg.client_id = StubValue::test(client_id);
     cfg.public_host = StubValue::test(public_host);
     cfg.jwks_uri = StubValue::test(jwks_uri);
+    cfg.logout_receiver_uri = StubValue::test(logout_receiver_uri);
     (registry, cfg)
 }
 
-/// AAUD-30・SECR-23（方法を当てはめたもの）: stub の設定の 3 欄に入れた登録簿の値（乱数の値と欄の全文）が、
+/// AAUD-30・SECR-23（方法を当てはめたもの）: stub の設定の 4 欄に入れた登録簿の値（乱数の値と欄の全文）が、
 /// 負荷の記録と、設定の口（`with_hub_stub_record`）を通した it-run の記録の全文に、生・base64・base64url・16 進のどの形でも現れない（一致の件数が 0）。
 /// JWT の形の語も 0 件。
 #[test]
@@ -507,7 +510,12 @@ fn written_records_have_no_registered_secret_in_any_form() {
     assert!(!w.load.is_empty() && !w.it_run.is_empty());
     // 設定の口（`with_hub_stub_record`）を通った行が it-run の記録に実際に書き出されている（欄名と印だけ）。
     let it_text = String::from_utf8(w.it_run.clone()).unwrap();
-    for field in ["client_id", "public_host", "jwks_uri"] {
+    for field in [
+        "client_id",
+        "public_host",
+        "jwks_uri",
+        "logout_receiver_uri",
+    ] {
         assert!(
             it_text
                 .lines()

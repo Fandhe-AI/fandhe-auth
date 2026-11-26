@@ -27,9 +27,9 @@ if [ "${rc}" -ne 0 ]; then
   echo "error: load trial test failed (the captured test output is not printed; run the test directly to inspect)" >&2
   exit 1
 fi
-if ! printf '%s\n' "${out}" | grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;'; then
+if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' <<<"${out}"; then
   # 件数の行（libtest の固定の形）だけを出し、本文は出さない
-  printf '%s\n' "${out}" | grep -E '^test result:' >&2 || true
+  grep -E '^test result:' <<<"${out}" >&2 || true
   echo "error: expected exactly one passed load trial main test (0 ignored)" >&2
   exit 1
 fi
