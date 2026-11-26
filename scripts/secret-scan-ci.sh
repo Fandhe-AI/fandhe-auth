@@ -3,6 +3,7 @@
 #   scripts/secret-scan-ci.sh [<走査対象のリポジトリのパス>]   既定は本スクリプトのあるリポジトリ
 # 検出器・陰性対照は本スクリプトと同じリポジトリ（CI では PR が書き換えられない版。PR では保護された main の先端）のものを使い、
 # 走査対象はデータとして渡す。公開ログには規則 ID・件数・固定の診断文だけを出す。
+# 検査不能（2）のときは、lib.sh の許可リストと行全体が完全一致する検出器の診断文も通す（#6036）。
 # 走査するのは HEAD を sha に固定して作った専用の一時 index（作業ツリーの index は読まない）。
 # 検出器の出力は一度ファイルへ受け、規則 ID・件数の行（--summary の出力形）だけを通す。ファイル名・値・
 # git のエラー文は出さない（パスに値が含まれ得る。SECR-23）。
@@ -183,11 +184,15 @@ case "${rc}" in
     fi
     ;;
   1)
-    echo "secret-scan-ci: findings reported; details are withheld on the public log. Re-run locally: make secret-scan" >&2
+    echo "secret-scan-ci: findings reported; details are withheld on the public log. Re-run locally on a clean checkout of the scanned commit: make secret-scan" >&2
     exit 1
     ;;
   *)
-    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log. Re-run locally: make secret-scan" >&2
+    # 検査不能のときだけ、検出器の固定の診断文を許可リスト（lib.sh。陰性対照と共有）との行全体の完全一致で通す。
+    # 値・パス・git の生の診断は通さない（SECR-23）。失敗は無視する（既に検査不能（2）で終える）。
+    secret_scan_fixed_diagnostics > "${work_dir}/allowed-diag" 2> /dev/null || true
+    grep -aFx -f "${work_dir}/allowed-diag" "${out}" >&2 2> /dev/null || true
+    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log. Re-run locally on a clean checkout of the scanned commit: make secret-scan" >&2
     exit 2
     ;;
 esac

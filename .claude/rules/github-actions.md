@@ -417,7 +417,7 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
   新しい skill を足す PR は、main の一覧にまだ名前が無いため中身が全部走査される。誤検出が出たときの扱い（除外の範囲・手順）は人が決める。
   lock だけを先に main へ入れて名前を事前登録する運用は、後続の PR が足す本文を初回から走査対象外にするため案内しない
 - 取得は匿名で `GITHUB_TOKEN` を使わないため、ジョブの権限は `permissions: {}` にする
-- 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
+- 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。検査不能（2）のときは、共有の許可リスト（`scripts/lib.sh`）と行全体が完全一致する固定の診断文も出す（#6036）。`if:` で skip せず、`ci-complete` の `needs` に入れる
 - 既知の限界: `ci.yml` のジョブの定義（この節の `secret scan (tracked files)`・`ci-complete`）は、今も PR が書き換えられる（`D-2026-11-21-18`。#5985 で追跡。人の担当）
   - これを補うのが、組織の ruleset が固定した SHA で要求する `trust-root-secret-scan.yml`（`D-2026-11-21-19`・`D-2026-11-22-4`）。
     補えるのは「必須チェックと集約ジョブ」の節の (b) の条件が満たされている間だけ。(a) の間と、(a)・(b) のどちらでもない間は補えない
