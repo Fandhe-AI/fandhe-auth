@@ -466,7 +466,25 @@ mod tests {
             TargetName::new("route_a").unwrap(),
             IntervalName::new(RECORD_INTERVALS[0]).unwrap(),
         );
-        let mut run = run_stages(new_clock, &ok_spec, &plan(), || CallResult::Ok).unwrap();
+        // failure_metric の行を出すため、成功と失敗を交互に返す（2 試行）。
+        let two = StagePlan::new(
+            vec![StageConfig::new(LoadConfig::new(1, 2, 0).unwrap(), 1).unwrap()],
+            MetricKey::P99Ns,
+            StageLimits::new(4, 4, 100, 100).unwrap(),
+        )
+        .unwrap();
+        let calls = std::sync::atomic::AtomicU64::new(0);
+        let mut run = run_stages(new_clock, &ok_spec, &two, || {
+            if calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .is_multiple_of(2)
+            {
+                CallResult::Ok
+            } else {
+                CallResult::Rejected
+            }
+        })
+        .unwrap();
         run.interval = IntervalName::new(&long).unwrap();
         // metric・failure_metric の区間名は各 RunSummary のマップのキー由来のため、同じ長さのキーへ差し替える。
         for st in &mut run.stages {
@@ -484,7 +502,7 @@ mod tests {
         }
         let text = run.to_string();
         assert!(text.contains(&format!("interval={long}")));
-        for key in ["metric", "worst_run"] {
+        for key in ["metric", "failure_metric", "worst_run"] {
             assert!(
                 text.lines().any(|l| l.starts_with(&format!("{key}: "))
                     && l.contains(&format!("interval={long} "))),

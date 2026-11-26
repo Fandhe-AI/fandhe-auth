@@ -49,6 +49,10 @@ const MAX_WORD_BYTES: usize = 64;
 
 /// 記録に出してよい値の名前の固定語彙（仮置き。人が確認する。SECR-23・`load.md` の 2・6）。
 /// 呼び出し元は足せない。設定由来の値が名前の欄を通って記録に出る経路を塞ぐ（#6038）。足すのは人（PR のレビュー）。
+///
+/// 現在の語彙は `p99_target` だけで、これは `AUDP-29` により `undecided`（値なし）の区分にだけ使える（`NAME_CLASS_RULES`）。
+/// そのため公開の口から作れる比べる値の行は `p99_target` の `undecided` だけで、`external`・`test_condition`・`measured` の行は
+/// 公開の口からは作れない（`ClassNotAllowed`）。これらの区分の名前は、用途が決まったときに人がレビューして語彙へ足す（TASK-12）。
 pub const VALUE_NAMES: [&str; 1] = ["p99_target"];
 
 /// 記録に出してよい出典の ID の固定語彙（仮置き。人が確認する。SECR-23・`load.md` の 6）。
@@ -234,6 +238,8 @@ pub struct ValueName(String);
 
 impl ValueName {
     /// 記録に出してよい名前だけを作る。語彙の外は誤りにする（自由な名前を出さない。SECR-23）。
+    /// 現在の語彙は `p99_target` だけで、`ComparisonValue::new` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する
+    /// （[`VALUE_NAMES`] の説明）。
     ///
     /// # Errors
     /// 文字種・長さの規則を満たさないか、固定語彙 [`VALUE_NAMES`] に無いとき [`LoadRecordError::InvalidName`]。

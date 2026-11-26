@@ -413,7 +413,7 @@ judgment:
   利用条件: 出力先のディレクトリとその祖先は呼び出し元だけが変更できること。`create_new` の排他性は一時ファイルを開く時点だけで、書き込み後の `hard_link` はパスを引き直すため、他の利用者が書けるディレクトリでは「書ききった完成品だけを公開する」保証は成り立たない（検査済みと別のファイルを公開しうる）。「既存のファイルを上書きしない」は崩れない（`hard_link` は最終名が既にあれば `EEXIST` で失敗し `WriteFailed`）。一時ファイルの名前は予測できるため、他の利用者が書けるディレクトリでは名前を先に作られて `WriteFailed` になりうる（上書きではなく失敗で止まる）。
 - 入力の検査（仮置き）: `ValueName::new` は固定語彙 `VALUE_NAMES` に含まれる名前だけを受ける。`RefId::new` は固定語彙 `REF_IDS`（spec の ID 等）に完全一致するものだけを受け、予約語（`none`・`harness_config`・`measured`）を拒否する。
   語彙は引数で受けないため、設定由来の値は通らない（6 の記録の出力先の段落。#6038・TASK-12）。語彙の中身は仮置きで、足すのは人。
-  `p99_target` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する（`AUDP-29`）。`RunRecordFile` は生成元と同じ整数型で解析し、再整形した名前と一致しない名前（先頭ゼロ等）を拒否する。
+  `p99_target` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する（`AUDP-29`）。現在の語彙は `p99_target` だけのため、公開の口から記録できる比べる値の行は `p99_target` の `undecided` だけで、`external`・`test_condition`・`measured` の行は公開の口からは作れない（`ClassNotAllowed`。区分の規則自体は上のとおり保つ）。これらの区分の名前は、用途が決まったときに人がレビューして `VALUE_NAMES` へ足す（TASK-12）。`RunRecordFile` は生成元と同じ整数型で解析し、再整形した名前と一致しない名前（先頭ゼロ等）を拒否する。
   `RunRecordFile` の起動秒と `run_started_at` が違えば `RunSession::new` が `RunStartMismatch`。申告した構成要素が空、または測定の条件で起動していなければ、`RunSession::run` が対象を 1 回も呼ばずに `InvalidRunEvidence`（stub を申告した実行に stub の起動を載せない構成が付く組を作らない。stub の `note:` は条件の `Display`）。段階の実行の誤りは `Stage`。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
   値の行の違反の理由は固定の列挙 `InvalidValueReason` で持つ（`&'static str` を公開しない）。
 - 時刻の RFC 3339 の整形は、通常の依存を 0 に保つため it-harness の `UtcTimestamp` と同じ変換を `record` に重複して持つ。
