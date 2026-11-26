@@ -152,6 +152,8 @@ if [ "${sc_rc}" -eq 1 ] && [ "$(cat "${work_dir}/out")" = "${sc_want}" ]; then
 else
   fail "shellcheck-staged: output of multi-file batches is grouped per batch and ordered by batch number, not by input order" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
 fi
+sc_jobs=8
+cd "${work_dir}"
 
 # getconf が桁あふれする数字の列を返しても、比較が誤って 0 のまま素通りしない。固定値（4）に落ちて全件が検査され、0 で終わる
 # （期待は「正常に検査されて 0」。2 で止まるのではなく、検査の範囲が変わらないことを確かめる）

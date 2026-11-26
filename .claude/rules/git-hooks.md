@@ -53,10 +53,12 @@ description: >
     `scripts/hooks/shellcheck-staged.sh` で並列に流す（最大 `getconf _NPROCESSORS_ONLN` 個のバッチに分け、
     バッチごとに shellcheck を 1 回だけ呼ぶ。起動の回数はファイル数に比例しない。
     lefthook は glob が 2 つあると同じファイルを 2 回渡すため、重複は除く）。検査時間はほぼ行数に比例するので、
-    最大だった `test-hooks.sh`（2818 行・単独で約 1.9 秒）は共有部と 9 つの part（各約 100〜440 行。shellcheck-staged の試験は part 8・9 と道具 `test-hooks-sc-lib.sh`）に分けた（入口は変えない）。
+    最大だった `test-hooks.sh`（2818 行・単独で約 1.9 秒）は共有部と 7 つの part（各約 300〜440 行）に分けた（入口は変えない）。
     この実装の `--all-files` の summary は約 1.0〜1.35 秒（2026-11-21 に 10 コアの 1 台で測定。バッチ単位の実装は 5 回で 1.01〜1.11 秒だが、直後の load average が 5 前後で他の負荷が残っていた。
     それ以前の、ほかの負荷が無いときの 12 回は 1.1〜1.35 秒。ビルドと並走すると 2 秒前後）で、予算の 1 秒未満には届いていない
     （残りは shellcheck 自体の CPU 時間で、秘密情報の検査と editorconfig-checker の並走も効く）。予算の値は変えていない。残りは #6056（TASK-6）で追う
+  - 追記（構成の変更。上の計測値は 7 分割の構成のときのもので、書き換えない）: shellcheck-staged の試験を足したため、
+    `test-hooks.sh` の分割は共有部と 9 つの part（各約 100〜440 行。試験は part 8・9 と道具 `test-hooks-sc-lib.sh`）になった。この 9 分割での `--all-files` の再計測はしていない（未計測）
 - `secret-scan.sh` 冒頭の正規表現自己テストは ms 単位の fail-closed ガードであり、
   上記「フックスクリプト自体のテスト」には当たらない。削除・CI への移動はしない
 
