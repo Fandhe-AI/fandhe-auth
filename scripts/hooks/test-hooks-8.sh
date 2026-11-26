@@ -252,17 +252,90 @@ else
   fail "secret-scan: a /dev/tcp-like index path is never opened (no connection attempt)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-# T11: 不在判定の経路で開かない（FIFO が現れても止まらない）。stat の shim は使わず、FIFO を index にして 2 で即座に終わることを確かめる
+# run_watched <秒数> <コマンド...>: コマンドを背景で実行し、時間内に終わらなければ kill して 124 を返す（timeout コマンドは macOS 標準に無い）。
+# 終了コードは rc に入れる。標準出力・標準エラーは呼び出し側のリダイレクトを受け継ぐ。
+run_watched() {
+  local limit="$1" pid i=0
+  shift
+  "$@" &
+  pid=$!
+  while kill -0 "${pid}" 2> /dev/null; do
+    if [ "${i}" -ge $((limit * 10)) ]; then
+      kill -9 "${pid}" 2> /dev/null || true
+      wait "${pid}" 2> /dev/null || true
+      rc=124
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  rc=0
+  wait "${pid}" || rc=$?
+}
+
+# T11: FIFO を index にしても止まらず 2 で終わる（通常ファイルの確認で止まる経路）。打ち切りは run_watched で行う
 new_repo; stage src/app.txt "hello"
 t11_fifo="${work_dir}/t11-fifo"
 rm -f "${t11_fifo}"; mkfifo "${t11_fifo}"
 rc=0
-GIT_INDEX_FILE="${t11_fifo}" LC_ALL="${utf8_locale}" timeout 20 "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+GIT_INDEX_FILE="${t11_fifo}" LC_ALL="${utf8_locale}" run_watched 20 "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1
 if [ "${rc}" -eq 2 ]; then
   pass "secret-scan: a FIFO index path does not hang the hook (2)"
 else
   fail "secret-scan: a FIFO index path does not hang the hook (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 rm -f "${t11_fifo}"
+
+# T12: 不在と読んだ後、stat の照会までの間に index の場所が FIFO に変わっても、開かずに待たず 2（index_absent_confirmed の経路）
+new_repo; stage src/app.txt "hello"
+stat12_dir="${work_dir}/stat12-shim"
+mkdir -p "${stat12_dir}"
+t12_path="${work_dir}/t12-index"
+rm -f "${t12_path}" "${work_dir}/t12-flag"
+REAL_STAT="$(command -v stat)"
+export REAL_STAT
+cat > "${stat12_dir}/stat" <<'EOF12'
+#!/bin/sh
+# 最初の照会の直前に、不在だった index の場所を FIFO に替える（一度だけ）
+if [ ! -e "${T12_FLAG}" ]; then
+  : > "${T12_FLAG}"
+  mkfifo "${T12_PATH}"
+fi
+exec "${REAL_STAT}" "$@"
+EOF12
+chmod +x "${stat12_dir}/stat"
+rc=0
+GIT_INDEX_FILE="${t12_path}" T12_FLAG="${work_dir}/t12-flag" T12_PATH="${t12_path}" PATH="${stat12_dir}:${PATH}" LC_ALL="${utf8_locale}" \
+  run_watched 20 "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1
+if [ -e "${work_dir}/t12-flag" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an absent index that becomes a FIFO before the stat check is a scan failure (2), not a hang"
+else
+  fail "secret-scan: an absent index that becomes a FIFO before the stat check is a scan failure (2), not a hang" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rm -f "${t12_path}"
+
+# T13: 親ディレクトリのリンクの参照先が走査中に変わったら、開始時に index があっても 2（index_paths_unchanged。#6047）
+new_repo; stage src/app.txt "hello"
+t13_dir="${work_dir}/t13"
+rm -rf "${t13_dir}"
+mkdir -p "${t13_dir}/real1" "${t13_dir}/real2"
+cp "$(git rev-parse --git-path index)" "${t13_dir}/real1/index"
+cp "$(git rev-parse --git-path index)" "${t13_dir}/real2/index"
+ln -s "${t13_dir}/real1" "${t13_dir}/lnk"
+rm -f "${work_dir}/t13-flag"
+sed -e 's/T8_FLAG/T13_FLAG/g' -e 's/T8_TO/T13_TO/g' -e 's/T8_LINK/T13_LINK/g' "${git8b_dir}/git" > "${git8b_dir}/git13"
+mkdir -p "${work_dir}/git13-shim"
+mv "${git8b_dir}/git13" "${work_dir}/git13-shim/git"
+chmod +x "${work_dir}/git13-shim/git"
+rc=0
+GIT_INDEX_FILE="${t13_dir}/lnk/index" T13_FLAG="${work_dir}/t13-flag" T13_TO="${t13_dir}/real2" T13_LINK="${t13_dir}/lnk" PATH="${work_dir}/git13-shim:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/t13-flag" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an existing index whose parent link was retargeted during the scan is a scan failure (2)"
+else
+  fail "secret-scan: an existing index whose parent link was retargeted during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
 
 finish "part 8"

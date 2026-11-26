@@ -112,7 +112,7 @@ fi
 # 確認より前に外部コマンドを呼ばない（`command -v` はシェルの組み込み）。lib.sh は検出器の複製だけで動くよう読み込まない。
 # 欠けたコマンドは「失敗の吸収」になり得る（例: 監視の sleep を起動できず、待ち時間なしで読み取りを打ち切る）。
 # 固定の文言は fd 4 へ出す（--summary でも出る）。使うコマンドを足したら、この一覧にも足す（試験が踏む経路の漏れを検出する。踏まない経路は検出できない）。
-for _c in git readlink mktemp rm cp head wc sleep tr cmp; do
+for _c in git readlink mktemp rm cp head wc sleep tr cmp stat; do
   if ! command -v "${_c}" > /dev/null 2>&1; then
     echo "secret-scan: required command not found on PATH: ${_c}; aborting" >&4
     exit 2
@@ -395,6 +395,13 @@ elif ! index_absent_confirmed; then
   # 「無い」と読んだ理由が ENOENT と確かめられない（権限の変化等）。空として扱わず 2（#6047）。
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
+fi
+# 終了時の再解決（index_paths_unchanged）のため、固定前の GIT_INDEX_FILE の有無と値を控える。
+orig_gif_set=0
+orig_gif=""
+if [ "${GIT_INDEX_FILE+set}" = set ]; then
+  orig_gif_set=1
+  orig_gif="${GIT_INDEX_FILE}"
 fi
 export GIT_INDEX_FILE="${snap_index}"
 # 空の tree の ID は常に解決する。未作成ブランチの staged も、基準を暗黙にせず空の tree を明示して固定する
@@ -1357,9 +1364,33 @@ esac
 # リンクは開始時も終了時も辿らず 2（解く前のパスで判定する）。
 # 残る窓: 2 回目の複写から exit までの間の index の置き換え、最後の HEAD の照合から exit までの間に動いた HEAD。窓を狭めるだけで、無くならない
 # （監視付きの複写・ロックの取得はしない。git-hooks.md の (f)）。
+# index_paths_unchanged: 固定前と同じ環境で index の経路（解く前・解いた後）を取り直し、開始時の値と同じときだけ 0 を返す（#6047）。
+# 親ディレクトリのシンボリックリンクの参照先が走査中に変わると、末尾だけを見る index_is_link では検出できず、
+# 古い index を 2 回比べて 0 を返し得る。取得の失敗・食い違いは 1（2 にする）。パスを出力しない。
+# shellcheck disable=SC2030,SC2031 # 固定前の環境で取り直すため、サブシェルの中でだけ GIT_INDEX_FILE を戻す（意図）
+index_paths_unchanged() {
+  local now_abs now_raw
+  now_abs="$(
+    if [ "${orig_gif_set}" -eq 1 ]; then export GIT_INDEX_FILE="${orig_gif}"; else unset GIT_INDEX_FILE; fi
+    g rev-parse --path-format=absolute --git-path index && printf x
+  )" || return 1
+  now_raw="$(
+    if [ "${orig_gif_set}" -eq 1 ]; then export GIT_INDEX_FILE="${orig_gif}"; else unset GIT_INDEX_FILE; fi
+    g rev-parse --git-path index && printf x
+  )" || return 1
+  now_abs="${now_abs%x}"
+  now_abs="${now_abs%$'\n'}"
+  now_raw="${now_raw%x}"
+  now_raw="${now_raw%$'\n'}"
+  [ "${now_abs}" = "${orig_index}" ] && [ "${now_raw}" = "${raw_index}" ]
+}
 # verify_index_unchanged <複写先> <一覧の出力先>
 verify_index_unchanged() {
   local copy="$1" listing="$2" cmp_rc=0
+  if ! index_paths_unchanged; then
+    echo "secret-scan: cannot snapshot the index; aborting" >&4
+    exit 2
+  fi
   if index_is_link; then
     # 走査中にリンクへ替わった（固定時はリンクでなかった）。辿らず 2。
     echo "secret-scan: cannot snapshot the index; aborting" >&4
