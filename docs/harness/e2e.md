@@ -195,7 +195,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 ### 実行の方法
 
-- `make test`（`cargo test --workspace --locked`）: workspace 全体の試験を流す。ドライバ不要で、この crate では実ブラウザ・実ドライバを要さない試験（偽のドライバを使う試験と、`crates/e2e-harness/tests/run_record.rs` の記録形式・保存処理の統合試験と、`crates/e2e-harness/src/record.rs` 内の単体試験）だけが流れ（`#[ignore]` のブラウザ E2E は対象外）、ブラウザ E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
+- `make test`（`cargo test --workspace --locked`）: workspace 全体の試験を流す。ドライバ不要で、この crate では実ブラウザ・実ドライバを要さない試験だけが流れ（例えば、偽のドライバを使う試験、`crates/e2e-harness/tests/` の `scope.rs`・`test_origin.rs`・`lifecycle.rs`・`webdriver_client.rs`・`run_record.rs`〔記録形式・保存処理〕、`crates/e2e-harness/src/record.rs` 内の単体試験。一覧は `tests/` の実際の構成に従う）（`#[ignore]` のブラウザ E2E は対象外）、ブラウザ E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
 - `make e2e-chrome`（`scripts/e2e-chrome.sh`）・`make e2e-firefox`（`scripts/e2e-firefox.sh`）: `#[ignore]` の登録・認証の試験を target ごとに流す。
   引数は受け付けない。target ごとに 1 件以上通らなければ失敗する。CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
 
