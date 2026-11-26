@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# scripts/hooks/ のフックスクリプト自体の回帰テストの part 8（TASK-6）。
+# 入口は test-hooks.sh（`make test-hooks`・CI の test-hooks ジョブ）。単体でも実行できる。
+# 準備・helper・例示値は test-hooks-lib.sh が持つ。part の間で状態は引き継がない。
+set -euo pipefail
+# shellcheck source=./test-hooks-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-lib.sh"
+
+# ---------------------------------------------------------------- secret-scan: 終了時の index の 2 回目の確認（#6047）
+# 終了時の確認は 2 回（HEAD の取り直しの前の index-after と、集計の直前の index-final）。
+# 1 回目の複写の後に元の index が置き換わっても、2 回目の確認で検出して 2 にする。
+# 内容（一覧）で比べるため、stat 情報だけの更新（バイトは変わるが一覧は変わらない）では 0 のまま。
+REAL_CP="$(command -v cp)"
+export REAL_CP
+cp8_dir="${work_dir}/cp8-shim"
+mkdir -p "${cp8_dir}"
+# CP8_MODE: mutate=index-after の複写の直後に元の index へ別のファイルを add する（一度だけ）。
+# stat=同じ場所で追跡ファイルの mtime だけ変えて update-index --refresh する（一度だけ。複写とのバイト差を記録する）。
+# fail-final=index-final への複写だけ失敗させる（index-after は通し、通ったことを記録する）。
+cat > "${cp8_dir}/cp" <<'EOF8'
+#!/bin/sh
+for last in "$@"; do :; done
+case "${CP8_MODE:-}:${last}" in
+  fail-final:*/index-final)
+    : > "${CP8_FLAG}.final"
+    exit 1
+    ;;
+esac
+"${REAL_CP}" "$@" || exit $?
+case "${last}" in
+  */index-after)
+    : > "${CP8_FLAG}.first"
+    if [ ! -e "${CP8_FLAG}" ]; then
+      case "${CP8_MODE:-}" in
+        mutate)
+          : > "${CP8_FLAG}"
+          (unset GIT_INDEX_FILE; "${REAL_GIT}" add -- "${CP8_ADD}")
+          ;;
+        stat)
+          : > "${CP8_FLAG}"
+          touch -t 200101010000 "${CP8_TOUCH}"
+          (unset GIT_INDEX_FILE; "${REAL_GIT}" update-index --refresh > /dev/null 2>&1 || true)
+          orig="$(unset GIT_INDEX_FILE; "${REAL_GIT}" rev-parse --path-format=absolute --git-path index)"
+          if ! cmp -s "${orig}" "${last}"; then
+            : > "${CP8_FLAG}.differs"
+          fi
+          ;;
+      esac
+    fi
+    ;;
+esac
+EOF8
+chmod +x "${cp8_dir}/cp"
+
+# T1: 1 回目の複写の後に元の index が置き換わったら 2（修正前は 0 を返していた）
+new_repo; stage src/app.txt "hello"
+printf '%s\n' "other" > extra.txt
+rm -f "${work_dir}/cp8-flag" "${work_dir}/cp8-flag.first"
+rc=0
+CP8_MODE=mutate CP8_FLAG="${work_dir}/cp8-flag" CP8_ADD=extra.txt PATH="${cp8_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/cp8-flag" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an index replaced after the first end-of-scan copy is a scan failure (2)"
+else
+  fail "secret-scan: an index replaced after the first end-of-scan copy is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T2: stat 情報だけの更新（バイトは変わるが一覧は変わらない）では誤検出しない（0）
+new_repo; stage src/app.txt "hello"
+rm -f "${work_dir}/cp8-flag" "${work_dir}/cp8-flag.first" "${work_dir}/cp8-flag.differs"
+rc=0
+CP8_MODE=stat CP8_FLAG="${work_dir}/cp8-flag" CP8_TOUCH=src/app.txt PATH="${cp8_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ ! -e "${work_dir}/cp8-flag.differs" ]; then
+  fail "secret-scan: a stat-only index update after the first copy is not a scan failure" "premise broken: the index bytes did not differ" "output: $(cat "${work_dir}/out")"
+elif [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: a stat-only index update after the first copy is not a scan failure"
+else
+  fail "secret-scan: a stat-only index update after the first copy is not a scan failure" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T3: 集計の直前の複写（index-final）の失敗は 2。1 回目の複写は通る
+new_repo; stage src/app.txt "hello"
+rm -f "${work_dir}/cp8-flag" "${work_dir}/cp8-flag.first" "${work_dir}/cp8-flag.final"
+rc=0
+CP8_MODE=fail-final CP8_FLAG="${work_dir}/cp8-flag" PATH="${cp8_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/cp8-flag.first" ] && [ -e "${work_dir}/cp8-flag.final" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a failure of the final pre-verdict index copy is a scan failure (2)"
+else
+  fail "secret-scan: a failure of the final pre-verdict index copy is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T4: 開始時に無かった index の親ディレクトリが走査中に検索できなくなったら、空として扱わず 2（#6047）。
+# ルートは権限を迂回するため、一般ユーザーのときだけ行い、ルートでは skip を明示する。
+if [ "$(id -u)" -ne 0 ]; then
+  git8_dir="${work_dir}/git8-shim"
+  mkdir -p "${git8_dir}"
+  cat > "${git8_dir}/git" <<'EOF9'
+#!/bin/sh
+# 本文の diff（-U0）の呼び出しの前に一度だけ、T4_DIR の検索権限を外す
+if [ ! -e "${T4_FLAG}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "-U0" ]; then
+      : > "${T4_FLAG}"
+      chmod 000 "${T4_DIR}"
+      break
+    fi
+  done
+fi
+exec "${REAL_GIT}" "$@"
+EOF9
+  chmod +x "${git8_dir}/git"
+  new_repo; stage src/app.txt "hello"
+  t4_dir="${work_dir}/t4-index-dir"
+  mkdir -p "${t4_dir}"
+  rm -f "${work_dir}/t4-flag"
+  rc=0
+  GIT_INDEX_FILE="${t4_dir}/index" T4_DIR="${t4_dir}" T4_FLAG="${work_dir}/t4-flag" PATH="${git8_dir}:${PATH}" \
+    LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  chmod 755 "${t4_dir}"
+  if [ -e "${work_dir}/t4-flag" ] && [ "${rc}" -eq 2 ] \
+    && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+    pass "secret-scan: a missing index whose parent became unsearchable is a scan failure (2), not an empty index"
+  else
+    fail "secret-scan: a missing index whose parent became unsearchable is a scan failure (2), not an empty index" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+else
+  echo "ok - secret-scan: a missing index whose parent became unsearchable is a scan failure (2): skipped (running as root bypasses permissions)"
+fi
+
+finish "part 8"

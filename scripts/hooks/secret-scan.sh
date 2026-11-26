@@ -321,6 +321,18 @@ fi
 index_is_link() {
   [ -L "${raw_index}" ] || [ -L "${orig_index}" ]
 }
+# index_absent_confirmed: 「元の index が無い」と読んだ状態が、本当に無い（ENOENT）と確かめられたときだけ 0 を返す（#6047）。
+# `[ -e ]` は ENOENT 以外（親ディレクトリの検索権限が走査中に外れた等の EACCES）でも偽になり、そのまま「無い（空）」と読むと
+# 0 を返し得る（fail-open）。親ディレクトリが検索できることを、存在の確認の前後で確かめて挟む（シェルの test だけ。外部コマンドを足さない）。
+# 権限の付け外しが確認の間に往復する窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。パスを出力しない。
+index_absent_confirmed() {
+  local parent="${orig_index%/*}"
+  [ -n "${parent}" ] || parent="/"
+  { [ -d "${parent}" ] && [ -x "${parent}" ]; } || return 1
+  { [ ! -e "${orig_index}" ] && [ ! -L "${raw_index}" ] && [ ! -L "${orig_index}" ]; } || return 1
+  { [ -d "${parent}" ] && [ -x "${parent}" ]; } || return 1
+  return 0
+}
 if index_is_link; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
@@ -339,6 +351,10 @@ if [ -e "${orig_index}" ]; then
     echo "secret-scan: cannot snapshot the index; aborting" >&4
     exit 2
   fi
+elif ! index_absent_confirmed; then
+  # 「無い」と読んだ理由が ENOENT と確かめられない（権限の変化等）。空として扱わず 2（#6047）。
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
 fi
 export GIT_INDEX_FILE="${snap_index}"
 # 空の tree の ID は常に解決する。未作成ブランチの staged も、基準を暗黙にせず空の tree を明示して固定する
@@ -1290,42 +1306,53 @@ case "${cmp_rc}" in
 esac
 
 # 走査中に元の index の内容が変わっていたら、固定した複写に基づく結果は実際の内容と食い違う。合格を返さず検査不能（2）にする。
-# 終了時も元の index を固定時と同じ方法で 1 回だけ複写し、2 つの一覧（ls-files -s と intent-to-add の印）を同じ複写から取る。
+# 終了時の確認は 2 回行う（#6047）。1 回目は HEAD の取り直しの前、2 回目は HEAD の取り直しの後で集計の直前。どちらも元の index を
+# 固定時と同じ方法で 1 回だけ複写し、2 つの一覧（ls-files -s と intent-to-add の印）を同じ複写から取って固定時の一覧と内容で比べる
+# （バイト比較にしない。stat 情報だけの更新で index のバイトは変わるが、一覧は変わらず、フックを時々落とす誤検出になる）。
 # 元の index を一覧ごとに開くと、2 つの呼び出しの間の更新で 2 つの一覧が別の版を見て、どちらの版とも違う組で一致し得る（#6011）。
-# git は index を lock ファイルの rename で置き換えるため、cp は 1 つの版を読む。元の index が無いときは存在しない複写のパスを
-# 指し（空として扱う）。固定時にあった index が終了時に無ければ、一覧の差とは別に有無の記録（index_pinned）で 2 にする
-# （登録 0 件の index は一覧が空のままのため）。複写の失敗は 2。固定したパスが終了時に通常ファイルでなく（FIFO・リンク等に）
-# 替わっていれば、複写せず 2。リンクは開始時も終了時も辿らず 2（解く前のパスで判定する）。
-after_index="${tmp_dir}/index-after"
-if index_is_link; then
-  # 走査中にリンクへ替わった（固定時はリンクでなかった）。辿らず 2。
-  echo "secret-scan: cannot snapshot the index; aborting" >&4
-  exit 2
-fi
-if [ -e "${orig_index}" ]; then
-  if [ ! -f "${orig_index}" ]; then
+# git は index を lock ファイルの rename で置き換えるため、cp は 1 つの版を読む。
+# 元の index が無いときは、ENOENT と確かめられた場合だけ存在しない複写のパスを指し（空として扱う）、確かめられなければ 2（index_absent_confirmed）。
+# 固定時にあった index が終了時に無ければ、一覧の差とは別に有無の記録（index_pinned）で 2 にする（登録 0 件の index は一覧が空のままのため）。
+# 複写の失敗は 2。固定したパスが終了時に通常ファイルでなく（FIFO・リンク等に）替わっていれば、複写せず 2。
+# リンクは開始時も終了時も辿らず 2（解く前のパスで判定する）。
+# 残る窓: 2 回目の複写から exit までの間の index の置き換え、2 回目の確認の途中に動いた HEAD。窓を狭めるだけで、無くならない
+# （監視付きの複写・ロックの取得はしない。git-hooks.md の (f)）。
+# verify_index_unchanged <複写先> <一覧の出力先>
+verify_index_unchanged() {
+  local copy="$1" listing="$2" cmp_rc=0
+  if index_is_link; then
+    # 走査中にリンクへ替わった（固定時はリンクでなかった）。辿らず 2。
     echo "secret-scan: cannot snapshot the index; aborting" >&4
     exit 2
   fi
-  if ! cp -- "${orig_index}" "${after_index}" 2> /dev/null; then
+  if [ -e "${orig_index}" ]; then
+    if [ ! -f "${orig_index}" ]; then
+      echo "secret-scan: cannot snapshot the index; aborting" >&4
+      exit 2
+    fi
+    if ! cp -- "${orig_index}" "${copy}" 2> /dev/null; then
+      echo "secret-scan: cannot snapshot the index; aborting" >&4
+      exit 2
+    fi
+  elif ! index_absent_confirmed; then
+    echo "secret-scan: cannot snapshot the index; aborting" >&4
+    exit 2
+  elif [ "${index_pinned}" -eq 1 ]; then
+    # 固定時にあった index が無い。登録 0 件の index は一覧が空のまま変わらないため、有無そのものを見て止める。
+    echo "secret-scan: the index changed during the scan; aborting" >&4
+    exit 2
+  fi
+  if ! GIT_INDEX_FILE="${copy}" index_listing "${listing}" 2> /dev/null; then
     echo "secret-scan: cannot snapshot the index; aborting" >&4
     exit 2
   fi
-elif [ "${index_pinned}" -eq 1 ]; then
-  # 固定時にあった index が無い。登録 0 件の index は一覧が空のまま変わらないため、有無そのものを見て止める。
-  echo "secret-scan: the index changed during the scan; aborting" >&4
-  exit 2
-fi
-if ! GIT_INDEX_FILE="${after_index}" index_listing "${tmp_dir}/index-listing-after" 2> /dev/null; then
-  echo "secret-scan: cannot snapshot the index; aborting" >&4
-  exit 2
-fi
-index_cmp_rc=0
-cmp -s "${tmp_dir}/index-listing-before" "${tmp_dir}/index-listing-after" || index_cmp_rc=$?
-if [ "${index_cmp_rc}" -ne 0 ]; then
-  echo "secret-scan: the index changed during the scan; aborting" >&4
-  exit 2
-fi
+  cmp -s "${tmp_dir}/index-listing-before" "${listing}" || cmp_rc=$?
+  if [ "${cmp_rc}" -ne 0 ]; then
+    echo "secret-scan: the index changed during the scan; aborting" >&4
+    exit 2
+  fi
+}
+verify_index_unchanged "${tmp_dir}/index-after" "${tmp_dir}/index-listing-after"
 
 # 走査中に HEAD が動いていたら、固定した ID を基準にした結果は古い。合格を返さず検査不能（2）にする
 # （未作成ブランチ・空の ID のまま始まり、走査中にブランチが作られた場合も違いに含む）。
@@ -1338,6 +1365,9 @@ if [ "${head_resolved}" -eq 1 ]; then
     exit 2
   fi
 fi
+
+# 集計の直前の 2 回目の確認（#6047）。1 回目から HEAD の取り直しまでの間に置き換わった index を見落とさない。
+verify_index_unchanged "${tmp_dir}/index-final" "${tmp_dir}/index-listing-final"
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
 total="${env_hits}"
