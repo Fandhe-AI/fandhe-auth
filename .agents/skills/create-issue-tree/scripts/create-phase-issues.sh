@@ -40,8 +40,8 @@
 #
 # 処理順: 引数 → gh・jq → spec の全件検証（owner の値を含む）→ ロック → 状態ファイルの照合（番号の重複を含む）→
 #         対象リポジトリの確定（最初の gh 呼び出し）と状態ファイルのリポジトリとの照合 → 読み取り（ルート・ルート直下・
-#         Phase 親の探索と再確認・状態ファイルの番号の実物との照合・milestone の実在）→ 状態ファイルのヘッダ・ラベルの確保
-#         （最初の書き込み）→ 起票と紐付け。spec か状態ファイルが 1 つでも不正なら gh を 1 回も呼ばずに止め、読み取りで
+#         Phase 親の探索と再確認・状態ファイルの番号の実物との照合・milestone の実在・depends_on_issues の参照先）→
+#         状態ファイルのヘッダ・ラベルの確保（最初の書き込み）→ 起票と紐付け。spec か状態ファイルが 1 つでも不正なら gh を 1 回も呼ばずに止め、読み取りで
 #         分かる不備（下の終了コード 1）では書き込まずに止める。
 #         起票と紐付けは下から: child を作る → その sub を spec 順に作って child へ紐付ける → child を Phase 親へ紐付ける
 #         → 全 child が済んでから Phase 親をルートへ紐付ける（新設した Phase 親が子の無いまま実装候補にならないように）。
@@ -80,6 +80,14 @@
 #   - ラベル名は GitHub と同じく大小を区別せずに比べる（既存の Phase:1 を phase:1 として確保・判定する）。
 #   - ラベル（phase:N と spec が使う owner ラベル）は最初の issue 作成より前に確保する。確保できなければ issue を作らない。
 #   - milestone を付ける場合は、open な milestone に同じ題名（完全一致）があることを最初の書き込みの前に確かめる。
+#   - depends_on_issues の番号は、最初の書き込みの前に重複を除いて 1 件ずつ読み、対象リポジトリの issue（PR ではない。
+#     open・closed は問わない）であることを確かめる。番号の決まっている祖先は読む前に拒否する（implement-issue-tree は
+#     祖先〔ルート・Phase 親・親 child〕への依存を無視するので、前提に書いても完了条件として効かない）。祖先はルート、確定済みの
+#     Phase 親（状態ファイル・--phase-number・探索で決まった番号）、sub に対しては状態ファイルに作成済みと記録された親 child
+#     （再開で、未作成の sub が親 child の番号を書いた場合）。番号がまだ無い祖先（Phase 親を新設する初回の実行の Phase 親、
+#     新規実行の親 child〔sub より先に同じ実行で作るので、spec を書く時点で番号が無い〕）は比べない。
+#     対象は状態ファイルに記録の無い（この実行で作る）要素の分で、どの要素もそれを作る実行で先に確かめる
+#     （この検査より前の版で作った要素は確かめられていない）。
 #   - 再利用する Phase 親の milestone は未設定のときだけ spec の値を設定し、別の値が付いていれば上書きしない。
 #   - 一時ファイルと自分が取ったロックは成否によらず削除する（trap は mktemp・ロックより先に登録）。
 #   - ルートは対象リポジトリの確定直後、最初の書き込みより前に読み、open な issue（PR ではない）でなければ止める
@@ -90,8 +98,12 @@
 # 終了コード: 0 完了 / 1 引数・spec・状態ファイルの不正、ロックが既にある、状態ファイルと対象リポジトリの食い違い、
 #            ルートが open な issue でない（closed・PR）、Phase 親が不適（指定した親・状態ファイルの親が閉じている・
 #            ルート直下に無い）、状態ファイルの番号が実物と合わない（題名の違い・closed・PR・別リポジトリ）、milestone が
-#            open で実在しない（この実行では GitHub へ書き込んでいない）/ 2 前提不備（gh・jq が使えない）/
-#            3 GitHub 操作の失敗（対象リポジトリの確定・読み取り・ラベル・作成・番号の抽出・紐付け・状態ファイルへの追記。
+#            open で実在しない、depends_on_issues の番号が PR・別リポジトリの issue（repository_url の無い応答を含む）・
+#            ルート・確定済みの Phase 親・sub の作成済みの親 child（この実行では GitHub へ書き込んでいない）/
+#            2 前提不備（gh・jq が使えない）/
+#            3 GitHub 操作の失敗（対象リポジトリの確定・読み取り〔depends_on_issues の番号を読めない・応答の形が崩れている
+#              〔対象リポジトリの issue だが番号が違う等〕場合を含む。このときは書き込み前〕・ラベル・作成・番号の抽出・紐付け・
+#              状態ファイルへの追記。
 #              途中まで作成済みのことがあるので、同じ spec と状態ファイルで再実行する。作成と記録の間の失敗は下記）/
 #            129・130・143 HUP・INT・TERM で中断（途中まで作成済みのことがある。issue の作成中だった場合は下記）。
 # 成功時の stdout 最終行: result=created root=<n> phase=<N> phase_number=<n> children=<k>。エラーは stderr へ出す。
@@ -160,6 +172,11 @@ done
   || die 1 "--phase-number は正整数で指定してください。"
 [[ -n "${SPEC}" ]] || die 1 "--spec がありません。${USAGE}"
 [[ -n "${STATE}" ]] || die 1 "--state がありません。${USAGE}"
+# ハイフンで始まる相対パスは ./ を付けて 1 回だけ正規化する。以降は jq・chmod・dirname・mkdir・rmdir・rm（ロックは
+# <状態ファイル>.lock）に位置引数で渡すので、そのままではオプションとして解釈される（jq は Unknown option、mkdir・dirname は
+# illegal option）。`--` はコマンドと版によって効くか確かでないので頼らない
+[[ "${SPEC}" == -* ]] && SPEC="./${SPEC}"
+[[ "${STATE}" == -* ]] && STATE="./${STATE}"
 [[ -f "${SPEC}" && -r "${SPEC}" ]] || die 1 "spec を読めません: ${SPEC}"
 # 状態ファイルはシンボリックリンクを辿らない（共有の一時ディレクトリで、他人が置いたリンク先へ書き込まないように）
 if [[ -L "${STATE}" ]]; then
@@ -337,7 +354,7 @@ def chk_owner($p):
     then ["\($p).owner: \"\" / \"owner:human\" のどちらかにする"] else [] end;
 # depends_on: 要素のパスの配列。$self は自分の位置（refpos と同じ形）、$root は spec 全体。
 # 指せるのは作成順で自分より先に作られる要素（同じ親の先行 sub・先行する child とその sub）だけ。sub から自分の親 child は
-# 作成順では先だが祖先なので拒否する（implement-issue-tree は sub を持つ child を実装せず、sub が親を待つと進まない）
+# 作成順では先だが祖先なので拒否する（implement-issue-tree は祖先への依存を無視するので、書いても完了条件として効かない）
 # 参照先の child の sub-issue の数。参照先そのものが不正（オブジェクトでない・subs が配列でない）なら 0 とみなし、
 # jq を止めずに「spec に無い要素」として一覧へ出す（参照先の不正は参照先の位置でも別に報告される）
 def nsub_safe: if type == "object" and ((.subs // []) | type) == "array" then (.subs // [] | length) else 0 end;
@@ -348,7 +365,7 @@ def chk_deps($p; $self; $root):
     | if $q == null then "\($p).depends_on: \($r | tojson) は要素のパス（\"c<i>\" / \"c<i>.s<j>\"。例 \"c0\"・\"c1.s0\"）ではない（整数の添字は使えない）"
       elif $q[0] >= ($root.children | length) or ($q[1] >= 0 and $q[1] >= ($root.children[$q[0]] | nsub_safe))
       then "\($p).depends_on: \($r | tojson) は spec に無い要素"
-      elif $q[0] == $self[0] and $q[1] == -1 and $self[1] >= 0 then "\($p).depends_on: \($r | tojson) は自分の親 child（祖先）は指せない"
+      elif $q[0] == $self[0] and $q[1] == -1 and $self[1] >= 0 then "\($p).depends_on: \($r | tojson) は自分の親 child（祖先）は指せない（implement-issue-tree は祖先への依存を無視するので、書いても完了条件として効かない）"
       elif ($q < $self | not) then "\($p).depends_on: \($r | tojson) は自分か、作成順で自分より後に作られる要素（自己参照・前方参照・自分の sub）"
       else empty end]
   end;
@@ -693,9 +710,13 @@ fi
 if [[ "${STATE_EXISTS}" == 1 ]]; then
   RECORDS=$(jq -rs '.[1:][] | select(.key != "phase" or .created == true) | "\(.key) \(.number)"' "${STATE}") \
     || die 1 "状態ファイルの記録を読めません: ${STATE}"
+  # ループの本体は here-string を stdin として継ぐので、gh には </dev/null を渡す（stdin を読む版の gh が残りの行を
+  # 食べると、照合が途中で黙って終わる）。照合した件数を記録の行数と突き合わせ、途中で抜けたら止める
+  R_EXPECT=$(awk 'NF { n++ } END { print n + 0 }' <<<"${RECORDS}") || die 1 "状態ファイルの記録を数えられません: ${STATE}"
+  R_DONE=0
   while read -r R_KEY R_NUM; do
     [[ -n "${R_KEY}" ]] || continue
-    R_JSON=$(get_issue "${R_NUM}") \
+    R_JSON=$(get_issue "${R_NUM}" </dev/null) \
       || die 3 "状態ファイルの ${R_KEY} → #${R_NUM} を読めません。書き込みは行っていません。"
     R_WHY=$({ printf '%s' "${R_JSON}"; } | jq -r --arg k "${R_KEY}" --arg slug "${REPO_SLUG}" --slurpfile sp "${SPEC_SNAP}" "${JQ_DEFS}"'
       def trim: sub("^[ \t\r\n]+"; "") | sub("[ \t\r\n]+$"; "");
@@ -710,7 +731,10 @@ if [[ "${STATE_EXISTS}" == 1 ]]; then
       || die 3 "状態ファイルの ${R_KEY} → #${R_NUM} の内容を読めません。書き込みは行っていません。"
     [[ -z "${R_WHY}" ]] \
       || die 1 "状態ファイルの ${R_KEY} → #${R_NUM} が実物と合いません: ${R_WHY}。書き込みは行っていません。番号の打ち間違いなら状態ファイルの行を正しい番号に直し、作られていなかったならその行を消して再実行する。"
+    R_DONE=$((R_DONE + 1))
   done <<<"${RECORDS}"
+  [[ "${R_DONE}" == "${R_EXPECT}" ]] \
+    || die 3 "状態ファイルの番号の照合が途中で終わりました（${R_DONE}/${R_EXPECT} 件）。書き込みは行っていません。"
 fi
 
 # milestone を付ける場合は、open な milestone に同じ題名があることを書き込みの前に確かめる（無ければ issue の作成が
@@ -730,6 +754,90 @@ if [[ -n "${MILESTONE}" ]]; then
   [[ "${MS_FOUND}" == 1 ]] \
     || die 1 "milestone「${MILESTONE}」が ${REPO} の open な milestone にありません（無い・closed）。書き込みは行っていません。milestone を作る・開き直すか、spec・--milestone の値を直す。"
 fi
+
+# ---- depends_on_issues の参照先の確認（最初の書き込みより前）----
+# spec の検証は番号の形しか見ないので、PR の番号を書いても起票・紐付けは通り、`## 前提` に PR が載る（SKILL.md Step 7 の
+# 人の作業の表は前提が PR だと止まり、表全体が出なくなる）。参照先を 1 件ずつ読み、対象リポジトリの issue（PR ではない）で
+# あることを確かめる。state（open・closed）は問わない（closed の issue を前提にするのは正当）。
+# 確かめるのは状態ファイルに記録の無い（この実行で作る）要素の分だけ。本文の `## 前提` を書くのは作成時だけなので、
+# どの要素もそれを作る実行で先に確かめられている。作成済みの要素の分は確かめ直さない（後から参照先が読めなくなっても、
+# 作成済みの要素の spec は状態ファイルの照合で変えられないため、確かめ直すと再開が進めなくなる）。
+# 番号は重複を除いて 1 回ずつ読み、止めるときはその番号を書いた spec の要素のパスをすべて出す（1 つの要素に同じ番号を
+# 2 回書いてもパスは 1 回。要素の中で重複を落としてから group_by〔安定〕で束ねるので、パスは spec の順に並ぶ）。
+# 祖先の番号は、読む前に spec の誤りとして止める（implement-issue-tree は祖先〔ルート・Phase 親・親 child〕への依存を無視するので、
+# 前提に書いても完了条件として効かない）。比べるのは番号の決まっている祖先だけ: ルート、確定済みの Phase 親（状態ファイル・
+# --phase-number・探索で決まった番号）、未作成の sub に対しては状態ファイルに作成済みと記録された親 child。Phase 親を新設する
+# 初回の実行の Phase 親と、新規実行（親 child がまだ作られていない）の親 child は番号が無いので比べない
+if [[ "${STATE_EXISTS}" == 1 ]]; then
+  DONE_KEYS=$(jq -cs '[.[1:][] | .key]' "${STATE}") || die 1 "状態ファイルの記録を読めません: ${STATE}"
+  DONE_NUMS=$(jq -cs '[.[1:][] | {(.key): .number}] | add // {}' "${STATE}") || die 1 "状態ファイルの記録を読めません: ${STATE}"
+else
+  DONE_KEYS='[]'
+  DONE_NUMS='{}'
+fi
+DEP_REFS=$(jq -r --argjson created "${DONE_KEYS}" '[.children | to_entries[] | .key as $i | .value
+    | ({k: "c\($i)", p: "children[\($i)]", n: (if has("depends_on_issues") then .depends_on_issues else [] end)},
+      ((if has("subs") then .subs else [] end) | to_entries[]
+        | {k: "c\($i).s\(.key)", p: "children[\($i)].subs[\(.key)]", n: (.value | if has("depends_on_issues") then .depends_on_issues else [] end)}))
+    | select(.k as $k | any($created[]; . == $k) | not)
+    | .p as $p | (.n | unique)[] | {n: ., p: $p}]
+  | group_by(.n)[] | "\(.[0].n) \(map("\(.p).depends_on_issues") | join("・"))"' "${SPEC_SNAP}") \
+  || die 3 "spec の depends_on_issues を読めません（jq の異常終了）。書き込みは行っていません。"
+ANCESTOR_WHY="ルート・Phase 親・親 child（祖先）は子孫の前提にできない（implement-issue-tree は祖先〔ルート・Phase 親・親 child〕への依存を無視するので、前提に書いても完了条件として効かない）。depends_on_issues から外す。"
+# 未作成の sub の親 child が作成済み（状態ファイルに記録がある）なら、その番号も祖先として読む前に止める。番号で束ねた
+# DEP_REFS では親 child かどうかが要素ごとに違う（別の child の sub・child 自身には祖先でない）ので、要素ごとに照合し、
+# 違反した sub のパスだけを親 child の番号ごとに束ねて出す（パスは spec の順）。親 child が未作成なら番号が無いので比べない
+D_PARENT=$(jq -r --argjson created "${DONE_KEYS}" --argjson m "${DONE_NUMS}" '
+  [.children | to_entries[] | .key as $i | $m["c\($i)"] as $pn | select($pn != null)
+    | (if .value | has("subs") then .value.subs else [] end) | to_entries[]
+    | "c\($i).s\(.key)" as $k | select(any($created[]; . == $k) | not)
+    | select(.value | (if has("depends_on_issues") then .depends_on_issues else [] end) | any(.[]; . == $pn))
+    | {n: $pn, c: "c\($i)", p: "children[\($i)].subs[\(.key)].depends_on_issues"}]
+  | group_by(.n)[] | "\(.[0].n) \(.[0].c) \(map(.p) | join("・"))"' "${SPEC_SNAP}") \
+  || die 3 "spec の depends_on_issues と状態ファイルの親 child の番号を照合できません（jq の異常終了）。書き込みは行っていません。"
+if [[ -n "${D_PARENT}" ]]; then
+  read -r D_NUM D_KEY D_PATHS <<<"${D_PARENT%%$'\n'*}"
+  die 1 "spec: ${D_PATHS}: #${D_NUM} は親 child（${D_KEY}）です。書き込みは行っていません。${ANCESTOR_WHY}"
+fi
+# ループの本体は here-string を stdin として継ぐので、gh には </dev/null を渡す。確かめた件数を番号の行数と突き合わせ、
+# 途中で抜けたら（残りの番号を確かめないまま書き込みへ進まないよう）止める
+D_EXPECT=$(awk 'NF { n++ } END { print n + 0 }' <<<"${DEP_REFS}") \
+  || die 3 "spec の depends_on_issues の番号を数えられません。書き込みは行っていません。"
+D_DONE=0
+while read -r D_NUM D_PATHS; do
+  [[ -n "${D_NUM}" ]] || continue
+  [[ "${D_NUM}" =~ ^[1-9][0-9]*$ ]] \
+    || die 3 "spec: ${D_PATHS}: 番号 ${D_NUM} を読めません。書き込みは行っていません。"
+  [[ "${D_NUM}" != "${ROOT_NUMBER}" ]] \
+    || die 1 "spec: ${D_PATHS}: #${D_NUM} はルートです。書き込みは行っていません。${ANCESTOR_WHY}"
+  [[ -z "${PHASE_NUMBER}" || "${D_NUM}" != "${PHASE_NUMBER}" ]] \
+    || die 1 "spec: ${D_PATHS}: #${D_NUM} はこの Phase の親です。書き込みは行っていません。${ANCESTOR_WHY}"
+  D_JSON=$(get_issue "${D_NUM}" </dev/null) \
+    || die 3 "spec: ${D_PATHS}: #${D_NUM} を ${REPO} の issue として読めません（存在しない番号・権限・通信の失敗）。書き込みは行っていません。番号の誤りなら spec を直して再実行する。"
+  # 結果は「ok」か「<種別> <理由>」。種別 pr・foreign は spec の誤り（exit 1）、shape は応答を判定できない（exit 3）。
+  # 判定は PR → 別リポジトリ → 番号の食い違いの順（別リポジトリへ移管された issue は、gh が移管先へのリダイレクトを辿って
+  # 別の番号の応答を返すので、番号より先にリポジトリを見て spec の誤りとして扱う）。repository_url の無い・文字列でない
+  # 応答は、状態ファイルの番号の照合と同じく対象リポジトリの issue と確かめられないとして foreign にする
+  D_WHY=$({ printf '%s' "${D_JSON}"; } | jq -r --argjson n "${D_NUM}" --arg slug "${REPO_SLUG}" '
+    if type != "object" then "shape issue として読めない"
+    elif has("pull_request") then "pr PR である（issue ではない）"
+    elif (.repository_url | type) != "string" or (.repository_url | ascii_downcase | endswith("/repos/" + ($slug | ascii_downcase)) | not)
+    then "foreign 対象リポジトリの issue ではない（\(.repository_url // "repository_url が無い" | tostring)）"
+    elif (.number | type) != "number" or .number != $n then "shape 応答の番号が違う（\(.number | tojson)）"
+    else "ok" end' 2>/dev/null) \
+    || die 3 "spec: ${D_PATHS}: #${D_NUM} の応答を読めません（JSON でない等）。書き込みは行っていません。"
+  case "${D_WHY}" in
+    ok) ;;
+    "pr "* | "foreign "*)
+      die 1 "spec: ${D_PATHS}: #${D_NUM} は ${D_WHY#* }。書き込みは行っていません。depends_on_issues には ${REPO} の issue の番号を書く（spec の要素なら depends_on にパスで書く）。" ;;
+    "shape "*)
+      die 3 "spec: ${D_PATHS}: #${D_NUM} の応答を判定できません（${D_WHY#* }）。書き込みは行っていません。" ;;
+    *) die 3 "spec: ${D_PATHS}: #${D_NUM} の判定結果を読めません。書き込みは行っていません。" ;;
+  esac
+  D_DONE=$((D_DONE + 1))
+done <<<"${DEP_REFS}"
+[[ "${D_DONE}" == "${D_EXPECT}" ]] \
+  || die 3 "depends_on_issues の参照先の確認が途中で終わりました（${D_DONE}/${D_EXPECT} 件）。書き込みは行っていません。"
 
 # ---- 書き込みの開始: 状態ファイルのヘッダ・ラベル ----
 if [[ "${STATE_EXISTS}" == 0 ]]; then
