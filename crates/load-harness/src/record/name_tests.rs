@@ -34,8 +34,13 @@ impl Drop for TestDir {
 impl TestDir {
     fn new(name: &str) -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
-        // 共有の一時ディレクトリでなく、Cargo の管理下の target の下に置く。
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-tmp");
+        // 共有の一時ディレクトリでなく、Cargo の出力先（試験の実行ファイルの隣）に置く。
+        // ソースツリーの固定パスにせず、出力先を別の書き込み可能な場所へ変えた構成にも追従する。
+        let base = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test-tmp");
         // 一時ディレクトリが無い環境でも create_dir が親の欠けで失敗しないよう、親を先に作る。
         std::fs::create_dir_all(&base).unwrap();
         for _ in 0..100 {

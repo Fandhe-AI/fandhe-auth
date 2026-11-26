@@ -982,9 +982,13 @@ mod tests {
     fn dir(name: &str) -> TestDir {
         static N: AtomicU64 = AtomicU64::new(0);
         for _ in 0..100 {
-            // 共有の一時ディレクトリでなく、Cargo の管理下の target の下に置く。
-            let base =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-tmp");
+            // 共有の一時ディレクトリでなく、Cargo の出力先（試験の実行ファイルの隣）に置く。
+            // ソースツリーの固定パスにせず、出力先を別の書き込み可能な場所へ変えた構成にも追従する。
+            let base = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("test-tmp");
             std::fs::create_dir_all(&base).unwrap();
             let d = base.join(format!(
                 "{name}-{}-{}",
