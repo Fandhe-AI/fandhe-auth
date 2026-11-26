@@ -42,8 +42,11 @@ MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・
 - 定期のジョブも `make`・`scripts/` の同じ入口を呼び、CI 側に検査のロジックを書かない。
 - 道具の版と SHA256 を宣言するのは `ci.yml` の `env` の 1 か所だけ。定期の系統で共有する方法（`workflow_call` か宣言の移設）は未定（TASK-681 で決める）。
 - 例外（承認待ち）: PR の検査を担わない定期ジョブに限り、`scheduled.yml` を `ci-complete` の `needs` に入れず、required にも登録しない。
-  `needs` は同一ワークフロー内のジョブしか参照できず、別ワークフローの `scheduled.yml` のジョブを `ci.yml` の `ci-complete` に直接束ねられない（GitHub Actions の仕様）。
-  承認が記録されるまで `schedule` は有効にしない（`workflow_dispatch` のみ）。
+  例外の根拠は 2 点に分ける。
+  (1) 集約できない理由: `needs` は同一ワークフロー内のジョブしか参照できず、別ワークフローの `scheduled.yml` のジョブを `ci.yml` の `ci-complete` に直接束ねられない（GitHub Actions の仕様）。
+  (2) required に登録しない理由: `scheduled.yml` は PR で起動しないため、required に登録するとチェックの結果が報告されないこと自体がマージを妨げる。
+  この例外は、手動起動の枠（`workflow_dispatch`）と、承認後に足す `schedule` の両方に及ぶ。人の承認は未取得で、`scheduled.yml` の追加は承認前の先行配置である（承認が得られたとは書かない。AI は承認を代行しない。ACPT-7）。
+  承認が記録されるまで `schedule` は有効にしない（`workflow_dispatch` のみ）。承認が得られない場合は `scheduled.yml` の追加を取り下げる。
   チェックリスト 2 は追加ジョブを `ci-complete` に含めるよう求めるため、この例外の採否は利用者の確認待ちで、承認済みではない（承認は人が行う）。PR の検査を担うジョブを足すときは `ci.yml` に置く。
   - 承認の記録（承認は人が記入する。ACPT-7。Claude Code は記入しない。記入があるまでは「承認待ち」を事実どおりに保つ）
     - 根拠: 定期ジョブは PR を検査しないため、`ci-complete` に入れても PR の判定に使われず、失敗が無関係な PR を止める（記入待ち。人が確認する）
