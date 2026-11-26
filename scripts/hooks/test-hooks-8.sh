@@ -27,7 +27,8 @@ else
   fail "shellcheck-staged: every file passing exits 0 and each file is checked once" "exit ${sc_rc}, calls: $(cat "${sc_log}")" "output: $(cat "${work_dir}/out")"
 fi
 
-# 失敗したファイルがあれば非 0。ほかのファイルも検査され、出力はファイル単位でまとまり、引数の順に並ぶ
+# 失敗したファイルがあれば非 0。ほかのファイルも検査され、出力はバッチ単位でまとまり、バッチ番号の順に並ぶ
+# （この入力は各バッチ 1 ファイルで、入力順とバッチ番号順が一致する。複数ファイルのバッチの並びは、下の大きさ別の試験で確かめる）
 sc_run a.sh slow-bad1.sh c.sh bad2.sh
 sc_want="$(printf '%s\n' 'slow-bad1.sh: begin' 'slow-bad1.sh: middle' 'slow-bad1.sh: end' 'bad2.sh: begin' 'bad2.sh: middle' 'bad2.sh: end')"
 if [ "${sc_rc}" -eq 1 ] && [ "$(cat "${work_dir}/out")" = "${sc_want}" ] && [ "$(sc_ncalls)" = "4" ]; then
@@ -133,6 +134,24 @@ else
 fi
 sc_jobs=8
 cd "${work_dir}"
+
+# 複数ファイルを含むバッチの出力は、バッチ単位でまとまり、バッチ番号の順に並ぶ（入力順ではない）。
+# 大きさ 1000・600・500・400（全て bad）を 2 バッチに分けると、バッチ 0 が {1000, 400}、バッチ 1 が {600, 500}。入力順（400・600・500・1000）とバッチ番号順が異なる
+sc_dir="${work_dir}/sc-order"
+mkdir -p "${sc_dir}"
+cd "${sc_dir}"
+head -c 1000 /dev/zero > bad-big.sh
+head -c 600 /dev/zero > bad-mid1.sh
+head -c 500 /dev/zero > bad-mid2.sh
+head -c 400 /dev/zero > bad-small.sh
+sc_jobs=2
+sc_run bad-small.sh bad-mid1.sh bad-mid2.sh bad-big.sh
+sc_want="$(printf '%s\n' 'bad-big.sh: begin' 'bad-big.sh: middle' 'bad-big.sh: end' 'bad-small.sh: begin' 'bad-small.sh: middle' 'bad-small.sh: end' 'bad-mid1.sh: begin' 'bad-mid1.sh: middle' 'bad-mid1.sh: end' 'bad-mid2.sh: begin' 'bad-mid2.sh: middle' 'bad-mid2.sh: end')"
+if [ "${sc_rc}" -eq 1 ] && [ "$(cat "${work_dir}/out")" = "${sc_want}" ]; then
+  pass "shellcheck-staged: output of multi-file batches is grouped per batch and ordered by batch number, not by input order"
+else
+  fail "shellcheck-staged: output of multi-file batches is grouped per batch and ordered by batch number, not by input order" "exit ${sc_rc}" "output: $(cat "${work_dir}/out")"
+fi
 
 # getconf が桁あふれする数字の列を返しても、比較が誤って 0 のまま素通りしない。固定値（4）に落ちて全件が検査され、0 で終わる
 # （期待は「正常に検査されて 0」。2 で止まるのではなく、検査の範囲が変わらないことを確かめる）
