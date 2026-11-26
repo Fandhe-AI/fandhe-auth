@@ -172,7 +172,8 @@ PKEY の振る舞いを満たしたとは主張しない。
 4. `RecordSink::new(&handle, Browser::.., PasskeyOperation::..)` で記録を開く。
 5. 登録は `support::passkey::register`（仮想 authenticator を `VirtualAuthenticatorOptions` で足し、`register_once` を呼び、戻り値は `(AuthenticatorId, CredentialRef)`）。
     ヘルパーは内部で `registration_run_result` により分類した登録の結果を `sink.record(..)` に足すので、呼び出し側は登録を記録しない（二重に数えない）。
-    登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` で分類してから一度だけ `sink.record(..)` する。
+    登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` の戻り値を `(run, check_ok)` に分け、`run` を `sink.record(PasskeyOperation::Registration, run)` で一度だけ記録する。
+    記録のあと、登録の成否と `check_ok` の両方を検査する（手順 6 の `check_ok` はここで得た値）。
     ヘルパーを使わないときは、`register_once` の前の準備も自分で行う（見本は `support::passkey::register`、`crates/e2e-harness/tests/support/passkey.rs`）。
     準備は 3 つ。(1) `add_virtual_authenticator(&VirtualAuthenticatorOptions)` で仮想 authenticator を足す、(2) `navigate(&origin.origin())` で試験用 origin へ移動する、
     (3) `set_script_timeout(..)` でスクリプトのタイムアウトを command timeout より短く設定する（時間切れを script timeout として観測するため）。
@@ -180,7 +181,7 @@ PKEY の振る舞いを満たしたとは主張しない。
     後続の検査（credential がちょうど 1 件・RP ID が `localhost` と完全一致）を反映した `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Authentication, run)` で一度だけ記録する。
     `authenticate_once` の結果をそのまま記録しない（検査を反映できない）。options の値は PoC の値（`QP-1`）で要件の値ではない。
 6. 成否と `check_ok`（`assert!(check_ok, ..)`）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
-7. `running.stop()` で停止し、`sink.finish()` で記録を出す。
+7. `running.stop()` で停止し、その成功を確かめてから `sink.finish()` で記録を出し、`finish()` の戻り値も確かめる。停止に失敗した実行を完了扱いで記録しない。
 
 失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
 
@@ -196,7 +197,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 出力先は起動をまたいで追記されるので、集計はその起動の標準出力だけを正とするか、起動ごとに空の専用の出力先を使う。
 出力先は `env!("CARGO_TARGET_TMPDIR")` でビルド時に取り込まれるため、実行時に環境変数を設定しても変わらない。
 起動ごとに分けるには、`make e2e-chrome`・`make e2e-firefox` を呼ぶときに `CARGO_TARGET_DIR` を起動ごとに異なる空のディレクトリへ設定する
-（例: `CARGO_TARGET_DIR="$(mktemp -d)" make e2e-chrome`。cargo が環境変数を引き継ぐ。ビルドはその出力先で一からやり直しになる）。
+（例: `dir=$(mktemp -d) && CARGO_TARGET_DIR="$dir" make e2e-chrome`。`mktemp` が失敗したときは make を起動しない。cargo が環境変数を引き継ぐ。ビルドはその出力先で一からやり直しになる）。
 
 ### 守ること
 
