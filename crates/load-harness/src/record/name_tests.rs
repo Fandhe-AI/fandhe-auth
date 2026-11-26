@@ -1,16 +1,25 @@
 //! 記録のファイル全体の単体試験（TASK-12 9/10）。偽の値・合成の時刻（epoch 付近）だけを使い、
 //! PoC の数値・要件の値を置かない（ACPT-7）。
+//!
+//! crate 内の試験にしてある理由: 値の名前・出典の語彙は crate の固定の定数で、外から任意の名前・出典を作る口は無い（#6038）。
+//! 語彙の外の名前・出典（長さの境界・目印・重複等）で記録の検査を見る試験は、非公開のフィールドから直接作る。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fandhe_auth_load_harness::{
+use super::{
+    BoundedText, MAX_RECORD_BYTES, REF_IDS, RESERVED_REFS, RefId, VALUE_NAMES, ValueName, compose,
+    is_name, is_ref_shape,
+};
+use crate::{
     ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
     ConditionError, IntervalName, InvalidValueReason, LOAD_RECORD_FORMAT, LoadConfig, LoadRecord,
-    LoadRecordError, LoopModel, MeasurementConditions, MetricKey, RefId, RunEvidence,
-    RunRecordFile, RunSession, StageConfig, StageError, StageLimits, StagePlan, TargetName,
-    TargetSpec, ValueClass, ValueName, ValueUnit,
+    LoadRecordError, LoopModel, MeasurementConditions, MetricKey, RunEvidence, RunRecordFile,
+    RunSession, StageConfig, StageError, StageLimits, StagePlan, TargetName, TargetSpec,
+    ValueClass, ValueUnit,
 };
+use std::cell::Cell;
+use std::fmt::{self, Write as _};
 
 /// 排他的に新規作成したディレクトリ。既存のもの（中断した試験の残り・PID の再利用で重なる名前）は
 /// 消さず、自分が作ったものだけを Drop で片付ける。
@@ -25,8 +34,7 @@ impl Drop for TestDir {
 impl TestDir {
     fn new(name: &str) -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
-        let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
-        std::fs::create_dir_all(base).unwrap();
+        let base = std::env::temp_dir();
         for _ in 0..100 {
             let d = base.join(format!(
                 "{name}-{}-{}",
@@ -48,13 +56,14 @@ impl TestDir {
     }
 }
 
-/// 試験用の語彙。入れた名前だけが通る。
+/// 固定語彙の外の名前を直接作る（公開の `ValueName::new` は固定語彙だけを通す。記録の検査の試験用）。
 fn vname(n: &str) -> ValueName {
-    ValueName::new(n, &[n]).unwrap()
+    ValueName(n.to_owned())
 }
 
+/// 固定語彙の外の出典を直接作る（公開の `RefId::new` は固定語彙だけを通す）。
 fn refs(ids: &[&str]) -> Vec<RefId> {
-    ids.iter().map(|s| RefId::new(s, ids).unwrap()).collect()
+    ids.iter().map(|s| RefId((*s).to_owned())).collect()
 }
 
 fn val(
@@ -288,18 +297,19 @@ fn refs_limits() {
 fn input_validation() {
     for bad in ["", "A", "a-b", "a\nb", "a\u{2028}b", "a b", &"a".repeat(65)] {
         assert_eq!(
-            ValueName::new(bad, &[bad]).unwrap_err(),
+            ValueName::new(bad).unwrap_err(),
             LoadRecordError::InvalidName
         );
     }
-    // 形が正しくても語彙の外は拒否する。
+    // 形が正しくても固定語彙の外は拒否する（語彙を足す口は無い。#6038）。
     assert_eq!(
-        ValueName::new("free_text", &["p99_target"]).unwrap_err(),
+        ValueName::new("free_text").unwrap_err(),
         LoadRecordError::InvalidName
     );
+    assert!(ValueName::new("p99_target").is_ok());
     for reserved in ["none", "harness_config", "measured"] {
         assert_eq!(
-            RefId::new(reserved, &[reserved]).unwrap_err(),
+            RefId::new(reserved).unwrap_err(),
             LoadRecordError::InvalidRef
         );
     }
@@ -313,17 +323,14 @@ fn input_validation() {
         "a\0b",
         &"a".repeat(65),
     ] {
-        assert_eq!(
-            RefId::new(bad, &[bad]).unwrap_err(),
-            LoadRecordError::InvalidRef
-        );
+        assert_eq!(RefId::new(bad).unwrap_err(), LoadRecordError::InvalidRef);
     }
-    // 信頼済みの一覧に無い出典は、文字種が正しくても拒否する（SECR-23）。
+    // 固定語彙に無い出典は、文字種が正しくても拒否する（SECR-23）。
     assert_eq!(
-        RefId::new("CONFIG-SECRET-1", &["AUDP-29"]).unwrap_err(),
+        RefId::new("CONFIG-SECRET-1").unwrap_err(),
         LoadRecordError::InvalidRef
     );
-    assert!(RefId::new("AUDP-29", &["AUDP-29"]).is_ok());
+    assert!(RefId::new("AUDP-29").is_ok());
     assert!(RunRecordFile::new("it-run-0-1-2.txt").is_ok());
     for bad in [
         "",
@@ -373,16 +380,15 @@ fn value_line_shapes() {
 fn spec() -> TargetSpec {
     TargetSpec::new(
         TargetName::new("route_a").unwrap(),
-        IntervalName::new("op").unwrap(),
+        IntervalName::new("client_response").unwrap(),
     )
 }
 
-fn plan_with(interval: &str) -> StagePlan {
+fn plan() -> StagePlan {
     StagePlan::new(
         vec![StageConfig::new(LoadConfig::new(1, 3, 0).unwrap(), 1).unwrap()],
         MetricKey::P99Ns,
         StageLimits::new(4, 4, 100, 100).unwrap(),
-        vec![IntervalName::new(interval).unwrap()],
     )
     .unwrap()
 }
@@ -406,7 +412,17 @@ fn run_in(
     plan: &StagePlan,
     calls: &AtomicU64,
 ) -> Result<RunEvidence, LoadRecordError> {
-    session.run(exercised, &spec(), plan, || {
+    run_spec_in(session, exercised, &spec(), plan, calls)
+}
+
+fn run_spec_in(
+    session: RunSession,
+    exercised: &[ConditionComponent],
+    spec: &TargetSpec,
+    plan: &StagePlan,
+    calls: &AtomicU64,
+) -> Result<RunEvidence, LoadRecordError> {
+    session.run(exercised, spec, plan, || {
         calls.fetch_add(1, Ordering::Relaxed);
         CallResult::Ok
     })
@@ -417,7 +433,7 @@ fn evidence(s: u64) -> Result<RunEvidence, LoadRecordError> {
     run_in(
         RunSession::new(file_at(s), s, conditions())?,
         &[ConditionComponent::HubStub],
-        &plan_with("op"),
+        &plan(),
         &calls,
     )
 }
@@ -494,7 +510,7 @@ fn run_session_binds_exercised_components_to_conditions() {
         let e = run_in(
             RunSession::new(file_at(0), 0, c).unwrap(),
             exercised,
-            &plan_with("op"),
+            &plan(),
             &calls,
         )
         .unwrap_err();
@@ -533,14 +549,19 @@ fn run_session_binds_exercised_components_to_conditions() {
     assert!(t.contains("note: stub results are not counted as real results\n"));
 }
 
-/// 段階の実行の誤りは `Stage` で返し、記録の元を作らない（区間名が語彙外なら最初の回の前に拒否）。
+/// 段階の実行の誤りは `Stage` で返し、記録の元を作らない（区間名が固定語彙の外なら最初の回の前に拒否）。
 #[test]
 fn run_session_stage_error_is_reported() {
     let calls = AtomicU64::new(0);
-    let e = run_in(
+    let other = TargetSpec::new(
+        TargetName::new("route_a").unwrap(),
+        IntervalName::new("other").unwrap(),
+    );
+    let e = run_spec_in(
         RunSession::new(file_at(0), 0, conditions()).unwrap(),
         &[ConditionComponent::HubStub],
-        &plan_with("other"),
+        &other,
+        &plan(),
         &calls,
     )
     .unwrap_err();
@@ -625,7 +646,7 @@ fn debug_and_errors_do_not_leak() {
     }
     let e = RunRecordFile::new("bad\nlines").unwrap_err().to_string();
     assert!(!e.contains("bad"));
-    let e = RefId::new("x\ny", &["x\ny"]).unwrap_err().to_string();
+    let e = RefId::new("x\ny").unwrap_err().to_string();
     assert!(!e.contains('x'));
 }
 
@@ -649,33 +670,107 @@ fn p99_target_only_undecided() {
     assert!(val("p99_target", ValueClass::Undecided, None, &["AUDP-29"]).is_ok());
 }
 
-/// 正当な最大の入力（出典 8 件が各 64 バイト・名前 64 バイト・区間名 64 バイト）で、
-/// 形の網（語・行の上限）に当たらず `LoadRecord::new` が通る（SECR-23・AAUD-30。網は正当な入力を拒否しない）。
+/// 正当な最大の入力（出典 8 件が各 64 バイト・名前 64 バイト）で、形の網（語・行の上限）に当たらず
+/// `LoadRecord::new` が通る（SECR-23・AAUD-30。網は正当な入力を拒否しない）。区間名の 64 バイトは
+/// 固定語彙では作れないため、`stage` の試験が `StagedRun` を直接組んで確かめる。
 #[test]
 fn record_with_max_length_refs_and_names_is_accepted() {
     let ids: Vec<String> = (0..8).map(|i| format!("{i}{}", "r".repeat(63))).collect();
     let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
     let name = "n".repeat(64);
     let v = val(&name, ValueClass::External, None, &ids).unwrap();
-    let interval = "i".repeat(64);
-    let spec = TargetSpec::new(
-        TargetName::new("route_a").unwrap(),
-        IntervalName::new(&interval).unwrap(),
-    );
-    let ev = RunSession::new(file_at(0), 0, conditions())
-        .unwrap()
-        .run(
-            &[ConditionComponent::HubStub],
-            &spec,
-            &plan_with(&interval),
-            || CallResult::Ok,
-        )
-        .unwrap();
+    let ev = evidence(0).unwrap();
     let rec = LoadRecord::new(&ev, 1, vec![v]).unwrap();
     let text = rec.to_string();
     assert!(
         text.lines()
             .any(|l| l.matches(&"r".repeat(63)).count() == 8)
     );
-    assert!(text.contains(&format!("interval={interval}")));
+}
+
+/// 書き込みの回数を数える表示。1 回に 10 バイトを `n` 回書く。
+struct Chunks<'a> {
+    n: usize,
+    writes: &'a Cell<usize>,
+}
+
+impl fmt::Display for Chunks<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for _ in 0..self.n {
+            self.writes.set(self.writes.get() + 1);
+            f.write_str("0123456789")?;
+        }
+        Ok(())
+    }
+}
+
+/// #6038（上限を整形中に確かめる）: 上限を超えた最初の書き込みで打ち切り、後続を書かない。
+/// 整形後に長さを見る旧来の作りには `BoundedText` が無く、この試験は成り立たない。
+#[test]
+fn bounded_text_stops_at_first_overflow() {
+    let writes = Cell::new(0);
+    let mut t = BoundedText::new(100);
+    let r = write!(
+        t,
+        "{}",
+        Chunks {
+            n: 10_000,
+            writes: &writes
+        }
+    );
+    assert!(r.is_err());
+    // 10 回（100 バイト）は通り、11 回目で拒否されて以後は書かれない。
+    assert_eq!(writes.get(), 11);
+    assert_eq!(t.buf.len(), 100);
+    assert!(t.buf.capacity() <= 100);
+}
+
+#[test]
+fn bounded_text_accepts_exact_limit_and_rejects_one_more() {
+    let mut t = BoundedText::new(10);
+    assert!(t.write_str("0123456789").is_ok());
+    assert_eq!(t.buf.len(), 10);
+    assert!(t.write_str("x").is_err());
+    assert_eq!(t.buf.len(), 10);
+    let mut t = BoundedText::new(10);
+    assert!(t.write_str("012345").is_ok());
+    assert!(t.write_str("67890").is_err());
+    assert_eq!(t.buf, "012345");
+    // 空の追記は通る。
+    assert!(t.write_str("").is_ok());
+}
+
+/// 小さな上限では `Format` で拒否し、本番の上限では同じ入力が通る。上限ちょうどは受理する。
+#[test]
+fn compose_with_small_limit_is_format_error() {
+    let ev = evidence(0).unwrap();
+    assert!(matches!(
+        compose(&ev, 1, &[], 64),
+        Err(LoadRecordError::Format)
+    ));
+    let ok = compose(&ev, 1, &[], MAX_RECORD_BYTES).unwrap();
+    let len = ok.to_string().len();
+    assert!(compose(&ev, 1, &[], len).is_ok());
+    assert!(matches!(
+        compose(&ev, 1, &[], len - 1),
+        Err(LoadRecordError::Format)
+    ));
+}
+
+/// 固定語彙の各要素は形の規則を満たし、予約語を含まず、重複が無い（#6038）。
+#[test]
+fn fixed_vocabularies_are_well_formed() {
+    let mut seen = std::collections::BTreeSet::new();
+    for n in VALUE_NAMES {
+        assert!(is_name(n));
+        assert!(seen.insert(n));
+        assert!(ValueName::new(n).is_ok());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for r in REF_IDS {
+        assert!(is_ref_shape(r));
+        assert!(!RESERVED_REFS.contains(&r));
+        assert!(seen.insert(r));
+        assert!(RefId::new(r).is_ok());
+    }
 }

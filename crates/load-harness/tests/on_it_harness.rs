@@ -201,7 +201,6 @@ fn run_stages_calls_hub_stub_jwks_on_harness() {
         ],
         MetricKey::P99Ns,
         StageLimits::new(64, 1024, 1_000_000, u64::MAX).unwrap(),
-        vec![IntervalName::new("stub_jwks").unwrap()],
     )
     .unwrap();
     let call = || match handle.with(|s| s.jwks.serve(T0)) {

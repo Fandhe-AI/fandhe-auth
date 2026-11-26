@@ -29,6 +29,13 @@ use crate::generate::LoadConfig;
 use crate::meter::{IntervalName, MeterError, MonotonicClock};
 use crate::target::{CallResult, TargetError, TargetName, TargetSpec, run_target};
 
+/// 記録に出してよい区間名の固定語彙（仮置き。人が確認する。SECR-23・`load.md` の 6）。
+/// 呼び出し元は足せない（語彙を受ける引数・feature・環境変数を作らない。DPOL-30〜32）。
+/// 設定由来の値が区間名として記録に出る経路を型で塞ぐため、名前を渡す入力から語彙を独立させる（#6038）。
+/// 区間名の検査は記録へ出す入口の [`run_stages`] だけで行う（`IntervalName::new` は記録を出さない部品でも使うため一般の名前のまま）。
+/// 中身は `load.md` に出る名前と試し実行の区間だけの最小で、足すのは人（PR のレビュー）。
+pub const RECORD_INTERVALS: [&str; 2] = ["client_response", "stub_jwks"];
+
 /// 計画の上限。呼び出し元が実行環境に合わせて明示する（既定値・固定の上限は置かない。DPOL-32）。
 /// 値の導出は本 crate の範囲外。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,10 +145,9 @@ impl StageConfig {
 pub struct StagePlan {
     stages: Vec<StageConfig>,
     by: MetricKey,
-    allowed_intervals: Vec<IntervalName>,
 }
 
-/// SECR-23: 区間名の語彙を出さない固定文字列にする（値・長さ・ハッシュも出さない）。
+/// SECR-23: 固定文字列にする（値・長さ・ハッシュも出さない）。
 impl fmt::Debug for StagePlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("StagePlan(..)")
@@ -151,23 +157,21 @@ impl fmt::Debug for StagePlan {
 impl StagePlan {
     /// 段階の並びに制約（並行数の単調増加等）は置かない。
     ///
-    /// `allowed_intervals` は記録に出してよい区間名の語彙で、呼び出し元が承認済みの名前だけを渡す（既定値なし）。
+    /// 記録に出してよい区間名の語彙は crate の固定の定数 [`RECORD_INTERVALS`] で、呼び出し元は渡せない。
     /// [`run_stages`] は対象の区間名がこの語彙に無ければ、最初の回の前に拒否する
     /// （`load.md` の 6・SECR-23）。
     ///
     /// # Errors
     /// 段階が 0 件または `limits` の段階数超、繰り返しが `limits` 超、全体の試行数の計算が溢れる、
     /// 1 回の試行数（ウォームアップ + 計測）が `limits` の予算超の段階があるとき、
-    /// 全体の試行数の合計が `limits` の上限超のとき、
-    /// または語彙が空のとき [`StageError::InvalidPlan`]。
+    /// 全体の試行数の合計が `limits` の上限超のとき [`StageError::InvalidPlan`]。
     pub fn new(
         stages: Vec<StageConfig>,
         by: MetricKey,
         limits: StageLimits,
-        allowed_intervals: Vec<IntervalName>,
     ) -> Result<Self, StageError> {
         let n = u64::try_from(stages.len()).map_err(|_| StageError::InvalidPlan)?;
-        if n == 0 || n > limits.max_stages || allowed_intervals.is_empty() {
+        if n == 0 || n > limits.max_stages {
             return Err(StageError::InvalidPlan);
         }
         let mut total: u64 = 0;
@@ -193,11 +197,7 @@ impl StagePlan {
                 return Err(StageError::InvalidPlan);
             }
         }
-        Ok(Self {
-            stages,
-            by,
-            allowed_intervals,
-        })
+        Ok(Self { stages, by })
     }
 
     pub fn stages(&self) -> &[StageConfig] {
@@ -314,8 +314,8 @@ where
     C: FnMut() -> Result<Box<dyn MonotonicClock>, MeterError>,
     F: Fn() -> CallResult + Sync,
 {
-    // 語彙外の区間名は記録に出さず、最初の回の前に拒否する。
-    if !plan.allowed_intervals.contains(spec.interval()) {
+    // 語彙外の区間名は記録に出さず、最初の回の前に拒否する（固定語彙。呼び出し元は足せない）。
+    if !RECORD_INTERVALS.contains(&spec.interval().as_str()) {
         return Err(StageError::InvalidPlan);
     }
     let mut stages = Vec::with_capacity(plan.stages.len());
@@ -426,5 +426,50 @@ impl fmt::Display for StagedRun {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meter::StdMonotonicClock;
+    use crate::record::is_fixed_shape;
+
+    fn new_clock() -> Result<Box<dyn MonotonicClock>, MeterError> {
+        Ok(Box::new(StdMonotonicClock::new()))
+    }
+
+    fn plan() -> StagePlan {
+        StagePlan::new(
+            vec![StageConfig::new(LoadConfig::new(1, 1, 0).unwrap(), 1).unwrap()],
+            MetricKey::P99Ns,
+            StageLimits::new(4, 4, 100, 100).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// 64 バイトの区間名の行が形の網（語・行の上限）に当たらない（SECR-23。網は正当な入力を拒否しない）。
+    /// 区間名は固定語彙でしか記録に出ないため、公開の口では作れない長さを `StagedRun` の区間名の差し替えで確かめる。
+    #[test]
+    fn display_with_max_length_interval_passes_shape() {
+        let long = "i".repeat(64);
+        let long_spec = TargetSpec::new(
+            TargetName::new("route_a").unwrap(),
+            IntervalName::new(&long).unwrap(),
+        );
+        // 語彙の外は run_stages が拒否する。
+        assert_eq!(
+            run_stages(new_clock, &long_spec, &plan(), || CallResult::Ok).err(),
+            Some(StageError::InvalidPlan)
+        );
+        let ok_spec = TargetSpec::new(
+            TargetName::new("route_a").unwrap(),
+            IntervalName::new(RECORD_INTERVALS[0]).unwrap(),
+        );
+        let mut run = run_stages(new_clock, &ok_spec, &plan(), || CallResult::Ok).unwrap();
+        run.interval = IntervalName::new(&long).unwrap();
+        let text = run.to_string();
+        assert!(text.contains(&format!("interval={long}")));
+        assert!(is_fixed_shape(&text));
     }
 }
