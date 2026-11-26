@@ -35,6 +35,8 @@ impl TestDir {
     fn new(name: &str) -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
         let base = std::env::temp_dir();
+        // 一時ディレクトリが無い環境でも create_dir が親の欠けで失敗しないよう、親を先に作る。
+        std::fs::create_dir_all(&base).unwrap();
         for _ in 0..100 {
             let d = base.join(format!(
                 "{name}-{}-{}",
