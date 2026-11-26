@@ -86,7 +86,7 @@ fi
 
 # 一時領域を作れない（TMPDIR が存在しない）ときは、指摘ありの 1 ではなく検査不能の 2 で止まる
 sc_reset
-if SC_LOG="${sc_log}" TMPDIR="${work_dir}/no-such-dir" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" a.sh > "${work_dir}/out" 2>&1; then
+if SC_SYNC_DIR="" SC_BARRIER="" SC_GETCONF_RC="" SC_LOG="${sc_log}" TMPDIR="${work_dir}/no-such-dir" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" a.sh > "${work_dir}/out" 2>&1; then
   sc_rc=0
 else
   sc_rc=$?
@@ -160,7 +160,7 @@ EOF
 chmod +x "${sc_mk_dir}/mktemp"
 sc_real_mktemp="$(command -v mktemp)"
 sc_reset
-if SC_REAL_MKTEMP="${sc_real_mktemp}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_mk_dir}:${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" a.sh > "${work_dir}/out" 2>&1; then
+if SC_REAL_MKTEMP="${sc_real_mktemp}" SC_SYNC_DIR="" SC_BARRIER="" SC_GETCONF_RC="" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_mk_dir}:${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" a.sh > "${work_dir}/out" 2>&1; then
   sc_rc=0
 else
   sc_rc=$?
@@ -177,7 +177,7 @@ fi
 sc_pidfile="${work_dir}/sc.pid"
 rm -f "${sc_pidfile}"
 sc_reset
-SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh a.sh > "${work_dir}/out" 2>&1 &
+SC_PIDFILE="${sc_pidfile}" SC_SYNC_DIR="" SC_BARRIER="" SC_GETCONF_RC="" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh a.sh > "${work_dir}/out" 2>&1 &
 sc_script_pid=$!
 sc_waited=0
 while [ ! -s "${sc_pidfile}" ] && [ "${sc_waited}" -lt 100 ]; do

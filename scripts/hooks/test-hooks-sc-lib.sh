@@ -2,12 +2,13 @@
 # test-hooks-8.sh・test-hooks-9.sh が共有する shellcheck-staged.sh の試験の道具（TASK-6）。単体では実行せず、part から source する。
 # part が test-hooks-lib.sh を source し、cd "${work_dir}" した後に source する。part の間で状態は引き継がない。
 # 名前は test-hooks-<数字>.sh に当たらない（test-hooks.sh の parts の突き合わせの対象外）。
-# shellcheck disable=SC2154  # work_dir は test-hooks-lib.sh が定義する（part が先に source する）
 
 # ---------------------------------------------------------------- shellcheck-staged.sh（pre-commit の shellcheck の並列実行）
 # 本物の shellcheck には頼らず（macOS の CI にあるとは限らない）、PATH 先頭に置いた偽物で呼び方と集約を確かめる。
 # 偽物は呼び出しを 1 行ずつ、呼び出しごとの別ファイル（${SC_LOG}.d/ の下）へ記録する。呼び出しは call と arg:<値>（1 引数 1 行）で記録する。呼ばれた引数の全件を順に見て、名前に bad を含むファイルは 3 行を出し（終了コード 1）、err を含むものは 1 行を出して（終了コード 2。shellcheck 自身の失敗。1 より優先）、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とし、hang を含むものは自分の pid を SC_PIDFILE へ書いて 30 秒眠る。
-sc_shim_dir="${work_dir}/sc-shim"
+# shellcheck disable=SC2154  # work_dir は test-hooks-lib.sh が定義する（part が先に source する）。受け取るのはここだけで、以降は sc_work_dir を参照する
+sc_work_dir="${work_dir}"
+sc_shim_dir="${sc_work_dir}/sc-shim"
 mkdir -p "${sc_shim_dir}"
 cat > "${sc_shim_dir}/shellcheck" <<'EOF'
 #!/bin/sh
@@ -22,12 +23,18 @@ cat > "${sc_shim_dir}/shellcheck" <<'EOF'
 # 2 段の同期をとる。(1) ready.* が SC_BARRIER 件になるまで待つ（全員が run.* を作ってから観測を始める）。
 # 少し眠ってから run.* を数えて seen.* に書き、観測を終えた印（done.*。消さない）を置く。
 # (2) done.* が SC_BARRIER 件になるまで待ち（全員が観測を終えるまで run.* を保持する）、run.* を消す。
-# どちらも最大約 10 秒待ち、待ちきれなければ timeout.<pid> を作って先へ進む。
+# どちらも最大約 10 秒待ち、待ちきれなければ timeout.<pid> を作って先へ進む。timeout.* が 1 つでもあれば、両方の待ちを（後続の呼び出しも）すぐ打ち切る。
 # 記録は ${SC_LOG}.d/ の call / arg の行とは別のファイルに置く（記録の読み取りを乱さない）。
 if [ -n "${SC_SYNC_DIR:-}" ] || [ -n "${SC_BARRIER:-}" ]; then
   if [ -z "${SC_SYNC_DIR:-}" ] || [ -z "${SC_BARRIER:-}" ]; then
     exit 99
   fi
+  sy_timed_out() {
+    for sy_t in "${SC_SYNC_DIR}"/timeout.*; do
+      [ -e "${sy_t}" ] && return 0
+    done
+    return 1
+  }
   sy_n=0
   while :; do
     sy_id="$$.${sy_n}"
@@ -48,6 +55,10 @@ if [ -n "${SC_SYNC_DIR:-}" ] || [ -n "${SC_BARRIER:-}" ]; then
       [ -e "${sy_f}" ] && sy_started=$((sy_started + 1))
     done
     if [ "${sy_started}" -ge "${SC_BARRIER}" ]; then
+      break
+    fi
+    # 誰かが待ちきれていたら、後続の待ちも打ち切る（直列化の回帰で後続バッチが各約 10 秒待たないように）
+    if sy_timed_out; then
       break
     fi
     sy_tries=$((sy_tries + 1))
@@ -71,6 +82,9 @@ if [ -n "${SC_SYNC_DIR:-}" ] || [ -n "${SC_BARRIER:-}" ]; then
       [ -e "${sy_f}" ] && sy_finished=$((sy_finished + 1))
     done
     if [ "${sy_finished}" -ge "${SC_BARRIER}" ]; then
+      break
+    fi
+    if sy_timed_out; then
       break
     fi
     sy_tries=$((sy_tries + 1))
@@ -138,7 +152,7 @@ EOF
 chmod +x "${sc_shim_dir}/getconf"
 chmod +x "${sc_shim_dir}/shellcheck"
 SC_STAGED="${HOOKS_DIR}/shellcheck-staged.sh"
-sc_log="${work_dir}/sc.log"
+sc_log="${sc_work_dir}/sc.log"
 sc_jobs=8
 sc_getconf_rc=""
 sc_sync_dir=""
@@ -168,10 +182,10 @@ sc_collect() {
     fi
   done
 }
-# sc_run <引数...>: 偽の shellcheck を先頭に置いて入口を起動する。終了コードは sc_rc、出力は ${work_dir}/out、呼び出しの記録は sc_log。
+# sc_run <引数...>: 偽の shellcheck を先頭に置いて入口を起動する。終了コードは sc_rc、出力は ${sc_work_dir}/out、呼び出しの記録は sc_log。
 sc_run() {
   sc_reset
-  if SC_JOBS="${sc_jobs}" SC_GETCONF_RC="${sc_getconf_rc}" SC_SYNC_DIR="${sc_sync_dir}" SC_BARRIER="${sc_barrier}" SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" "$@" > "${work_dir}/out" 2>&1; then
+  if SC_JOBS="${sc_jobs}" SC_GETCONF_RC="${sc_getconf_rc}" SC_SYNC_DIR="${sc_sync_dir}" SC_BARRIER="${sc_barrier}" SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" "$@" > "${sc_work_dir}/out" 2>&1; then
     sc_rc=0
   else
     sc_rc=$?
@@ -235,7 +249,7 @@ sc_expect_batches() {
   if [ "${sc_rc}" -eq 0 ] && [ "${sc_calls}" = "$2" ] && [ "$(sc_files)" = "${sc_twenty_want}" ]; then
     pass "$3"
   else
-    fail "$3" "exit ${sc_rc}, calls: ${sc_calls} (want $2)" "output: $(cat "${work_dir}/out")"
+    fail "$3" "exit ${sc_rc}, calls: ${sc_calls} (want $2)" "output: $(cat "${sc_work_dir}/out")"
   fi
   sc_jobs=8
   sc_getconf_rc=""
