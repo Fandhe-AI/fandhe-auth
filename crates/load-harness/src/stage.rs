@@ -468,8 +468,29 @@ mod tests {
         );
         let mut run = run_stages(new_clock, &ok_spec, &plan(), || CallResult::Ok).unwrap();
         run.interval = IntervalName::new(&long).unwrap();
+        // metric・failure_metric の区間名は各 RunSummary のマップのキー由来のため、同じ長さのキーへ差し替える。
+        for st in &mut run.stages {
+            for r in &mut st.runs {
+                let key = IntervalName::new(&long).unwrap();
+                r.success_metrics = std::mem::take(&mut r.success_metrics)
+                    .into_values()
+                    .map(|v| (key.clone(), v))
+                    .collect();
+                r.failure_metrics = std::mem::take(&mut r.failure_metrics)
+                    .into_values()
+                    .map(|v| (key.clone(), v))
+                    .collect();
+            }
+        }
         let text = run.to_string();
         assert!(text.contains(&format!("interval={long}")));
+        for key in ["metric", "worst_run"] {
+            assert!(
+                text.lines().any(|l| l.starts_with(&format!("{key}: "))
+                    && l.contains(&format!("interval={long} "))),
+                "{key} line with the max-length interval is missing"
+            );
+        }
         assert!(is_fixed_shape(&text));
     }
 }

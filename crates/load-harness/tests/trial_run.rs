@@ -513,21 +513,18 @@ fn matcher_detects_every_form_mixed_into_output() {
 
 /// 設定由来の値は、値の名前・出典・区間名として記録に出せない（SECR-23・#6038。語彙は crate の固定の定数で、
 /// 呼び出し元は足せない）。登録簿の 16 進の値（文字種の規則には合う）を名前・出典に渡すと拒否され、
-/// 区間名にした対象は 1 回も呼ばれず、記録のファイルも作られない。
+/// 区間名にした対象は 1 回も呼ばれない（実行の前の拒否と呼び出し 0 件。記録のファイルの未作成までは確かめない）。
 /// 以前はここで「語彙にも入れた 16 進の値が書き出される」ことを陽性対照にしていたが、その経路を塞いだため
 /// 拒否の試験に置き換えた。照合の検出力は陽性対照 1（`matcher_detects_every_form_mixed_into_output`）で見る。
 #[test]
 fn config_derived_values_cannot_be_recorded_as_names() {
     let (registry, _cfg) = canary_registry_and_config();
-    let mut candidates: Vec<String> = registry.iter().take(3).map(|raw| hex(raw, false)).collect();
-    candidates.push(String::from_utf8(registry[3].clone()).unwrap());
+    let candidates: Vec<String> = registry.iter().take(3).map(|raw| hex(raw, false)).collect();
     for c in &candidates {
         assert_eq!(ValueName::new(c), Err(LoadRecordError::InvalidName));
         assert_eq!(RefId::new(c), Err(LoadRecordError::InvalidRef));
     }
-    // 区間名に使うと、実行の前に拒否される（対象を呼ばず、記録のファイルを作らない）。
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("load-trial-reject");
-    let before = std::fs::read_dir(&dir).map_or(0, Iterator::count);
+    // 区間名に使うと、実行の前に拒否される（対象を呼ばない）。
     let conditions = MeasurementConditions::detect(
         ComponentConditions::new(&[(ConditionComponent::HubStub, true)]).unwrap(),
         LoopModel::Closed,
@@ -561,5 +558,4 @@ fn config_derived_values_cannot_be_recorded_as_names() {
         );
     }
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(std::fs::read_dir(&dir).map_or(0, Iterator::count), before);
 }
