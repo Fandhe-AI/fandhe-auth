@@ -31,7 +31,7 @@ use crate::target::{CallResult, TargetError, TargetName, TargetSpec, run_target}
 
 /// 記録に出してよい区間名の固定語彙（仮置き。人が確認する。SECR-23・`load.md` の 6）。
 /// 呼び出し元は足せない（語彙を受ける引数・feature・環境変数を作らない。DPOL-30〜32）。
-/// 設定由来の値が区間名として記録に出る経路を型で塞ぐため、名前を渡す入力から語彙を独立させる（#6038）。
+/// 記録に載る区間名を固定語彙に限るため、名前を渡す入力から語彙を独立させる。検査は完全一致で、語彙にない文字列を拒否する（入力の由来は見ない。#6038）。
 /// 区間名の検査は記録へ出す入口の [`run_stages`] だけで行う（`IntervalName::new` は記録を出さない部品でも使うため一般の名前のまま）。
 /// 中身は `load.md` に出る名前と試し実行の区間だけの最小で、足すのは人（PR のレビュー）。
 pub const RECORD_INTERVALS: [&str; 2] = ["client_response", "stub_jwks"];

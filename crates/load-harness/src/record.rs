@@ -48,7 +48,7 @@ const MAX_LINE_BYTES: usize = 1024;
 const MAX_WORD_BYTES: usize = 64;
 
 /// 記録に出してよい値の名前の固定語彙（仮置き。人が確認する。SECR-23・`load.md` の 2・6）。
-/// 呼び出し元は足せない。設定由来の値が名前の欄を通って記録に出る経路を塞ぐ（#6038）。足すのは人（PR のレビュー）。
+/// 呼び出し元は足せない。固定語彙にない文字列は拒否され、記録に載る名前は固定語彙に限られる（入力の由来は検査しない。#6038）。足すのは人（PR のレビュー）。
 ///
 /// 現在の語彙は `p99_target` だけで、これは `AUDP-29` により `undecided`（値なし）の区分にだけ使える（`NAME_CLASS_RULES`）。
 /// そのため公開の口から作れる比べる値の行は `p99_target` の `undecided` だけで、`external`・`test_condition`・`measured` の行は
@@ -210,7 +210,7 @@ fn is_ref_shape(s: &str) -> bool {
 /// 64 バイト以下の英数字・base64url・16 進の秘密値は形では止められない。各欄の語彙・列挙・整数の検査が止めるのは、
 /// 固定語彙の外の名前と、列挙・整数の外の値である。区間名（`IntervalName`）・[`ValueName`]・[`RefId`] の語彙は
 /// crate の固定の定数で、記録に書く名前を渡す入力から独立している（呼び出し元は足せない。#6038）。
-/// そのため名前の欄に入るのは固定語彙・列挙・整数だけで、設定由来の値は名前として記録に出せない。
+/// そのため名前の欄に入るのは固定語彙・列挙・整数だけで、語彙にない文字列は拒否される（検査は完全一致で、入力の由来は見ない）。
 /// 漏れは照合の試験（`tests/trial_run.rs`）で確かめる。これは AAUD-30・AAUD-31 の方法を
 /// ハーネスの出力に当てはめたもので、満たしたものではない（実環境の走査は Hub の `AOPS-73`）。対象は stub の設定の
 /// 3 欄から負荷の記録へ値が流れないことの回帰の検出と、設定の口（`with_hub_stub_record`）を通した it-run の記録に
@@ -982,7 +982,11 @@ mod tests {
     fn dir(name: &str) -> TestDir {
         static N: AtomicU64 = AtomicU64::new(0);
         for _ in 0..100 {
-            let d = std::env::temp_dir().join(format!(
+            // 共有の一時ディレクトリでなく、Cargo の管理下の target の下に置く。
+            let base =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-tmp");
+            std::fs::create_dir_all(&base).unwrap();
+            let d = base.join(format!(
                 "{name}-{}-{}",
                 std::process::id(),
                 N.fetch_add(1, Ordering::Relaxed)
