@@ -301,6 +301,34 @@ fn refs_limits() {
     );
 }
 
+/// 形式検査を直接見る。公開の `new` は語彙との完全一致でも拒否するため、`new` 経由の否定試験だけでは
+/// `is_name`・`is_ref_shape` を外した退行を検出できない（SECR-23）。
+#[test]
+fn shape_checks_reject_bad_candidates_directly() {
+    for bad in ["", "A", "a-b", "a\nb", "a\u{2028}b", "a b", &"a".repeat(65)] {
+        assert!(!is_name(bad), "is_name must reject {bad:?}");
+    }
+    assert!(is_name("p99_target"));
+    assert!(is_name(&"a".repeat(64)));
+    for bad in [
+        "",
+        "a\nb",
+        "a\u{2028}b",
+        "a\u{2029}b",
+        "a,b",
+        "a b",
+        "a\0b",
+        "none",
+        "harness_config",
+        "measured",
+        &"a".repeat(65),
+    ] {
+        assert!(!is_ref_shape(bad), "is_ref_shape must reject {bad:?}");
+    }
+    assert!(is_ref_shape("AUDP-29"));
+    assert!(is_ref_shape(&"a".repeat(64)));
+}
+
 #[test]
 fn input_validation() {
     for bad in ["", "A", "a-b", "a\nb", "a\u{2028}b", "a b", &"a".repeat(65)] {
