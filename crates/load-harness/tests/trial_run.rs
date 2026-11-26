@@ -185,6 +185,10 @@ fn small_trial_run_writes_record_without_requirement_values() {
         assert!(!out.contains(dir_str));
     }
 
+    // 10/10: 上の検査（秘密値・設定の目印・パスが無い）を通した本文だけを出す。
+    // 記録のファイルは成功時に消えるため、`make load-trial`（--show-output）で人が本文を読める。
+    println!("{text}");
+
     // 上書きしない: 同じ記録をもう一度書くと別名の新しいファイルになる。
     let path2 = record.write_new(&dir).unwrap();
     assert_ne!(path, path2);

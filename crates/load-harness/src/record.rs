@@ -9,7 +9,7 @@
 //!
 //! 安全: 記録に入る文字列は作る時点で文字種・長さ・語彙を検査し、自由文の欄を作らない。違反は誤りにする
 //! （fail-closed。黙って `undecided` に落とさない。DPOL-32）。区分に既定値を置かず、ハーネスの中に測定値を要件の値へ上げる経路を作らない
-//! （要件の値・初期値は、承認一覧の置き場・形・承認の手順が決まるまで常に拒否する。TASK-12・#121。[`ApprovedValues`] の信頼の境界）。
+//! （要件の値・初期値は、承認一覧の置き場・形・承認の手順が決まるまで常に拒否する。TASK-12・#111。[`ApprovedValues`] の信頼の境界）。
 //! 段階の結果は [`RunSession::run`] の中でだけ作り、実行の文脈に結び付ける（型で塞げない部分は [`RunSession`] の信頼の境界）。
 //! `judgment:` は常に空で、ハーネスは合否を書かない（ACPT-7）。ファイル名は整数だけで作り、既存ファイルを上書きしない。
 //! 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない（SECR-11・SECR-23）。`Debug` は中身を出さない。
@@ -106,7 +106,7 @@ pub enum InvalidValueReason {
     ValueForbidden,
     ClassNotAllowed,
     /// 承認一覧（[`ApprovedValues`]）のどの行とも完全一致しない。現在は `ComparisonValue::new` が出さない
-    /// （要件の値・初期値を常に `ClassNotAllowed` で拒否する。照合を戻すときのために残す。TASK-12・#121）。
+    /// （要件の値・初期値を常に `ClassNotAllowed` で拒否する。照合を戻すときのために残す。TASK-12・#111）。
     NotInApprovedList,
 }
 
@@ -333,12 +333,12 @@ struct ApprovedValue {
 
 /// 承認一覧のファイルを読んだ結果。将来、要件の値・初期値の候補（[`ComparisonValue::new`] の引数）を、
 /// この一覧の行との完全一致で限る（規則 4）ための型。現在は `ComparisonValue::new` が要件の値・初期値を常に拒否し、
-/// この一覧を照合に使わない（TASK-12・#121）。作る口はファイルから読む [`ApprovedValues::load`] と、
+/// この一覧を照合に使わない（TASK-12・#111）。作る口はファイルから読む [`ApprovedValues::load`] と、
 /// 空の一覧（[`Default`]。どの要件の値・初期値も通さない）だけで、本文の文字列から作る公開の口はない。
 ///
 /// 信頼の境界: この型が検査するのは形式（ファイルの種類・大きさ・UTF-8・書式、候補との完全一致）だけで、
 /// 一覧の行を人が承認したこと（真正性）は検査しない。ライブラリの中では、ファイルを書いたのが人か、
-/// 記録の候補を持つ同じ呼び出し元かを区別できない（照合を戻した後は、呼び出し元が候補から書いたファイルを渡せば、その値は通る。TASK-12・#121 までは通らない）。
+/// 記録の候補を持つ同じ呼び出し元かを区別できない（照合を戻した後は、呼び出し元が候補から書いたファイルを渡せば、その値は通る。TASK-12・#111 までは通らない）。
 /// 真正性は、承認一覧を repo に commit し、人がレビューで承認することで担保する（値の決定・承認は人が行う。ACPT-7）。
 /// 一覧のファイルの置き場と形は未定で、人が決める（`docs/harness/load.md` の「未決・人の確認待ち」）。
 ///
@@ -356,7 +356,7 @@ impl fmt::Debug for ApprovedValues {
 }
 
 impl ApprovedValues {
-    /// 現在は `ComparisonValue::new` がこの結果を使わない（要件の値・初期値を常に拒否する。#121）。
+    /// 現在は `ComparisonValue::new` がこの結果を使わない（要件の値・初期値を常に拒否する。#111）。
     ///
     /// 承認一覧のファイルを読み込み専用で開き、形式を検査して読む。検査は形式だけで、承認の真正性は見ない
     /// （型の doc の信頼の境界）。渡すのは repo に commit され人がレビューで承認したファイルに限る。照合を戻した後は、
@@ -371,7 +371,7 @@ impl ApprovedValues {
     /// 書式に反する行・未知の区分や単位・数値でない値・出典の欠け・1 行の中の出典 ID の重複・出典が 9 件以上の行のとき
     /// [`LoadRecordError::Format`]（入力の値・パスを誤りに載せない）。拒否する重複は 1 行の中の出典 ID だけで、
     /// 同じ承認行を複数回書いても（別の行として）受理する。行どうしの重複は検査しない（今は照合に使わないため記録への影響は無い）。
-    /// 名前が同じで値・単位・出典が違う複数の行も受理する。照合を戻すとき（TODO(TASK-12)・#121）に、
+    /// 名前が同じで値・単位・出典が違う複数の行も受理する。照合を戻すとき（TODO(TASK-12)・#111）に、
     /// 食い違う行を読み込みで拒否するかを決める。
     pub fn load(path: &Path) -> Result<Self, LoadRecordError> {
         let bad = LoadRecordError::ApprovedFile;
@@ -437,7 +437,7 @@ impl ApprovedValues {
         Ok(Self(out))
     }
 
-    // TODO(TASK-12): `ComparisonValue::new` が `Requirement`・`Initial` を常に拒否する間は呼ばれない（#121）。
+    // TODO(TASK-12): `ComparisonValue::new` が `Requirement`・`Initial` を常に拒否する間は呼ばれない（#111）。
     #[expect(dead_code)]
     fn contains(
         &self,
@@ -539,7 +539,7 @@ impl ComparisonValue {
     /// 区分の規則に反するとき [`LoadRecordError::InvalidValue`]、出典が 9 件以上のとき
     /// [`LoadRecordError::TooManyRefs`]、重複のとき [`LoadRecordError::InvalidRef`]。
     // TODO(TASK-12): 承認一覧の置き場・形・承認の手順が決まったら、`approved` との完全一致の照合を戻す
-    // （`ApprovedValues::contains`。拒否の理由は `NotInApprovedList` に戻る。追跡は #121）。あわせて、不一致 5 種
+    // （`ApprovedValues::contains`。拒否の理由は `NotInApprovedList` に戻る。追跡は #111）。あわせて、不一致 5 種
     // （項目・区分・数値・単位・出典のどれか 1 つが違うと出せない）の試験も戻す
     // （削除した `approval_must_match_name_class_value_unit_refs` に当たるもの。AUDB-6）。
     pub fn new(

@@ -107,7 +107,7 @@ fn list(text: &str) -> ApprovedValues {
     try_list(text).unwrap()
 }
 
-/// ACPT-7・load.md 規則 4: 承認一覧の置き場・形・承認の手順が決まるまで（TASK-12・#121）、
+/// ACPT-7・load.md 規則 4: 承認一覧の置き場・形・承認の手順が決まるまで（TASK-12・#111）、
 /// 要件の値・初期値は一覧に一致する行があっても常に拒否する（fail-closed）。
 #[test]
 fn requirement_and_initial_always_rejected() {
@@ -238,7 +238,7 @@ fn invalid(r: Result<ComparisonValue, LoadRecordError>) -> bool {
 fn class_rules_fail_closed() {
     use ValueClass::*;
     for c in [Requirement, Initial] {
-        // 承認の手順が決まるまで常に ClassNotAllowed（TASK-12・#121）。
+        // 承認の手順が決まるまで常に ClassNotAllowed（TASK-12・#111）。
         for (v, ids) in [
             (Some(1), &[][..]),
             (None, &["X-1"][..]),
