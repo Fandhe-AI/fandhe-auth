@@ -378,8 +378,8 @@ rm -f "${work_dir}/gitlog"
 PATH="${shim_dir}:${PATH}" LOG_GIT_INDEX="${work_dir}/gitlog" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || true
 extra_log="$(grep -F ":(literal,top).agents/skills/vendored-a/" "${work_dir}/gitlog" || true)"
 extra_idx="${extra_log%%$'\t'*}"
-# 通常の本文の差分（追加の差分以外の --cached の diff）と同じ固定コピーを指す（未指定の "-"・実の index では通らない）
-main_idx="$(grep -vF ":(literal,top)" "${work_dir}/gitlog" | grep -F -- "--cached" | head -n 1 | cut -f1 || true)"
+# 通常の本文の差分（-U0 を持つ、追加の差分以外の diff。--name-only の一覧ではない）と同じ固定コピーを指す（未指定の "-"・実の index では通らない）
+main_idx="$(grep -vF ":(literal,top)" "${work_dir}/gitlog" | grep -F -- "-U0" | head -n 1 | cut -f1 || true)"
 if [ -n "${extra_log}" ] && [ "${extra_idx}" != "-" ] && [ "${extra_idx}" != "${real_index}" ] && [ -n "${main_idx}" ] && [ "${extra_idx}" = "${main_idx}" ]; then
   pass "secret-scan: dropped skill: the extra diff reads the pinned index copy"
 else
@@ -399,7 +399,7 @@ fi
 # 作業ツリーの skills-lock.json だけに足した名前（HEAD に無い）は、外れた名前として扱わない
 dropped_repo
 printf '%s\n' '{"version":2,"skills":{"vendored-a":{"source":"x"},"vendored-b":{"source":"x"},"vendored-c":{"source":"x"}}}' > skills-lock.json
-git add skills-lock.json
+# skills-lock.json はステージしない（index には入れず、作業ツリーだけの追加にする）
 stage plain.txt "ok"
 rm -f "${work_dir}/gitlog"
 rc=0
@@ -409,5 +409,17 @@ if [ "${rc}" -eq 0 ] && [ -s "${work_dir}/gitlog" ] && ! grep -qF ":(literal,top
 else
   fail "secret-scan: a name added only to the working tree adds no extra body diff" "exit ${rc}" "log: $(cat "${work_dir}/gitlog" 2> /dev/null)"
 fi
+
+# 別の checkout（検出器と走査対象が違う repo）の staged でも、対象側の skills-lock.json だけで外れた名前の既存の本文を走査する
+new_repo
+printf '%s\n' "${lock_ok}" > skills-lock.json
+stage .agents/skills/vendored-a/SKILL.md "x = ${token}"
+stage .agents/skills/vendored-b/SKILL.md "y = ${token}"
+git add skills-lock.json
+git commit -q -m "chore: add skill bodies"
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+git add skills-lock.json
+SCAN_BIN="${det_ok}" check_scan "dropped skill: another checkout scans the dropped body when only skills-lock.json is staged" 1 .agents/skills/vendored-a/SKILL.md
+expect_out "dropped skill: another checkout counts the dropped name once, sibling stays excluded" "secret-scan: total: 1 finding(s) in 1 file(s)"
 
 finish "part 7"
