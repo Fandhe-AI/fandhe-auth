@@ -1467,9 +1467,10 @@ index_paths_unchanged() {
   [ "${now_raw}" = "${raw_index}" ] || return 3
   return 0
 }
-# verify_index_unchanged <複写先> <一覧の出力先>
-verify_index_unchanged() {
-  local copy="$1" listing="$2" cmp_rc=0
+# require_index_paths_unchanged: index_paths_unchanged の結果を診断に変え、食い違い・取得の失敗は 2 で止める。
+# verify_index_unchanged が複写の前と後（cmp の後）の両方で呼び、複写を前後から挟む（#6047）。
+# 複写の後の確認が無いと、前の確認の後・複写の最中に親のリンクが付け替わったとき、古い実体を読んだまま 0 を返し得る。
+require_index_paths_unchanged() {
   local paths_rc=0
   index_paths_unchanged || paths_rc=$?
   case "${paths_rc}" in
@@ -1486,6 +1487,11 @@ verify_index_unchanged() {
       exit 2
       ;;
   esac
+}
+# verify_index_unchanged <複写先> <一覧の出力先>
+verify_index_unchanged() {
+  local copy="$1" listing="$2" cmp_rc=0
+  require_index_paths_unchanged
   if index_is_link; then
     # 走査中にリンクへ替わった（固定時はリンクでなかった）。辿らず 2。
     echo "secret-scan: cannot snapshot the index; aborting" >&4
@@ -1517,6 +1523,8 @@ verify_index_unchanged() {
     echo "secret-scan: the index changed during the scan; aborting" >&4
     exit 2
   fi
+  # 複写・一覧・比較の後にも経路を取り直す（複写を前後から挟む。確認の後の付け替えは窓として残る）。
+  require_index_paths_unchanged
 }
 verify_index_unchanged "${tmp_dir}/index-after" "${tmp_dir}/index-listing-after"
 
@@ -1544,6 +1552,9 @@ if [ "${head_resolved}" -eq 1 ]; then
     exit 2
   fi
 fi
+
+# 最後の HEAD の照合の後にも、index の経路を取り直す（#6047。複写の後の付け替えを、集計の直前まで見る）。
+require_index_paths_unchanged
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
 total="${env_hits}"

@@ -25,6 +25,14 @@ case "${CP8_MODE:-}:${last}" in
     : > "${CP8_FLAG}.final"
     exit 1
     ;;
+  link-final:*/index-final)
+    # index-final の複写の直後に、親ディレクトリのリンクを別の（同じ内容の index を持つ）ディレクトリへ付け替える。
+    # 一覧は一致するため、複写の後の経路の取り直しだけがこれを検出する。
+    "${REAL_CP}" "$@" || exit $?
+    ln -sfn "${CP8_TO}" "${CP8_LINK}" || exit 1
+    : > "${CP8_FLAG}.final"
+    exit 0
+    ;;
   head-final:*/index-final)
     "${REAL_CP}" "$@" || exit $?
     # 事前に用意したコミットへ update-ref で切り替える。失敗したら完了の印を作らず、原因を標準エラーに残す
@@ -242,7 +250,8 @@ else
   fail "secret-scan: an index with a too-long name (not ENOENT) is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-# T10: index のパスが有効な /dev/tcp 風でも、不在の確認で開かない（接続の試行を待ち受け側で観測する）（#6047）
+# T10: （python3 が無いと待ち受けを立てられず、port が空のまま失敗する。検査を省かない fail-closed）
+# index のパスが有効な /dev/tcp 風でも、不在の確認で開かない（接続の試行を待ち受け側で観測する）（#6047）
 # 127.0.0.1 の待ち受けを立て、その実ポートを /dev/tcp のパスに入れる。ファイルを開く（Bash の TCP リダイレクト）実装だと待ち受けが接続を受け、印ができる。
 new_repo; stage src/app.txt "hello"
 t10_listen="${work_dir}/t10-listen.py"
@@ -271,17 +280,31 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 t10_port="$(cat "${work_dir}/t10-port" 2> /dev/null || true)"
-rc=0
+# 陽性対照: 待ち受けが接続を記録できることを、/dev/tcp への 1 回の接続で先に確かめる（印が付かない待ち受けでは T10 が何も検出できない）。
+t10_ctl=0
 if [ -n "${t10_port}" ]; then
+  # bash の /dev/tcp への接続を、サブシェルで 1 回だけ開いて閉じる
+  ( exec 3<> "/dev/tcp/127.0.0.1/${t10_port}" ) 2> /dev/null || true
+  for _ in $(seq 1 30); do
+    [ -e "${work_dir}/t10-conn" ] && break
+    sleep 0.1
+  done
+  if [ -e "${work_dir}/t10-conn" ]; then
+    t10_ctl=1
+  fi
+  rm -f "${work_dir}/t10-conn"
+fi
+rc=0
+if [ -n "${t10_port}" ] && [ "${t10_ctl}" -eq 1 ]; then
   GIT_INDEX_FILE="/dev/tcp/127.0.0.1/${t10_port}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
   sleep 0.5
 fi
 kill "${t10_pid}" 2> /dev/null || true
 wait "${t10_pid}" 2> /dev/null || true
-if [ -n "${t10_port}" ] && [ ! -e "${work_dir}/t10-conn" ] && [ "${rc}" -eq 0 ]; then
+if [ "${t10_ctl}" -eq 1 ] && [ ! -e "${work_dir}/t10-conn" ] && [ "${rc}" -eq 0 ]; then
   pass "secret-scan: a valid /dev/tcp-like index path is never opened (no connection reaches the listener)"
 else
-  fail "secret-scan: a valid /dev/tcp-like index path is never opened (no connection reaches the listener)" "port ${t10_port:-none} rc ${rc} conn $([ -e "${work_dir}/t10-conn" ] && echo yes || echo no)" "output: $(cat "${work_dir}/out" 2> /dev/null)"
+  fail "secret-scan: a valid /dev/tcp-like index path is never opened (no connection reaches the listener)" "port ${t10_port:-none} positive-control ${t10_ctl} rc ${rc} conn $([ -e "${work_dir}/t10-conn" ] && echo yes || echo no)" "output: $(cat "${work_dir}/out" 2> /dev/null)"
 fi
 
 # T10b: 未作成の代替 index "-"（作業ツリーのルート基準）は標準入力と取り違えず、空の index として扱う（#6047）
@@ -301,7 +324,8 @@ run_watched() {
   shift
   # 監視対象を独立したプロセスグループで起動し（set -m）、打ち切りと終了後の取り残しの掃除をグループ全体へ行う。
   set -m
-  "$@" &
+  # 標準入力は明示して /dev/null にする（独立したグループの背景ジョブが端末を読んで SIGTTIN で止まらないように）。
+  "$@" < /dev/null &
   pid=$!
   set +m
   while kill -0 "${pid}" 2> /dev/null; do
@@ -317,7 +341,10 @@ run_watched() {
   done
   rc=0
   wait "${pid}" || rc=$?
-  kill -9 -- "-${pid}" 2> /dev/null || true
+  # 取り残しがあるときだけグループを終了させる（無ければ何もしない）。
+  if kill -0 -- "-${pid}" 2> /dev/null; then
+    kill -9 -- "-${pid}" 2> /dev/null || true
+  fi
 }
 
 # T10c: run_watched は打ち切り時に孫プロセスも含めて終了させる（フック本体の PID だけを kill すると子が残る）
@@ -328,7 +355,15 @@ rc=0
 run_watched 1 bash -c 'sleep 30 & echo $! > "$1"; wait' _ "${t10c_pidfile}" > /dev/null 2>&1
 sleep 0.3
 t10c_child="$(cat "${t10c_pidfile}" 2> /dev/null || true)"
-if [ "${rc}" -eq 124 ] && [ -n "${t10c_child}" ] && ! kill -0 "${t10c_child}" 2> /dev/null; then
+# zombie（終了済みで回収待ち）は生存と数えない
+t10c_alive=0
+if [ -n "${t10c_child}" ] && kill -0 "${t10c_child}" 2> /dev/null; then
+  case "$(ps -o stat= -p "${t10c_child}" 2> /dev/null || true)" in
+    Z*) ;;
+    *) t10c_alive=1 ;;
+  esac
+fi
+if [ "${rc}" -eq 124 ] && [ -n "${t10c_child}" ] && [ "${t10c_alive}" -eq 0 ]; then
   pass "run_watched: a timeout also ends the child processes of the watched command"
 else
   [ -z "${t10c_child}" ] || kill -9 "${t10c_child}" 2> /dev/null || true
@@ -398,6 +433,25 @@ if [ -e "${work_dir}/t13-flag" ] && [ "${rc}" -eq 2 ] \
   pass "secret-scan: an existing index whose parent link was retargeted during the scan is a scan failure (2)"
 else
   fail "secret-scan: an existing index whose parent link was retargeted during the scan is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T14: 2 回目の複写の直後に親ディレクトリのリンクが付け替わったら、一覧が一致しても 2（複写の後の経路の取り直し。#6047）
+# 2 回目の確認の前の経路の確認だけでは、前の確認の後・複写の最中の付け替えを見落とし、古い実体を読んで 0 を返す。
+new_repo; stage src/app.txt "hello"
+t14_dir="${work_dir}/t14"
+rm -rf "${t14_dir}"
+mkdir -p "${t14_dir}/real1" "${t14_dir}/real2"
+cp "$(git rev-parse --git-path index)" "${t14_dir}/real1/index"
+cp "$(git rev-parse --git-path index)" "${t14_dir}/real2/index"
+ln -s "${t14_dir}/real1" "${t14_dir}/lnk"
+rm -f "${work_dir}/t14-flag.final"
+rc=0
+GIT_INDEX_FILE="${t14_dir}/lnk/index" CP8_MODE=link-final CP8_FLAG="${work_dir}/t14-flag" CP8_TO="${t14_dir}/real2" CP8_LINK="${t14_dir}/lnk"   PATH="${cp8_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/t14-flag.final" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a parent link retargeted right after the final index copy is a scan failure (2)"
+else
+  fail "secret-scan: a parent link retargeted right after the final index copy is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 finish "part 8"
