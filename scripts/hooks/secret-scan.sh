@@ -1270,10 +1270,14 @@ if ! tr '\000' ' ' < "${tmp_dir}/diff" > "${tmp_dir}/diff.sp"; then
   exit 2
 fi
 
+# NUL の有無はフィルタの前に確定する（フィルタ後の diff.del は元の diff と常に違うため、後で比べると二重に走査する）。
+cmp_rc=0
+cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del" || cmp_rc=$?
+
 # 登録名の下の区画を落とす（#6053）。NUL を除いた版と空白へ置き換えた版の両方に同じ処理をかける（行の構造は同じ）。
 # 区画の数が一覧のファイル数と違う、または落とす区画のヘッダ（`diff --git a/<パス> b/<パス>`。--no-renames のため同じパス）が
-# 一覧の n 番目のパスと一致しなければ（diff.orderFile 等で順序が変わった場合を含む）、対応が取れないため検査不能（2）にする。
-# 落とさない区画は一致を問わない（走査する側に倒す）。元の diff（NUL の有無の判定用）は触らない。
+# 一覧の n 番目のパスと一致しなければ（git が引用・エスケープするタブ・二重引用符・非 ASCII のパス、diff.orderFile 等の順序の変更）、
+# 対応が取れないため落とさず走査する（走査する側に倒す）。区画の数が違うときだけ検査不能（2）にする。元の diff（NUL の有無の判定用）は触らない。
 if [ "${body_skip_filter}" -eq 1 ]; then
   for sk_f in diff.del diff.sp; do
     if ! LC_ALL=C awk -v want="${skip_total}" '
@@ -1281,10 +1285,11 @@ if [ "${body_skip_filter}" -eq 1 ]; then
       /^diff --git / {
         sec++
         drop = (substr(flag[sec], 1, 1) == "1")
-        if (drop && $0 != "diff --git a/" substr(flag[sec], 2) " b/" substr(flag[sec], 2)) bad = 1
+        # 生のパスのヘッダと一致しない区画（git が引用・エスケープする名前、順序の違い）は落とさず走査する（fail-closed）
+        if (drop && $0 != "diff --git a/" substr(flag[sec], 2) " b/" substr(flag[sec], 2)) drop = 0
       }
       !drop { print }
-      END { if (sec != want || bad) exit 3 }
+      END { if (sec != want) exit 3 }
     ' "${tmp_dir}/skip-flags" "${tmp_dir}/${sk_f}" > "${tmp_dir}/${sk_f}.f"; then
       echo "secret-scan: failed to filter diff; aborting" >&4
       exit 2
@@ -1349,8 +1354,6 @@ scan_pass() {
   done < "$1"
 }
 # cmp の終了状態は 0 = 同じ（NUL なし）/ 1 = 違う（NUL あり）/ 2 以上 = エラー。後者は検査不能として止める。
-cmp_rc=0
-cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del" || cmp_rc=$?
 case "${cmp_rc}" in
   0)
     scan_pass "${tmp_dir}/diff.del"
