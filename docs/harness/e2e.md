@@ -177,7 +177,7 @@ PKEY の振る舞いを満たしたとは主張しない。
     ヘルパーは登録結果の `counts_as_real_device()`・`counts_as_safari()` がともに `false` であることも内部で検査する（`ACPT-7`・`ACPT-8`）。戻り値から登録結果の `evidence()` は取れないので、
     直接呼び出した操作（認証など）の証跡の確認は呼び出し側が行う。
     `registration_run_result`・`authentication_run_result` を直接使うときは、得た `(run, check_ok)` を呼び出し側が検査する。`run` は操作の結果と後続の検査を合成した記録用の分類で、`check_ok` は後続の検査（credential の件数・RP ID）だけの結果である。
-    操作の成否は `run` ではなく元の `result` から決める。`run` を記録した後に `result.expect(..)` で `outcome` を取り出し、成功を期待するなら `outcome.succeeded()`、拒否を期待するなら `!outcome.succeeded()` と `outcome.error_name()` が期待したエラー名であることを検査する。`check_ok` はそれとは別に確かめる。ただし登録と認証で意味が違う。`registration_run_result` は、登録が成功しなかったときは credential を見ずに `(run, false)` を返す。そのため登録の拒否を期待する試験では `check_ok` は常に偽で、`assert!(check_ok, ..)` を置かない（`!outcome.succeeded()` と `error_name()` で確かめる）。登録の成功を期待するときは `assert!(check_ok, ..)` で確かめる。`authentication_run_result` は操作の成否によらず credential を検査するので、拒否を期待する認証でも `assert!(check_ok, ..)` で確かめる（`check_ok` が真でも、認証が成功したり別の理由で拒否されたりし得る）。
+    操作の成否は `run` ではなく元の `result` から決める。`run` を記録した後に `result.expect(..)` で `outcome` を取り出し、成功を期待するなら `outcome.succeeded()`、拒否を期待するなら `!outcome.succeeded()` と `outcome.error_name()` が期待したエラー名であることを検査する。`check_ok` はそれとは別に確かめる。ただし登録と認証で意味が違う。`registration_run_result` は、登録が成功しなかったとき（`Err` を含む）は credential を見ずに `(run, false)` を返し、成功したときだけ credential の件数と RP ID を見て真偽を決める。偽になる条件は「登録が成功しなかった」「credential の取得に失敗した」「件数が 1 でない・RP ID が `localhost` でない」で、登録が予期せず成功して件数と RP ID が合えば拒否を期待する試験でも真になる。そのため `check_ok` は拒否の判定に使えず、登録の拒否を期待する試験は `!outcome.succeeded()` と `error_name()` で確かめ、`assert!(check_ok, ..)` を拒否の根拠に置かない。登録の成功を期待するときは `assert!(check_ok, ..)` で確かめる。`authentication_run_result` は操作の成否によらず credential を検査するので、拒否を期待する認証でも `assert!(check_ok, ..)` で確かめる（`check_ok` が真でも、認証が成功したり別の理由で拒否されたりし得る）。
     登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` の戻り値を `(run, check_ok)` に分け、`run` を `sink.record(PasskeyOperation::Registration, run).expect("record")` で一度だけ記録する。
     `RecordSink::record` は件数の上限を超えると `Err` を返すので、`sink.record(..).expect("record")` のように成功を確かめる。
     エラーを無視すると、記録が欠けたまま `finish()` で完了にできてしまう。登録・認証のどちらの直接の記録も同じ。
@@ -195,7 +195,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 ### 実行の方法
 
-- `make test`（`cargo test --workspace --locked`）: workspace 全体の試験を流す。ドライバ不要で、この crate では実ブラウザ・実ドライバを要さない試験（偽のドライバを使う試験と、`crates/e2e-harness/src/record.rs` の記録形式・保存処理の単体試験）だけが流れ（`#[ignore]` のブラウザ E2E は対象外）、ブラウザ E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
+- `make test`（`cargo test --workspace --locked`）: workspace 全体の試験を流す。ドライバ不要で、この crate では実ブラウザ・実ドライバを要さない試験（偽のドライバを使う試験と、`crates/e2e-harness/tests/run_record.rs` の記録形式・保存処理の統合試験と、`crates/e2e-harness/src/record.rs` 内の単体試験）だけが流れ（`#[ignore]` のブラウザ E2E は対象外）、ブラウザ E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
 - `make e2e-chrome`（`scripts/e2e-chrome.sh`）・`make e2e-firefox`（`scripts/e2e-firefox.sh`）: `#[ignore]` の登録・認証の試験を target ごとに流す。
   引数は受け付けない。target ごとに 1 件以上通らなければ失敗する。CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
 
