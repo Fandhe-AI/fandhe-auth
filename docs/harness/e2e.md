@@ -177,7 +177,7 @@ PKEY の振る舞いを満たしたとは主張しない。
     ヘルパーは登録結果の `counts_as_real_device()`・`counts_as_safari()` がともに `false` であることも内部で検査する（`ACPT-7`・`ACPT-8`）。戻り値から登録結果の `evidence()` は取れないので、
     直接呼び出した操作（認証など）の証跡の確認は呼び出し側が行う。
     `registration_run_result`・`authentication_run_result` を直接使うときは、得た `(run, check_ok)` を呼び出し側が検査する。`run` は操作の結果と後続の検査を合成した記録用の分類で、`check_ok` は後続の検査（credential の件数・RP ID）だけの結果である。
-    操作の成否は `run` ではなく元の `result` から決める。`run` を記録した後に `result.expect(..)` で `outcome` を取り出し、成功を期待するなら `outcome.succeeded()`、拒否を期待するなら `!outcome.succeeded()` と `outcome.error_name()` が期待したエラー名であることを検査する。`check_ok` はそれとは別に `assert!(check_ok, ..)` で確かめる（`check_ok` が真でも、認証が成功したり別の理由で拒否されたりし得る）。
+    操作の成否は `run` ではなく元の `result` から決める。`run` を記録した後に `result.expect(..)` で `outcome` を取り出し、成功を期待するなら `outcome.succeeded()`、拒否を期待するなら `!outcome.succeeded()` と `outcome.error_name()` が期待したエラー名であることを検査する。`check_ok` はそれとは別に確かめる。ただし登録と認証で意味が違う。`registration_run_result` は、登録が成功しなかったときは credential を見ずに `(run, false)` を返す。そのため登録の拒否を期待する試験では `check_ok` は常に偽で、`assert!(check_ok, ..)` を置かない（`!outcome.succeeded()` と `error_name()` で確かめる）。登録の成功を期待するときは `assert!(check_ok, ..)` で確かめる。`authentication_run_result` は操作の成否によらず credential を検査するので、拒否を期待する認証でも `assert!(check_ok, ..)` で確かめる（`check_ok` が真でも、認証が成功したり別の理由で拒否されたりし得る）。
     登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` の戻り値を `(run, check_ok)` に分け、`run` を `sink.record(PasskeyOperation::Registration, run).expect("record")` で一度だけ記録する。
     `RecordSink::record` は件数の上限を超えると `Err` を返すので、`sink.record(..).expect("record")` のように成功を確かめる。
     エラーを無視すると、記録が欠けたまま `finish()` で完了にできてしまう。登録・認証のどちらの直接の記録も同じ。
@@ -188,7 +188,7 @@ PKEY の振る舞いを満たしたとは主張しない。
     認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)` を呼び、`authentication_run_result(&handle, &aid, &result)` で
     後続の検査（credential がちょうど 1 件・RP ID が `localhost` と完全一致）を反映した `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Authentication, run).expect("record")` で一度だけ記録し、成功を確かめる。
     `authenticate_once` の結果をそのまま記録しない（検査を反映できない）。options の値は PoC の値（`QP-1`）で要件の値ではない。
-6. 登録をヘルパーで行った場合、登録の検査はヘルパーが済ませている。呼び出し側は、認証（または直接使った登録）の成否（`run` ではなく元の `result` の `outcome`。拒否を期待する場合は `error_name()` も）と `check_ok`（`assert!(check_ok, ..)`）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
+6. 登録をヘルパーで行った場合、登録の検査はヘルパーが済ませている。呼び出し側は、認証（または直接使った登録）の成否（`run` ではなく元の `result` の `outcome`。拒否を期待する場合は `error_name()` も）と `check_ok`（認証は常に、直接使った登録は成功を期待するときだけ `assert!(check_ok, ..)`。登録の拒否を期待する試験では置かない）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
 7. `running.stop()` で停止し、その成功を確かめてから `sink.finish()` で記録を出し、`finish()` の戻り値も確かめる。停止に失敗した実行を完了扱いで記録しない。
 
 失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
