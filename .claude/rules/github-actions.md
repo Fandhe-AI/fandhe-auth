@@ -34,13 +34,15 @@ MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・
 
 ## PR ごとの実行と定期の実行の振り分け（TASK-6 7/10。#54）
 
-- PR の系統は `ci.yml`（`pull_request`・main への `push`）。マージを止める検査はすべてここに置き、`ci-complete` で束ねる。
+- PR の系統は `ci.yml`（`pull_request`・main への `push`）。`ci.yml` 内のジョブでマージを止める検査はここに置き、`ci-complete` で束ねる。
+  `ci-complete` の集約は `ci.yml` 内のジョブに限る。`codex / *` の必須ステータスチェックと `trust-root-secret-scan.yml` は別に要求される（「必須チェックと集約ジョブ」の節を参照）。
   依存の変更ごとの監査（DPOL-34）も PR の系統の `deps-audit` が持つ（TASK-680）。
 - 定期の系統は `scheduled.yml`（`schedule`・`workflow_dispatch`）。コードが変わらなくても結果が変わりうる検査を置き、マージは止めない。PR の系統の代わりにしない。
   今は検査を結線しない枠で、緑でも DPOL-35 を満たしたことにならない。結線・advisory DB の取得日の記録・警報は TASK-681（#1046）、警報の経路は Hub の `AOPS-3`。
 - 定期のジョブも `make`・`scripts/` の同じ入口を呼び、CI 側に検査のロジックを書かない。
 - 道具の版と SHA256 を宣言するのは `ci.yml` の `env` の 1 か所だけ。定期の系統で共有する方法（`workflow_call` か宣言の移設）は未定（TASK-681 で決める）。
-- `scheduled.yml` は `ci-complete` の `needs` に入れず、required にも登録しない（PR を検査しないため）。この例外の採否は利用者の確認待ちで、承認済みではない。
+- 例外（承認待ち）: PR の検査を担わない定期ジョブに限り、`scheduled.yml` を `ci-complete` の `needs` に入れず、required にも登録しない。
+  チェックリスト 2 は追加ジョブを `ci-complete` に含めるよう求めるため、この例外の採否は利用者の確認待ちで、承認済みではない（承認は人が行う）。PR の検査を担うジョブを足すときは `ci.yml` に置く。
 - `workflow_dispatch` は main 以外の ref でも流せる。check 名は必須のものと違うのでマージの判定には使われない（読み。〔実機〕では未確認）。
 - 失敗の通知は GitHub の既定だけで、運用の警報には結線していない。
 - schedule は default ブランチ（main）の定義で動く。活動の無い public の repo では GitHub が止めることがある。
