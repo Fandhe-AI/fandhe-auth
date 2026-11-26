@@ -1131,10 +1131,16 @@ fi
 # 走査の範囲には効かない。bash 3.2 は set -u で空配列を展開できないため、配列は `--` から始めて空にしない。
 skills_dir_spec=':(literal,top).agents/skills/'
 body_chunk_max_bytes=65536
-# 登録名を空白区切りの集合にする（名前は `[a-z0-9-]` の規則を通過済みで、空白を含まない）。
-skill_set=" "
+# 登録名の集合。名前ごとの変数 SKSET_<名前の '-' を '_' に直したもの> で持ち、所属の確認はパスごとの一覧検索にせず
+# 変数の参照 1 回で済ませる（パス数 × 登録名数のコストを避ける。json_seen_add と同じ方式）。名前は `[a-z0-9-]` の規則を
+# 通過済みで '_' を含まないため、'-' を '_' に直しても衝突しない。環境から継いだ SKSET_* は先に消す。
+for sk_var in $(compgen -v SKSET_ || true); do
+  unset "${sk_var}"
+done
+skill_count=0
 for name in ${skill_names[@]+"${skill_names[@]}"}; do
-  skill_set="${skill_set}${name} "
+  printf -v "SKSET_${name//-/_}" '%s' 1
+  skill_count=$((skill_count + 1))
 done
 
 # 利用者の git 設定で出力形式が変わると追加行・ファイル名を取りこぼすため固定する。
@@ -1208,7 +1214,7 @@ if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
 fi
 
 # 2. 追加行のみを走査する（削除行を対象にすると漏洩済み値の除去コミットを妨げる）
-if [ "${skill_set}" = " " ]; then
+if [ "${skill_count}" -eq 0 ]; then
   # 登録名が 0 件: 除外なしで 1 回だけ読む。
   if ! scan_diff -U0 --diff-filter=ACMR -- . > "${tmp_dir}/diff"; then
     echo "secret-scan: failed to read diff; aborting" >&4
@@ -1253,9 +1259,8 @@ else
           */*)
             seg="${rest%%/*}"
             if [[ "${seg}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
-              case "${skill_set}" in
-                *" ${seg} "*) skip=1 ;;
-              esac
+              sk_ref="SKSET_${seg//-/_}"
+              [ -z "${!sk_ref:-}" ] || skip=1
             fi
             ;;
         esac
