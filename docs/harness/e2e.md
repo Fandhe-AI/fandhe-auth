@@ -170,22 +170,26 @@ PKEY の振る舞いを満たしたとは主張しない。
 3. `E2eHarness::start(E2eConfig::new(PasskeyOperation::.., Browser::..).with(Box::new(driver)))` で起動する。
     起動順・逆順の停止・`Drop` の停止は「起動と停止の契約」の節を見る。
 4. `RecordSink::new(&handle, Browser::.., PasskeyOperation::..)` で記録を開く。
-5. 登録は `support::passkey::register`（仮想 authenticator を `VirtualAuthenticatorOptions` で足し、`register_once` を呼ぶ）。
-    認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)`。結果は `sink.record(..)` で記録に足す。options の値は PoC の値（`QP-1`）で要件の値ではない。
-6. 成否と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
+5. 登録は `support::passkey::register`（仮想 authenticator を `VirtualAuthenticatorOptions` で足し、`register_once` を呼び、戻り値は `(AuthenticatorId, CredentialRef)`）。
+    ヘルパーは内部で `registration_run_result` により分類した登録の結果を `sink.record(..)` に足すので、呼び出し側は登録を記録しない（二重に数えない）。
+    登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` で分類してから一度だけ `sink.record(..)` する。
+    認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)` を呼び、`authentication_run_result(&handle, &aid, &result)` で
+    後続の検査（credential がちょうど 1 件・RP ID が `localhost` と完全一致）を反映した `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Authentication, run)` で一度だけ記録する。
+    `authenticate_once` の結果をそのまま記録しない（検査を反映できない）。options の値は PoC の値（`QP-1`）で要件の値ではない。
+6. 成否と `check_ok`（`assert!(check_ok, ..)`）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
 7. `running.stop()` で停止し、`sink.finish()` で記録を出す。
 
 失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
 
 ### 実行の方法
 
-- `make test`: ドライバ不要。偽のドライバを使う単体・枠の試験だけが流れ、E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
+- `make test`（`cargo test --workspace --locked`）: workspace 全体の試験を流す。ドライバ不要で、この crate では偽のドライバを使う単体・枠の試験だけが流れ（`#[ignore]` のブラウザ E2E は対象外）、E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
 - `make e2e-chrome`（`scripts/e2e-chrome.sh`）・`make e2e-firefox`（`scripts/e2e-firefox.sh`）: `#[ignore]` の登録・認証の試験を target ごとに流す。
   引数は受け付けない。target ごとに 1 件以上通らなければ失敗する。CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
 
 ### 記録の読み方
 
-形式は「実行の記録の形式（5/6）」の節を見る。出力は標準出力と `target/` の下の `e2e-records/`。
+形式は「実行の記録の形式（5/6）」の節を見る。出力は標準出力と `CARGO_TARGET_TMPDIR/e2e-records/`（`RecordSink` の出力先。`target/` の下だが、固定の `target/e2e-records/` ではない）。
 出力先は起動をまたいで追記されるので、集計はその起動の標準出力だけを正とするか、起動ごとに空の専用の出力先を使う。
 
 ### 守ること
