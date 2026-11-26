@@ -13,9 +13,8 @@
 name: Scheduled
 
 on:
-  schedule:
-    # 1 日 1 回（UTC）。時刻は暫定で人が決める。毎時 0 分の混雑と update-external.yml の 00:00 UTC を避けた。
-    - cron: "23 4 * * *"
+  # 例外の承認が記録されるまで schedule は有効にしない（手動の workflow_dispatch だけ）。
+  # 承認後に schedule（1 日 1 回・UTC。時刻は人が決める）を足す。足すのは TASK-681 の結線と一緒（承認は人が行う。ACPT-7）。
   workflow_dispatch:
 
 permissions: {}

@@ -24,7 +24,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 | `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `deps audit frame (tool install only; ...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
 | `trust-root-secret-scan.yml` | `trusted secret scan (tracked files)` | `pull_request`（`branches` を一致しにくい名前に絞っており、通常は発火しない。組織の ruleset の「Require workflows to pass」から呼ばれたときに動く。発火の前提は「必須チェックと集約ジョブ」の節の例外を参照） | `ubuntu-latest` |
-| `scheduled.yml` | `scheduled frame (no checks wired; TASK-681)` | `schedule`（毎日 04:23 UTC。暫定）・`workflow_dispatch`。`pull_request`・`push` は持たない | `ubuntu-latest` |
+| `scheduled.yml` | `scheduled frame (no checks wired; TASK-681)` | `workflow_dispatch` のみ（`schedule` は例外の承認が記録されるまで有効にしない。`pull_request`・`push` は持たない） | `ubuntu-latest` |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
 
 `ci.yml` の Rust のジョブ（`build-test`・`lint`・`it-db-ci`）は、toolchain を MSRV の版で入れて流す（利用者の指示、2026-11-20）。
@@ -37,18 +37,20 @@ MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・
 - PR の系統は `ci.yml`（`pull_request`・main への `push`）。`ci.yml` 内のジョブでマージを止める検査はここに置き、`ci-complete` で束ねる。
   `ci-complete` の集約は `ci.yml` 内のジョブに限る。`codex / *` の必須ステータスチェックと `trust-root-secret-scan.yml` は別に要求される（「必須チェックと集約ジョブ」の節を参照）。
   依存の変更ごとの監査（DPOL-34）も PR の系統の `deps-audit` が持つ（TASK-680）。
-- 定期の系統は `scheduled.yml`（`schedule`・`workflow_dispatch`）。コードが変わらなくても結果が変わりうる検査を置き、マージは止めない。PR の系統の代わりにしない。
+- 定期の系統は `scheduled.yml`（今は `workflow_dispatch` のみ。`schedule` は下の例外の承認が記録された後に足す）。コードが変わらなくても結果が変わりうる検査を置き、マージは止めない。PR の系統の代わりにしない。
   今は検査を結線しない枠で、緑でも DPOL-35 を満たしたことにならない。結線・advisory DB の取得日の記録・警報は TASK-681（#1046）、警報の経路は Hub の `AOPS-3`。
 - 定期のジョブも `make`・`scripts/` の同じ入口を呼び、CI 側に検査のロジックを書かない。
 - 道具の版と SHA256 を宣言するのは `ci.yml` の `env` の 1 か所だけ。定期の系統で共有する方法（`workflow_call` か宣言の移設）は未定（TASK-681 で決める）。
 - 例外（承認待ち）: PR の検査を担わない定期ジョブに限り、`scheduled.yml` を `ci-complete` の `needs` に入れず、required にも登録しない。
+  `needs` は同一ワークフロー内のジョブしか参照できず、別ワークフローの `scheduled.yml` のジョブを `ci.yml` の `ci-complete` に直接束ねられない（GitHub Actions の仕様）。
+  承認が記録されるまで `schedule` は有効にしない（`workflow_dispatch` のみ）。
   チェックリスト 2 は追加ジョブを `ci-complete` に含めるよう求めるため、この例外の採否は利用者の確認待ちで、承認済みではない（承認は人が行う）。PR の検査を担うジョブを足すときは `ci.yml` に置く。
   - 承認の記録（承認は人が記入する。ACPT-7。Claude Code は記入しない。記入があるまでは「承認待ち」を事実どおりに保つ）
     - 根拠: 定期ジョブは PR を検査しないため、`ci-complete` に入れても PR の判定に使われず、失敗が無関係な PR を止める（記入待ち。人が確認する）
     - 適用範囲: PR の検査を担わない `scheduled.yml` のジョブに限る。PR の検査を担うジョブには広げない
     - 承認者: 未記入
     - 承認日: 未記入
-  - `ci-complete` で束ねない代わりの失敗の検知経路: 今は GitHub の既定の通知だけ（下の「失敗の通知」の項）。運用の警報への結線は TASK-681（Hub の `AOPS-3`）で、結線までは定期ジョブの失敗を人が Actions の画面で確かめる。承認の採否はこの経路で足りるかも含めて人が判断する
+  - `ci-complete` で束ねない代わりの失敗の検知経路: 今は実装に在る経路は無く、GitHub の既定の通知だけ（下の「失敗の通知」の項。失敗時の通知・Issue 起票の結線は `scheduled.yml` に無い）。運用の警報への結線は TASK-681（Hub の `AOPS-3`）で、結線までは定期ジョブの失敗を人が Actions の画面で確かめる。承認の採否はこの経路で足りるかも含めて人が判断する
 - `workflow_dispatch` は main 以外の ref でも流せる。check 名は必須のものと違うのでマージの判定には使われない（読み。〔実機〕では未確認）。
 - 失敗の通知は GitHub の既定だけで、運用の警報には結線していない。
 - schedule は default ブランチ（main）の定義で動く。活動の無い public の repo では GitHub が止めることがある。
@@ -222,7 +224,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - 現状の `ci.yml` は全体で数十秒のため導入していない（費用対効果が見合う重いジョブを足した時に検討する）
 - draft PR の skip は現状入れていない。入れる場合は `if: github.event.pull_request.draft == false` とし、
   trigger の `types` に `ready_for_review` を加える（加えないと ready にしても CI が走らない）
-- schedule は日次以下の頻度にする（`update-external.yml` は 00:00 UTC の 1 回、`scheduled.yml` は 04:23 UTC の 1 回）
+- schedule は日次以下の頻度にする（`update-external.yml` は 00:00 UTC の 1 回、`scheduled.yml` に足すときは 1 日 1 回）
 
 ## ジョブ・ワークフローを追加するときのチェックリスト
 
