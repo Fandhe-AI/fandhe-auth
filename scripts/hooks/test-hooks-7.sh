@@ -377,7 +377,10 @@ real_index="$(git rev-parse --git-path index)"
 rm -f "${work_dir}/gitlog"
 PATH="${shim_dir}:${PATH}" LOG_GIT_INDEX="${work_dir}/gitlog" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || true
 extra_log="$(grep -F ":(literal,top).agents/skills/vendored-a/" "${work_dir}/gitlog" || true)"
-if [ -n "${extra_log}" ] && [[ "${extra_log}" != "${real_index}"$'\t'* ]] && [[ "${extra_log}" != *$'\n'"${real_index}"$'\t'* ]]; then
+extra_idx="${extra_log%%$'\t'*}"
+# 通常の本文の差分（追加の差分以外の --cached の diff）と同じ固定コピーを指す（未指定の "-"・実の index では通らない）
+main_idx="$(grep -vF ":(literal,top)" "${work_dir}/gitlog" | grep -F -- "--cached" | head -n 1 | cut -f1 || true)"
+if [ -n "${extra_log}" ] && [ "${extra_idx}" != "-" ] && [ "${extra_idx}" != "${real_index}" ] && [ -n "${main_idx}" ] && [ "${extra_idx}" = "${main_idx}" ]; then
   pass "secret-scan: dropped skill: the extra diff reads the pinned index copy"
 else
   fail "secret-scan: dropped skill: the extra diff reads the pinned index copy" "log: $(cat "${work_dir}/gitlog" 2> /dev/null)"
@@ -385,11 +388,26 @@ fi
 dropped_repo
 stage plain.txt "ok"
 rm -f "${work_dir}/gitlog"
-PATH="${shim_dir}:${PATH}" LOG_GIT_INDEX="${work_dir}/gitlog" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || true
-if [ -s "${work_dir}/gitlog" ] && ! grep -qF ":(literal,top)" "${work_dir}/gitlog"; then
+rc=0
+PATH="${shim_dir}:${PATH}" LOG_GIT_INDEX="${work_dir}/gitlog" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ] && [ -s "${work_dir}/gitlog" ] && ! grep -qF ":(literal,top)" "${work_dir}/gitlog"; then
   pass "secret-scan: no dropped name means no extra body diff"
 else
   fail "secret-scan: no dropped name means no extra body diff" "log: $(cat "${work_dir}/gitlog" 2> /dev/null)"
+fi
+
+# 作業ツリーの skills-lock.json だけに足した名前（HEAD に無い）は、外れた名前として扱わない
+dropped_repo
+printf '%s\n' '{"version":2,"skills":{"vendored-a":{"source":"x"},"vendored-b":{"source":"x"},"vendored-c":{"source":"x"}}}' > skills-lock.json
+git add skills-lock.json
+stage plain.txt "ok"
+rm -f "${work_dir}/gitlog"
+rc=0
+PATH="${shim_dir}:${PATH}" LOG_GIT_INDEX="${work_dir}/gitlog" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_bin}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ] && [ -s "${work_dir}/gitlog" ] && ! grep -qF ":(literal,top)" "${work_dir}/gitlog"; then
+  pass "secret-scan: a name added only to the working tree adds no extra body diff"
+else
+  fail "secret-scan: a name added only to the working tree adds no extra body diff" "exit ${rc}" "log: $(cat "${work_dir}/gitlog" 2> /dev/null)"
 fi
 
 finish "part 7"
