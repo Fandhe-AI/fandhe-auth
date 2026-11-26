@@ -38,8 +38,8 @@
 #   だけを除外にする（PR が登録を削除した名前は走査される。対象の index に一覧が無ければ除外は 0 件）。
 #   PR が自分の変更で一覧に名前を足して検査を免れる経路を作らないため（CI は保護された main の検出器を使う。
 #   #51・#6000）。パスの形（*.lock・.claude/skills/・未登録の .agents/skills/ の下）では除外しない。
-#   名前は `[a-z0-9-]` の規則に合うものだけを通す。除外は `.agents/skills/` 全体を 1 個の exclude で外し、内側は git の列挙のうち
-#   登録名の下でないものを literal の正の pathspec でチャンクに分けて渡す（引数の長さが登録名の数に比例しない。#6053）。
+#   名前は `[a-z0-9-]` の規則に合うものだけを通す。除外は pathspec に載せず、ファイル名の一覧と全体の diff を 1 回ずつ読み、
+#   登録名の下の区画を落とす（引数の長さも git の起動回数も登録名・ファイルの数に依らない。#6053）。
 #   検出器の skills-lock.json が無いときの挙動は 3 つ: (1) 別の checkout なら除外なしで全部走査する。(2) 同じ checkout なら
 #   HEAD の一覧を検証する（壊れている・通常ファイルでないときは 2。有効なら除外なしで走査する）。(3) 未作成ブランチ・
 #   HEAD に一覧が無いときは除外なし。一覧があるときは、ファイル全体を（正しい UTF-8 かを確かめてから）JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
@@ -1124,17 +1124,15 @@ if [ "${mode}" = staged ] && [ "${head_resolved}" -eq 0 ]; then
   resolve_head
 fi
 
-# 本文の走査の pathspec（#6053）。登録名ごとに exclude を並べると、引数の長さが登録名の数に比例し、
-# 一覧の上限（64 KiB）の内側でも macOS の引数の上限（256 KiB）を超えて git を起動できなくなる。
-# そこで `.agents/skills/` 全体を 1 個の exclude で外し、その内側は git に列挙させたパスのうち「登録名の下でないもの」だけを
-# literal の正の pathspec でチャンクに分けて渡す。引数の長さは登録名の数に依らない。チャンクの上限は呼び出しの回数だけを変え、
-# 走査の範囲には効かない。bash 3.2 は set -u で空配列を展開できないため、配列は `--` から始めて空にしない。
-skills_dir_spec=':(literal,top).agents/skills/'
-body_chunk_max_bytes=65536
-# 登録名の集合。名前ごとの変数 SKSET_<名前の '-' を '_' に直したもの> で持ち、所属の確認はパスごとの一覧検索にせず
+# 本文の走査の除外（#6053）。登録名ごとに exclude を並べると、引数の長さが登録名の数に比例し、一覧の上限（64 KiB）の内側でも
+# macOS の引数の上限（256 KiB）を超えて git を起動できなくなる。そこで pathspec では外さず、git の呼び出しは
+# 「ファイル名の一覧」と「全体の diff」の 2 回に固定する。除外は、一覧の n 番目のファイルと diff の n 番目の区画
+# （`diff --git` の行で始まる）が対応することを使い、登録名の下の区画を diff から落とす（引数の長さも起動の回数も登録名・ファイルの数に依らない）。
+# 登録名の集合は、名前ごとの変数 SKSET_<名前の '-' を '_' に直したもの> で持ち、所属の確認はパスごとの一覧検索にせず
 # 変数の参照 1 回で済ませる（パス数 × 登録名数のコストを避ける。json_seen_add と同じ方式）。名前は `[a-z0-9-]` の規則を
-# 通過済みで '_' を含まないため、'-' を '_' に直しても衝突しない。環境から継いだ SKSET_* は先に消す。
-for sk_var in $(compgen -v SKSET_ || true); do
+# 通過済みで '_' を含まないため、'-' を '_' に直しても衝突しない。環境から継いだ SKSET_* は、組み込みの `${!SKSET_*}` で
+# 失敗の余地なく先に消す（残ると未登録の名前が除外されて秘密値を見逃す）。
+for sk_var in ${!SKSET_*}; do
   unset "${sk_var}"
 done
 skill_count=0
@@ -1214,42 +1212,21 @@ if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
 fi
 
 # 2. 追加行のみを走査する（削除行を対象にすると漏洩済み値の除去コミットを妨げる）
-if [ "${skill_count}" -eq 0 ]; then
-  # 登録名が 0 件: 除外なしで 1 回だけ読む。
-  if ! scan_diff -U0 --diff-filter=ACMR -- . > "${tmp_dir}/diff"; then
-    echo "secret-scan: failed to read diff; aborting" >&4
+if ! scan_diff -U0 --diff-filter=ACMR -- . > "${tmp_dir}/diff"; then
+  echo "secret-scan: failed to read diff; aborting" >&4
+  exit 2
+fi
+body_skip_filter=0
+if [ "${skill_count}" -gt 0 ]; then
+  # 登録名の下のファイルの印（区画ごとに 1 行。1 = 外す）。外すのは `.agents/skills/<登録名>/` の下だけで、
+  # 判定に迷う形（`.agents/skills/` で始まらない・直下のファイル・規則に合わない区画・未登録・前方一致の別名）は走査する。
+  if ! scan_diff --name-only -z --diff-filter=ACMR -- . > "${tmp_dir}/names"; then
+    echo "secret-scan: failed to list files; aborting" >&4
     exit 2
   fi
-else
-  # (1) `.agents/skills/` の内側を git に列挙させる（下の exclude と同じ pathspec の正の形なので、
-  #     除外される集合と一致する。bash の前方一致で内側を決めない）。
-  if ! scan_diff --name-only -z --diff-filter=ACMR -- "${skills_dir_spec}" > "${tmp_dir}/inside"; then
-    echo "secret-scan: failed to list files under the skills directory; aborting" >&4
-    exit 2
-  fi
-  # (2) 外側（`.agents/skills/` の外）の本文。引数は固定長。
-  if ! scan_diff -U0 --diff-filter=ACMR -- . ":(exclude,literal,top).agents/skills/" > "${tmp_dir}/diff"; then
-    echo "secret-scan: failed to read diff; aborting" >&4
-    exit 2
-  fi
-  # (3) 内側のうち、走査するパスをチャンクに分けて読み足す。除外するのは「`.agents/skills/<登録名>/` の下」だけで、
-  #     判定に迷う形（`.agents/skills/` で始まらない・直下のファイル・規則に合わない区画・未登録・前方一致の別名）は走査する。
-  #     D/F が衝突する細工された index では同じパスが 2 回現れ得るが、件数が多めに数えられる側（検出の向き）に倒れる。
-  chunk=(--)
-  chunk_n=0
-  chunk_bytes=0
-  flush_chunk() {
-    if [ "${chunk_n}" -gt 0 ]; then
-      if ! scan_diff -U0 --diff-filter=ACMR "${chunk[@]}" >> "${tmp_dir}/diff"; then
-        echo "secret-scan: failed to read diff; aborting" >&4
-        exit 2
-      fi
-    fi
-    chunk=(--)
-    chunk_n=0
-    chunk_bytes=0
-  }
   skills_prefix=".agents/skills/"
+  skip_total=0
+  skip_any=0
   while IFS= read -r -d '' path; do
     skip=0
     case "${path}" in
@@ -1266,19 +1243,11 @@ else
         esac
         ;;
     esac
-    if [ "${skip}" -eq 0 ]; then
-      spec=":(literal,top)${path}"
-      # 各引数の長さ + 終端 1 + ポインタ 8 バイトで数える（LC_ALL=C なのでバイト数）。
-      add=$((${#spec} + 9))
-      if [ "${chunk_n}" -gt 0 ] && [ $((chunk_bytes + add)) -gt "${body_chunk_max_bytes}" ]; then
-        flush_chunk
-      fi
-      chunk+=("${spec}")
-      chunk_n=$((chunk_n + 1))
-      chunk_bytes=$((chunk_bytes + add))
-    fi
-  done < "${tmp_dir}/inside"
-  flush_chunk
+    printf '%s\n' "${skip}"
+    skip_total=$((skip_total + 1))
+    [ "${skip}" -eq 0 ] || skip_any=1
+  done < "${tmp_dir}/names" > "${tmp_dir}/skip-flags"
+  body_skip_filter="${skip_any}"
 fi
 
 # bash の read は NUL を保持できず（実装により NUL 以降を切る・NUL だけを捨てる）、NUL を含む行で
@@ -1291,6 +1260,26 @@ fi
 if ! tr '\000' ' ' < "${tmp_dir}/diff" > "${tmp_dir}/diff.sp"; then
   echo "secret-scan: failed to normalize diff; aborting" >&4
   exit 2
+fi
+
+# 登録名の下の区画を落とす（#6053）。NUL を除いた版と空白へ置き換えた版の両方に同じ処理をかける（行の構造は同じ）。
+# 区画の数が一覧のファイル数と違えば対応が取れないため、検査不能（2）にする。元の diff（NUL の有無の判定用）は触らない。
+if [ "${body_skip_filter}" -eq 1 ]; then
+  for sk_f in diff.del diff.sp; do
+    if ! LC_ALL=C awk -v want="${skip_total}" '
+      NR == FNR { flag[FNR] = $0; next }
+      /^diff --git / { sec++; drop = (flag[sec] == "1") }
+      !drop { print }
+      END { if (sec != want) exit 3 }
+    ' "${tmp_dir}/skip-flags" "${tmp_dir}/${sk_f}" > "${tmp_dir}/${sk_f}.f"; then
+      echo "secret-scan: failed to filter diff; aborting" >&4
+      exit 2
+    fi
+    if ! mv -- "${tmp_dir}/${sk_f}.f" "${tmp_dir}/${sk_f}"; then
+      echo "secret-scan: failed to filter diff; aborting" >&4
+      exit 2
+    fi
+  done
 fi
 
 # scan_pass <file>: `+++ b/<path>` のファイルヘッダは `diff --git` から最初の `@@` までの間でだけ解釈する。

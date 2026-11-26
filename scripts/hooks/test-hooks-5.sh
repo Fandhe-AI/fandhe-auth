@@ -358,10 +358,10 @@ PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=131072 SCAN_BIN="${big_bin}" check_
 big_expect "big lock (--tracked)"
 SCAN_ARG=
 
-# チャンクが 2 つ以上になる配置: 未登録の名前の下に大量の無害なパスと、先頭・末尾の token のファイル
+# 未登録の名前の下に大量の無害なパスと、先頭・末尾の token のファイルがあっても、git の呼び出しは固定回数で引数は短い
 make_detector small "${lock_ok}"
 small_bin="${det_bin}"
-chunk_repo() {
+many_repo() {
   new_repo
   stage_lock
   stage .agents/skills/unreg/a-first.txt "x = ${token}"
@@ -374,15 +374,18 @@ chunk_repo() {
     done
   } | git update-index --add --index-info
 }
-chunk_repo
-PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=100000 SCAN_BIN="${small_bin}" check_scan "many paths are split into chunks" 1 .agents/skills/unreg/z-last.txt
-expect_out "chunked scan counts each file once" "secret-scan: total: 2 finding(s) in 2 file(s)"
-chunk_repo
-FAIL_GIT_BOTH1=-U0 FAIL_GIT_BOTH2=":(literal,top).agents/skills/unreg/z-last.txt" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a failing chunk call is not scannable (exit 2)" 2
-expect_out "a failing chunk call reports the diff failure" "secret-scan: failed to read diff; aborting"
-chunk_repo
-FAIL_GIT_BOTH1=--name-only FAIL_GIT_BOTH2=":(literal,top).agents/skills/" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a failing inside listing is not scannable (exit 2)" 2
-expect_out "a failing inside listing reports its own message" "secret-scan: failed to list files under the skills directory; aborting"
+many_repo
+PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=4096 SCAN_BIN="${small_bin}" check_scan "many paths keep the arguments short" 1 .agents/skills/unreg/z-last.txt
+expect_out "many paths count each file once" "secret-scan: total: 2 finding(s) in 2 file(s)"
+many_repo
+FAIL_GIT_BOTH1=--name-only FAIL_GIT_BOTH2="--diff-filter=ACMR" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a failing file listing is not scannable (exit 2)" 2
+expect_out "a failing file listing reports its own message" "secret-scan: failed to list files; aborting"
+
+# 環境に SKSET_* が残っていても、未登録の名前は除外されない
+new_repo; stage_lock
+stage .agents/skills/unreg/x.md "x = ${token}"
+SKSET_unreg=1 SKSET_aa=1 SCAN_BIN="${small_bin}" check_scan "an inherited SKSET_ variable does not exclude an unregistered name" 1 .agents/skills/unreg/x.md
+expect_out "the inherited variable leaves the finding in place" "secret-scan: total: 1 finding(s) in 1 file(s)"
 
 # 区画の形が紛らわしいパスは除外せず走査する
 new_repo; stage_lock
