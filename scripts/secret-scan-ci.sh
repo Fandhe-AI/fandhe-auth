@@ -149,7 +149,7 @@ fi
 rescan_hint() {
   local trusted_sha
   trusted_sha="$(g -C "${ROOT_DIR}" rev-parse --verify "HEAD^{commit}" 2> /dev/null)" || trusted_sha="unknown"
-  echo "secret-scan-ci: to see file names and diagnostics, check out the trusted detector and exclusion list at the commit this job used (${trusted_sha}), not the main tip; then, with the scanned repository as the working directory, build a dedicated index from the scanned commit (${head_sha}) with GIT_INDEX_FILE=<new file> git read-tree ${head_sha}, and run <trusted checkout>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE; do not run make or any script from the scanned commit" >&2
+  echo "secret-scan-ci: to see file names and diagnostics, check out the trusted detector and exclusion list at the commit this job used (${trusted_sha}), not the main tip; then, with the scanned repository as the working directory, build a dedicated index from the scanned commit (${head_sha}) with GIT_NO_REPLACE_OBJECTS=1 GIT_INDEX_FILE=<new file> git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree ${head_sha}, and run <trusted checkout>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE; do not run make or any script from the scanned commit" >&2
 }
 
 # 検出器の終了状態は 0 = 検出なし / 1 = 検出 / 2 = 検査不能。それ以外（起動失敗・シグナル等）も検査不能に畳む。
