@@ -195,11 +195,37 @@ fn small_trial_run_writes_record_without_requirement_values() {
     std::fs::remove_file(&path2).unwrap();
     std::fs::remove_file(&it_path).unwrap();
 
-    // 10/10: 上の検査（設定の目印 2 種・出力先のパスが無い。秘密値の各表現の照合は下の別の試験で、`make load-trial` では流れない）を通し、停止と後片付けが成功した後に、
+    // 10/10: 上の検査（設定の目印 2 種・出力先のパスが無い）を通し、さらに出す本文そのものを秘密値の各表現の照合（`printable_body`）に通し、停止と後片付けが成功した後に、
     // `make load-trial`（`FANDHE_AUTH_LOAD_TRIAL_PRINT=1`・--show-output）で明示的に選んだときだけ本文を出す。
     // 通常の `make test` では出さない（失敗時に本文が CI ログへ残らない。SECR-23）。
     if std::env::var_os("FANDHE_AUTH_LOAD_TRIAL_PRINT").is_some_and(|v| v == "1") {
-        println!("{text}");
+        // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 3 欄に入れた値の全文）の
+        // 生・base64・base64url・16 進の各形と JWT の形で走査する。一致したら本文を出さず失敗させる。
+        let body = printable_body(&text, &stdout_registry()).unwrap();
+        println!("{body}");
+    }
+}
+
+/// 標準出力へ出す本文の走査用の登録簿: 主試験が stub の設定の 3 欄へ入れた値の全文。
+fn stdout_registry() -> Vec<Vec<u8>> {
+    let cfg = hub_config();
+    vec![
+        cfg.client_id.get().clone().into_bytes(),
+        cfg.public_host.get().clone().into_bytes(),
+        cfg.jwks_uri.get().clone().into_bytes(),
+    ]
+}
+
+/// 本文に登録簿の値（生・base64・base64url・16 進）か JWT の形が 1 件でもあれば `Err`（本文は返さず、件数だけ）。
+fn printable_body<'a>(text: &'a str, registry: &[Vec<u8>]) -> Result<&'a str, String> {
+    let n = count_matches(registry, text.as_bytes());
+    let j = count_jwt_like(text.as_bytes());
+    if n == 0 && j == 0 {
+        Ok(text)
+    } else {
+        Err(format!(
+            "refusing to print the load record: {n} registered-value match(es), {j} JWT-like word(s)"
+        ))
     }
 }
 
@@ -536,4 +562,24 @@ fn matcher_detects_registered_hex_written_through_write_new() {
         n >= 1,
         "registered hex value written via write_new not detected"
     );
+}
+
+/// 出力の走査（`printable_body`）は、登録簿の値の各形・JWT の形が混ざった本文を出さず、通常の本文は通す。
+#[test]
+fn printable_body_refuses_registered_forms_and_jwt() {
+    let registry = vec![random_value()];
+    assert!(printable_body("format: x\njudgment:\n", &registry).is_ok());
+    // 生のバイト列は UTF-8 とは限らないため、文字列にできる形（先頭以外）で確かめる。
+    for f in forms(&registry[0]).into_iter().skip(1) {
+        let text = format!("note: {}\n", String::from_utf8(f).unwrap());
+        assert!(printable_body(&text, &registry).is_err());
+    }
+    let jwt = format!(
+        "note: eyJ{}.eyJ{}.{}\n",
+        "a".repeat(20),
+        "b".repeat(20),
+        "c".repeat(20)
+    );
+    let err = printable_body(&jwt, &registry).unwrap_err();
+    assert!(!err.contains("eyJ"));
 }

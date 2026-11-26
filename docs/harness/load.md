@@ -448,7 +448,7 @@ judgment:
 
 - 正本の見本は `crates/load-harness/tests/trial_run.rs` の主試験で、そのまま流せる。ここには手順の骨格だけを書き、値は見本を見る（ずれを防ぐため）。
 - `load-harness` は試験専用の crate で、どの crate からも依存しない（`LIB-2`・`LIB-4`）。負荷をかける試験は it-harness の上で書く（試験〔dev〕の依存。許可表の行は人の確認待ち）。
-- Docker・ネットワークは要らない。実物の経路は `TODO(TASK-716)` 待ちで、今の相手は Hub の stub だけ。
+- Docker・ネットワークは要らない。ただし `make load-trial`（`cargo test --locked`）はツールチェーンと依存が未取得だと取得を試みる。オフラインで流すときは、ツールチェーンと依存（`cargo fetch --locked` 相当）を取得済みにしておく。実物の経路は `TODO(TASK-716)` 待ちで、今の相手は Hub の stub だけ。
 - 試験の置き場は `crates/load-harness/tests/*.rs`。他の crate からの辺を足すときは、許可表（`scripts/check-crate-deps.sh`）の人の確認が要る。
 
 ### 組み立ての手順
