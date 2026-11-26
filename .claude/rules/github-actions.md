@@ -233,7 +233,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
 ## ジョブ・ワークフローを追加するときのチェックリスト
 
 1. 新規ワークフローを作らず、まず既存の `ci.yml` へのジョブ追加で済むか検討する（同じトリガーなら `ci.yml` に集約）
-    - 例外: `scheduled.yml`。トリガーが `schedule`・`workflow_dispatch` の定期の系統は別にする（「PR ごとの実行と定期の実行の振り分け」。例外は利用者が承認済み。2026-11-26）
+    - 例外: `scheduled.yml`。トリガーが `schedule`・`workflow_dispatch` の定期の系統は別にする（「PR ごとの実行と定期の実行の振り分け」。例外は利用者が承認済み。2026-11-26。範囲は `workflow_dispatch` だけで動く間。`schedule` を足すときは見直す〔TASK-681〕）
     - 例外: `trust-root-secret-scan.yml`。(a) 先行配置の期間と、(b) 組織の ruleset が workflow のファイルを固定して要求する間は、`ci.yml` に入れられない（要求されうる）（「必須チェックと集約ジョブ」の例外）
 2. 追加したジョブを `ci-complete` の `needs` に必ず加える（漏れると未検査のままマージ可能になる）。条件付きで skip
     するジョブは、許容する条件を `ci-complete` の jq 式に明示する
