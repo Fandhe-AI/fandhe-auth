@@ -176,18 +176,19 @@ PKEY の振る舞いを満たしたとは主張しない。
     呼び出し側が登録の `check_ok` を再検査する必要はなく、できない。ヘルパーが担わない検査（手順 6 の認証の `check_ok`、`evidence()` の確認）だけを呼び出し側が行う。
     ヘルパーは登録結果の `counts_as_real_device()`・`counts_as_safari()` がともに `false` であることも内部で検査する（`ACPT-7`・`ACPT-8`）。戻り値から登録結果の `evidence()` は取れないので、
     直接呼び出した操作（認証など）の証跡の確認は呼び出し側が行う。
-    `registration_run_result`・`authentication_run_result` を直接使うときは、得た `(run, check_ok)` の成否と `check_ok` の検査を呼び出し側がすべて行う。
+    `registration_run_result`・`authentication_run_result` を直接使うときは、得た `(run, check_ok)` を呼び出し側が検査する。`run` は操作の結果と後続の検査を合成した記録用の分類で、`check_ok` は後続の検査（credential の件数・RP ID）だけの結果である。
+    操作の成否は `run` ではなく元の `result` から決める。`run` を記録した後に `result.expect(..)` で `outcome` を取り出し、成功を期待するなら `outcome.succeeded()`、拒否を期待するなら `!outcome.succeeded()` と `outcome.error_name()` が期待したエラー名であることを検査する。`check_ok` はそれとは別に `assert!(check_ok, ..)` で確かめる（`check_ok` が真でも、認証が成功したり別の理由で拒否されたりし得る）。
     登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` の戻り値を `(run, check_ok)` に分け、`run` を `sink.record(PasskeyOperation::Registration, run).expect("record")` で一度だけ記録する。
     `RecordSink::record` は件数の上限を超えると `Err` を返すので、`sink.record(..).expect("record")` のように成功を確かめる。
     エラーを無視すると、記録が欠けたまま `finish()` で完了にできてしまう。登録・認証のどちらの直接の記録も同じ。
-    記録のあと、登録の成否と `check_ok` の両方を呼び出し側で検査する（手順 6 の `check_ok` はここで得た値）。
+    記録のあと、元の `result` から取り出した `outcome` で登録の成否を、`check_ok` を別に、それぞれ呼び出し側で検査する（手順 6 の `check_ok` はここで得た値）。
     ヘルパーを使わないときは、`register_once` の前の準備も自分で行う（見本は `support::passkey::register`、`crates/e2e-harness/tests/support/passkey.rs`）。
     準備は 3 つ。(1) `add_virtual_authenticator(&VirtualAuthenticatorOptions)` で仮想 authenticator を足す、(2) `navigate(&origin.origin())` で試験用 origin へ移動する、
     (3) `set_script_timeout(..)` でスクリプトのタイムアウトを command timeout より短く設定する（時間切れを script timeout として観測するため）。
     認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)` を呼び、`authentication_run_result(&handle, &aid, &result)` で
     後続の検査（credential がちょうど 1 件・RP ID が `localhost` と完全一致）を反映した `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Authentication, run).expect("record")` で一度だけ記録し、成功を確かめる。
     `authenticate_once` の結果をそのまま記録しない（検査を反映できない）。options の値は PoC の値（`QP-1`）で要件の値ではない。
-6. 登録をヘルパーで行った場合、登録の検査はヘルパーが済ませている。呼び出し側は、認証（または直接使った登録）の成否と `check_ok`（`assert!(check_ok, ..)`）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
+6. 登録をヘルパーで行った場合、登録の検査はヘルパーが済ませている。呼び出し側は、認証（または直接使った登録）の成否（`run` ではなく元の `result` の `outcome`。拒否を期待する場合は `error_name()` も）と `check_ok`（`assert!(check_ok, ..)`）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
 7. `running.stop()` で停止し、その成功を確かめてから `sink.finish()` で記録を出し、`finish()` の戻り値も確かめる。停止に失敗した実行を完了扱いで記録しない。
 
 失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
@@ -200,7 +201,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 ### 記録の読み方
 
-形式は「実行の記録の形式（5/6）」の節を見る。出力は標準出力と `CARGO_TARGET_TMPDIR/e2e-records/`（`RecordSink` の出力先。`target/` の下だが、固定の `target/e2e-records/` ではない）。
+形式は「実行の記録の形式（5/6）」の節を見る。出力は標準出力と `CARGO_TARGET_TMPDIR/e2e-records/`（`RecordSink` の出力先。`target/` の下になるのは Cargo の既定の設定の場合だけで、固定の `target/e2e-records/` ではない。`CARGO_TARGET_DIR` を変えた場合はビルド時の `CARGO_TARGET_TMPDIR` に従う）。
 出力先は起動をまたいで追記されるので、集計はその起動の標準出力だけを正とするか、起動ごとに空の専用の出力先を使う。
 出力先は `env!("CARGO_TARGET_TMPDIR")` でビルド時に取り込まれるため、実行時に環境変数を設定しても変わらない。
 起動ごとに分けるには、`make e2e-chrome`・`make e2e-firefox` を呼ぶときに `CARGO_TARGET_DIR` を起動ごとに異なる空のディレクトリへ設定する
