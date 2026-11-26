@@ -105,7 +105,8 @@ job_state() {
       fi
     fi
   fi
-  rm -f "${fr}" "${fs}"
+  # 一覧の削除の失敗で set -e が中断の後始末（CONT・TERM）を飛ばさない
+  rm -f "${fr}" "${fs}" || true
 }
 # stop_job <pid>: ジョブ表で確かめた子を止める。CONT を先に、TERM を最後に 1 回だけ送る。
 # 一時停止中（SIGSTOP 等）の子は CONT が無いと TERM を受け取れず wait で止まる（非対話の bash は停止を検知しないため、状態では分けず必ず CONT を送る）。
@@ -271,6 +272,8 @@ fi
 batch_stop() {
   # 停止処理中の別の信号で再入すると、回収直後の pid へ kill を送り得る。冒頭で対象の信号を無視する。
   trap '' TERM INT HUP
+  # どの後始末の失敗でも停止と回収を続け、最後の exit 2 に必ず届く
+  set +e
   if [ -n "${sc_pid}" ]; then
     stop_job "${sc_pid}"
     wait "${sc_pid}" 2> /dev/null || true

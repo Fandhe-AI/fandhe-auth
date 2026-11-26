@@ -620,6 +620,10 @@ for sc_sig in TERM HUP TERM-STOPPED; do
       sc_setup_err="the fake shellcheck did not become sleep"
     fi
   fi
+  sc_fake_start=""
+  if [ -z "${sc_setup_err}" ]; then
+    sc_fake_start="$(ps -p "${sc_fake_pid}" -o lstart= 2> /dev/null || true)"
+  fi
   if [ -z "${sc_setup_err}" ] && [ "${sc_stop_child}" -eq 1 ]; then
     # 一時停止中の子を持つ中断（停止中の子は CONT が無いと TERM を受け取れない）
     if ! sc_signal_owned STOP "${sc_script_pid}" "${sc_fake_pid}"; then
@@ -679,16 +683,22 @@ for sc_sig in TERM HUP TERM-STOPPED; do
   sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
   # 停止の確認: 消滅（kill -0 の失敗）を確かめられたときだけ停止済みとする。ps の失敗・別名は停止の証拠にしない。
   # 強制終了は送らない（pid の再利用で無関係のプロセスを落とさない）。
+  # 消滅の判定は kill -0 だけで行う（ps の失敗・名前の不一致を消滅と取り違えない。ps は起動時の待ち合わせにだけ使う）。
   sc_alive=1
   if [ -n "${sc_fake_pid}" ]; then
     sc_waited=0
-    while sc_is_fake_sleep "${sc_fake_pid}" && [ "${sc_waited}" -lt 30 ]; do
+    while kill -0 "${sc_fake_pid}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
       sleep 0.1
       sc_waited=$((sc_waited + 1))
     done
-    if sc_is_fake_sleep "${sc_fake_pid}"; then
-      # 強制終了は送らない（pid が再利用された無関係のプロセスに届き得る）。偽物は 30 秒で自然に終わる。
-      :
+    if kill -0 "${sc_fake_pid}" 2> /dev/null; then
+      # 親が先に終わった孤児（SIGSTOP のまま残る等）は、起動時に控えた開始時刻と一致し、まだ sleep であるときだけ回収する
+      # （pid の再利用で無関係のプロセスへ送らない）。ps で確かめられなければ送らず、偽物は 30 秒で自然に終わる。
+      sc_now_start="$(ps -p "${sc_fake_pid}" -o lstart= 2> /dev/null || true)"
+      if [ -n "${sc_fake_start}" ] && [ "${sc_now_start}" = "${sc_fake_start}" ] && sc_is_fake_sleep "${sc_fake_pid}"; then
+        kill -CONT "${sc_fake_pid}" 2> /dev/null || true
+        kill -TERM "${sc_fake_pid}" 2> /dev/null || true
+      fi
     else
       sc_alive=0
     fi
