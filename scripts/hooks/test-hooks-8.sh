@@ -25,6 +25,12 @@ case "${CP8_MODE:-}:${last}" in
     : > "${CP8_FLAG}.final"
     exit 1
     ;;
+  head-final:*/index-final)
+    "${REAL_CP}" "$@" || exit $?
+    (unset GIT_INDEX_FILE; "${REAL_GIT}" commit -q --allow-empty --no-verify -m moved)
+    : > "${CP8_FLAG}.final"
+    exit 0
+    ;;
 esac
 "${REAL_CP}" "$@" || exit $?
 case "${last}" in
@@ -41,9 +47,13 @@ case "${last}" in
           touch -t 200101010000 "${CP8_TOUCH}"
           (unset GIT_INDEX_FILE; "${REAL_GIT}" update-index --refresh > /dev/null 2>&1 || true)
           orig="$(unset GIT_INDEX_FILE; "${REAL_GIT}" rev-parse --path-format=absolute --git-path index)"
-          if ! cmp -s "${orig}" "${last}"; then
-            : > "${CP8_FLAG}.differs"
-          fi
+          cmp_rc=0
+          cmp -s "${orig}" "${last}" || cmp_rc=$?
+          case "${cmp_rc}" in
+            0) ;;
+            1) : > "${CP8_FLAG}.differs" ;;
+            *) : > "${CP8_FLAG}.cmperr" ;;
+          esac
           ;;
       esac
     fi
@@ -68,11 +78,13 @@ fi
 
 # T2: stat 情報だけの更新（バイトは変わるが一覧は変わらない）では誤検出しない（0）
 new_repo; stage src/app.txt "hello"
-rm -f "${work_dir}/cp8-flag" "${work_dir}/cp8-flag.first" "${work_dir}/cp8-flag.differs"
+rm -f "${work_dir}/cp8-flag" "${work_dir}/cp8-flag.first" "${work_dir}/cp8-flag.differs" "${work_dir}/cp8-flag.cmperr"
 rc=0
 CP8_MODE=stat CP8_FLAG="${work_dir}/cp8-flag" CP8_TOUCH=src/app.txt PATH="${cp8_dir}:${PATH}" \
   LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ ! -e "${work_dir}/cp8-flag.differs" ]; then
+if [ -e "${work_dir}/cp8-flag.cmperr" ]; then
+  fail "secret-scan: a stat-only index update after the first copy is not a scan failure" "premise broken: cmp could not compare" "output: $(cat "${work_dir}/out")"
+elif [ ! -e "${work_dir}/cp8-flag.differs" ]; then
   fail "secret-scan: a stat-only index update after the first copy is not a scan failure" "premise broken: the index bytes did not differ" "output: $(cat "${work_dir}/out")"
 elif [ "${rc}" -eq 0 ]; then
   pass "secret-scan: a stat-only index update after the first copy is not a scan failure"
@@ -129,6 +141,29 @@ EOF9
   fi
 else
   echo "ok - secret-scan: a missing index whose parent became unsearchable is a scan failure (2): skipped (running as root bypasses permissions)"
+fi
+
+# T5: 2 回目の index 検証の途中に HEAD が動いたら 2（検証の後にも HEAD を照合する）
+new_repo; stage src/app.txt "hello"
+rm -f "${work_dir}/cp8-flag" "${work_dir}/cp8-flag.first" "${work_dir}/cp8-flag.final"
+rc=0
+CP8_MODE=head-final CP8_FLAG="${work_dir}/cp8-flag" PATH="${cp8_dir}:${PATH}" \
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/cp8-flag.final" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: HEAD changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: HEAD moved during the final index check is a scan failure (2)"
+else
+  fail "secret-scan: HEAD moved during the final index check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T6: 親ディレクトリが未作成の GIT_INDEX_FILE は空の index として扱う（検査不能にしない）
+new_repo
+rc=0
+GIT_INDEX_FILE="${work_dir}/no-such-dir/sub/index" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: an index whose parent directory does not exist is an empty index"
+else
+  fail "secret-scan: an index whose parent directory does not exist is an empty index" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 finish "part 8"

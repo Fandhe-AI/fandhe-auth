@@ -326,12 +326,24 @@ index_is_link() {
 # 0 を返し得る（fail-open）。親ディレクトリが検索できることを、存在の確認の前後で確かめて挟む（シェルの test だけ。外部コマンドを足さない）。
 # 権限の付け外しが確認の間に往復する窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。パスを出力しない。
 index_absent_confirmed() {
-  local parent="${orig_index%/*}"
-  [ -n "${parent}" ] || parent="/"
-  { [ -d "${parent}" ] && [ -x "${parent}" ]; } || return 1
+  index_ancestor_searchable || return 1
   { [ ! -e "${orig_index}" ] && [ ! -L "${raw_index}" ] && [ ! -L "${orig_index}" ]; } || return 1
-  { [ -d "${parent}" ] && [ -x "${parent}" ]; } || return 1
+  index_ancestor_searchable || return 1
   return 0
+}
+# index_ancestor_searchable: index の祖先のうち、実在する最も近いディレクトリが検索できる（-x）ときだけ 0 を返す。
+# 途中のディレクトリが未作成（代替 index の親が未作成。従来どおり空として扱う）でも、実在する祖先が検索できれば ENOENT と言える。
+# 実在はするがディレクトリでない祖先・検索できない祖先は確かめられないため 1（2 にする）。
+index_ancestor_searchable() {
+  local p="${orig_index%/*}"
+  [ -n "${p}" ] || p="/"
+  while [ ! -d "${p}" ]; do
+    { [ ! -e "${p}" ] && [ ! -L "${p}" ]; } || return 1
+    [ "${p}" != "/" ] || return 1
+    p="${p%/*}"
+    [ -n "${p}" ] || p="/"
+  done
+  [ -x "${p}" ]
 }
 if index_is_link; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
@@ -1315,7 +1327,7 @@ esac
 # 固定時にあった index が終了時に無ければ、一覧の差とは別に有無の記録（index_pinned）で 2 にする（登録 0 件の index は一覧が空のままのため）。
 # 複写の失敗は 2。固定したパスが終了時に通常ファイルでなく（FIFO・リンク等に）替わっていれば、複写せず 2。
 # リンクは開始時も終了時も辿らず 2（解く前のパスで判定する）。
-# 残る窓: 2 回目の複写から exit までの間の index の置き換え、2 回目の確認の途中に動いた HEAD。窓を狭めるだけで、無くならない
+# 残る窓: 2 回目の複写から exit までの間の index の置き換え、最後の HEAD の照合から exit までの間に動いた HEAD。窓を狭めるだけで、無くならない
 # （監視付きの複写・ロックの取得はしない。git-hooks.md の (f)）。
 # verify_index_unchanged <複写先> <一覧の出力先>
 verify_index_unchanged() {
@@ -1368,6 +1380,16 @@ fi
 
 # 集計の直前の 2 回目の確認（#6047）。1 回目から HEAD の取り直しまでの間に置き換わった index を見落とさない。
 verify_index_unchanged "${tmp_dir}/index-final" "${tmp_dir}/index-listing-final"
+
+# 2 回目の index の検証の途中に動いた HEAD も見落とさないよう、検証の後にもう一度 HEAD を照合する（#6047。git-hooks.md の (f)）。
+if [ "${head_resolved}" -eq 1 ]; then
+  pinned_head="${head_id}"
+  resolve_head
+  if [ "${head_id}" != "${pinned_head}" ]; then
+    echo "secret-scan: HEAD changed during the scan; aborting" >&4
+    exit 2
+  fi
+fi
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
 total="${env_hits}"
