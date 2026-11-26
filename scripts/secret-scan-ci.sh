@@ -184,7 +184,7 @@ case "${rc}" in
     fi
     ;;
   1)
-    echo "secret-scan-ci: findings reported; details are withheld on the public log. To see file names and diagnostics, check out the scanned commit locally and run: make secret-scan (scripts/hooks/secret-scan.sh --tracked, without --summary)" >&2
+    echo "secret-scan-ci: findings reported; details are withheld on the public log. To see file names and diagnostics, run the trusted detector from the protected main tip (scripts/hooks/secret-scan.sh --tracked, without --summary) with the scanned commit given only as data; do not run make or any script from the scanned commit" >&2
     exit 1
     ;;
   *)
@@ -192,7 +192,7 @@ case "${rc}" in
     # 値・パス・git の生の診断は通さない（SECR-23）。失敗は無視する（既に検査不能（2）で終える）。
     secret_scan_fixed_diagnostics > "${work_dir}/allowed-diag" 2> /dev/null || true
     grep -aFx -f "${work_dir}/allowed-diag" "${out}" >&2 2> /dev/null || true
-    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log. To see file names and diagnostics, check out the scanned commit locally and run: make secret-scan (scripts/hooks/secret-scan.sh --tracked, without --summary)" >&2
+    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log. To see file names and diagnostics, run the trusted detector from the protected main tip (scripts/hooks/secret-scan.sh --tracked, without --summary) with the scanned commit given only as data; do not run make or any script from the scanned commit" >&2
     exit 2
     ;;
 esac
