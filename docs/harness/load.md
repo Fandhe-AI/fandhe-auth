@@ -465,7 +465,7 @@ judgment:
 ### 実行の方法
 
 - `make test`: workspace 全体を流す。試し実行を含むが、記録の本文は出ない（cargo は成功した試験の標準出力を捕まえる）。CI の build-test ジョブと同じ契約。
-- `make load-trial`（`scripts/load-trial.sh`）: 試し実行 `trial_run` だけを流し、負荷の記録の本文を標準出力に出す。引数は受けない。0 件・失敗は終了コード 1。CI の外。名前は暫定。
+- `make load-trial`（`scripts/load-trial.sh`）: 試し実行 `trial_run` だけを流し、負荷の記録の本文を標準出力に出す。引数は受けない。主試験（`small_trial_run_writes_record_without_requirement_values`）が 1 件でない・失敗は `scripts/load-trial.sh` の直接実行で終了コード 1（make 経由ではレシピが 1 で終了しても make 自体は 2 を返す）。本文は `FANDHE_AUTH_LOAD_TRIAL_PRINT=1` のときだけ出る（通常の `make test` では出さない）。CI の外。名前は暫定。
 - Docker の有無などで自動に飛ばす分岐は作らない（`DPOL-30`〜`32`）。
 
 ### 記録の置き場と読み方

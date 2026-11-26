@@ -185,10 +185,6 @@ fn small_trial_run_writes_record_without_requirement_values() {
         assert!(!out.contains(dir_str));
     }
 
-    // 10/10: 上の検査（秘密値・設定の目印・パスが無い）を通した本文だけを出す。
-    // 記録のファイルは成功時に消えるため、`make load-trial`（--show-output）で人が本文を読める。
-    println!("{text}");
-
     // 上書きしない: 同じ記録をもう一度書くと別名の新しいファイルになる。
     let path2 = record.write_new(&dir).unwrap();
     assert_ne!(path, path2);
@@ -198,6 +194,13 @@ fn small_trial_run_writes_record_without_requirement_values() {
     std::fs::remove_file(&path).unwrap();
     std::fs::remove_file(&path2).unwrap();
     std::fs::remove_file(&it_path).unwrap();
+
+    // 10/10: 上の検査（秘密値・設定の目印・パスが無い）を通し、停止と後片付けが成功した後に、
+    // `make load-trial`（`FANDHE_AUTH_LOAD_TRIAL_PRINT=1`・--show-output）で明示的に選んだときだけ本文を出す。
+    // 通常の `make test` では出さない（失敗時に本文が CI ログへ残らない。SECR-23）。
+    if std::env::var_os("FANDHE_AUTH_LOAD_TRIAL_PRINT").is_some_and(|v| v == "1") {
+        println!("{text}");
+    }
 }
 
 /// it-harness の記録の `started_at` の RFC 3339 表記（`UtcTimestamp` の `Display`）。
