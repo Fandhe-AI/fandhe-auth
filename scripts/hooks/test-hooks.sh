@@ -32,7 +32,7 @@ source "${HOOKS_DIR}/../lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 
-parts="1 2 3 4 5 6 7 8"
+parts="1 2 3 4 5 6 7 8 9"
 
 # parts が実在する part のファイル（test-hooks-<数字>.sh）と一致しなければ失敗にする（足した part の起動漏れ・消した part の素通りを防ぐ）
 part_files=0
