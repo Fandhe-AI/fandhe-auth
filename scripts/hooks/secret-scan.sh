@@ -332,15 +332,28 @@ index_absent_confirmed() {
   return 0
 }
 # index_ancestor_searchable: index の祖先のうち、実在する最も近いディレクトリが検索できる（-x）ときだけ 0 を返す。
+# 解いた後の絶対パス（orig_index）と、解く前の参照経路（raw_index。親の経路にリンクがあり得る）の両方を確かめる。
+# 解いた先の祖先だけを見ると、リンクに至るディレクトリの検索権限が外れても、raw_index の -L が参照エラーで偽になり、空と取り違える（#6047）。
 # 途中のディレクトリが未作成（代替 index の親が未作成。従来どおり空として扱う）でも、実在する祖先が検索できれば ENOENT と言える。
 # 実在はするがディレクトリでない祖先・検索できない祖先は確かめられないため 1（2 にする）。
 index_ancestor_searchable() {
-  local p="${orig_index%/*}"
+  path_ancestor_searchable "${orig_index}" && path_ancestor_searchable "${raw_index}"
+}
+# path_ancestor_searchable <パス>: 相対パスは作業ツリーのルート基準（カレントディレクトリ）で読む。
+path_ancestor_searchable() {
+  local p="$1"
+  case "${p}" in
+    */*) p="${p%/*}" ;;
+    *) p="." ;;
+  esac
   [ -n "${p}" ] || p="/"
   while [ ! -d "${p}" ]; do
     { [ ! -e "${p}" ] && [ ! -L "${p}" ]; } || return 1
     [ "${p}" != "/" ] || return 1
-    p="${p%/*}"
+    case "${p}" in
+      */*) p="${p%/*}" ;;
+      *) p="." ;;
+    esac
     [ -n "${p}" ] || p="/"
   done
   [ -x "${p}" ]

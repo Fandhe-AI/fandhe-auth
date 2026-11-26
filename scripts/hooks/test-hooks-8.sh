@@ -48,8 +48,12 @@ case "${last}" in
           ;;
         stat)
           : > "${CP8_FLAG}"
-          touch -t 200101010000 "${CP8_TOUCH}"
-          (unset GIT_INDEX_FILE; "${REAL_GIT}" update-index --refresh > /dev/null 2>&1 || true)
+          # touch と update-index --refresh の成功を確かめる。失敗したら前提崩れの印を残し、cmp の判定に進まない
+          if ! touch -t 200101010000 "${CP8_TOUCH}" \
+            || ! (unset GIT_INDEX_FILE; "${REAL_GIT}" update-index --refresh > /dev/null 2>&1); then
+            : > "${CP8_FLAG}.setuperr"
+            exit 0
+          fi
           orig="$(unset GIT_INDEX_FILE; "${REAL_GIT}" rev-parse --path-format=absolute --git-path index)"
           cmp_rc=0
           cmp -s "${orig}" "${last}" || cmp_rc=$?
@@ -82,11 +86,13 @@ fi
 
 # T2: stat 情報だけの更新（バイトは変わるが一覧は変わらない）では誤検出しない（0）
 new_repo; stage src/app.txt "hello"
-rm -f "${work_dir}/cp8-flag" "${work_dir}/cp8-flag.first" "${work_dir}/cp8-flag.differs" "${work_dir}/cp8-flag.cmperr"
+rm -f "${work_dir}/cp8-flag" "${work_dir}/cp8-flag.first" "${work_dir}/cp8-flag.differs" "${work_dir}/cp8-flag.cmperr" "${work_dir}/cp8-flag.setuperr"
 rc=0
 CP8_MODE=stat CP8_FLAG="${work_dir}/cp8-flag" CP8_TOUCH=src/app.txt PATH="${cp8_dir}:${PATH}" \
   LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ -e "${work_dir}/cp8-flag.cmperr" ]; then
+if [ -e "${work_dir}/cp8-flag.setuperr" ]; then
+  fail "secret-scan: a stat-only index update after the first copy is not a scan failure" "premise broken: touch or update-index --refresh failed" "output: $(cat "${work_dir}/out")"
+elif [ -e "${work_dir}/cp8-flag.cmperr" ]; then
   fail "secret-scan: a stat-only index update after the first copy is not a scan failure" "premise broken: cmp could not compare" "output: $(cat "${work_dir}/out")"
 elif [ ! -e "${work_dir}/cp8-flag.differs" ]; then
   fail "secret-scan: a stat-only index update after the first copy is not a scan failure" "premise broken: the index bytes did not differ" "output: $(cat "${work_dir}/out")"
@@ -143,8 +149,25 @@ EOF9
   else
     fail "secret-scan: a missing index whose parent became unsearchable is a scan failure (2), not an empty index" "got ${rc}" "output: $(cat "${work_dir}/out")"
   fi
+  # T7: 親の経路にリンクがある代替 index。解いた先の祖先は検索できるまま、リンクに至るディレクトリの検索権限が走査中に外れたら 2（#6047）
+  new_repo; stage src/app.txt "hello"
+  t7_outer="${work_dir}/t7-outer"
+  t7_real="${work_dir}/t7-real"
+  mkdir -p "${t7_outer}" "${t7_real}"
+  ln -s "${t7_real}" "${t7_outer}/lnk"
+  rm -f "${work_dir}/t7-flag"
+  rc=0
+  GIT_INDEX_FILE="${t7_outer}/lnk/index" T4_DIR="${t7_outer}" T4_FLAG="${work_dir}/t7-flag" PATH="${git8_dir}:${PATH}" \
+    LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  chmod 755 "${t7_outer}"
+  if [ -e "${work_dir}/t7-flag" ] && [ "${rc}" -eq 2 ] \
+    && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+    pass "secret-scan: a missing index reached through a link whose parent became unsearchable is a scan failure (2)"
+  else
+    fail "secret-scan: a missing index reached through a link whose parent became unsearchable is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
 else
-  echo "ok - secret-scan: a missing index whose parent became unsearchable is a scan failure (2): skipped (running as root bypasses permissions)"
+  echo "ok - secret-scan: a missing index whose parent became unsearchable (also via a link) is a scan failure (2): skipped (running as root bypasses permissions)"
 fi
 
 # T5: 2 回目の index 検証の途中に HEAD が動いたら 2（検証の後にも HEAD を照合する）
