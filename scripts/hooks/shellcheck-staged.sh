@@ -66,24 +66,46 @@ pending_signal=0
 # jobs は現在のシェルで実行する（command substitution やパイプラインのサブシェルは、bash 3.2 等で空のジョブ表を見る）。出力はファイルへのリダイレクトで受ける。
 # 確認と kill の間の窓は残るが、回収済みの pid を無条件に狙う経路は無くなる。
 job_state_result=none
-job_state() {
-  local f="${tmp_dir}/jobs.$1" line
-  job_state_result=none
-  jobs -rp > "${f}" 2> /dev/null || true
+# job_scan <file> <pid>: 一覧のファイルに pid があれば 0、無ければ 1、ファイルを開けなければ 2（set -e で中断せず、呼び出し側が分岐する）。
+job_scan() {
+  local line found=1
   while read -r line; do
-    if [ "${line}" = "$1" ]; then
-      job_state_result=running
+    if [ "${line}" = "$2" ]; then
+      found=0
     fi
-  done < "${f}"
-  if [ "${job_state_result}" = none ]; then
-    jobs -sp > "${f}" 2> /dev/null || true
-    while read -r line; do
-      if [ "${line}" = "$1" ]; then
-        job_state_result=stopped
-      fi
-    done < "${f}"
+  done < "$1" || return 2
+  return "${found}"
+}
+# 一覧の出力・読み取りに失敗したら unknown にする（stop_job は所有を確かめられない子へも CONT と TERM を送り、中断の後始末を止めない。
+# 保持している pid は wait で回収するまで pids に残るもので、窓は上の注記のとおり）。出力先は >| で開き、継承した noclobber に左右されない。
+job_state() {
+  local fr="${tmp_dir}/jobs-r.$1" fs="${tmp_dir}/jobs-s.$1" rc
+  job_state_result=none
+  if ! jobs -rp >| "${fr}" 2> /dev/null; then
+    job_state_result=unknown
+    return 0
   fi
-  rm -f "${f}"
+  if job_scan "${fr}" "$1"; then
+    job_state_result=running
+  else
+    rc=$?
+    if [ "${rc}" -ne 1 ]; then
+      job_state_result=unknown
+    fi
+  fi
+  if [ "${job_state_result}" = none ]; then
+    if ! jobs -sp >| "${fs}" 2> /dev/null; then
+      job_state_result=unknown
+    elif job_scan "${fs}" "$1"; then
+      job_state_result=stopped
+    else
+      rc=$?
+      if [ "${rc}" -ne 1 ]; then
+        job_state_result=unknown
+      fi
+    fi
+  fi
+  rm -f "${fr}" "${fs}"
 }
 # stop_job <pid>: ジョブ表で確かめた子を止める。CONT を先に、TERM を最後に 1 回だけ送る。
 # 一時停止中（SIGSTOP 等）の子は CONT が無いと TERM を受け取れず wait で止まる（非対話の bash は停止を検知しないため、状態では分けず必ず CONT を送る）。
@@ -99,6 +121,8 @@ stop_job() {
 on_signal() {
   # 後始末の途中の信号で入れ子に呼ばれると、回収済みの pid へ二重に kill を送り得る
   trap '' INT TERM HUP
+  # どの後始末の失敗でも途中で終わらず、最後の exit 2 に必ず届く（終了コード 1 は shellcheck の指摘専用）
+  set +e
   local k=0
   while [ "${k}" -lt "${launched}" ]; do
     if [ -n "${pids[k]}" ]; then

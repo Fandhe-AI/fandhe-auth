@@ -560,6 +560,23 @@ sc_is_fake_sleep() {
   esac
 }
 
+# pid が試験の起動したスクリプト（$2）の子孫の偽物（sleep）であるときだけ、信号 $1 を $3 へ送る（pid の再利用で無関係のプロセスへ送らない。深さ 4 まで辿る）。
+sc_signal_owned() {
+  sc_so_pid="$3"
+  sc_so_depth=0
+  sc_is_fake_sleep "${sc_so_pid}" || return 1
+  while [ "${sc_so_depth}" -lt 4 ]; do
+    sc_so_pid="$(ps -p "${sc_so_pid}" -o ppid= 2> /dev/null | tr -d '[:space:]')" || return 1
+    [ -n "${sc_so_pid}" ] || return 1
+    if [ "${sc_so_pid}" = "$2" ]; then
+      kill -"$1" "$3" 2> /dev/null
+      return $?
+    fi
+    sc_so_depth=$((sc_so_depth + 1))
+  done
+  return 1
+}
+
 # 中断（TERM・HUP）では、起動済みのバッチの shellcheck まで止め、2 で終わる（止めずに孫の shellcheck を残さない）。
 # 偽の shellcheck が pid を書いて眠っている間に親へ信号を送り、終わった後にその pid のプロセスが残っていないことを確かめる
 # INT は試験しない（背景で起動したシェルでは INT が無視された状態で始まり、trap できない）。
@@ -605,7 +622,7 @@ for sc_sig in TERM HUP TERM-STOPPED; do
   fi
   if [ -z "${sc_setup_err}" ] && [ "${sc_stop_child}" -eq 1 ]; then
     # 一時停止中の子を持つ中断（停止中の子は CONT が無いと TERM を受け取れない）
-    if ! kill -STOP "${sc_fake_pid}" 2> /dev/null; then
+    if ! sc_signal_owned STOP "${sc_script_pid}" "${sc_fake_pid}"; then
       sc_setup_err="SIGSTOP could not be sent to the fake shellcheck"
     else
       sc_waited=0
@@ -628,7 +645,7 @@ for sc_sig in TERM HUP TERM-STOPPED; do
   if [ -n "${sc_setup_err}" ]; then
     # 管理下のプロセスだけを後始末する（偽物は自分で起動した子孫。眠りは 30 秒で終わる）
     if [ -n "${sc_fake_pid}" ]; then
-      kill -CONT "${sc_fake_pid}" 2> /dev/null || true
+      sc_signal_owned CONT "${sc_script_pid}" "${sc_fake_pid}" || true
     fi
     kill -KILL "${sc_script_pid}" 2> /dev/null || true
     wait "${sc_script_pid}" 2> /dev/null || true
@@ -647,7 +664,7 @@ for sc_sig in TERM HUP TERM-STOPPED; do
   if kill -0 "${sc_script_pid}" 2> /dev/null; then
     sc_timed_out=1
     # 期限切れ: 試験が管理するプロセスだけを後始末して失敗にする
-    kill -CONT "${sc_fake_pid}" 2> /dev/null || true
+    sc_signal_owned CONT "${sc_script_pid}" "${sc_fake_pid}" || true
     kill -KILL "${sc_script_pid}" 2> /dev/null || true
   fi
   if wait "${sc_script_pid}"; then
@@ -665,11 +682,11 @@ for sc_sig in TERM HUP TERM-STOPPED; do
   sc_alive=1
   if [ -n "${sc_fake_pid}" ]; then
     sc_waited=0
-    while kill -0 "${sc_fake_pid}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
+    while sc_is_fake_sleep "${sc_fake_pid}" && [ "${sc_waited}" -lt 30 ]; do
       sleep 0.1
       sc_waited=$((sc_waited + 1))
     done
-    if kill -0 "${sc_fake_pid}" 2> /dev/null; then
+    if sc_is_fake_sleep "${sc_fake_pid}"; then
       # 強制終了は送らない（pid が再利用された無関係のプロセスに届き得る）。偽物は 30 秒で自然に終わる。
       :
     else
