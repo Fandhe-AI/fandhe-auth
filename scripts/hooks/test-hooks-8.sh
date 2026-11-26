@@ -242,4 +242,27 @@ else
   fail "secret-scan: an index with a too-long name (not ENOENT) is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# T10: index のパスが /dev/tcp 風でも、不在の確認で開かない（外向き通信・接続の誤りを出さない）（#6047）
+new_repo; stage src/app.txt "hello"
+rc=0
+GIT_INDEX_FILE="/dev/tcp/127.0.0.1/9/index" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if ! grep -qiE "connect|refused|/dev/tcp" "${work_dir}/out" && [ "${rc}" -ne 1 ]; then
+  pass "secret-scan: a /dev/tcp-like index path is never opened (no connection attempt)"
+else
+  fail "secret-scan: a /dev/tcp-like index path is never opened (no connection attempt)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T11: 不在判定の経路で開かない（FIFO が現れても止まらない）。stat の shim は使わず、FIFO を index にして 2 で即座に終わることを確かめる
+new_repo; stage src/app.txt "hello"
+t11_fifo="${work_dir}/t11-fifo"
+rm -f "${t11_fifo}"; mkfifo "${t11_fifo}"
+rc=0
+GIT_INDEX_FILE="${t11_fifo}" LC_ALL="${utf8_locale}" timeout 20 "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then
+  pass "secret-scan: a FIFO index path does not hang the hook (2)"
+else
+  fail "secret-scan: a FIFO index path does not hang the hook (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rm -f "${t11_fifo}"
+
 finish "part 8"

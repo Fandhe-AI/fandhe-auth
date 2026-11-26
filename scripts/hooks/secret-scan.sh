@@ -328,17 +328,18 @@ index_is_link() {
 index_absent_confirmed() {
   index_ancestor_searchable || return 1
   { [ ! -e "${orig_index}" ] && [ ! -e "${raw_index}" ] && [ ! -L "${raw_index}" ] && [ ! -L "${orig_index}" ]; } || return 1
-  # 解いた先と解く前の両方が ENOENT と確かめられること。`-e` は ENAMETOOLONG 等でも偽になるため、開く試行の誤りの種類で区別する。
+  # 解いた先と解く前の両方が ENOENT と確かめられること。`-e` は ENAMETOOLONG 等でも偽になるため、メタデータの照会（開かない）の誤りの種類で区別する。
   path_enoent_confirmed "${orig_index}" && path_enoent_confirmed "${raw_index}" || return 1
   index_ancestor_searchable || return 1
   return 0
 }
-# path_enoent_confirmed <パス>: 開く試行が ENOENT で失敗したときだけ 0 を返す（それ以外の誤り・成功は 1。#6047）。
-# 誤りの種類は strerror の文言の末尾で見る（LC_ALL=C 固定。文言は誤りの種類で決まり、パスの内容に左右されない末尾）。
-# 呼び出しは `-e` が偽と確かめた後だけ（FIFO 等を開いて止まらない）。差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
+# path_enoent_confirmed <パス>: メタデータの照会（stat。ファイルを開かない）が ENOENT で失敗したときだけ 0 を返す
+# （それ以外の誤り・成功は 1。#6047）。入力リダイレクトで開く方式は使わない（/dev/tcp 等の特殊パスがソケット接続になる・
+# 照会の間に FIFO が現れると書き手を待って止まる、の 2 点を避ける）。誤りの種類は strerror の文言の末尾で見る
+# （LC_ALL=C 固定。文言は誤りの種類で決まり、パスの内容に左右されない末尾）。差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
 path_enoent_confirmed() {
   local err rc=0
-  err="$({ : < "$1"; } 2>&1)" || rc=$?
+  err="$(LC_ALL=C stat -- "$1" 2>&1 >/dev/null)" || rc=$?
   [ "${rc}" -ne 0 ] || return 1
   case "${err}" in
     *": No such file or directory") return 0 ;;
