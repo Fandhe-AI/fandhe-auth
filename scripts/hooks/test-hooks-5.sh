@@ -378,8 +378,16 @@ many_repo
 PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=4096 SCAN_BIN="${small_bin}" check_scan "many paths keep the arguments short" 1 .agents/skills/unreg/z-last.txt
 expect_out "many paths count each file once" "secret-scan: total: 2 finding(s) in 2 file(s)"
 many_repo
-FAIL_GIT_BOTH1=--name-only FAIL_GIT_BOTH2="--diff-filter=ACMR" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a failing file listing is not scannable (exit 2)" 2
+FAIL_GIT_BOTH1=--name-only FAIL_GIT_BOTH2=. PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a failing file listing is not scannable (exit 2)" 2
 expect_out "a failing file listing reports its own message" "secret-scan: failed to list files; aborting"
+
+# diff.submodule=log が設定されていても、gitlink を含む index で区画の対応が崩れず走査できる（--submodule=short の明示）
+new_repo; stage_lock
+git update-index --add --cacheinfo 160000,1111111111111111111111111111111111111111,docs/spec
+stage .agents/skills/unreg/x.md "x = ${token}"
+git config diff.submodule log
+SCAN_BIN="${small_bin}" check_scan "diff.submodule=log does not break the section count" 1 .agents/skills/unreg/x.md
+git config --unset diff.submodule
 
 # 環境に SKSET_* が残っていても、未登録の名前は除外されない
 new_repo; stage_lock

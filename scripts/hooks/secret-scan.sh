@@ -113,7 +113,7 @@ fi
 # 確認より前に外部コマンドを呼ばない（`command -v` はシェルの組み込み）。lib.sh は検出器の複製だけで動くよう読み込まない。
 # 欠けたコマンドは「失敗の吸収」になり得る（例: 監視の sleep を起動できず、待ち時間なしで読み取りを打ち切る）。
 # 固定の文言は fd 4 へ出す（--summary でも出る）。使うコマンドを足したら、この一覧にも足す（試験が踏む経路の漏れを検出する。踏まない経路は検出できない）。
-for _c in git readlink mktemp rm cp head wc sleep tr cmp; do
+for _c in git readlink mktemp rm cp head wc sleep tr cmp awk mv; do
   if ! command -v "${_c}" > /dev/null 2>&1; then
     echo "secret-scan: required command not found on PATH: ${_c}; aborting" >&4
     exit 2
@@ -1159,7 +1159,7 @@ else
   scan_base="${head_id}"
 fi
 scan_diff() {
-  g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
+  g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames --submodule=short \
     --src-prefix=a/ --dst-prefix=b/ "${scan_base}" "$@"
 }
 
