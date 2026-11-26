@@ -184,7 +184,7 @@ case "${rc}" in
     fi
     ;;
   1)
-    echo "secret-scan-ci: findings reported; details are withheld on the public log. Re-run locally on a clean checkout of the scanned commit: make secret-scan" >&2
+    echo "secret-scan-ci: findings reported; details are withheld on the public log. Re-run with the trusted revision's script on a separate checkout of the scanned commit: scripts/secret-scan-ci.sh <path-to-scanned-checkout>" >&2
     exit 1
     ;;
   *)
@@ -192,7 +192,7 @@ case "${rc}" in
     # 値・パス・git の生の診断は通さない（SECR-23）。失敗は無視する（既に検査不能（2）で終える）。
     secret_scan_fixed_diagnostics > "${work_dir}/allowed-diag" 2> /dev/null || true
     grep -aFx -f "${work_dir}/allowed-diag" "${out}" >&2 2> /dev/null || true
-    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log. Re-run locally on a clean checkout of the scanned commit: make secret-scan" >&2
+    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log. Re-run with the trusted revision's script on a separate checkout of the scanned commit: scripts/secret-scan-ci.sh <path-to-scanned-checkout>" >&2
     exit 2
     ;;
 esac
