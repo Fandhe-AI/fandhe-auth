@@ -112,7 +112,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 `fandhe_auth_e2e_harness::record::E2eRunRecord`。1 つのブラウザのセッション（`E2eHarness::start` 1 回、つまり E2E の試験の関数 1 つ）で
 行った登録・認証の結果を、1 行 1 項目の `key: value`（UTF-8・LF）で出す。試験は `tests/support/passkey.rs` の `RecordSink` を使い、
-終了時（panic の巻き戻りを含む）に本文を標準出力へ出し、`CARGO_TARGET_TMPDIR/e2e-records/`（`target/` の下）へ
+終了時（panic の巻き戻りを含む）に本文を標準出力へ出し、`CARGO_TARGET_TMPDIR/e2e-records/`（Cargo の既定の設定なら `target/` の下。`CARGO_TARGET_DIR` を変えた場合は保存先もビルド時の `CARGO_TARGET_TMPDIR` に従って変わる）へ
 `e2e-run-<browser>-<unix秒>-<pid>-<通し番号>.txt` として新規に書く（既存のファイルは上書きしない）。
 
 | キー | 内容 |
@@ -172,15 +172,18 @@ PKEY の振る舞いを満たしたとは主張しない。
 4. `RecordSink::new(&handle, Browser::.., PasskeyOperation::..)` で記録を開く。
 5. 登録は `support::passkey::register`（仮想 authenticator を `VirtualAuthenticatorOptions` で足し、`register_once` を呼び、戻り値は `(AuthenticatorId, CredentialRef)`）。
     ヘルパーは内部で `registration_run_result` により分類した登録の結果を `sink.record(..)` に足すので、呼び出し側は登録を記録しない（二重に数えない）。
+    検査の担当を分ける。ヘルパーを使うときは、登録の成否と登録の `check_ok` の検査をヘルパーが内部で行い、呼び出し側へ返るのは `(AuthenticatorId, CredentialRef)` だけで `check_ok` は返らない。
+    呼び出し側が登録の `check_ok` を再検査する必要はなく、できない。ヘルパーが担わない検査（手順 6 の認証の `check_ok`、`evidence()` の確認）だけを呼び出し側が行う。
+    `registration_run_result`・`authentication_run_result` を直接使うときは、得た `(run, check_ok)` の成否と `check_ok` の検査を呼び出し側がすべて行う。
     登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` の戻り値を `(run, check_ok)` に分け、`run` を `sink.record(PasskeyOperation::Registration, run)` で一度だけ記録する。
-    記録のあと、登録の成否と `check_ok` の両方を検査する（手順 6 の `check_ok` はここで得た値）。
+    記録のあと、登録の成否と `check_ok` の両方を呼び出し側で検査する（手順 6 の `check_ok` はここで得た値）。
     ヘルパーを使わないときは、`register_once` の前の準備も自分で行う（見本は `support::passkey::register`、`crates/e2e-harness/tests/support/passkey.rs`）。
     準備は 3 つ。(1) `add_virtual_authenticator(&VirtualAuthenticatorOptions)` で仮想 authenticator を足す、(2) `navigate(&origin.origin())` で試験用 origin へ移動する、
     (3) `set_script_timeout(..)` でスクリプトのタイムアウトを command timeout より短く設定する（時間切れを script timeout として観測するため）。
     認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)` を呼び、`authentication_run_result(&handle, &aid, &result)` で
     後続の検査（credential がちょうど 1 件・RP ID が `localhost` と完全一致）を反映した `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Authentication, run)` で一度だけ記録する。
     `authenticate_once` の結果をそのまま記録しない（検査を反映できない）。options の値は PoC の値（`QP-1`）で要件の値ではない。
-6. 成否と `check_ok`（`assert!(check_ok, ..)`）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
+6. 登録をヘルパーで行った場合、登録の検査はヘルパーが済ませている。呼び出し側は、認証（または直接使った登録）の成否と `check_ok`（`assert!(check_ok, ..)`）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
 7. `running.stop()` で停止し、その成功を確かめてから `sink.finish()` で記録を出し、`finish()` の戻り値も確かめる。停止に失敗した実行を完了扱いで記録しない。
 
 失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
