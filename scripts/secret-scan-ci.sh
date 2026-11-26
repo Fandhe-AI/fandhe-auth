@@ -153,6 +153,9 @@ rescan_hint() {
   trusted_sha="$(g -C "${ROOT_DIR}" rev-parse --verify "HEAD^{commit}" 2> /dev/null)" || trusted_sha="unknown"
   # 検出器（scripts/hooks/secret-scan.sh）と除外一覧（skills-lock.json）は作業ツリーのファイルを使う。どちらかが
   # コミットと違う（未コミットの変更・未追跡）か、比較できないときは、sha では再現できないので、版の案内を切り替える（fail-closed）。
+  # 限界: 判定は git status --porcelain によるため、skip-worktree・assume-unchanged の変更と、ignore された未追跡のファイルは
+  # 見落とす（その場合は sha の案内になり、実際に使った版とずれ得る）。走査そのものと終了コードには影響しない（案内の文だけの違い）。
+  # 内容を直接比べる方式は、git の設定・フラグ次第の挙動を増やすため採らない。
   dirty="$(g -C "${ROOT_DIR}" status --porcelain --untracked-files=all -- scripts/hooks/secret-scan.sh skills-lock.json 2> /dev/null && printf x)" || dirty="unknown"
   if [ "${trusted_sha}" = "unknown" ] || [ "${dirty}" != "x" ]; then
     detector_src="use the detector and exclusion list exactly as this run used them: the working-tree copies of scripts/hooks/secret-scan.sh and skills-lock.json in the repository of this entry differ from, or cannot be compared with, the commit (${trusted_sha}), so that commit does not reproduce them; keep copies of both files from that working tree (do not rely on the commit or the main tip)"

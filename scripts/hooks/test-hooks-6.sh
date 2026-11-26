@@ -258,7 +258,7 @@ det_root="${work_dir}/det-root"
 mkdir -p "${det_root}/scripts/hooks"
 cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${det_root}/scripts/"
 cp "${SECRET_SCAN}" "${det_root}/scripts/hooks/secret-scan.sh"
-if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${det_root}/skills-lock.json"; fi
+if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${det_root}/skills-lock.json"; else printf '{}\n' > "${det_root}/skills-lock.json"; fi
 git -C "${det_root}" -c init.defaultBranch=main init -q
 git -C "${det_root}" add -A
 git -C "${det_root}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m "chore: detector copy"
@@ -296,6 +296,41 @@ else
   fail "secret-scan-ci: an uncommitted detector change switches the rescan hint to the working-tree version" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 git -C "${det_root}" checkout -q -- scripts/hooks/secret-scan.sh
+
+# 判定が作業ツリーの版へ倒れる残りの経路も、sha の取得を案内しないことを確かめる（期待は緩めない）
+assert_worktree_hint() {
+  # 引数: 試験名・入口のスクリプト。出力は ${work_dir}/out。
+  local name="$1" entry="$2"
+  rc=0
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${entry}" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 1 ] && grep -qF -- "use the detector and exclusion list exactly as this run used them" "${work_dir}/out" \
+    && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+    && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
+    && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
+    pass "${name}"
+  else
+    fail "${name}" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+}
+# (1) 入口のあるディレクトリが git のリポジトリでなく、HEAD を解決できない（trusted_sha=unknown）
+nogit_root="${work_dir}/nogit-root"
+mkdir -p "${nogit_root}/scripts/hooks"
+cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${nogit_root}/scripts/"
+cp "${SECRET_SCAN}" "${nogit_root}/scripts/hooks/secret-scan.sh"
+if git -C "${nogit_root}" rev-parse --git-dir > /dev/null 2>&1; then
+  fail "secret-scan-ci: setup for the unresolvable-HEAD hint" "nogit_root is inside a git repository"
+else
+  assert_worktree_hint "secret-scan-ci: an unresolvable detector HEAD (unknown) does not suggest checking out a commit" "${nogit_root}/scripts/secret-scan-ci.sh"
+  grep -qF -- "(unknown)" "${work_dir}/out" || fail "secret-scan-ci: an unresolvable detector HEAD reports unknown" "output: $(cat "${work_dir}/out")"
+fi
+# (2) skills-lock.json がコミットと違う
+printf '\n' >> "${det_root}/skills-lock.json"
+assert_worktree_hint "secret-scan-ci: an uncommitted skills-lock.json change switches the rescan hint to the working-tree version" "${det_root}/scripts/secret-scan-ci.sh"
+git -C "${det_root}" checkout -q -- skills-lock.json
+# (3) skills-lock.json が未追跡（コミットに無い）
+git -C "${det_root}" rm -q --cached skills-lock.json
+git -C "${det_root}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m "chore: untrack lock"
+assert_worktree_hint "secret-scan-ci: an untracked skills-lock.json switches the rescan hint to the working-tree version" "${det_root}/scripts/secret-scan-ci.sh"
 
 # 絶対パスへの解決（cd）が失敗しても、mktemp が作った一時領域を残さない（EXIT トラップが消せること）
 cd_tmp_fail_env="${work_dir}/cd-tmp-fail.sh"
