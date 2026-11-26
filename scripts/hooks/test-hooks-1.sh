@@ -589,7 +589,7 @@ sc_kill_job() {
   while read -r _kj_n sc_kj_pid sc_kj_state _kj_rest; do
     if [ "${sc_kj_pid}" = "$2" ]; then
       case "${sc_kj_state}" in
-        Running | Stopped) sc_kj_ok=0 ;;
+        Running | Stopped*) sc_kj_ok=0 ;;
       esac
     fi
   done < "${sc_kj_file}"
@@ -758,6 +758,104 @@ for sc_sig in TERM HUP TERM-STOPPED; do
     fail "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2" "exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_alive}, seconds to stop: ${sc_stop_secs}${sc_kj_note}" "output: $(cat "${work_dir}/out")"
   fi
 done
+
+# job_state の状態語の解釈（ジョブ表を偽物に差し替えて確かめる。本体の関数をそのまま取り出す）。
+# 信号で死んだ子の状態語（Hangup・Interrupt・Segmentation fault 等）は終了済み（none）で、誤った診断・wait の省略を起こさない。
+# 一致した pid の状態語が空・ジョブ表を取れないときだけ unknown（信号を送らない）。
+sc_js_fn="$(awk '/^job_state\(\) \{/ {p=1} p {print} p && /^\}/ {exit}' "${SC_STAGED}")"
+sc_js_check() {
+  # sc_js_check <期待> <説明> <jobs の出力の 1 行。"FAIL" なら jobs が失敗する>
+  sc_js_got="$(
+    # shellcheck disable=SC2034 # eval で取り出した job_state が使う
+    tmp_dir="${work_dir}"
+    SC_FAKE_LINE="$3"
+    # shellcheck disable=SC2329 # eval で取り出した job_state が呼ぶ
+    jobs() {
+      [ "${SC_FAKE_LINE}" != "FAIL" ] || return 1
+      printf '%s\n' "${SC_FAKE_LINE}"
+    }
+    eval "${sc_js_fn}"
+    job_state 4242
+    # shellcheck disable=SC2154 # eval で取り出した job_state が設定する
+    echo "${job_state_result}"
+  )"
+  if [ "${sc_js_got}" = "$1" ]; then
+    pass "shellcheck-staged: job_state treats ${2} as ${1}"
+  else
+    fail "shellcheck-staged: job_state treats ${2} as ${1}" "got: ${sc_js_got:-none}" "line: $3"
+  fi
+}
+sc_js_check owned "Running" "[1]+ 4242 Running                    sleep 30 &"
+sc_js_check owned "Stopped" "[1]+ 4242 Stopped                    sleep 30"
+sc_js_check owned "Stopped(SIGTSTP)" "[1]+ 4242 Stopped(SIGTSTP)           sleep 30"
+sc_js_check none "Done" "[1]+ 4242 Done                       sleep 30"
+sc_js_check none "Exit 3" "[1]+ 4242 Exit 3                     sleep 30"
+sc_js_check none "Terminated" "[1]+ 4242 Terminated                 sleep 30"
+sc_js_check none "Interrupt (a child killed by SIGINT)" "[1]+ 4242 Interrupt                  sleep 30"
+sc_js_check none "Hangup (a child killed by SIGHUP)" "[1]+ 4242 Hangup                     sleep 30"
+sc_js_check none "Segmentation fault" "[1]+ 4242 Segmentation fault        sleep 30"
+sc_js_check none "a pid not in the table" "[1]+ 9999 Running                    sleep 30 &"
+sc_js_check unknown "an empty state word" "[1]+ 4242"
+sc_js_check unknown "a failing jobs" "FAIL"
+
+# ジョブ表を取れない（所有を確かめられない）中断では、信号を送らず、診断を出し、wait せずに 2 で終わる。
+# `jobs` を失敗させる関数を BASH_ENV で差し込む。wait へ進めば偽物の眠り（30 秒）が終わるまで戻らないため、10 秒未満で終わることで wait の省略を確かめる。
+sc_unk_env="${work_dir}/sc-unknown-env.sh"
+printf '%s\n' 'jobs() { return 1; }' > "${sc_unk_env}"
+sc_pidfile="${work_dir}/sc.pid"
+rm -f "${sc_pidfile}"
+sc_reset
+BASH_ENV="${sc_unk_env}" SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh a.sh > "${work_dir}/out" 2>&1 &
+sc_script_pid=$!
+sc_waited=0
+while [ ! -s "${sc_pidfile}" ] && [ "${sc_waited}" -lt 100 ]; do
+  sleep 0.1
+  sc_waited=$((sc_waited + 1))
+done
+sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
+sc_waited=0
+while [ -n "${sc_fake_pid}" ] && ! sc_is_fake_sleep "${sc_fake_pid}" && [ "${sc_waited}" -lt 50 ]; do
+  sleep 0.1
+  sc_waited=$((sc_waited + 1))
+done
+sc_fake_start=""
+if [ -n "${sc_fake_pid}" ]; then
+  sc_fake_start="$(ps -p "${sc_fake_pid}" -o lstart= 2> /dev/null || true)"
+fi
+if [ -z "${sc_fake_start}" ] || ! sc_is_fake_sleep "${sc_fake_pid}"; then
+  sc_reap "${sc_script_pid}" || true
+  fail "shellcheck-staged: a TERM with an unreadable job table sends no signal and does not wait" "setup failed: the fake shellcheck did not become sleep${sc_kj_note}" "output: $(cat "${work_dir}/out")"
+else
+  sc_t0="${SECONDS}"
+  sc_kj_note=""
+  sc_kill_job TERM "${sc_script_pid}" || true
+  sc_waited=0
+  while kill -0 "${sc_script_pid}" 2> /dev/null && [ "${sc_waited}" -lt 200 ]; do
+    sleep 0.1
+    sc_waited=$((sc_waited + 1))
+  done
+  if kill -0 "${sc_script_pid}" 2> /dev/null; then
+    sc_reap "${sc_script_pid}" || true
+    sc_rc=124
+  elif wait "${sc_script_pid}"; then
+    sc_rc=0
+  else
+    sc_rc=$?
+  fi
+  sc_unk_secs=$((SECONDS - sc_t0))
+  sc_unk_alive=0
+  if kill -0 "${sc_fake_pid}" 2> /dev/null; then
+    sc_unk_alive=1
+  fi
+  # 送られなかったので偽物は生きている。孤児の後始末は開始時刻と同一性を確かめて行う（眠りは 30 秒で終わる）
+  sc_orphan_signal TERM "${sc_fake_pid}" "${sc_fake_start}" || true
+  sc_unk_out="$(cat "${work_dir}/out")"
+  if [ "${sc_rc}" -eq 2 ] && [ "${sc_unk_alive}" -eq 1 ] && [ "${sc_unk_secs}" -lt 10 ] && [[ "${sc_unk_out}" == *"cannot confirm ownership of child"* ]]; then
+    pass "shellcheck-staged: a TERM with an unreadable job table sends no signal and does not wait"
+  else
+    fail "shellcheck-staged: a TERM with an unreadable job table sends no signal and does not wait" "exit ${sc_rc}, fake still running: ${sc_unk_alive}, seconds: ${sc_unk_secs}${sc_kj_note}" "output: ${sc_unk_out}"
+  fi
+fi
 
 # PATH に shellcheck が無いときは、未検査で成功にせず 2 で止まる
 sc_empty_path="${work_dir}/sc-empty-path"
