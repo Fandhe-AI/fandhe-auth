@@ -260,6 +260,8 @@ if [ "${rc}" -eq 1 ] && grep -qxF -- "secret-scan: total: 1 finding(s) in 1 file
   && grep -qF -- "check out the trusted detector and exclusion list at the commit this job used" "${work_dir}/out" \
   && grep -qF -- "not the main tip" "${work_dir}/out" \
   && grep -qF -- "GIT_NO_REPLACE_OBJECTS=1 GIT_INDEX_FILE=<new file> git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree ${head_want}" "${work_dir}/out" \
+  && grep -qF -- "every existing GIT_* variable unset for both commands below" "${work_dir}/out" \
+  && grep -qF -- "env -u GIT_DIR -u GIT_OBJECT_DIRECTORY" "${work_dir}/out" \
   && grep -qF -- "do not run make or any script from the scanned commit" "${work_dir}/out" \
   && ! grep -qF -- "check out the scanned commit" "${work_dir}/out" && ! grep -qF -- "run: make secret-scan" "${work_dir}/out" \
   && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
