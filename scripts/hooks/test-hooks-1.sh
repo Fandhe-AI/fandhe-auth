@@ -579,6 +579,13 @@ for sc_sig in TERM HUP; do
     sleep 0.1
     sc_waited=$((sc_waited + 1))
   done
+  # 偽物が exec して sleep になるまで待ってから信号を送る（exec 前に送ると、停止の対象が sleep でなくシェルになり、確認が曖昧になる）
+  sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
+  sc_waited=0
+  while [ -n "${sc_fake_pid}" ] && ! sc_is_fake_sleep "${sc_fake_pid}" && [ "${sc_waited}" -lt 50 ]; do
+    sleep 0.1
+    sc_waited=$((sc_waited + 1))
+  done
   sc_t0="${SECONDS}"
   kill -"${sc_sig}" "${sc_script_pid}" 2> /dev/null || true
   if wait "${sc_script_pid}"; then
@@ -588,15 +595,19 @@ for sc_sig in TERM HUP; do
   fi
   sc_stop_secs=$((SECONDS - sc_t0))
   sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
+  # 停止の確認: 消滅（kill -0 の失敗）を確かめられたときだけ停止済みとする。ps の失敗・別名は停止の証拠にしない。
+  # 強制終了は、まだ生きていて偽物の sleep と確認できたときだけ送る（pid の再利用で無関係のプロセスを落とさない）。
   sc_alive=1
   if [ -n "${sc_fake_pid}" ]; then
     sc_waited=0
-    while kill -0 "${sc_fake_pid}" 2> /dev/null && sc_is_fake_sleep "${sc_fake_pid}" && [ "${sc_waited}" -lt 30 ]; do
+    while kill -0 "${sc_fake_pid}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
       sleep 0.1
       sc_waited=$((sc_waited + 1))
     done
-    if kill -0 "${sc_fake_pid}" 2> /dev/null && sc_is_fake_sleep "${sc_fake_pid}"; then
-      kill -9 "${sc_fake_pid}" 2> /dev/null || true
+    if kill -0 "${sc_fake_pid}" 2> /dev/null; then
+      if sc_is_fake_sleep "${sc_fake_pid}"; then
+        kill -9 "${sc_fake_pid}" 2> /dev/null || true
+      fi
     else
       sc_alive=0
     fi

@@ -61,13 +61,24 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 pids=()
 launched=0
 pending_signal=0
+# is_running_job <pid>: bash のジョブ表で「まだ実行中」の子だけ真にする。bash は明示の wait の前にも終了した子を回収するため、
+# 保持している pid が回収済み（pid が再利用されうる）のことがある。kill の前にこれで自分の子だと確かめる（#6063・TASK-6）。
+# 確認と kill の間の窓は残るが、回収済みの pid を無条件に狙う経路は無くなる。
+is_running_job() {
+  local running
+  running=" $(jobs -rp 2> /dev/null | tr '\n' ' ') "
+  case "${running}" in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
 # shellcheck disable=SC2329 # trap から呼ばれる
 on_signal() {
   # 後始末の途中の信号で入れ子に呼ばれると、回収済みの pid へ二重に kill を送り得る
   trap '' INT TERM HUP
   local k=0
   while [ "${k}" -lt "${launched}" ]; do
-    if [ -n "${pids[k]}" ]; then
+    if [ -n "${pids[k]}" ] && is_running_job "${pids[k]}"; then
       kill "${pids[k]}" 2> /dev/null || true
     fi
     k=$((k + 1))
@@ -211,8 +222,12 @@ fi
 # 止められた場合は .rc を書かず、親が「結果が無い」として扱う。
 # shellcheck disable=SC2329 # trap から呼ばれる
 batch_stop() {
+  # 停止処理中の別の信号で再入すると、回収直後の pid へ kill を送り得る。冒頭で対象の信号を無視する。
+  trap '' TERM INT HUP
   if [ -n "${sc_pid}" ]; then
-    kill "${sc_pid}" 2> /dev/null || true
+    if is_running_job "${sc_pid}"; then
+      kill "${sc_pid}" 2> /dev/null || true
+    fi
     wait "${sc_pid}" 2> /dev/null || true
     sc_pid=""
   fi
