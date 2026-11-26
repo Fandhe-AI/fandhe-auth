@@ -1243,7 +1243,15 @@ if [ "${skill_count}" -gt 0 ]; then
         esac
         ;;
     esac
-    printf '%s\n' "${skip}"
+    # 外す区画は印に実際のパスを付ける（`1<パス>`）。diff 側の区画のヘッダと突き合わせる（改行を含むパスは外さず走査する）。
+    if [ "${skip}" -eq 1 ] && [[ "${path}" == *$'\n'* ]]; then
+      skip=0
+    fi
+    if [ "${skip}" -eq 1 ]; then
+      printf '1%s\n' "${path}"
+    else
+      printf '0\n'
+    fi
     skip_total=$((skip_total + 1))
     [ "${skip}" -eq 0 ] || skip_any=1
   done < "${tmp_dir}/names" > "${tmp_dir}/skip-flags"
@@ -1263,14 +1271,20 @@ if ! tr '\000' ' ' < "${tmp_dir}/diff" > "${tmp_dir}/diff.sp"; then
 fi
 
 # 登録名の下の区画を落とす（#6053）。NUL を除いた版と空白へ置き換えた版の両方に同じ処理をかける（行の構造は同じ）。
-# 区画の数が一覧のファイル数と違えば対応が取れないため、検査不能（2）にする。元の diff（NUL の有無の判定用）は触らない。
+# 区画の数が一覧のファイル数と違う、または落とす区画のヘッダ（`diff --git a/<パス> b/<パス>`。--no-renames のため同じパス）が
+# 一覧の n 番目のパスと一致しなければ（diff.orderFile 等で順序が変わった場合を含む）、対応が取れないため検査不能（2）にする。
+# 落とさない区画は一致を問わない（走査する側に倒す）。元の diff（NUL の有無の判定用）は触らない。
 if [ "${body_skip_filter}" -eq 1 ]; then
   for sk_f in diff.del diff.sp; do
     if ! LC_ALL=C awk -v want="${skip_total}" '
       NR == FNR { flag[FNR] = $0; next }
-      /^diff --git / { sec++; drop = (flag[sec] == "1") }
+      /^diff --git / {
+        sec++
+        drop = (substr(flag[sec], 1, 1) == "1")
+        if (drop && $0 != "diff --git a/" substr(flag[sec], 2) " b/" substr(flag[sec], 2)) bad = 1
+      }
       !drop { print }
-      END { if (sec != want) exit 3 }
+      END { if (sec != want || bad) exit 3 }
     ' "${tmp_dir}/skip-flags" "${tmp_dir}/${sk_f}" > "${tmp_dir}/${sk_f}.f"; then
       echo "secret-scan: failed to filter diff; aborting" >&4
       exit 2

@@ -389,6 +389,18 @@ git config diff.submodule log
 SCAN_BIN="${small_bin}" check_scan "diff.submodule=log does not break the section count" 1 .agents/skills/unreg/x.md
 git config --unset diff.submodule
 
+# 登録名の下の変更と gitlink が同じ diff にあっても、登録名の下だけが落ち、未登録の名前は走査される（区画の対応と突き合わせの経路）
+# diff.orderFile で区画の順序を変えても、パスの突き合わせで対応が保たれる
+new_repo; stage_lock
+git update-index --add --cacheinfo 160000,1111111111111111111111111111111111111111,docs/spec
+stage .agents/skills/vendored-a/x.md "x = ${token}"
+stage .agents/skills/unreg/x.md "x = ${token}"
+printf '%s\n' 'docs/*' '.agents/skills/unreg/*' '.agents/skills/vendored-a/*' > "${PWD}/order.txt"
+git config diff.orderFile "${PWD}/order.txt"
+SCAN_BIN="${small_bin}" check_scan "registered path is excluded and unregistered path is scanned beside a gitlink" 1 .agents/skills/unreg/x.md
+expect_out "only the unregistered path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
+git config --unset diff.orderFile
+
 # 環境に SKSET_* が残っていても、未登録の名前は除外されない
 new_repo; stage_lock
 stage .agents/skills/unreg/x.md "x = ${token}"
