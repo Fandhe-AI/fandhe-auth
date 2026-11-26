@@ -195,7 +195,7 @@ fn small_trial_run_writes_record_without_requirement_values() {
     std::fs::remove_file(&path2).unwrap();
     std::fs::remove_file(&it_path).unwrap();
 
-    // 10/10: 上の検査（秘密値・設定の目印・パスが無い）を通し、停止と後片付けが成功した後に、
+    // 10/10: 上の検査（設定の目印 2 種・出力先のパスが無い。秘密値の各表現の照合は下の別の試験で、`make load-trial` では流れない）を通し、停止と後片付けが成功した後に、
     // `make load-trial`（`FANDHE_AUTH_LOAD_TRIAL_PRINT=1`・--show-output）で明示的に選んだときだけ本文を出す。
     // 通常の `make test` では出さない（失敗時に本文が CI ログへ残らない。SECR-23）。
     if std::env::var_os("FANDHE_AUTH_LOAD_TRIAL_PRINT").is_some_and(|v| v == "1") {

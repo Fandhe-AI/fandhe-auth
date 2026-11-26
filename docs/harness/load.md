@@ -457,7 +457,7 @@ judgment:
 2. it-harness の実行の記録を `write_new` で出力先へ書き、そのファイル名から `RunRecordFile` を作る。起動秒は記録の `started_at` から取る。
 3. 起動済みの構成（`composition_record`）を写して `ComponentConditions` を作り、`MeasurementConditions::detect` で測定の条件を作る（閉ループ）。
 4. `TargetSpec`（対象名・区間名）と `StagePlan`（段階の `StageConfig`・比べる指標・`StageLimits`・記録へ出してよい区間名の語彙）を組む。上限は実行環境に合わせて呼び出し元が明示する。既定値は無い。
-5. `RunSession::new(..).run(申告する構成要素, &spec, &plan, 呼び出しの閉包)` で回し、`RunEvidence` を得る。閉包は `CallResult` を返す。申告と閉包が実際に呼ぶ相手の一致は呼び出し元の責任で、見本は stub 側の呼び出し件数で確かめている。
+5. `RunSession::new(..)?`（`Result<RunSession, LoadRecordError>`）で実行を作り、`.run(申告する構成要素, &spec, &plan, 呼び出しの閉包)?`（これも `Result`）で回して `RunEvidence` を取り出す。見本は `.unwrap()` で取り出している。閉包は `CallResult` を返す。申告と閉包が実際に呼ぶ相手の一致は呼び出し元の責任で、見本は stub 側の呼び出し件数で確かめている。
 6. 比べる値は `ComparisonValue` で渡す。性能の目標は持ち越しなので `undecided` で渡す（`AUDP-29`）。`requirement`・`initial` は今は常に拒否される。
 7. `LoadRecord::new(&evidence, 記録時刻, 値)` を作り、`write_new(dir)` で書く。
 8. 構成要素を `stop()` で止める。
@@ -465,7 +465,7 @@ judgment:
 ### 実行の方法
 
 - `make test`: workspace 全体を流す。試し実行を含むが、記録の本文は出ない（cargo は成功した試験の標準出力を捕まえる）。CI の build-test ジョブと同じ契約。
-- `make load-trial`（`scripts/load-trial.sh`）: 試し実行 `trial_run` だけを流し、負荷の記録の本文を標準出力に出す。引数は受けない。主試験（`small_trial_run_writes_record_without_requirement_values`）が 1 件でない・失敗は `scripts/load-trial.sh` の直接実行で終了コード 1（make 経由ではレシピが 1 で終了しても make 自体は 2 を返す）。本文は `FANDHE_AUTH_LOAD_TRIAL_PRINT=1` のときだけ出る（通常の `make test` では出さない）。CI の外。名前は暫定。
+- `make load-trial`（`scripts/load-trial.sh`）: 試し実行 `trial_run` だけを流し、負荷の記録の本文を標準出力に出す。引数は受けない。主試験（`small_trial_run_writes_record_without_requirement_values`）の合格が 1 件（無視 0 件）でない・失敗は `scripts/load-trial.sh` の直接実行で終了コード 1（make 経由ではレシピが 1 で終了しても make 自体は 2 を返す）。本文は `FANDHE_AUTH_LOAD_TRIAL_PRINT=1` のときだけ出る（通常の `make test` では出さない）。CI の外。名前は暫定。
 - Docker の有無などで自動に飛ばす分岐は作らない（`DPOL-30`〜`32`）。
 
 ### 記録の置き場と読み方
