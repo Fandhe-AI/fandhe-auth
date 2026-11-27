@@ -45,6 +45,13 @@ if [ "${n_begin}" != "1" ] || [ "${n_end}" != "1" ]; then
   echo "error: expected exactly one checked load record body block (begin=${n_begin} end=${n_end}); nothing is printed" >&2
   exit 1
 fi
+# 開始行が終了行より前にあること（順序が逆なら区画として扱わない）
+begin_no="$(grep -nFx -- "${begin_line}" <<<"${out}" | cut -d: -f1)"
+end_no="$(grep -nFx -- "${end_line}" <<<"${out}" | cut -d: -f1)"
+if [ "${begin_no}" -ge "${end_no}" ]; then
+  echo "error: the load record body block is out of order (end before begin); nothing is printed" >&2
+  exit 1
+fi
 block="$(awk -v b="${begin_line}" -v e="${end_line}" '$0 == e {on = 0} on {print} $0 == b {on = 1}' <<<"${out}")"
 if [ -z "${block}" ] || ! grep -q '^format: fandhe-auth-load-record/' <<<"${block}"; then
   echo "error: the load record body block is empty or malformed; nothing is printed" >&2
