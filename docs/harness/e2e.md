@@ -155,7 +155,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 - unix（Linux・macOS 等）に限る。非 unix では対象の試験が 0 件になり、入口のスクリプトが失敗にする。
 - Chrome は chromedriver と Chrome、Firefox は geckodriver と Firefox（仮想 authenticator の WebDriver のエンドポイントを使える組み合わせ。
   版の値はここに写さず、参照先を分ける）。
-  - Firefox: 動作の記録のある組み合わせは `scripts/e2e-firefox.sh` と Makefile の `e2e-firefox` の説明を見る（スクリプトが書く範囲は、記録のある組み合わせと、それより古い版・pref が足りない版は未確認という点。記録は spec の PoC の記録〔〔仮想〕〕で、この repo の `make e2e-firefox` ではまだ実行していない）。
+  - Firefox: 動作の記録のある組み合わせは `scripts/e2e-firefox.sh` と Makefile の `e2e-firefox` の説明を見る（スクリプトが書く範囲は、記録のある組み合わせと、それより古い版・pref が足りない版は未確認という点。記録は spec の `03-poc/` の PoC の記録（〔仮想〕）で、この repo の `make e2e-firefox` ではまだ実行していない）。
   - Chrome: 同じ文書の「起動・停止の契約（2/6）」にある ChromeDriver を含む確認環境を見る。書かれている確認は chromedriver と Chrome が同じプロセスグループに入ること（特定の環境・版で `ps` により確認。他は未確認）で、仮想 authenticator の動作の確認ではない。
 - ドライバが無ければ黙って飛ばさず失敗する（`DPOL-30`〜`32`）。環境の有無で自動に飛ばす分岐は作らない。
 
