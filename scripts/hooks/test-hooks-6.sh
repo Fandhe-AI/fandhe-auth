@@ -317,8 +317,11 @@ nogit_root="${work_dir}/nogit-root"
 mkdir -p "${nogit_root}/scripts/hooks"
 cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${nogit_root}/scripts/"
 cp "${SECRET_SCAN}" "${nogit_root}/scripts/hooks/secret-scan.sh"
+# TMPDIR が git のリポジトリの中にあっても親の repo を拾わないよう、壊れた gitfile を置いて探索をここで止める
+# （入口は GIT_CEILING_DIRECTORIES を含む GIT_* を外すため、環境変数では隔離できない）
+printf 'gitdir: %s\n' "${nogit_root}/no-such-gitdir" > "${nogit_root}/.git"
 if git -C "${nogit_root}" rev-parse --git-dir > /dev/null 2>&1; then
-  fail "secret-scan-ci: setup for the unresolvable-HEAD hint" "nogit_root is inside a git repository"
+  fail "secret-scan-ci: setup for the unresolvable-HEAD hint" "nogit_root still resolves a git directory"
 else
   assert_worktree_hint "secret-scan-ci: an unresolvable detector HEAD (unknown) does not suggest checking out a commit" "${nogit_root}/scripts/secret-scan-ci.sh"
   grep -qF -- "(unknown)" "${work_dir}/out" || fail "secret-scan-ci: an unresolvable detector HEAD reports unknown" "output: $(cat "${work_dir}/out")"
@@ -331,6 +334,58 @@ git -C "${det_root}" checkout -q -- skills-lock.json
 git -C "${det_root}" rm -q --cached skills-lock.json
 git -C "${det_root}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m "chore: untrack lock"
 assert_worktree_hint "secret-scan-ci: an untracked skills-lock.json switches the rescan hint to the working-tree version" "${det_root}/scripts/secret-scan-ci.sh"
+
+# (4) skip-worktree・assume-unchanged・ignore された未追跡は git status に出ないが、内容の照合で見つけて sha を案内しない
+det_commit() {
+  git -C "${det_root}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q "$@"
+}
+git -C "${det_root}" add skills-lock.json
+det_commit -m "chore: track lock"
+git -C "${det_root}" update-index --skip-worktree skills-lock.json
+printf '\n' >> "${det_root}/skills-lock.json"
+if [ -n "$(git -C "${det_root}" status --porcelain -- skills-lock.json)" ]; then
+  fail "secret-scan-ci: setup for the skip-worktree hint" "git status is not empty"
+fi
+assert_worktree_hint "secret-scan-ci: a skip-worktree skills-lock.json change does not get a commit hint" "${det_root}/scripts/secret-scan-ci.sh"
+git -C "${det_root}" update-index --no-skip-worktree skills-lock.json
+git -C "${det_root}" checkout -q -- skills-lock.json
+git -C "${det_root}" update-index --assume-unchanged scripts/hooks/secret-scan.sh
+printf '\n# local edit\n' >> "${det_root}/scripts/hooks/secret-scan.sh"
+assert_worktree_hint "secret-scan-ci: an assume-unchanged detector change does not get a commit hint" "${det_root}/scripts/secret-scan-ci.sh"
+git -C "${det_root}" update-index --no-assume-unchanged scripts/hooks/secret-scan.sh
+git -C "${det_root}" checkout -q -- scripts/hooks/secret-scan.sh
+git -C "${det_root}" rm -q --cached skills-lock.json
+printf 'skills-lock.json\n' > "${det_root}/.gitignore"
+git -C "${det_root}" add .gitignore
+det_commit -m "chore: ignore lock"
+if [ -n "$(git -C "${det_root}" status --porcelain --untracked-files=all -- skills-lock.json)" ]; then
+  fail "secret-scan-ci: setup for the ignored-lock hint" "git status is not empty"
+fi
+assert_worktree_hint "secret-scan-ci: an ignored untracked skills-lock.json does not get a commit hint" "${det_root}/scripts/secret-scan-ci.sh"
+# (5) 元の実行が同じ checkout（対象の引数なし）のときは、別の checkout へ移さずその場で引数なしで流す案内にする
+same_root="${work_dir}/same-root"
+mkdir -p "${same_root}/scripts/hooks"
+cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${same_root}/scripts/"
+cp "${SECRET_SCAN}" "${same_root}/scripts/hooks/secret-scan.sh"
+cp "${HOOKS_DIR}/../../skills-lock.json" "${same_root}/skills-lock.json"
+printf 'x = %s\n' "${token}" > "${same_root}/leaked.txt"
+git -C "${same_root}" -c init.defaultBranch=main init -q
+git -C "${same_root}" add -A
+git -C "${same_root}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m "chore: same checkout"
+same_sha="$(git -C "${same_root}" rev-parse HEAD)"
+rc=0
+(cd "${work_dir}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${same_root}/scripts/secret-scan-ci.sh" "${same_root}") > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qF -- "this run scanned this entry's own checkout" "${work_dir}/out" \
+  && grep -qF -- "the same-checkout exclusion rules apply" "${work_dir}/out" \
+  && grep -qF -- "run ./scripts/hooks/secret-scan.sh --tracked (without --summary and without a target argument) from the root of this same checkout" "${work_dir}/out" \
+  && grep -qF -- "read-tree ${same_sha}" "${work_dir}/out" \
+  && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+  && ! grep -qF -- "<trusted checkout>" "${work_dir}/out" \
+  && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
+  pass "secret-scan-ci: a same-checkout run tells to rescan in the same checkout without a target"
+else
+  fail "secret-scan-ci: a same-checkout run tells to rescan in the same checkout without a target" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
 
 # 絶対パスへの解決（cd）が失敗しても、mktemp が作った一時領域を残さない（EXIT トラップが消せること）
 cd_tmp_fail_env="${work_dir}/cd-tmp-fail.sh"
