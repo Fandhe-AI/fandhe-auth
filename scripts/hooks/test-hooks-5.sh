@@ -423,14 +423,20 @@ stage .agents/skills/vendored-a/x.md "harmless = 1"
 stage src/app.txt "harmless = 2"
 PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "the same fixture without the extra listing entry passes (the filter is on the path)" 0
 
-# TMPDIR にバックスラッシュがあっても、一時ファイルの振り分け（登録名の除外と外した名前の区画の除外）が外れない
-bs_tmp="${work_dir}/tmp\\dir"
+# TMPDIR に `\t` のようなエスケープに読める並びがあっても、一時ファイルの振り分け（登録名の除外と外した名前の区画の除外）が外れない
+# （awk の `-v` で値を渡すと、gawk・mawk・busybox awk のどれも `\t` をタブへ書き換える。`\d` のような未知の並びは mawk が書き換えない）。
+# 外した名前（vendored-b。索引の一覧では外れ、検出器の一覧にはある）も含め、両方のファイル（SS_F1・SS_F2）を使う経路を通す。
+bs_tmp="${work_dir}/tmp\\tdir"
 mkdir -p "${bs_tmp}"
-new_repo; stage_lock
+new_repo
+printf '%s\n' '{"version":2,"skills":{"vendored-a":{"source":"x"}}}' > skills-lock.json
+git add -- skills-lock.json
 stage .agents/skills/vendored-a/x.md "x = ${token}"
+stage .agents/skills/vendored-b/x.md "x = ${token}"
 stage src/app.txt "x = ${token}"
-TMPDIR="${bs_tmp}" SCAN_BIN="${small_bin}" check_scan "a backslash in TMPDIR keeps the registered exclusion" 1 src/app.txt
-expect_out "a backslash in TMPDIR counts only the outside file" "secret-scan: total: 1 finding(s) in 1 file(s)"
+TMPDIR="${bs_tmp}" SCAN_BIN="${small_bin}" check_scan "an escape-like TMPDIR keeps the exclusions" 1 src/app.txt
+expect_out "an escape-like TMPDIR counts the outside and the dropped files once each" "secret-scan: total: 2 finding(s) in 2 file(s)"
+expect_out "an escape-like TMPDIR reports the dropped name" "  .agents/skills/vendored-b/x.md"
 
 # NUL の後ろに 64 KiB を超える本文があっても、NUL の確認（cmp が最初の差で読むのをやめ、tr が SIGPIPE になる）で
 # 検査不能にならず、NUL を含む差分として両方の版を走査する（終了コード 1・内部エラーの出力なし）
