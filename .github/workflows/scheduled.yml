@@ -16,7 +16,7 @@ name: Scheduled
 
 on:
   # 例外の承認の範囲は workflow_dispatch だけで動く間（手動の workflow_dispatch だけ）。
-  # schedule（頻度の上限は日次以下、候補は日次で、どちらも暫定。時刻とあわせて TASK-681 で人が決める）は TASK-681 の結線と一緒に、例外を見直してから足す（承認は人が行う。ACPT-7）。
+  # schedule（頻度の上限は .claude/rules/github-actions.md の「日次以下」のまま。候補は日次で暫定。時刻とあわせて TASK-681 で人が決める）は TASK-681 の結線と一緒に、例外を見直してから足す（承認は人が行う。ACPT-7）。
   workflow_dispatch:
 
 permissions: {}
