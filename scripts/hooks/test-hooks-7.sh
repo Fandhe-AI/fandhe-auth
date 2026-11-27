@@ -366,6 +366,22 @@ git add .agents/skills/vendored-b/SKILL.md
 SCAN_BIN="${same_bin}" check_scan "dropped skill: the dropped body is scanned beside a registered sibling's change" 1 .agents/skills/vendored-a/SKILL.md
 expect_out "dropped skill: only the dropped name is counted, the registered sibling stays excluded" "secret-scan: total: 1 finding(s) in 1 file(s)"
 
+# 外した名前の下の、引用されるパス（二重引用符・バックスラッシュ。core.quotePath=false でも引用される）のファイルを、
+# 登録の解除と同じコミットで変えても、二重に数えない（ヘッダが一覧の生のパスと一致せず、登録名の判定では主の差分の区画を落とせない）。
+# 全行（コミット済みの 1 行 + 追加の 1 行 = 2 件）が 1 ファイルとして数えられる。主の差分の区画が残れば 3 件になる。
+for qname in 'q"x.md' 'b\s.md'; do
+  same_checkout_repo "${lock_ok}"
+  mkdir -p .agents/skills/vendored-a
+  printf '%s\n' "x = ${token}" > ".agents/skills/vendored-a/${qname}"
+  git add -- ".agents/skills/vendored-a/${qname}"
+  git commit -q -m "chore: add a quoted-path skill body"
+  printf '%s\n' "${lock_only_b}" > skills-lock.json
+  printf '%s\n' "z = ${token}" >> ".agents/skills/vendored-a/${qname}"
+  git add -- skills-lock.json ".agents/skills/vendored-a/${qname}"
+  SCAN_BIN="${same_bin}" check_scan "dropped skill: a quoted path (${qname}) modified with the drop is scanned" 1
+  expect_out "dropped skill: a quoted path (${qname}) is not counted twice" "secret-scan: total: 2 finding(s) in 1 file(s)"
+done
+
 # 外した名前の本文だけが NUL を含むとき（主の差分には NUL が無い）も、NUL を空白へ置き換えた版を走査する。
 # 区切りが NUL のヘッダ文は、NUL を取り除くと一致せず、空白へ置き換えると一致する
 same_checkout_repo "${lock_ok}"

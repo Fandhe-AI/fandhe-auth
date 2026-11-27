@@ -420,6 +420,7 @@ EXTRA_LIST_ENTRY=extra.txt PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" ch
 expect_out "a section count mismatch reports a normalization failure" "secret-scan: failed to normalize diff; aborting"
 new_repo; stage_lock
 stage .agents/skills/vendored-a/x.md "harmless = 1"
+stage src/app.txt "harmless = 2"
 PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "the same fixture without the extra listing entry passes (the filter is on the path)" 0
 
 # diff.submodule=log が設定されていても、gitlink を含む index で区画の対応が崩れず走査できる（--submodule=short の明示）

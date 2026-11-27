@@ -1211,9 +1211,8 @@ if [ "${mode}" = tracked ] || [ -z "${head_id}" ]; then
   dropped_names=()
 fi
 for name in ${dropped_names[@]+"${dropped_names[@]}"}; do
-  # 主の差分では登録名と同じく区画を落とし（二重に数えない。除外の集合 SKSET_* に足す）、全行は下の別の差分で走査する。
-  printf -v "SKSET_${name//-/_}" '%s' 1
-  skill_count=$((skill_count + 1))
+  # 全行は下の別の差分（diff.dropped）で走査する。主の差分の同じファイルの区画は、diff.dropped に同じヘッダの区画があると
+  # 確かめられたものだけを落とす（登録名の除外の判定とは別。登録名の除外の集合 SKSET_* には足さない）。
   dropped_pathspec+=(":(literal,top).agents/skills/${name}/")
   dropped_count=$((dropped_count + 1))
 done
@@ -1302,7 +1301,7 @@ if ! scan_diff -U0 --diff-filter=ACMR -- . > "${tmp_dir}/diff"; then
   exit 2
 fi
 body_skip_filter=0
-if [ "${skill_count}" -gt 0 ]; then
+if [ "${skill_count}" -gt 0 ] || [ "${dropped_count}" -gt 0 ]; then
   # 登録名の下のファイルの印（区画ごとに 1 行。1 = 外す）。外すのは `.agents/skills/<登録名>/` の下だけで、
   # 判定に迷う形（`.agents/skills/` で始まらない・直下のファイル・規則に合わない区画・未登録・前方一致の別名）は走査する。
   if ! scan_diff --name-only -z --diff-filter=ACMR -- . > "${tmp_dir}/names"; then
@@ -1340,7 +1339,9 @@ if [ "${skill_count}" -gt 0 ]; then
     skip_total=$((skip_total + 1))
     [ "${skip}" -eq 0 ] || skip_any=1
   done < "${tmp_dir}/names" > "${tmp_dir}/skip-flags"
-  body_skip_filter="${skip_any}"
+  if [ "${skip_any}" -eq 1 ] || [ "${dropped_count}" -gt 0 ]; then
+    body_skip_filter=1
+  fi
 fi
 
 # 登録を外した名前の既存の本文（#6054）。外れた名前があるときだけ呼ぶ（正の pathspec が空だと index 全体になる）。
@@ -1353,6 +1354,14 @@ if [ "${dropped_count}" -gt 0 ]; then
     exit 2
   fi
 fi
+# 主の差分から落とす、外れた名前の区画のヘッダ（`diff --git ...` の行そのもの）。引用されるパス（制御文字・二重引用符・バックスラッシュ。
+# core.quotePath=false でも引用される）は、一覧の生のパスとヘッダが一致せず登録名の判定では突き合わせられないが、同じ git の
+# 同じ設定が両方の差分へ同じ文字列で書くため、ヘッダ全体の一致で「diff.dropped にも同じ区画がある」ことを確かめられる。
+# 一致しない区画は落とさない（走査する側に倒す。二重に数えても検出は漏れない）。ヘッダに NUL は入らない。
+if ! tr -d '\000' < "${tmp_dir}/diff.dropped" | LC_ALL=C awk '/^diff --git /' > "${tmp_dir}/dropped-headers"; then
+  echo "secret-scan: failed to normalize diff; aborting" >&4
+  exit 2
+fi
 
 # bash の read は NUL を保持できず（実装により NUL 以降を切る・NUL だけを捨てる）、NUL を含む行で
 # 後ろの秘密値や NUL で分割された語を見落とし得る（fail-open）。走査の前に NUL を取り除いた版と
@@ -1361,39 +1370,38 @@ fi
 # NUL の有無は元の diff（主と外れた名前の本文）で確定する（フィルタ後の diff.del は元の diff と常に違うため、後で比べると二重に走査する）。
 # 0 = NUL なし・1 = あり・それ以外は後段で検査不能（2）。
 # cmp は差があると 1 を返す。パイプの末尾に置くと ERR の trap（set -E で子に継がれる）が子の中で exit 2 にしてしまい、
-# 「NUL あり」が検査不能と取り違えられるため、tr の出力を一度ファイルへ書き、cmp は親のシェルの `||` の左で流す。
+# 「NUL あり」が検査不能と取り違えられるため、cmp は親のシェルの `||` の左で流す。取り除いた版はファイルに複製せず
+# （--tracked では登録名の本文も含む全体の複製になり、一時領域の最大が増える）、プロセス置換で流して元のファイルと比べる。
+# tr が途中で失敗しても出力が短くなるだけで、差あり（1）として両方の版を走査する側に倒れる（NUL の見落としにはならない）。
 cmp_rc=0
 for nul_src in diff diff.dropped; do
-  if ! tr -d '\000' < "${tmp_dir}/${nul_src}" > "${tmp_dir}/nul-check"; then
-    echo "secret-scan: failed to normalize diff; aborting" >&4
-    exit 2
-  fi
   one_rc=0
-  cmp -s "${tmp_dir}/nul-check" "${tmp_dir}/${nul_src}" || one_rc=$?
+  cmp -s <(tr -d '\000' < "${tmp_dir}/${nul_src}") "${tmp_dir}/${nul_src}" || one_rc=$?
   if [ "${one_rc}" -gt "${cmp_rc}" ]; then
     cmp_rc="${one_rc}"
   fi
 done
-rm -f -- "${tmp_dir}/nul-check"
 
-# 登録名の下の区画を落とす（#6053）。除外は正規化の流れの中（パイプ）で行い、除外対象の本文は生の diff と同じ一時領域にだけ、走査が終わるまでの短い間置く
-# （NUL の確認の複製も同じ領域で、直後に消す。除外した本文の複製を正規化の出力には残さない）。
+# 登録名の下の区画を落とす（#6053）。除外は正規化の流れの中（パイプ）で行い、除外対象の本文は生の diff と同じ一時領域にだけ、正規化が終わるまでの短い間置く
+# （除外した本文の複製を正規化の出力には残さない）。
 # 区画の数が一覧のファイル数と違えば（git の出力と一覧の対応が崩れている）検査不能（2）にする。
 # 落とす区画のヘッダ（`diff --git a/<パス> b/<パス>`。--no-renames のため同じパス）が一覧の n 番目のパスと一致しない区画
 # （git が引用・エスケープするタブ・二重引用符・バックスラッシュ・制御文字のパス、diff.orderFile 等の順序の変更）は、
 # 対応が取れないため落とさず走査する（走査する側に倒す。2 にはしない）。
 filter_sections() {
   if [ "${body_skip_filter}" -eq 1 ]; then
-    LC_ALL=C awk -v want="${skip_total}" '
-      NR == FNR { flag[FNR] = $0; next }
+    LC_ALL=C awk -v want="${skip_total}" -v f1="${tmp_dir}/skip-flags" -v f2="${tmp_dir}/dropped-headers" '
+      FILENAME == f1 { flag[FNR] = $0; next }
+      FILENAME == f2 { dh[$0] = 1; next }
       /^diff --git / {
         sec++
         drop = (substr(flag[sec], 1, 1) == "1")
         if (drop && $0 != "diff --git a/" substr(flag[sec], 2) " b/" substr(flag[sec], 2)) drop = 0
+        if ($0 in dh) drop = 1
       }
       !drop { print }
       END { if (sec != want) exit 3 }
-    ' "${tmp_dir}/skip-flags" -
+    ' "${tmp_dir}/skip-flags" "${tmp_dir}/dropped-headers" -
   else
     cat
   fi
