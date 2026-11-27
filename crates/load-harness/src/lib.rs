@@ -22,6 +22,7 @@
 //! 書くのは `write_new` が呼び出し元の渡したディレクトリへ書く記録だけ（ディレクトリの作成・一時ファイル・`hard_link` による公開を含む）。
 //! 例外として、[`ApprovedValues::load`] は呼び出し元が渡したパスのファイル（承認一覧）を形式の検査つきで読む
 //! （現在は照合に使わない。TODO(TASK-12): 承認一覧の置き場・形・承認の手順が決まったら照合を戻す。#121）。
+//! 記録に出す名前・出典・区間名の語彙は crate の固定の定数で、呼び出し元は足せない（#6038）。
 //! 誤りの値に名前の中身・パスを載せない（SECR-11・SECR-23）。
 
 #![forbid(unsafe_code)]
@@ -53,12 +54,13 @@ pub use meter::{
 
 pub use record::{
     ApprovedValues, ComparisonValue, InvalidValueReason, LOAD_RECORD_FORMAT, LoadRecord,
-    LoadRecordError, RefId, RunEvidence, RunRecordFile, RunSession, ValueClass, ValueName,
-    ValueUnit,
+    LoadRecordError, REF_IDS, RefId, RunEvidence, RunRecordFile, RunSession, VALUE_NAMES,
+    ValueClass, ValueName, ValueUnit,
 };
 
 pub use stage::{
-    StageConfig, StageError, StageLimits, StagePlan, StageResult, StagedRun, run_stages,
+    RECORD_INTERVALS, StageConfig, StageError, StageLimits, StagePlan, StageResult, StagedRun,
+    run_stages,
 };
 
 pub use target::{CallResult, TargetError, TargetName, TargetRun, TargetSpec, run_target};
