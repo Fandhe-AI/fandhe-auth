@@ -354,19 +354,18 @@ index_absent_confirmed() {
 # path_enoent_confirmed <パス>: メタデータの照会（stat。ファイルを開かない）が ENOENT で失敗したときだけ 0 を返す
 # （それ以外の誤り・成功は 1。#6047）。入力リダイレクトで開く方式は使わない（/dev/tcp 等の特殊パスがソケット接続になる・
 # 照会の間に FIFO が現れると書き手を待って止まる、の 2 点を避ける）。0 にする条件はすべてそろったときだけ（1 つでも欠ければ 1）:
-#   (1) パスが改行を含まない（診断が複数行になり得て、診断の形を偽装できるため）
-#   (2) 診断の受け皿を照会の前に消せて、照会の後も消せる（リダイレクトの open が失敗すると bash は stat を起動せず 1 を返し、
+#   (1) 診断の受け皿を照会の前に消せて、照会の後も消せる（リダイレクトの open が失敗すると bash は stat を起動せず 1 を返し、
 #       前回の ENOENT の診断が残ったまま読まれる fail-open になるため。読む診断は必ず今回の照会のもの）
-#   (3) 終了コードが 1（起動の失敗は 126・127。bash 自身が「…: No such file or directory」を出し得るため区別する）
-#   (4) 診断が改行で終わるちょうど 1 行で、stat 自身の接頭辞 "stat: " で始まり、strerror の文言 ": No such file or directory" で終わる
-#       （LC_ALL=C 固定。文言は誤りの種類で決まる。GNU・uutils・BSD〔macOS〕は終了コード 1 と接頭辞 "stat: " と読んでいる。BSD は実機で未確認。
-#       busybox の stat はパスの改行をそのまま診断に出し、複数行になり得るため (1)(4) で 1 を返す）
+#   (2) 終了コードが 1（起動の失敗は 126・127。bash 自身が「…: No such file or directory」を出し得るため区別する）
+#   (3) 診断の全体が 64 KiB 以下で、stat 自身の接頭辞 "stat: " で始まり、strerror の文言 ": No such file or directory" と
+#       改行 1 つで終わる（LC_ALL=C 固定）。診断の途中にはパスが入り得る（BSD〔macOS〕の stat・busybox の stat は、パスの改行を
+#       そのまま出して複数行になる）が、末尾は strerror が占めるため、パスの内容では変えられない（パスに改行が入っても成り立つ。
+#       以前の「末尾の文言で判定する」設計と同じ理由）。途中の行は問わず、先頭と末尾だけを見る。末尾の改行は必須（途中で切れた診断は 1）。
+#       GNU・uutils・BSD〔macOS〕は終了コード 1 と接頭辞 "stat: " と読んでいる（BSD は macOS の CI の bash 3.2 でも通っているが、実機の確認ではない）。
+# 診断は 1 行ずつ bash の read で読む（コマンド置換は使わない。末尾の改行を落とすため。外部コマンドは head・cmp だけで、どちらも確認済みの一覧にある）。
 # 差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
 path_enoent_confirmed() {
-  local err="" extra="" more=0 unterminated=0 rc=0 p="$1" errfile="${tmp_dir}/stat-err"
-  case "${p}" in
-    *$'\n'*) return 1 ;;
-  esac
+  local line="" first="" last="" n=0 rc=0 p="$1" errfile="${tmp_dir}/stat-err" capfile="${tmp_dir}/stat-err-cap"
   # 先頭が "/" でない相対パスには "./" を付ける。GNU stat は "--" の後でも単独の "-" を標準入力として扱い、
   # 未作成の代替 index "-" を誤って「ある」と読むため（#6047）。
   case "${p}" in
@@ -375,17 +374,31 @@ path_enoent_confirmed() {
   esac
   # 置換を使わず、一時ファイルへ診断を書き出して終了状態をそのまま受ける（resolve_head と同じ。コマンド置換の中で 1 を返すと、
   # bash 3.2〔macOS〕は ERR トラップをサブシェルで実行して 2 に化かし、本物の ENOENT を取り違える）。
-  rm -f -- "${errfile}" || return 1
+  rm -f -- "${errfile}" "${capfile}" || return 1
   LC_ALL=C stat -- "${p}" > /dev/null 2> "${errfile}" || rc=$?
-  # 診断は 1 行目と、2 行目の有無だけを読む（空行の 2 行目も「有る」と数える）。
-  # 1 行目が改行で終わっていなければ（read が 0 を返さない）、途中で切れた診断として 1 を返す。
-  { IFS= read -r err || unterminated=1; if IFS= read -r extra || [ -n "${extra}" ]; then more=1; fi; } < "${errfile}" || return 1
-  rm -f -- "${errfile}" || return 1
+  # 大きさの上限: 先頭の 64 KiB と全体が同じでなければ、上限を超えている。
+  head -c 65536 "${errfile}" > "${capfile}" || return 1
+  cmp -s "${errfile}" "${capfile}" || return 1
+  # 全体を 1 行ずつ読む。最後の行が改行で終わっていなければ（read が非 0 で、残りが有る）、途中で切れた診断として 1。
+  while :; do
+    if IFS= read -r line; then
+      n=$((n + 1))
+      [ "${n}" -ne 1 ] || first="${line}"
+      last="${line}"
+    else
+      [ -z "${line}" ] || return 1
+      break
+    fi
+  done < "${errfile}" || return 1
+  rm -f -- "${errfile}" "${capfile}" || return 1
   [ "${rc}" -eq 1 ] || return 1
-  [ "${unterminated}" -eq 0 ] || return 1
-  [ "${more}" -eq 0 ] || return 1
-  case "${err}" in
-    "stat: "*": No such file or directory") return 0 ;;
+  [ "${n}" -ge 1 ] || return 1
+  case "${first}" in
+    "stat: "*) ;;
+    *) return 1 ;;
+  esac
+  case "${last}" in
+    *": No such file or directory") return 0 ;;
     *) return 1 ;;
   esac
 }

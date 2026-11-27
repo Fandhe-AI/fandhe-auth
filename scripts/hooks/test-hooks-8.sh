@@ -595,10 +595,10 @@ else
   fail "secret-scan: HEAD moved during the last index path re-check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-# T17: stat の起動の失敗（診断が ENOENT で終わっても、終了コードが 126・127）・接頭辞 "stat: " の無い診断・複数行の診断（終了コード 1）は「不在」と確かめられたとは言えず 2（path_enoent_confirmed。#6047）
+# T17: stat の起動の失敗（診断が ENOENT で終わっても、終了コードが 126・127）・接頭辞 "stat: " の無い診断・末尾が ENOENT でない診断・改行で終わらない診断・空の診断・上限を超える診断（終了コード 1）は「不在」と確かめられたとは言えず 2（path_enoent_confirmed。#6047）
 # 起動の失敗は、不在の index を空として 0 を返す経路になり得る（fail-open）。直しを外すと 0 を返し、この試験が落ちる。
 t17_i=0
-for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-second-line unterminated; do
+for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-second-line unterminated unterminated-tail enoent-not-at-end empty oversize; do
   t17_i=$((t17_i + 1))
   new_repo; stage src/app.txt "hello"
   stat17_dir="${work_dir}/stat17-shim-${t17_i}"
@@ -618,12 +618,28 @@ for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-secon
       printf '#!/bin/sh\necho "x: No such file or directory" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
     multi-line)
-      # 終了コード 1・1 行目は ENOENT の形だが、診断が 2 行ある（1 行目だけでは判定しない）
+      # 終了コード 1・1 行目は ENOENT の形だが、末尾の行が ENOENT でない複数行（先頭と末尾の両方を見る）
       printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\necho "extra" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
     empty-second-line)
       # 1 行目は ENOENT の形で、2 行目が空行（空の 2 行目も「2 行目が有る」と数える）
       printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\necho "" >&2\nexit 1\n' > "${stat17_dir}/stat"
+      ;;
+    unterminated-tail)
+      # 先頭の行は完結しているが、末尾の行が改行で終わらない（末尾が ENOENT の形でも、途中で切れた診断として 1）
+      printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\nprintf "%%s" "stat: cannot statx y: No such file or directory" >&2\nexit 1\n' > "${stat17_dir}/stat"
+      ;;
+    enoent-not-at-end)
+      # 末尾の行に ENOENT の文言を含むが、末尾ではない
+      printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory (extra)" >&2\nexit 1\n' > "${stat17_dir}/stat"
+      ;;
+    empty)
+      # 終了コード 1 だが診断が空
+      printf '#!/bin/sh\nexit 1\n' > "${stat17_dir}/stat"
+      ;;
+    oversize)
+      # 接頭辞と末尾は正しいが、診断が上限（64 KiB）を超える
+      printf '#!/bin/sh\nprintf "stat: "  >&2\nhead -c 70000 /dev/zero | tr "\\0" a >&2\nprintf ": No such file or directory\\n" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
     unterminated)
       # 1 行の ENOENT の形だが、改行で終わらない（途中で切れた診断）
@@ -631,10 +647,14 @@ for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-secon
       ;;
   esac
   case "${t17_kind}" in
-    empty-second-line) t17_msg="a stat diagnostic with an empty second line" ;;
+    multi-line) t17_msg="a multi-line stat diagnostic not ending with ENOENT" ;;
+    unterminated-tail) t17_msg="a stat diagnostic whose last line is unterminated" ;;
+    enoent-not-at-end) t17_msg="a stat diagnostic with the ENOENT text not at the end" ;;
+    empty) t17_msg="an empty stat diagnostic" ;;
+    oversize) t17_msg="an oversize stat diagnostic" ;;
+    empty-second-line) t17_msg="a stat diagnostic with a trailing empty line" ;;
     unterminated) t17_msg="an unterminated stat diagnostic" ;;
     no-prefix) t17_msg="a stat diagnostic without the stat: prefix" ;;
-    multi-line) t17_msg="a multi-line stat diagnostic" ;;
     *) t17_msg="a stat that fails to run (${t17_kind})" ;;
   esac
   chmod +x "${stat17_dir}/stat"
@@ -692,16 +712,56 @@ else
   echo "ok - secret-scan: stale diagnostic test skipped (running as root bypasses permissions)"
 fi
 
-# T19: 改行を含む不在のパスは、ENOENT と確かめられず 2（path_enoent_confirmed。診断が複数行になり得る stat の実装があるため。#6047）
+# T19: 改行を含む不在の index のパスは、診断の全体の先頭と末尾（strerror）で ENOENT と確かめて 0 になる（path_enoent_confirmed。#6047）
+# BSD（macOS）の stat・busybox の stat はパスの改行をそのまま診断に出し、複数行になる。GNU 形・BSD 形の shim と実物の stat の 3 つで確かめる。
 new_repo; stage src/app.txt "hello"
 t19_nl=$'t19-dir\nwith-newline'
 mkdir -p "${work_dir}/${t19_nl}"
+for t19_kind in gnu bsd real; do
+  stat19_dir="${work_dir}/stat19-shim-${t19_kind}"
+  mkdir -p "${stat19_dir}"
+  case "${t19_kind}" in
+    gnu)
+      # GNU 形（パスを生のまま入れた形にして、改行が診断の途中に入る）
+      # shellcheck disable=SC2016 # shim の本文。展開させず、shim の実行時に評価させる（意図）
+      printf '#!/bin/sh\nfor last in "$@"; do :; done\nprintf "stat: cannot statx %%s: No such file or directory\\n" "${last}" >&2\nexit 1\n' > "${stat19_dir}/stat"
+      ;;
+    bsd)
+      # shellcheck disable=SC2016 # shim の本文。展開させず、shim の実行時に評価させる（意図）
+      printf '#!/bin/sh\nfor last in "$@"; do :; done\nprintf "stat: %%s: stat: No such file or directory\\n" "${last}" >&2\nexit 1\n' > "${stat19_dir}/stat"
+      ;;
+    real)
+      # 実物の stat（shim なし）
+      rm -rf "${stat19_dir}"
+      stat19_dir="${work_dir}/stat19-shim-empty"
+      mkdir -p "${stat19_dir}"
+      ;;
+  esac
+  [ ! -f "${stat19_dir}/stat" ] || chmod +x "${stat19_dir}/stat"
+  rc=0
+  GIT_INDEX_FILE="${work_dir}/${t19_nl}/absent-index" PATH="${stat19_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    pass "secret-scan: an absent index path containing a newline is confirmed absent (${t19_kind} stat) (0)"
+  else
+    fail "secret-scan: an absent index path containing a newline is confirmed absent (${t19_kind} stat) (0)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+done
+
+# T19b: パスに ": No such file or directory" と改行を含めても、実際の誤りが別なら偽装できず 2（末尾は strerror が占める）
+new_repo; stage src/app.txt "hello"
+t19_spoof=$'t19-spoof\nx: No such file or directory'
+mkdir -p "${work_dir}/${t19_spoof}"
+stat19s_dir="${work_dir}/stat19-shim-spoof"
+mkdir -p "${stat19s_dir}"
+# shellcheck disable=SC2016 # shim の本文。展開させず、shim の実行時に評価させる（意図）
+printf '#!/bin/sh\nfor last in "$@"; do :; done\nprintf "stat: cannot statx %%s: Permission denied\\n" "${last}" >&2\nexit 1\n' > "${stat19s_dir}/stat"
+chmod +x "${stat19s_dir}/stat"
 rc=0
-GIT_INDEX_FILE="${work_dir}/${t19_nl}/absent-index" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+GIT_INDEX_FILE="${work_dir}/${t19_spoof}/absent-index" PATH="${stat19s_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
 if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
-  pass "secret-scan: an absent index path containing a newline is not confirmed absent (2)"
+  pass "secret-scan: a path faking the ENOENT text does not confirm an absent index when the real error differs (2)"
 else
-  fail "secret-scan: an absent index path containing a newline is not confirmed absent (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fail "secret-scan: a path faking the ENOENT text does not confirm an absent index when the real error differs (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 finish "part 8"
