@@ -97,6 +97,9 @@ PoC-7 の手順 6 の向き（転送器が応答に遅延を足す・経路を�
     `upstream_attempt_count` は接続処理の直前に加算する診断用の回数で、到達の確認には使わない。
     `release_returns_in_time_under_reconnect_storm` は macOS で最後の往復が切れることが報告されており調査中。期待は緩めず、
     失敗の文言に失敗した段階・誤りの種類・集計値の差を出す。集計値は転送器全体の合計で、最後の接続の失敗箇所を断定しない。
+    観測の `accept()` が転送器の閉じる動作に先んじられて失敗する揺れ（#6042）に対し、`UpstreamStall::with_upstream_accept_sync()` の停止点は、
+    上流への実接続の後・世代の検査の前に、観測側の accept の完了の通知（`notify_upstream_accepted`）を上限 5 秒で待つ（opt-in。コード上の構築子だけ）。
+    期限切れ・停止は `accept_sync_exit` で `Expired`・`Stopped` と区別し、試験は合格にしない（AUDB-6）。順序の試験は OS に依らない。macOS での効果は未検証。
   - 観測のスレッドの上流の accept には期限があり、期限内に受理されなければ観測不能として失敗にする（#6040。AUDB-6。macOS での確認は未検証）。
 
 ## 遮断の順序と境界の契約（#5983）

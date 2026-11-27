@@ -161,6 +161,14 @@ struct StallState {
     /// 直近に停止点を離れた理由。試験が「期限切れで抜けたのを合格にしない」ために見る（ORST-17）。
     /// `exit_reason` は `expired` が正のとき、この値より `Expired` を優先する。
     last_exit: Option<StallExit>,
+    /// 上流側の accept の完了を待つ同期点を持つか（構築時に決める。`rebind` では変えない。#6042）。
+    await_accept: bool,
+    /// 受理の同期点への到達の数（`rebind` で戻す）。
+    accept_entered: u64,
+    /// 試験が上流側の accept の完了を通知した時刻（`notify_upstream_accepted`。同じロックの下で記録する）。
+    accepted_at: Option<Instant>,
+    /// 直近に受理の同期点を離れた理由。
+    accept_exit: Option<AcceptSyncExit>,
     /// 今の転送器へ渡してから、`Expired` で離れた保持の回数（通り抜けは数えない）。
     /// 先の期限切れを後の保持の `Released`・`Stopped` で上書きさせないための印（ORST-17・AUDB-6）。
     expired: u64,
@@ -206,6 +214,18 @@ pub enum StallExit {
     Expired,
 }
 
+/// 受理の同期点（[`UpstreamStall::with_upstream_accept_sync`]）を離れた理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AcceptSyncExit {
+    /// 期限内に、試験が上流側の accept の完了を通知した。
+    Accepted,
+    /// 転送器の停止の通知で解けた。
+    Stopped,
+    /// 上限（[`UpstreamStall::MAX_ACCEPT_WAIT`]）の期限切れで解けた。試験は合格にしない（AUDB-6）。
+    Expired,
+}
+
 impl fmt::Debug for UpstreamStall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UpstreamStall").finish_non_exhaustive()
@@ -216,9 +236,75 @@ impl UpstreamStall {
     /// 停止点で待つ上限。解放されなくても転送器はこの時間で先へ進む。
     pub const MAX_HOLD: Duration = Duration::from_secs(5);
 
+    /// 受理の同期点で待つ上限。開発の値で要件の値ではない（THRT-29）。
+    pub const MAX_ACCEPT_WAIT: Duration = Duration::from_secs(5);
+
     /// 新しい停止点。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 上流への実接続に成功した後、世代の検査の前に、上流側の accept の完了の通知
+    /// （[`Self::notify_upstream_accepted`]）を待つ停止点。
+    ///
+    /// 転送器が先に上流を閉じると、OS によっては上流の `accept()` が失敗して観測できなくなる（#6042）。
+    /// 順序を「accept の完了 → 転送器が閉じる」に固定するための試験用の同期点で、opt-in はこの構築子だけ
+    /// （環境変数・feature・`cfg` で切り替えない。DPOL-30〜32）。待ちは通知・停止・上限
+    /// （[`Self::MAX_ACCEPT_WAIT`]）のどれかで必ず解け、解けた後も世代の検査と停止の検査は外れない（ORST-17）。
+    /// 接続先も接続の結果も変えない。
+    pub fn with_upstream_accept_sync() -> Self {
+        let s = Self::default();
+        s.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .await_accept = true;
+        s
+    }
+
+    /// 上流側の accept が成功した直後に、試験の観測スレッドが呼ぶ。
+    pub fn notify_upstream_accepted(&self) {
+        let mut g = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if g.accepted_at.is_none() {
+            g.accepted_at = Some(Instant::now());
+        }
+        self.inner.cv.notify_all();
+    }
+
+    /// 転送器が受理の同期点に入るのを待つ。入れば `true`。`timeout` は 24 時間に丸める。
+    pub fn wait_accept_sync_entered(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout.min(Duration::from_secs(86_400));
+        let mut g = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        while g.accept_entered == 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            g = self
+                .inner
+                .cv
+                .wait_timeout(g, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+
+    /// 直近に受理の同期点を離れた理由。`Expired` は期限切れで、合格にしない（AUDB-6）。
+    pub fn accept_sync_exit(&self) -> Option<AcceptSyncExit> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .accept_exit
     }
 
     /// 転送器が停止点に入るのを待つ。入れば `true`、上限までに入らなければ `false`。
@@ -299,6 +385,9 @@ impl UpstreamStall {
         }
         g.entered = 0;
         g.last_exit = None;
+        g.accept_entered = 0;
+        g.accepted_at = None;
+        g.accept_exit = None;
         g.expired = 0;
         g.bound_at = Some(Instant::now());
         g.bound = true;
@@ -380,6 +469,64 @@ impl UpstreamStall {
     }
 }
 
+impl UpstreamStall {
+    /// 転送器の accept のスレッドが、上流への実接続の後に呼ぶ。受理の同期点を持たない停止点では何もしない。
+    fn hold_until_accepted(&self, stop: &AtomicBool) {
+        self.hold_until_accepted_for(stop, Self::MAX_ACCEPT_WAIT);
+    }
+
+    /// [`Self::hold_until_accepted`] の本体。上限だけ引数にする（期限切れの分類を短い待ちで試験するため）。
+    fn hold_until_accepted_for(&self, stop: &AtomicBool, max: Duration) {
+        let started = Instant::now();
+        let deadline = started + max;
+        let mut g = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !g.await_accept {
+            return;
+        }
+        g.accept_entered += 1;
+        self.inner.cv.notify_all();
+        while g.accepted_at.is_none() && !stop.load(Ordering::SeqCst) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            g = self
+                .inner
+                .cv
+                .wait_timeout(g, left.min(Duration::from_millis(20)))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        // 古い転送器の停止の名残は数えない（`hold_for` と同じ規則）。
+        let since = g.bound_at.unwrap_or(started);
+        let stopped_at = g
+            .stopped_at
+            .filter(|t| *t >= since && stop.load(Ordering::SeqCst));
+        g.accept_exit = Some(classify_accept_exit(g.accepted_at, stopped_at, deadline));
+    }
+}
+
+/// 受理の同期点を離れた理由の決定。通知・停止のどちらも期限の後なら期限切れ（期限の後の通知を `Accepted` と読ませない）。
+/// 両方が期限内なら先に記録されたほうで、同時刻は `Stopped` に倒す（AUDB-6）。
+fn classify_accept_exit(
+    accepted_at: Option<Instant>,
+    stopped_at: Option<Instant>,
+    deadline: Instant,
+) -> AcceptSyncExit {
+    let accepted = accepted_at.filter(|t| *t <= deadline);
+    let stopped = stopped_at.filter(|t| *t <= deadline);
+    match (accepted, stopped) {
+        (Some(a), Some(s)) if s <= a => AcceptSyncExit::Stopped,
+        (Some(_), _) => AcceptSyncExit::Accepted,
+        (None, Some(_)) => AcceptSyncExit::Stopped,
+        (None, None) => AcceptSyncExit::Expired,
+    }
+}
+
 /// 停止点を離れた理由の決定。解除・停止のどちらも期限の後なら期限切れ（解除や停止が待ちを解いた、と読ませない）。
 /// どちらも期限内なら、先に記録されたほうを理由にする（停止が先に待ちを解いた後に解除が割り込んでも `Stopped`。
 /// 同時刻は順序を決められないので `Stopped` に倒す）。
@@ -419,7 +566,8 @@ struct Shared {
     refused: AtomicU64,
     /// 上流への connect を始めようとした回数（診断用。`connect_timeout` の直前（停止点の前）に加算するので到達の確認には使わず、成否も表さない）。
     upstream_attempts: AtomicU64,
-    /// 上流への connect が成功した回数（`connect_timeout` が `Ok` を返した時点で数える）。
+    /// 上流への connect が成功した回数（`connect_timeout` が `Ok` を返した時点で数える。
+    /// 受理の同期点つきの停止点では、その同期点を抜けた後に数える。#6042）。
     upstream_connected: AtomicU64,
     /// 中継を始める段で、遮断の世代の比較が外れて拒否した回数。実際に拒否した箇所（`start_relay`）でだけ数え、
     /// 停止・現在の遮断だけによる拒否は数えない。
@@ -645,7 +793,7 @@ impl DbFaultProxy {
     /// 診断の計数が数える処理の段階（受け付け順）。
     /// 1. accept した接続（[`Self::refused_count`] の対象は、この後に直ちに閉じたもの）。
     /// 2. 上流への connect の試行（[`Self::upstream_attempt_count`]。connect の呼び出しの直前、停止点の前に数える）。
-    /// 3. 上流への connect の成功（[`Self::upstream_connected_count`]）。
+    /// 3. 上流への connect の成功（[`Self::upstream_connected_count`]。受理の同期点つきの停止点では、同期点を抜けた後に数える）。
     /// 4. 世代の比較。外れれば client のバイトを送らずに拒否（[`Self::generation_refused_count`]）。
     /// 5. 中継の開始（[`Self::accepted_count`]）。
     ///
@@ -663,7 +811,7 @@ impl DbFaultProxy {
         self.shared.upstream_attempts.load(Ordering::SeqCst)
     }
 
-    /// 上流への connect が成功した回数。接続の失敗・停止点での打ち切りは数えない（試行の計数には入る）。
+    /// 上流への connect が成功した回数（受理の同期点つきの停止点では、同期点を抜けた後に数える）。接続の失敗・停止点での打ち切りは数えない（試行の計数には入る）。
     /// 成功した後に世代の不一致で拒否された接続も数える（受理済みの [`Self::accepted_count`] とは別）。
     /// 転送器全体の数。接続を 1 本に限った試験でだけ、接続ごとの証拠になる。
     pub fn upstream_connected_count(&self) -> u64 {
@@ -1028,7 +1176,13 @@ fn connect_after_stall(
             return Err(io::Error::other("stopped at the upstream stall point"));
         }
     }
-    TcpStream::connect_timeout(addr, timeout)
+    let up = TcpStream::connect_timeout(addr, timeout)?;
+    // #6042: 上流への実接続の後・世代の検査の前で、試験側の accept の完了を待つ（opt-in の停止点だけ）。
+    // 待ちの後も接続は返し、後段の `halted()`・世代の検査が閉じる。`conns` のロックは持たない（ORST-17）。
+    if let Some(stall) = &shared.stall {
+        stall.hold_until_accepted(&shared.stop);
+    }
+    Ok(up)
 }
 
 /// 中継を始める段。上流側の複製を登録し、世代を確かめてから転送のスレッドを起こす。
@@ -1927,6 +2081,71 @@ mod tests {
         // 解放も到達も記録されないまま（待たずに `Released` が出ない）。
         assert_eq!(stall.exit_reason(), None);
         assert!(!stall.wait_entered(Duration::from_millis(20)));
+    }
+
+    /// #6042: 受理の同期点の分類。通知が先なら `Accepted`、通知なしなら `Expired`、停止なら `Stopped`。
+    #[test]
+    fn accept_sync_classifies_accepted_expired_and_stopped() {
+        let stop = AtomicBool::new(false);
+        let s = UpstreamStall::with_upstream_accept_sync();
+        s.notify_upstream_accepted();
+        s.hold_until_accepted_for(&stop, Duration::from_millis(200));
+        assert_eq!(s.accept_sync_exit(), Some(AcceptSyncExit::Accepted));
+
+        let s = UpstreamStall::with_upstream_accept_sync();
+        s.hold_until_accepted_for(&stop, Duration::from_millis(30));
+        assert_eq!(s.accept_sync_exit(), Some(AcceptSyncExit::Expired));
+
+        let s = UpstreamStall::with_upstream_accept_sync();
+        let _b = s.rebind().expect("bind");
+        let stop = AtomicBool::new(false);
+        s.note_stop(&stop);
+        s.hold_until_accepted_for(&stop, Duration::from_millis(200));
+        assert_eq!(s.accept_sync_exit(), Some(AcceptSyncExit::Stopped));
+    }
+
+    /// #6042: 期限の後の通知は `Accepted` と読ませない。
+    #[test]
+    fn classify_accept_exit_rejects_late_notification() {
+        let deadline = Instant::now();
+        let late = Some(deadline + Duration::from_millis(10));
+        let early = Some(deadline - Duration::from_millis(10));
+        assert_eq!(
+            classify_accept_exit(late, None, deadline),
+            AcceptSyncExit::Expired
+        );
+        assert_eq!(
+            classify_accept_exit(early, None, deadline),
+            AcceptSyncExit::Accepted
+        );
+        assert_eq!(
+            classify_accept_exit(early, early, deadline),
+            AcceptSyncExit::Stopped
+        );
+    }
+
+    /// #6042: opt-in でない停止点は待たず、記録も残さない。
+    #[test]
+    fn plain_stall_does_not_wait_for_accept() {
+        let s = UpstreamStall::new();
+        let t = Instant::now();
+        s.hold_until_accepted_for(&AtomicBool::new(false), Duration::from_secs(5));
+        assert!(t.elapsed() < Duration::from_secs(1));
+        assert_eq!(s.accept_sync_exit(), None);
+    }
+
+    /// #6042: `rebind` で前の使用の通知・到達・離れた理由を戻す。
+    #[test]
+    fn rebind_clears_accept_sync_state() {
+        let s = UpstreamStall::with_upstream_accept_sync();
+        s.notify_upstream_accepted();
+        s.hold_until_accepted_for(&AtomicBool::new(false), Duration::from_millis(50));
+        assert!(s.wait_accept_sync_entered(Duration::from_millis(1)));
+        let _b = s.rebind().expect("rebind");
+        assert!(!s.wait_accept_sync_entered(Duration::from_millis(30)));
+        assert_eq!(s.accept_sync_exit(), None);
+        s.hold_until_accepted_for(&AtomicBool::new(false), Duration::from_millis(30));
+        assert_eq!(s.accept_sync_exit(), Some(AcceptSyncExit::Expired));
     }
 
     /// 使用中の停止点は再び渡せず、拒否は 1 つ目の観測を変えない。束縛を下ろせば渡せる（ORST-17・AUDB-6）。

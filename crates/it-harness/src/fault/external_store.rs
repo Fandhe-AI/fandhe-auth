@@ -90,6 +90,8 @@ impl ExternalStoreFaultProxy {
 
     /// 上流への接続の直前に停止点を置いて始める（試験用。接続中で止まる状態を同期で作る。ORST-17）。
     /// 宛先（`127.0.0.1:<port>`）の決定と接続は転送器が行い、停止点は接続先も結果も変えない。
+    /// [`UpstreamStall::with_upstream_accept_sync`] の停止点を渡すと、上流への実接続の後・世代の検査の前に
+    /// 試験側の accept の完了も待つ（#6042）。
     pub fn start_to_port_with_stall(
         port: u16,
         stall: UpstreamStall,
@@ -127,7 +129,7 @@ impl ExternalStoreFaultProxy {
         self.inner.upstream_attempt_count()
     }
 
-    /// 上流への connect が成功した回数（2/8 の `upstream_connected_count` と同じ）。
+    /// 上流への connect が成功した回数（2/8 の `upstream_connected_count` と同じ。受理の同期点つきの停止点では、同期点を抜けた後に数える）。
     pub fn upstream_connected_count(&self) -> u64 {
         self.inner.upstream_connected_count()
     }
