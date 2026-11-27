@@ -20,6 +20,9 @@ use fandhe_auth_load_harness::{
     ValueClass, ValueName, ValueUnit,
 };
 
+/// 照合済みの本文を挟む固定の行。`scripts/load-trial.sh` の同名の文字列と一致させる。
+const PRINT_BEGIN: &str = "-----BEGIN LOAD RECORD BODY-----";
+const PRINT_END: &str = "-----END LOAD RECORD BODY-----";
 const T0: u64 = 1_000;
 const HOST_MARK: &str = "load-canary-host.example.test";
 const CLIENT_MARK: &str = "load-canary-client.test";
@@ -221,7 +224,8 @@ fn small_trial_run_writes_record_without_requirement_values() {
         // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 4 欄に入れた値の全文）の
         // 生・base64・base64url・16 進の各形と JWT の形で走査する。一致したら本文を出さず失敗させる。
         let body = printable_body(&text, &registry).unwrap();
-        println!("{body}");
+        // `scripts/load-trial.sh` が照合済みの本文を見分けるための固定の開始行・終了行（ちょうど 1 区画だけ出す）。
+        println!("{PRINT_BEGIN}\n{body}{PRINT_END}");
     }
 }
 

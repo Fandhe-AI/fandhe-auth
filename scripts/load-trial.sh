@@ -3,6 +3,7 @@
 # 呼び出し元: `make load-trial`。CI では流さない（同じ試験 trial_run は `make test` に入っている）。
 # 負荷の記録は成功時に消えるため、--show-output で記録の本文を標準出力に出す（試験が設定の目印 2 種と出力先のパスの無いことを確かめ、出す本文そのものを秘密値の各表現の照合に通した本文だけ。一致があれば本文を出さず失敗する）。
 # 本文の公開は、この入口が環境変数 FANDHE_AUTH_LOAD_TRIAL_PRINT=1 を試験へ渡したときだけ（通常の `make test` では出ない。SECR-23）。
+# 本文は試験が照合後に固定の開始行・終了行で挟んで出す。この入口は、集計行が合格 1 件（無視 0 件）かつ区画がちょうど 1 件のときだけ区画の中身を出す。
 # 終了コード: 0 = 主試験 1 件が流れて合格、1 = 失敗または主試験の合格が 1 件（無視 0 件）でない、2 = 誤用（引数）。
 # stub の結果を実物の結果に数えない（A-2026-10-28-9・ACPT-7）。この入口自身は環境変数・設定ファイルを読まない（DPOL-32）。
 set -euo pipefail
@@ -33,5 +34,21 @@ if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' <<<"${out}"; t
   echo "error: expected exactly one passed load trial main test (0 ignored)" >&2
   exit 1
 fi
-printf '%s\n' "${out}"
+# 公開するのは、試験が照合（printable_body）を通した後に固定の行で挟んで出した本文の区画だけ。区画がちょうど 1 件でなければ何も出さず失敗する
+# （環境変数の不一致などで本文を出す分岐に入らなかった場合に、記録が無いまま 0 を返さない）。区画の外の出力は公開しない。
+# 文字列は crates/load-harness/tests/trial_run.rs の PRINT_BEGIN・PRINT_END と一致させる
+begin_line="-----BEGIN LOAD RECORD BODY-----"
+end_line="-----END LOAD RECORD BODY-----"
+n_begin="$(grep -cFx -- "${begin_line}" <<<"${out}" || true)"
+n_end="$(grep -cFx -- "${end_line}" <<<"${out}" || true)"
+if [ "${n_begin}" != "1" ] || [ "${n_end}" != "1" ]; then
+  echo "error: expected exactly one checked load record body block (begin=${n_begin} end=${n_end}); nothing is printed" >&2
+  exit 1
+fi
+block="$(awk -v b="${begin_line}" -v e="${end_line}" '$0 == e {on = 0} on {print} $0 == b {on = 1}' <<<"${out}")"
+if [ -z "${block}" ] || ! grep -q '^format: fandhe-auth-load-record/' <<<"${block}"; then
+  echo "error: the load record body block is empty or malformed; nothing is printed" >&2
+  exit 1
+fi
+printf '%s\n' "${block}"
 log "the load record body is printed above (the record file is removed on success; stub results are not real results)"
