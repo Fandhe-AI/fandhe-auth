@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # scripts/hooks/ のフックスクリプト自体の回帰テストの part 8（TASK-6）。shellcheck-staged.sh の回帰テスト。
 # 入口は test-hooks.sh（`make test-hooks`・CI の test-hooks ジョブ）。単体でも実行できる。
-# 準備・helper・例示値は test-hooks-lib.sh が持つ。part の間で状態は引き継がない。
+# 最小の準備（work_dir・pass / fail・finish）は test-hooks-core.sh が持つ。part の間で状態は引き継がない。
 # part 1 から分けた（検査時間は行数にほぼ比例するため、part の行数の目安は .claude/rules/git-hooks.md）。
 # 道具（偽の shellcheck・helper）は test-hooks-sc-lib.sh に分けた（part 9 と共有。part の行数の目安は .claude/rules/git-hooks.md）。
 set -euo pipefail
-# shellcheck source=./test-hooks-lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-lib.sh"
+# shellcheck source=./test-hooks-core.sh
+source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-core.sh"
 
 cd "${work_dir}"
 

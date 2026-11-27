@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # scripts/hooks/ のフックスクリプト自体の回帰テストの part 9（TASK-6）。shellcheck-staged.sh の並列数・同時実行の上限の回帰テスト。
 # 入口は test-hooks.sh（`make test-hooks`・CI の test-hooks ジョブ）。単体でも実行できる。
-# 準備・helper・例示値は test-hooks-lib.sh が、偽の shellcheck と道具は test-hooks-sc-lib.sh が持つ。part の間で状態は引き継がない。
+# 最小の準備は test-hooks-core.sh が、偽の shellcheck と道具は test-hooks-sc-lib.sh が持つ。part の間で状態は引き継がない。
 # part 8 から分けた（検査時間は行数にほぼ比例するため、part の行数の目安は .claude/rules/git-hooks.md）。
 set -euo pipefail
-# shellcheck source=./test-hooks-lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-lib.sh"
+# shellcheck source=./test-hooks-core.sh
+source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-core.sh"
 
 cd "${work_dir}"
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-hooks-8.sh・test-hooks-9.sh が共有する shellcheck-staged.sh の試験の道具（TASK-6）。単体では実行せず、part から source する。
-# part が test-hooks-lib.sh を source し、cd "${work_dir}" した後に source する。part の間で状態は引き継がない。
+# part が test-hooks-core.sh を source し、cd "${work_dir}" した後に source する。part の間で状態は引き継がない。
 # 名前は test-hooks-<数字>.sh に当たらない（test-hooks.sh の parts の突き合わせの対象外）。
 
 # ---------------------------------------------------------------- shellcheck-staged.sh（pre-commit の shellcheck の並列実行）
