@@ -21,7 +21,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 
 | ファイル | ジョブ（check 名） | トリガー | runs-on |
 | --- | --- | --- | --- |
-| `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `deps audit frame (tool install only; ...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
+| `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `deps audit frame (tool install only; ...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `hook script tests (macOS bash 3.2)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix と `test-hooks-bash32` のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
 | `trust-root-secret-scan.yml` | `trusted secret scan (tracked files)` | `pull_request`（`branches` を一致しにくい名前に絞っており、通常は発火しない。組織の ruleset の「Require workflows to pass」から呼ばれたときに動く。発火の前提は「必須チェックと集約ジョブ」の節の例外を参照） | `ubuntu-latest` |
 | `scheduled.yml` | `scheduled frame (no checks wired; TASK-681)` | `workflow_dispatch` のみ（`schedule` は持たない。足すときに例外を見直す（TASK-681）。`pull_request`・`push` は持たない） | `ubuntu-latest` |
@@ -99,10 +99,14 @@ TASK-680 が結線するときの契約は次のとおり。値は spec の ID �
 - reusable workflow の runner 入力は既定値が可視性で自動切替しないものがある。public から呼ぶ場合は
   `ubuntu-latest` を明示する（`ai-review.yml` の `post-feedback-runner`・`update-external.yml` の `runner-json`）
 
-### 例外 1: `test-hooks` の `macos-latest`
+### 例外 1: `test-hooks`・`test-hooks-bash32` の `macos-latest`
 
 開発者の多くは macOS でフックを実行するため、BSD 系コマンドの挙動と macOS 標準の bash 3.2 を検証する目的で
 `macos-latest` を使う（GitHub ホステッドのため runner 方針には反しない。分単価が高いので他ジョブには広げない）。
+`test-hooks` の matrix は Homebrew の bash で 1 回、bash 3.2 は別ジョブ `test-hooks-bash32`（check 名は
+`hook script tests (macOS bash 3.2)`）で 1 回流す。2 回を 1 ジョブに入れると runner の遅い日に 15 分の上限へ届くため（#6149）。
+matrix の check 名は ruleset の必須チェックに登録済みで変えない。新しいジョブは `ci-complete` の `needs` で集約する。上限は
+どちらも 15 分のまま。
 
 ### 例外 2: `ai-review.yml` の review ジョブ（public で self-hosted）
 
