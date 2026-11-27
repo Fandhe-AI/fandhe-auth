@@ -171,6 +171,52 @@ else
   echo "ok - crate-deps: skipped (cargo not found)"
 fi
 
+# ---- check-openssl-vendored.sh: R4 の設定の読み取りは最初の Cargo の前に済み、読めない・include は fail-closed（#6037）
+# 偽の cargo（目印を作って 1 で終わる）を PATH の先頭に置き、Cargo を起動する前に 2 で止まることを目印の有無で確かめる。
+# 前提: tomllib を持つ python3（3.11 以上）。CI（CI または GITHUB_ACTIONS が設定）では前提が無ければ失敗、ローカルでは skip する。
+if ! command -v python3 > /dev/null 2>&1 || ! python3 -I -c 'import tomllib' > /dev/null 2>&1; then
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "vendored: prerequisites (python3 with tomllib) are required in CI" "missing prerequisite" ""
+  else
+    echo "ok - vendored: skipped (python3 with tomllib not found)"
+  fi
+else
+  vend_fx="${work_dir}/vendored-fx"
+  vend_bin="${work_dir}/vendored-fakebin"
+  vend_mark="${work_dir}/vendored-cargo-ran"
+  mkdir -p "${vend_fx}/scripts" "${vend_bin}"
+  cp "${HOOKS_DIR}/../check-openssl-vendored.sh" "${HOOKS_DIR}/../lib.sh" "${vend_fx}/scripts/"
+  printf '#!/bin/sh\n: > "%s"\nexit 1\n' "${vend_mark}" > "${vend_bin}/cargo"
+  chmod +x "${vend_bin}/cargo"
+  # vendored_case <名前> <期待の終了コード> <stderr に含むべき文字列（空なら不問）> <目印の期待: ran|none>
+  vendored_case() {
+    local name="$1" want_rc="$2" want_msg="$3" want_mark="$4" rc=0 out mark="none"
+    rm -f "${vend_mark}"
+    out="$(PATH="${vend_bin}:${PATH}" "${HOOK_BASH}" "${vend_fx}/scripts/check-openssl-vendored.sh" 2>&1)" || rc=$?
+    [ -e "${vend_mark}" ] && mark="ran"
+    if [ "${rc}" -eq "${want_rc}" ] && [ "${mark}" = "${want_mark}" ] && { [ -z "${want_msg}" ] || [[ "${out}" == *"${want_msg}"* ]]; }; then
+      pass "vendored: ${name}"
+    else
+      fail "vendored: ${name}" "expected rc=${want_rc} cargo=${want_mark} msg='${want_msg}', got rc=${rc} cargo=${mark}: ${out}"
+    fi
+  }
+  # V0 対照: .cargo なし。偽の cargo が実際に呼ばれて 2（目印が作られる）
+  vendored_case "control: fake cargo is invoked when no .cargo config" 2 "cargo tree failed" ran
+  # V1: include を含む設定は Cargo を起動する前に拒否する
+  mkdir -p "${vend_fx}/.cargo"
+  printf 'include = ["extra.toml"]\n' > "${vend_fx}/.cargo/config.toml"
+  vendored_case "NG: include is rejected before cargo runs" 2 "include is not supported" none
+  # V2: .cargo に検索権限が無い設定は検査不能（2）。権限が効かない利用者（root 等）では確かめられないため緩める
+  printf '[env]\nOPENSSL_STATIC = "1"\n' > "${vend_fx}/.cargo/config.toml"
+  chmod 000 "${vend_fx}/.cargo"
+  if [ ! -x "${vend_fx}/.cargo" ]; then
+    vendored_case "NG: .cargo without search permission is cannot-inspect before cargo runs" 2 "cannot read .cargo config" none
+  else
+    echo "ok - vendored: .cargo permission case skipped (search permission not enforced for this user)"
+  fi
+  chmod u+rwx "${vend_fx}/.cargo"
+fi
+
 # ---- scripts/msrv.sh: cargo metadata の解決結果から読む（表記の違い・複数行の文字列に左右されない。読めなければ 2）
 # 前提: cargo・jq・tomllib を持つ python3（3.11 以上）。CI（CI または GITHUB_ACTIONS が設定）では前提が足りなければ
 # skip せず失敗にする（検査が黙って素通りしないため）。ローカルでは skip する。
@@ -464,5 +510,232 @@ printf '%s\n' "${lock_only_b}" > skills-lock.json
 git add skills-lock.json
 SCAN_BIN="${det_ok}" check_scan "dropped skill: another checkout scans the dropped body when only skills-lock.json is staged" 1 .agents/skills/vendored-a/SKILL.md
 expect_out "dropped skill: another checkout counts the dropped name once, sibling stays excluded" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
+# ---------------------------------------------------------------- check-audit-config: cargo-audit が読む設定の検査（DPOL-34・TASK-679）
+# 承認していない audit.toml が cargo-audit の読む場所に在れば 1、検査できなければ 2 で止まる（偽の cargo-audit を PATH の先頭に置く。
+# 実物の cargo-audit と advisory DB は使わない）。HOME・CARGO_HOME は fixture 内に向け、開発者の実際の ~/.cargo を読ませない。
+AUDIT_CFG_SH="${HOOKS_DIR}/../check-audit-config.sh"
+audit_ver="$(sed -n 's/^VERIFIED_CARGO_AUDIT_VERSION="\(.*\)"$/\1/p' "${AUDIT_CFG_SH}")"
+ci_audit_ver="$(sed -n 's/^  CARGO_AUDIT_VERSION: "\(.*\)"$/\1/p' "${HOOKS_DIR}/../../.github/workflows/ci.yml")"
+if [ -n "${audit_ver}" ] && [ "${audit_ver}" = "${ci_audit_ver}" ]; then
+  pass "audit-config: measured version matches ci.yml CARGO_AUDIT_VERSION"
+else
+  fail "audit-config: measured version matches ci.yml CARGO_AUDIT_VERSION" "script: ${audit_ver}, ci.yml: ${ci_audit_ver}"
+fi
+
+audit_fx_seq=0
+# audit_stage: audit_case が渡す段（fetch か no-fetch）。既定は fetch。
+audit_stage=fetch
+# audit_db <dir>: 使い捨ての advisory DB（git の作業ツリー・advisory 1 件・変更なし）を作る。
+audit_db() {
+  mkdir -p "$1/crates/x"
+  echo "id = RUSTSEC-2099-0001" > "$1/crates/x/RUSTSEC-2099-0001.md"
+  (cd "$1" && git -c init.defaultBranch=main init -q && git add -A && git commit -q -m "chore: db")
+}
+# audit_fx: 使い捨ての git repo を作り、cwd をそこへ移す。偽の cargo-audit は AUDIT_FAKE_VER の版を名乗る（中身は固定）。
+audit_fx() {
+  audit_fx_seq=$((audit_fx_seq + 1))
+  audit_root="${work_dir}/audit-fx-${audit_fx_seq}"
+  mkdir -p "${audit_root}/scripts" "${audit_root}/crates/trial-deps/fuzz" "${audit_root}/home" "${audit_root}/bin"
+  cp "${AUDIT_CFG_SH}" "${HOOKS_DIR}/../lib.sh" "${audit_root}/scripts/"
+  cat > "${audit_root}/bin/cargo-audit" <<'FAKE'
+#!/bin/sh
+echo "cargo-audit-audit ${AUDIT_FAKE_VER}"
+FAKE
+  chmod +x "${audit_root}/bin/cargo-audit"
+  (cd "${audit_root}" && git -c init.defaultBranch=main init -q && git add -A && git commit -q -m "chore: fixture")
+  cd "${audit_root}"
+}
+# audit_case <名前> <期待の終了コード> [env NAME=VALUE...]: fixture で検査を流す（HOME は fixture 内、CARGO_HOME は未設定が既定）
+audit_case() {
+  local name="$1" want="$2" rc=0
+  shift 2
+  env -u CARGO_HOME AUDIT_FAKE_VER="${audit_ver}" PATH="${audit_root}/bin:${PATH}" HOME="${audit_root}/home" ${@+"$@"} \
+    "${HOOK_BASH}" scripts/check-audit-config.sh "${audit_stage}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq "${want}" ]; then
+    pass "audit-config: ${name}"
+  else
+    fail "audit-config: ${name}" "exit ${rc} (expected ${want})" "output: $(cat "${work_dir}/out")"
+  fi
+}
+audit_has() {
+  if grep -qF -- "$2" "${work_dir}/out"; then pass "audit-config: $1"; else fail "audit-config: $1" "missing: $2" "output: $(cat "${work_dir}/out")"; fi
+}
+audit_lacks() {
+  if grep -qF -- "$2" "${work_dir}/out"; then fail "audit-config: $1" "unexpected: $2"; else pass "audit-config: $1"; fi
+}
+audit_ignore_toml='[advisories]
+ignore = ["RUSTSEC-2099-0001"]'
+
+audit_fx
+audit_case "OK: nothing present exits 0" 0
+audit_has "record: approved config is none" "audit-config: approved config: none"
+audit_has "record: root location is absent" "audit-config: <root>/.cargo/audit.toml: absent"
+audit_has "record: fuzz location is absent" "audit-config: <root>/crates/trial-deps/fuzz/.cargo/audit.toml: absent"
+audit_has "record: CARGO_HOME location is absent" "audit-config: CARGO_HOME/audit.toml (CARGO_HOME from HOME): absent"
+audit_has "record: result ok" "audit-config: result: ok"
+
+audit_fx; printf '%s\n' "${audit_ignore_toml}" > audit.toml
+audit_case "OK: audit.toml outside .cargo is not read by cargo-audit" 0
+
+audit_fx; mkdir .cargo; printf '%s\n' "${audit_ignore_toml}" > .cargo/audit.toml
+audit_case "NG: root .cargo/audit.toml with ignore" 1
+audit_has "record: root location is present" "audit-config: <root>/.cargo/audit.toml: present (not approved)"
+audit_has "record: result violation" "audit-config: result: violation"
+audit_lacks "record: file content is not printed" "RUSTSEC-2099-0001"
+
+audit_fx; mkdir crates/trial-deps/fuzz/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/trial-deps/fuzz/.cargo/audit.toml
+audit_case "NG: fuzz .cargo/audit.toml" 1
+
+audit_fx; mkdir "${audit_root}/ch"; audit_db "${audit_root}/ch/advisory-db"; printf '%s\n' "${audit_ignore_toml}" > "${audit_root}/ch/audit.toml"
+audit_case "error: CARGO_HOME set (with audit.toml) exits 2 at the fetch stage" 2 CARGO_HOME="${audit_root}/ch"
+audit_has "record: reason (CARGO_HOME is set, fetch)" "CARGO_HOME is set; the fetch stage"
+audit_lacks "record: no absolute path" "${audit_root}"
+audit_stage=no-fetch
+audit_case "error: CARGO_HOME set (with audit.toml) exits 2 at the no-fetch stage" 2 CARGO_HOME="${audit_root}/ch"
+audit_has "record: reason (CARGO_HOME is set, no-fetch)" "CARGO_HOME is set; the no-fetch stage"
+audit_stage=fetch
+
+# HOME は fixture の repo の外に置く（repo 内に置くと手順 4 の repo 内の件数にも数えられ、HOME 側の検査を消しても通る）
+audit_fx; audit_home="${audit_root}.home"; mkdir -p "${audit_home}/.cargo"; audit_db "${audit_home}/.cargo/advisory-db"; printf '%s\n' "${audit_ignore_toml}" > "${audit_home}/.cargo/audit.toml"
+audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME unset" 1 HOME="${audit_home}"
+audit_has "record: HOME-side location is present" "(CARGO_HOME from HOME): present (not approved)"
+audit_has "record: nothing nested in the repo" "(tracked or untracked): 0"
+audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME empty" 1 CARGO_HOME= HOME="${audit_home}"
+audit_has "record: HOME-side location is present (CARGO_HOME empty)" "(CARGO_HOME from HOME): present (not approved)"
+audit_stage=no-fetch
+audit_case "NG: HOME/.cargo/audit.toml at the no-fetch stage" 1 HOME="${audit_home}"
+audit_has "record: HOME-side location is present (no-fetch)" "(CARGO_HOME from HOME): present (not approved)"
+audit_has "record: nothing nested in the repo (no-fetch)" "(tracked or untracked): 0"
+audit_stage=fetch
+
+audit_fx; mkdir .cargo; ln -s "${audit_root}/missing-target" .cargo/audit.toml
+audit_case "NG: dangling symlink .cargo/audit.toml" 1
+
+audit_fx; mkdir -p .cargo/audit.toml
+audit_case "NG: directory .cargo/audit.toml" 1
+
+audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml; git add -A; git commit -q -m "chore: nested"
+audit_case "NG: committed nested .cargo/audit.toml" 1
+audit_has "record: nested count" "(tracked or untracked): 1"
+
+audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml
+audit_case "NG: untracked nested .cargo/audit.toml" 1
+
+audit_fx
+audit_case "error: relative CARGO_HOME exits 2" 2 CARGO_HOME=relative/dir
+audit_case "error: HOME and CARGO_HOME both unset exits 2" 2 HOME=
+audit_case "error: different cargo-audit version exits 2" 2 AUDIT_FAKE_VER=0.0.1
+rc=0
+env -u CARGO_HOME AUDIT_FAKE_VER="${audit_ver}" PATH="${audit_root}/bin:${PATH}" HOME="${audit_root}/home" \
+  "${HOOK_BASH}" scripts/check-audit-config.sh --skip > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then pass "audit-config: error: argument is rejected"; else fail "audit-config: error: argument is rejected" "exit ${rc}"; fi
+printf '#!/bin/sh\nexit 3\n' > "${audit_root}/bin/cargo-audit"
+audit_case "error: failing cargo-audit exits 2" 2
+printf '#!/bin/sh\nexit 0\n' > "${audit_root}/bin/cargo-audit"
+audit_case "error: silent cargo-audit exits 2" 2
+
+# 件数の読み取りの陰性対照: grep が失敗（2）・数字でない出力を返しても合格へ進まない
+audit_fx
+printf '#!/bin/sh\nexit 2\n' > "${audit_root}/bin/grep"
+chmod +x "${audit_root}/bin/grep"
+audit_case "error: failing grep (empty count) exits 2" 2
+audit_has "record: reason (cannot count nested)" "cannot count nested"
+audit_lacks "record: no ok result when count is unreadable" "audit-config: result: ok"
+printf '#!/bin/sh\necho abc\nexit 0\n' > "${audit_root}/bin/grep"
+audit_case "error: non-numeric count exits 2" 2
+audit_has "record: reason (cannot read the nested count)" "cannot read the nested"
+
+# 必要なコマンドが PATH に無いときは 1（違反）ではなく 2（検査不能）で止まる（lib.sh の require_cmd は使わない）
+# audit_minbin <除くコマンド>: 必要最小限のコマンドだけを symlink した PATH 用のディレクトリを作る。
+audit_minbin() {
+  local c
+  rm -rf "${audit_root}/minbin"
+  mkdir -p "${audit_root}/minbin"
+  for c in dirname basename git grep tr find; do
+    if [ "$c" != "$1" ]; then ln -s "$(command -v "$c")" "${audit_root}/minbin/$c"; fi
+  done
+  cp "${audit_root}/bin/cargo-audit" "${audit_root}/minbin/cargo-audit"
+}
+audit_fx
+audit_minbin none
+audit_case "OK: minimal PATH with all required commands exits 0" 0 PATH="${audit_root}/minbin"
+for missing_cmd in grep tr find git; do
+  audit_minbin "${missing_cmd}"
+  audit_case "error: ${missing_cmd} missing from PATH exits 2" 2 PATH="${audit_root}/minbin"
+  audit_has "record: reason (${missing_cmd} not found)" "required command not found on PATH: ${missing_cmd}"
+done
+
+# 一覧のパイプの全段の終了: tr の失敗（空の出力・一部の出力）を件数 0 の合格に読まない
+audit_fx
+printf '#!/bin/sh\nexit 2\n' > "${audit_root}/bin/tr"; chmod +x "${audit_root}/bin/tr"
+audit_case "error: failing tr in the repo listing exits 2" 2
+audit_has "record: reason (cannot list repository files, tr)" "cannot list repository files"
+audit_lacks "record: no ok result when the listing failed" "audit-config: result: ok"
+printf '#!/bin/sh\ncat >/dev/null\nexit 1\n' > "${audit_root}/bin/tr"
+audit_case "error: tr failing after reading the listing exits 2" 2
+
+# 2 段の検査（DPOL-33・DPOL-34）
+audit_fx
+rc=0
+env -u CARGO_HOME AUDIT_FAKE_VER="${audit_ver}" PATH="${audit_root}/bin:${PATH}" HOME="${audit_root}/home" \
+  "${HOOK_BASH}" scripts/check-audit-config.sh > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then pass "audit-config: error: stage argument is required"; else fail "audit-config: error: stage argument is required" "exit ${rc}"; fi
+rc=0
+env -u CARGO_HOME AUDIT_FAKE_VER="${audit_ver}" PATH="${audit_root}/bin:${PATH}" HOME="${audit_root}/home" \
+  "${HOOK_BASH}" scripts/check-audit-config.sh unknown > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then pass "audit-config: error: unknown stage is rejected"; else fail "audit-config: error: unknown stage is rejected" "exit ${rc}"; fi
+
+audit_fx
+audit_case "OK: fetch stage with CARGO_HOME unset (no DB needed)" 0
+audit_has "record: fetch stage" "audit-config: stage: fetch"
+audit_case "OK: fetch stage with CARGO_HOME empty" 0 CARGO_HOME=
+audit_case "error: fetch stage with CARGO_HOME set exits 2" 2 CARGO_HOME="${audit_root}/ch"
+audit_has "record: reason (CARGO_HOME is set)" "CARGO_HOME is set"
+audit_lacks "record: no absolute path (CARGO_HOME set)" "${audit_root}"
+
+audit_stage=no-fetch
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+audit_case "OK: no-fetch stage with a clean advisory-db" 0
+audit_has "record: no-fetch stage" "audit-config: stage: no-fetch"
+audit_has "record: advisory count" "git work tree, advisories: 1"
+audit_has "record: no changes" "audit-config: advisory-db changes: 0"
+audit_lacks "record: no absolute path (db)" "${audit_root}"
+audit_fx; audit_db "${audit_root}/ch/advisory-db"
+audit_case "error: no-fetch stage with CARGO_HOME set to a clean advisory-db exits 2" 2 CARGO_HOME="${audit_root}/ch"
+audit_has "record: reason (CARGO_HOME is set)" "CARGO_HOME is set; the no-fetch stage"
+
+# no-fetch 段の advisory の件数の読み取り: grep・find の失敗を 0 件・一部の件数に読まない
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+printf '#!/bin/sh\nexit 2\n' > "${audit_root}/bin/grep"; chmod +x "${audit_root}/bin/grep"
+audit_case "error: no-fetch stage with failing grep exits 2" 2
+audit_has "record: reason (cannot count advisories, grep)" "cannot count advisories"
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+printf '#!/bin/sh\nexit 2\n' > "${audit_root}/bin/find"; chmod +x "${audit_root}/bin/find"
+audit_case "error: no-fetch stage with failing find exits 2" 2
+audit_has "record: reason (cannot count advisories, find)" "cannot count advisories"
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; echo "ignored-file" > "${audit_root}/home/.cargo/advisory-db/.gitignore"; git -C "${audit_root}/home/.cargo/advisory-db" add .gitignore; git -C "${audit_root}/home/.cargo/advisory-db" commit -q -m "chore: ignore"; echo x > "${audit_root}/home/.cargo/advisory-db/ignored-file"
+audit_case "error: no-fetch stage with an ignored file exits 2" 2
+audit_has "record: reason (has changes, ignored)" "has changes"
+
+audit_fx
+audit_case "error: no-fetch stage without advisory-db exits 2" 2
+audit_has "record: reason (advisory-db is missing)" "advisory-db is missing"
+
+audit_fx; mkdir -p "${audit_root}/home/.cargo/advisory-db/crates/x"; echo "id = RUSTSEC-2099-0001" > "${audit_root}/home/.cargo/advisory-db/crates/x/RUSTSEC-2099-0001.md"
+audit_case "error: no-fetch stage with advisory-db not a git work tree exits 2" 2
+audit_has "record: reason (not the top of a git work tree)" "not the top of a git work tree"
+
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; git -C "${audit_root}/home/.cargo/advisory-db" rm -q -r crates; git -C "${audit_root}/home/.cargo/advisory-db" commit -q -m "chore: empty"; mkdir "${audit_root}/home/.cargo/advisory-db/crates"
+audit_case "error: no-fetch stage with empty crates/ exits 2" 2
+audit_has "record: reason (has no advisory)" "has no advisory"
+
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; echo "x" >> "${audit_root}/home/.cargo/advisory-db/crates/x/RUSTSEC-2099-0001.md"
+audit_case "error: no-fetch stage with a modified advisory exits 2" 2
+audit_has "record: reason (has changes)" "has changes"
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; echo "x" > "${audit_root}/home/.cargo/advisory-db/crates/x/RUSTSEC-2099-0002.md"
+audit_case "error: no-fetch stage with an untracked advisory exits 2" 2
+audit_has "record: reason (has changes)" "has changes"
+audit_stage=fetch
 
 finish "part 7"

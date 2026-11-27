@@ -385,6 +385,73 @@ else
   fail "secret-scan-ci: diagnostics are not passed through on exit 1" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# (d) 陰性対照（scripts/secret-scan-canary.sh）: 許可リストのファイルを作れない（検出器が同じ名前のディレクトリを作る）と、
+# 開けない旨の文（パスを含む）を公開ログへ出さず、検出器の行も通さない（SECR-23。CI 入口の (c) と同じ形の確認）。
+canary_root="${work_dir}/canary-root"
+mkdir -p "${canary_root}/scripts/hooks"
+cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${canary_root}/scripts/"
+cat > "${canary_root}/scripts/hooks/secret-scan.sh" <<EOF
+#!/usr/bin/env bash
+mkdir -p "\${TMPDIR}/allowed-diag"
+echo '${allowed_line}'
+exit 2
+EOF
+chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
+git -c init.defaultBranch=main init -q "${canary_root}"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${canary_root}/scripts/secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF 'scan-canary: scanner could not complete (exit 2)' "${work_dir}/out" \
+  && ! grep -qF 'allowed-diag' "${work_dir}/out" && ! grep -qiF 'Is a directory' "${work_dir}/out" \
+  && ! grep -qF "${allowed_line}" "${work_dir}/out"; then
+  pass "scan-canary: an unopenable allowlist file leaks no shell diagnostic and passes no detector line (exit 2)"
+else
+  fail "scan-canary: an unopenable allowlist file leaks no shell diagnostic and passes no detector line (exit 2)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# ---- 許可リスト（lib.sh の secret_scan_fixed_diagnostics）と検出器の固定の診断文の整合（#6145・#6036）
+# 検出器が出す固定の文（"secret-scan: …; aborting" の形で、変数の展開 $ を含まないリテラル）がすべて許可リストにあり、
+# 許可リストの各行が検出器の中にリテラルとして残っていること。動的な文（${what}・cmp exit・rc=・required command not found）は対象外。
+# shellcheck source=../lib.sh
+source "${HOOKS_DIR}/../lib.sh"
+diag_allowed="${work_dir}/diag-allowed.txt"
+diag_literals="${work_dir}/diag-literals.txt"
+# check_diag_sync <検出器のパス>: 0 = 整合 / 1 = 食い違い / 2 = 抜き出しの失敗
+check_diag_sync() {
+  local det="$1" g_rc=0 line
+  secret_scan_fixed_diagnostics > "${diag_allowed}" || return 2
+  LC_ALL=C grep -ao '"secret-scan: [^$"]*; aborting"' "${det}" > "${diag_literals}" || g_rc=$?
+  [ "${g_rc}" -le 1 ] || return 2
+  [ -s "${diag_literals}" ] || return 2
+  # 検出器のリテラルはすべて許可リストにある
+  while IFS= read -r line; do
+    line="${line#\"}"
+    line="${line%\"}"
+    grep -qxF -- "${line}" "${diag_allowed}" || return 1
+  done < "${diag_literals}"
+  # 許可リストの各行は検出器の中にリテラルとして現れる（古い行の残りを検出する）
+  while IFS= read -r line; do
+    LC_ALL=C grep -aqF -- "\"${line}\"" "${det}" || return 1
+  done < "${diag_allowed}"
+  return 0
+}
+rc=0
+check_diag_sync "${SECRET_SCAN}" || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: the fixed diagnostics of the detector and the CI allowlist agree"
+else
+  fail "secret-scan: the fixed diagnostics of the detector and the CI allowlist agree" "check exit ${rc}"
+fi
+# 陰性対照: 許可リストに無い固定の文を足した複製は、照合に失敗する
+diag_stub="${work_dir}/diag-stub.sh"
+{ cat "${SECRET_SCAN}"; printf '%s\n' 'echo "secret-scan: an unlisted fixed diagnostic; aborting" >&4'; } > "${diag_stub}"
+rc=0
+check_diag_sync "${diag_stub}" || rc=$?
+if [ "${rc}" -eq 1 ]; then
+  pass "secret-scan: an unlisted fixed diagnostic in the detector is caught by the allowlist check"
+else
+  fail "secret-scan: an unlisted fixed diagnostic in the detector is caught by the allowlist check" "check exit ${rc}"
+fi
+
 # ---- 除外の一覧の大きさと引数の長さ（#6053）
 # 登録名ごとの exclude を並べると、有効な一覧（64 KiB 以内）でも引数が macOS の上限を超えて git を起動できなくなる。
 # 実際の上限は CI の macOS で踏み、ここでは shim の MAX_GIT_ARG_BYTES で模す。
@@ -594,10 +661,153 @@ for qp in true false; do
   expect_out "only the unregistered non-ASCII path is counted (core.quotePath=${qp})" "secret-scan: total: 1 finding(s) in 1 file(s)"
 done
 
-# ヘッダが引用される登録名の下のパス（二重引用符）は、落とさず走査する（2 にしない。検出があれば 1）
+# 引用されるパス（制御文字・DEL・二重引用符・バックスラッシュ。#6144）: 登録名の下は除外、未登録の下は走査する。
+# 一覧の生のパスから git と同じ規則で引用したヘッダを組み、区画のヘッダ全体と突き合わせる（引用形は照合にだけ使う）
+quoted_bytes="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 34 92 127"
+quoted_n=0
+# stage_quoted <名前>: 引用が要る 1 バイトごとに 1 ファイルを index へ置く（件数は quoted_n）
+stage_quoted() {
+  local name="$1" b blob ch
+  quoted_n=0
+  blob="$(printf 'x = %s\n' "${token}" | git hash-object -w --stdin)"
+  for b in ${quoted_bytes}; do
+    printf -v ch '%b' "\\0$(printf '%03o' "${b}")"
+    printf '100644 %s 0\t.agents/skills/%s/a%sb.md\0' "${blob}" "${name}" "${ch}" | git update-index --add -z --index-info
+    quoted_n=$((quoted_n + 1))
+  done
+}
+for qp in true false; do
+  for scan_arg in "" --tracked; do
+    new_repo; stage_lock
+    git config core.quotePath "${qp}"
+    stage_quoted vendored-a
+    if [ -n "${scan_arg}" ]; then git commit -q -m "test: quoted"; fi
+    SCAN_ARG="${scan_arg}" SCAN_BIN="${small_bin}" check_scan "quoted paths under a registered name are excluded (core.quotePath=${qp} ${scan_arg})" 0
+    stage_quoted unreg
+    if [ -n "${scan_arg}" ]; then git commit -q -m "test: quoted 2"; fi
+    SCAN_ARG="${scan_arg}" SCAN_BIN="${small_bin}" check_scan "quoted paths under an unregistered name are scanned (core.quotePath=${qp} ${scan_arg})" 1
+    expect_out "only the unregistered quoted paths are counted (core.quotePath=${qp} ${scan_arg})" "secret-scan: total: ${quoted_n} finding(s) in ${quoted_n} file(s)"
+  done
+done
+SCAN_ARG=
+
+# 同じ名前の未登録の兄弟（二重引用符）は 1 件だけ数えられる
 new_repo; stage_lock
 stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
-SCAN_BIN="${small_bin}" check_scan "a quoted header under a registered name is scanned, not an error" 1
-expect_out "the quoted-header path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
+SCAN_BIN="${small_bin}" check_scan "a quoted path under a registered name is excluded" 0
+stage '.agents/skills/unreg/q"x.md' "x = ${token}"
+SCAN_BIN="${small_bin}" check_scan "a quoted path under an unregistered sibling is scanned" 1
+expect_out "only the unregistered quoted path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
+# 非 ASCII と二重引用符・DEL・タブ・改行を含むパスも、登録名の下は除外・未登録の下は走査
+for qp in true false; do
+  new_repo; stage_lock
+  git config core.quotePath "${qp}"
+  blob="$(printf 'x = %s\n' "${token}" | git hash-object -w --stdin)"
+  mixed_names=("caf$(printf '\303\251')\"z.md" "a$(printf '\177')b.md" "a$(printf '\t')b.md" "a$(printf '\n')b.md")
+  for nm in "${mixed_names[@]}"; do
+    printf '100644 %s 0\t.agents/skills/vendored-a/%s\0' "${blob}" "${nm}" | git update-index --add -z --index-info
+  done
+  SCAN_BIN="${small_bin}" check_scan "mixed quoted paths under a registered name are excluded (core.quotePath=${qp})" 0
+  for nm in "${mixed_names[@]}"; do
+    printf '100644 %s 0\t.agents/skills/unreg/%s\0' "${blob}" "${nm}" | git update-index --add -z --index-info
+  done
+  SCAN_BIN="${small_bin}" check_scan "mixed quoted paths under an unregistered name are scanned (core.quotePath=${qp})" 1
+  expect_out "only the four unregistered paths are counted (core.quotePath=${qp})" "secret-scan: total: 4 finding(s) in 4 file(s)"
+done
+
+# diff.orderFile は --name-only（一覧）にも効くため、一覧と区画の並びは揃ったままで、順序の変更だけでは対応は崩れない。
+# 並びを入れ替えても、未登録の区画は走査される。
+new_repo; stage_lock
+stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
+stage '.agents/skills/unreg/q"x.md' "x = ${token}"
+printf '%s\n' '.agents/skills/unreg/*' '.agents/skills/vendored-a/*' > "${PWD}/order.txt"
+git config diff.orderFile "${PWD}/order.txt"
+SCAN_BIN="${small_bin}" check_scan "reordered quoted sections: the unregistered one is still scanned" 1
+expect_out "reordered quoted sections: only the unregistered path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
+git config --unset diff.orderFile
+
+# 一覧と区画を実際にずらす（shim が -U0 の呼び出しにだけ区画の並びを変える）。一覧では未登録が先、区画では登録名が先になり、
+# 一覧の 2 番目（登録名の印）が区画の 2 番目（未登録）に当たる。ヘッダの一致の歯止めが無いと、未登録の区画が落ちて 1 件になる。
+# 歯止めがあれば、一致しない区画は落とさず、両方が走査される（2 件）。
+new_repo; stage_lock
+stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
+stage '.agents/skills/unreg/q"x.md' "x = ${token}"
+printf '%s\n' '.agents/skills/vendored-a/*' '.agents/skills/unreg/*' > "${work_dir}/order-u0.txt"
+PATH="${shim_dir}:${PATH}" ORDER_U0_FILE="${work_dir}/order-u0.txt" SCAN_BIN="${small_bin}" check_scan "misaligned sections: the unregistered section at a registered position is scanned" 1
+expect_out "misaligned sections: header mismatch scans both sections" "secret-scan: total: 2 finding(s) in 2 file(s)"
+
+# ---- 主の差分はパイプで流す（#6143）
+# 除外する区画の本文を、除外の前に一時ファイルへ全量で書かない（--tracked の一時領域の最大を増やさない）。
+mk_val="marker-$$-${RANDOM}"
+tmp_obs="${work_dir}/obs-tmp"
+mkdir -p "${tmp_obs}"
+marker_log="${work_dir}/marker.log"
+marker_repo() {
+  new_repo; stage_lock
+  stage .agents/skills/vendored-a/x.md "note = ${mk_val}"
+  stage src/app.txt "harmless = 1"
+  [ -z "${1:-}" ] || stage .agents/skills/unreg/y.md "note = ${mk_val}"
+}
+marker_run() {
+  rm -f -- "${marker_log}"
+  TMPDIR="${tmp_obs}" TMP_MARKER="${mk_val}" TMP_MARKER_DIR="${tmp_obs}" TMP_MARKER_LOG="${marker_log}" \
+    PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "$1" 0
+}
+marker_repo
+marker_run "excluded body is not written to a temp file (staged)"
+if [ ! -s "${marker_log}" ]; then pass "secret-scan: no temp file holds the excluded body (staged)"; else fail "secret-scan: no temp file holds the excluded body (staged)" "marker observed"; fi
+marker_repo unreg
+marker_run "unregistered body (control, staged)"
+if [ -s "${marker_log}" ]; then pass "secret-scan: the observation sees a scanned body (control)"; else fail "secret-scan: the observation sees a scanned body (control)" "marker not observed"; fi
+marker_repo
+git commit -q -m "test: marker"
+SCAN_ARG=--tracked
+marker_run "excluded body is not written to a temp file (--tracked)"
+if [ ! -s "${marker_log}" ]; then pass "secret-scan: no temp file holds the excluded body (--tracked)"; else fail "secret-scan: no temp file holds the excluded body (--tracked)" "marker observed"; fi
+SCAN_ARG=
+
+# 各パイプの git の失敗は 2（1 = NUL の数え・2 = 除去版・3 = 置換版。置換版は NUL があるときだけ呼ぶ）
+nth_counter="${work_dir}/nth.count"
+nth_run() {
+  rm -f -- "${nth_counter}"
+  FAIL_GIT_NTH_ARG=-U0 FAIL_GIT_NTH="$2" FAIL_GIT_NTH_COUNTER="${nth_counter}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${nth_bin:-${small_bin}}" check_scan "$1" 2
+  if [[ "${last_out}" == *"internal error"* ]]; then fail "secret-scan: $1 prints no internal error" "output: ${last_out}"; else pass "secret-scan: $1 prints no internal error"; fi
+}
+marker_repo
+nth_run "a failing NUL count is not scannable (exit 2)" 1
+expect_out "a failing NUL count reports a diff read failure" "secret-scan: failed to read diff; aborting"
+nth_run "a failing normalization (filtered) is not scannable (exit 2)" 2
+expect_out "a failing normalization reports its own message" "secret-scan: failed to normalize diff; aborting"
+make_detector nofilter
+nofilter_bin="${det_bin}"
+new_repo; stage src/app.txt "harmless = 1"
+nth_bin="${nofilter_bin}"
+nth_run "a failing normalization (no filter) is not scannable (exit 2)" 2
+nth_bin=""
+expect_out "a failing unfiltered normalization reports its own message" "secret-scan: failed to normalize diff; aborting"
+new_repo; stage src/nul.dat "x"
+printf 'a\000b\n' > src/nul.dat
+git add src/nul.dat
+nth_run "a failing space-replaced pass is not scannable (exit 2)" 3
+expect_out "a failing space-replaced pass reports its own message" "secret-scan: failed to normalize diff; aborting"
+
+# NUL が無ければ置換版の git を呼ばない（回数が 1 だけ違う）
+new_repo; stage src/app.txt "harmless = 1"
+rm -f -- "${count_log}"
+COUNT_GIT_LOG="${count_log}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "plain diff (counting git diff calls)" 0
+count_plain="$(wc -l < "${count_log}" | tr -d ' ')"
+git add src/nul.dat 2>/dev/null || true
+printf 'a\000b\n' > src/nul.dat
+git add src/nul.dat
+rm -f -- "${count_log}"
+COUNT_GIT_LOG="${count_log}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "NUL diff (counting git diff calls)" 0
+count_nul="$(wc -l < "${count_log}" | tr -d ' ')"
+rm -f -- "${count_log}"
+if [ "$((count_nul - count_plain))" -eq 1 ]; then
+  pass "secret-scan: the space-replaced pass runs only when a NUL exists (${count_plain} -> ${count_nul})"
+else
+  fail "secret-scan: the space-replaced pass runs only when a NUL exists" "plain ${count_plain}, nul ${count_nul}"
+fi
 
 finish "part 5"

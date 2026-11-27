@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps no-vendored pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps lib-deps no-vendored crypto-scan audit-cfg audit-cfg-nofetch pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -30,7 +30,7 @@ setup: ## Git hooks を有効化し .env を雛形から作成する（再実行
 check: ## editorconfig-checker + shellcheck（ソースは変更しない）。直接: scripts/check.sh
 	@scripts/check.sh
 
-test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git のみ）。直接: scripts/hooks/test-hooks.sh
+test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git が基本。part 12 の lib-deps だけ cargo が要り、無ければローカルは SKIP、CI では失敗）。直接: scripts/hooks/test-hooks.sh
 	@scripts/hooks/test-hooks.sh
 
 # secret-scan は暫定の名前（人が確定する）。scripts/secret-scan-ci.sh（--tracked --summary と scan-canary 相当）は CI の secret scan ジョブが呼ぶ（#51。TASK-6）。
@@ -58,9 +58,25 @@ lint: ## rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向
 crate-deps: ## crate 間の依存の向きの検査（許可表との照合）。直接: scripts/check-crate-deps.sh
 	@scripts/check-crate-deps.sh
 
+# lib-deps は暫定の名前（人が確定する）。TASK-714・LIB-2。lint への結線は #5164。
+lib-deps: ## 本体の crate の通常の依存の禁止 crate の検査（cargo tree。陰性対照つき。検査のみ）。直接: scripts/check-lib-deps.sh
+	@scripts/check-lib-deps.sh
+
 # no-vendored は暫定の名前（人が確定する）。DPOL-13・TASK-667。lint からも呼ばれる。
 no-vendored: ## openssl-sys の vendored の検査（合否は本番メンバーの normal・build 依存で、既定 feature と PROD_FEATURES で明示した feature だけ。全 feature の走査は参考（警告）。静的リンクを強いる設定の検出を含む。検査のみ）。直接: scripts/check-openssl-vendored.sh
 	@scripts/check-openssl-vendored.sh
+
+# audit-cfg は暫定の名前（人が確定する）。DPOL-34・TASK-679。cargo-audit を起動する前に必ず呼ぶ検査で、cargo-audit 自体は流さない。
+audit-cfg: ## cargo-audit が読む設定が無いこと（承認済みは無し）の検査。取得の前の段（CARGO_HOME は既定のみ。cargo-audit 0.22.2 の読み込み先。検査のみ）。直接: scripts/check-audit-config.sh fetch
+	@scripts/check-audit-config.sh fetch
+
+# audit-cfg-nofetch も暫定の名前。取得なし（--no-fetch）の cargo-audit の前の段で、advisory-db が git の作業ツリーの最上位・advisory 1 件以上・変更なしであることも確かめる（CARGO_HOME は両方の段で既定のみ）。
+audit-cfg-nofetch: ## audit-cfg の取得なしの段（cargo-audit --no-fetch の前。advisory-db の状態の検査を加える。検査のみ）。直接: scripts/check-audit-config.sh no-fetch
+	@scripts/check-audit-config.sh no-fetch
+
+# crypto-scan は暫定の名前（人が確定する）。LIB-21・DPOL-4・DPOL-47・TASK-715 (3/4)。
+crypto-scan: ## 自作の暗号処理の走査（合否は本番メンバーの C1〜C5。試験専用 crate と N1・N2 は参考の警告。発見的で人のレビューの代わりにならない。検査のみ）。直接: scripts/check-crypto-primitives.sh
+	@scripts/check-crypto-primitives.sh
 
 # pg-check は暫定の名前（人が確定する）。起動・停止の make ターゲットは置かない
 # （make の子プロセスは生成したパスワードを呼び出し元のシェルへ export できず、保存へ流れるため。SECR-6）。

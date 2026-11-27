@@ -25,3 +25,12 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # syn は parse_file（full）と Type/Item の読み取り（parsing）だけ使う。visit・printing は不要（D-2026-11-20-14 の (4)(c)）。
 syn = { version = "3.0.10", default-features = false, features = ["full", "parsing"] }
+# TASK-667 (3/4)・DPOL-14 の試験専用（tests/dpol14_rsa_pkcs8.rs）。本番の依存の木には入れない（D-2026-11-20-7 の K7）。
+# 本番の署名の実装の選びと jsonwebtoken の採否は未定（docs/records/task-715-crypto-deps.md）で、この dev 依存は採用の決定ではない。
+# 暗号 backend は aws_lc_rs だけで、rust_crypto（rsa を引く）は有効にしない（DPOL-17）。use_pem は from_rsa_pem に要る（DPOL-14）。
+# 版の固定方針と deny.toml は TASK-668 で決める。
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+# 鍵を実行時に生成するためだけに使う（鍵を repo に置かない）。
+aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
+# PKCS#8 の DER を PEM の形にするために使う。jsonwebtoken の use_pem が既に引く crate。
+pem = { version = "4.0.0", default-features = false }

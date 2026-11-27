@@ -409,25 +409,56 @@ enum UpstreamObservation {
     Received(usize),
     /// accept か読み取りが失敗し、バイトが届いたかを確かめられない。
     Unverifiable(ErrorKind),
+    /// 期限内に上流が接続を受理せず、バイトが届いたかを確かめられない（#6040。読み取りの期限切れとは区別する）。
+    NotAccepted(Duration),
 }
 
-/// 上流の接続を 1 本だけ受け、閉じられるまでの受信バイト数を数える。呼び出し側は blocking のリスナーを渡す。
+/// 観測のスレッドが上流の accept を待つ期限。観測のスレッドは転送器より先に起動し、上流への接続は
+/// 停止点の解放の後に起こる。その前の待ち（到達 5 秒・停止点 5 秒・上流への接続 5 秒）より先に切れると、
+/// リスナーを捨てて原因の分かりにくい失敗になるため、合計 15 秒に余裕を足す（#6040）。
+const OBSERVE_ACCEPT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// accept のポーリング間隔。短く保ち、受理前に接続が待ち行列に残る窓を広げない。
+const OBSERVE_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// 上流の接続を 1 本だけ受け、閉じられるまでの受信バイト数を数える。
+/// accept は非ブロッキングで `accept_deadline` までポーリングし、期限までに受理できなければ `NotAccepted` を返す
+/// （受理されないまま `join` で止まる経路を作らない。判定は失敗。ORST-17・AUDB-6・#6040）。
 ///
 /// `notify` を渡すと、accept の成功の直後に完了を通知する（#6042。転送器が accept の完了を待ってから閉じる順序に固定し、
 /// OS によって accept が `ConnectionAborted` で失敗して観測できなくなるのを避ける）。accept の失敗では通知しない。
 fn observe_upstream(
     up: TcpListener,
+    accept_deadline: Duration,
     notify: Option<UpstreamStall>,
 ) -> thread::JoinHandle<UpstreamObservation> {
     thread::spawn(move || {
-        let mut c = match up.accept() {
-            Ok((c, _)) => c,
-            Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
+        if let Err(e) = up.set_nonblocking(true) {
+            return UpstreamObservation::Unverifiable(e.kind());
+        }
+        let deadline = Instant::now() + accept_deadline;
+        let mut c = loop {
+            match up.accept() {
+                Ok((c, _)) => break c,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+                    if Instant::now() >= deadline {
+                        return UpstreamObservation::NotAccepted(accept_deadline);
+                    }
+                    thread::sleep(OBSERVE_POLL_INTERVAL);
+                }
+                Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
+            }
         };
         if let Some(stall) = &notify {
             stall.notify_upstream_accepted();
         }
-        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        // macOS/BSD では accept したソケットが O_NONBLOCK を受け継ぐため、blocking に戻してから期限を付ける。
+        if let Err(e) = c.set_nonblocking(false) {
+            return UpstreamObservation::Unverifiable(e.kind());
+        }
+        if let Err(e) = c.set_read_timeout(Some(Duration::from_secs(5))) {
+            return UpstreamObservation::Unverifiable(e.kind());
+        }
         read_until_eof(&mut c)
     })
 }
@@ -500,6 +531,9 @@ fn judge_upstream(obs: UpstreamObservation) -> Result<(), String> {
         UpstreamObservation::Unverifiable(kind) => Err(format!(
             "could not verify that no bytes reached upstream: {kind:?}"
         )),
+        UpstreamObservation::NotAccepted(d) => Err(format!(
+            "upstream did not accept within {d:?}; could not verify that no bytes reached upstream"
+        )),
     }
 }
 
@@ -512,6 +546,20 @@ fn judge_upstream_accepts_only_zero_bytes() {
     for kind in [ErrorKind::ConnectionAborted, ErrorKind::ConnectionReset] {
         assert!(judge_upstream(UpstreamObservation::Unverifiable(kind)).is_err());
     }
+    assert!(judge_upstream(UpstreamObservation::NotAccepted(Duration::from_secs(1))).is_err());
+}
+
+/// ORST-17・AUDB-6（#6040）: 上流が接続を受理しないとき、観測のスレッドは期限内に戻り、判定は失敗になる
+/// （`join` で止まらない）。時間は下限だけを確かめる。
+#[test]
+fn observe_upstream_fails_when_upstream_never_accepts() {
+    let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let deadline = Duration::from_millis(200);
+    let start = Instant::now();
+    let obs = observe_upstream(up, deadline, None).join().unwrap();
+    assert!(start.elapsed() >= deadline);
+    assert_eq!(obs, UpstreamObservation::NotAccepted(deadline));
+    assert!(judge_upstream(obs).is_err());
 }
 
 /// 観測のスレッドは、実際に届いたバイトを数える（陽性対照。0 と数え違えると回帰を見逃す）。
@@ -519,7 +567,7 @@ fn judge_upstream_accepts_only_zero_bytes() {
 fn observe_upstream_counts_delivered_bytes() {
     let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = up.local_addr().unwrap().port();
-    let h = observe_upstream(up, None);
+    let h = observe_upstream(up, OBSERVE_ACCEPT_DEADLINE, None);
     let mut c = connect(port);
     c.write_all(b"abc").unwrap();
     drop(c);
@@ -537,11 +585,11 @@ fn observe_upstream_counts_delivered_bytes() {
 fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let upstream_port = up.local_addr().unwrap().port();
-    // blocking の accept で待つ観測のスレッドを、転送器の起動の前に作る（待ち行列に残って切られる前に受ける）。
-    up.set_nonblocking(false).unwrap();
+    // 期限付きの非ブロッキングの accept で待つ観測のスレッドを、転送器の起動の前に作る
+    // （待ち行列に残って切られる前に受ける。ポーリングの間隔は短く保つ）。
     // #6042: 観測側の accept の完了を転送器が待ってから世代の不一致で閉じる（順序の固定）。
     let stall = UpstreamStall::with_upstream_accept_sync();
-    let observer = observe_upstream(up, Some(stall.clone()));
+    let observer = observe_upstream(up, OBSERVE_ACCEPT_DEADLINE, Some(stall.clone()));
     let mut p =
         ExternalStoreFaultProxy::start_to_port_with_stall(upstream_port, stall.clone()).unwrap();
     let mut tl = timeline();
@@ -607,7 +655,7 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
         p.generation_refused_count()
     );
     // 遮断前のバイトが上流へ届いていないことを、上流側の受信バイト数で確かめる（ORST-17・AUDB-6）。
-    // 観測は上で起動した専用のスレッド（blocking の accept）が行う。観測できない場合（accept・読み取りの失敗、
+    // 観測は上で起動した専用のスレッド（期限付きの accept）が行う。観測できない場合（期限内に受理されない・accept・読み取りの失敗、
     // macOS の `ConnectionAborted`・`ConnectionReset` を含む）は合格にせず失敗にする。計数だけでは、
     // 世代の検査より前にバイトを送る回帰を検出できないため、どの OS でも同じ判定を通す。
     if let Err(why) = judge_upstream(observer.join().unwrap()) {
@@ -746,17 +794,58 @@ fn stalled_upstream() -> StalledUpstream {
     }
 }
 
+/// `/proc/net/tcp` 形式の本文に、宛先ポートが `port` で SYN_SENT（状態 02）の行があるか。純粋関数で、読み取りの成否は扱わない。
+#[cfg(target_os = "linux")]
+fn syn_sent_in_text(text: &str, port: u16) -> bool {
+    let want = format!(":{port:04X}");
+    text.lines().skip(1).any(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        f.len() > 3 && f[2].ends_with(&want) && f[3] == "02"
+    })
+}
+
+/// `path` を読んで SYN_SENT の有無を返す。読めないときは環境の誤りとして `Err` を返し、
+/// 「接続が無い」（`Ok(false)`）と区別する（#6048）。パスは試験の中の補助の引数で、本体の設定ではない。
+#[cfg(target_os = "linux")]
+fn syn_sent_at(path: &std::path::Path, port: u16) -> Result<bool, String> {
+    std::fs::read_to_string(path)
+        .map(|t| syn_sent_in_text(&t, port))
+        .map_err(|e| format!("cannot read {}: {:?} ({e})", path.display(), e.kind()))
+}
+
 /// `/proc/net/tcp` に、宛先ポートが `port` で SYN_SENT（状態 02）の接続があるか。
 /// 溜まりきった待ち行列への connect は SYN を落とされ、OS の中で SYN_SENT のまま待つ。
+/// 読み取りの誤りは接続の状態の誤りと分け、環境の誤りとして直ちに panic で示す（ORST-17・TASK-13・#6048）。
+/// `wait_until` の中でも待ちを打ち切り、状態の失敗の文言に化けさせない。
 #[cfg(target_os = "linux")]
 fn syn_sent_to(port: u16) -> bool {
-    let want = format!(":{port:04X}");
-    std::fs::read_to_string("/proc/net/tcp").is_ok_and(|t| {
-        t.lines().skip(1).any(|l| {
-            let f: Vec<&str> = l.split_whitespace().collect();
-            f.len() > 3 && f[2].ends_with(&want) && f[3] == "02"
-        })
-    })
+    syn_sent_at(std::path::Path::new("/proc/net/tcp"), port)
+        .unwrap_or_else(|e| panic!("environment error, not a socket state: {e}"))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn syn_sent_at_reports_read_error_separately_from_socket_state() {
+    // ディレクトリは `read_to_string` が必ず誤りにする（ファイルを作らない）。
+    let err = syn_sent_at(std::path::Path::new("/"), 80).unwrap_err();
+    assert!(err.contains("cannot read"), "{err}");
+    assert!(err.contains('/'), "{err}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn syn_sent_in_text_matches_only_syn_sent_to_port() {
+    let head = "  sl  local_address rem_address   st tx_queue rx_queue\n";
+    let hit = "   0: 0100007F:9C40 0100007F:1F90 02 00000000:00000000 00:00000000 00000000\n";
+    let est = "   1: 0100007F:9C41 0100007F:1F90 01 00000000:00000000 00:00000000 00000000\n";
+    let other = "   2: 0100007F:9C42 0100007F:1F91 02 00000000:00000000 00:00000000 00000000\n";
+    assert!(syn_sent_in_text(
+        &format!("{head}{est}{other}{hit}"),
+        0x1F90
+    ));
+    assert!(!syn_sent_in_text(&format!("{head}{est}{other}"), 0x1F90));
+    // 見出し行は読み飛ばす。
+    assert!(!syn_sent_in_text(head, 0x1F90));
 }
 
 /// ORST-17: 本物の上流への connect が固まっていても `block()` は待たされない（Linux のみ。検出を足す試験で、契約を変えない）。

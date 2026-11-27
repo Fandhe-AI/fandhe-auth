@@ -36,7 +36,10 @@ implement-review・implement-review-pr・create-pr 等）。サブエージェ�
 | Rust のソース・`Cargo.toml` | `make lint` | `cargo fmt --check`・clippy `-D warnings`・crate 間の依存の向き・vendored の検査（CI の `lint` ジョブと同一。TASK-6） |
 | Rust のソース・crate の構成 | `make build`・`make test` | `cargo build`・`cargo test`（`--workspace --locked`。CI の `build-test` ジョブと同一。TASK-6。名前は暫定） |
 | crate 間の依存 | `make crate-deps` | 許可表との照合（`scripts/check-crate-deps.sh`） |
+| 本体の crate の依存 | `make lib-deps` | 禁止の crate が 0 件の検査（`scripts/check-lib-deps.sh`。LIB-2・TASK-714。lint への結線は #5164。名前は暫定） |
 | `openssl-sys` の `vendored` | `make no-vendored` | `cargo tree -e features` の 0 件の検査と、静的リンクを強いる設定が無いことの検査（`make lint` にも入る。DPOL-13・TASK-667。名前は暫定） |
+| 暗号の基本処理の自作 | `make crypto-scan` | `crates/` の本番メンバーで C1〜C5 が 0 件（終了コード 0）。発見的な走査で、人のレビュー（TASK-83）の代わりにならない（LIB-21・DPOL-4・DPOL-47・TASK-715。名前は暫定） |
+| cargo-audit が読む設定 | `make audit-cfg`（取得の前）・`make audit-cfg-nofetch`（`--no-fetch` の前） | 承認していない `audit.toml` が無いことの検査。後者は advisory-db の状態も確かめる（DPOL-33・DPOL-34・TASK-679。名前は暫定） |
 | `lefthook.yml`・`scripts/hooks/` の時間予算 | `time lefthook run pre-commit --all-files` | `./git-hooks.md` の時間予算の確認 |
 | 秘密情報の検査規則（`scripts/hooks/secret-scan.sh`） | `make secret-scan` と `make test-hooks` | 追跡ファイル全体で合計 0 件（終了コード 0）。規則の追加は `scripts/hooks/test-hooks-N.sh` の該当する part にも足す |
 | `Makefile`・`scripts/*.sh` | `make help` と `scripts/help.sh` の一致 | `./makefile.md` の手順 5 |

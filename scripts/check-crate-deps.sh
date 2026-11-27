@@ -6,7 +6,8 @@
 # 呼び出し元: scripts/lint.sh・`make crate-deps`。
 #
 # 表の値は spec の〔提案〕（LIB は検討中）から引いた暫定。表を変える（crate・辺を足す）ときは利用者に確かめる。
-# TODO(TASK-714): 外部の禁止 crate（非同期ランタイム・DB ドライバー・HTTP の枠組み・SDK 等）の検査を足す
+# 外部の禁止 crate（非同期ランタイム・DB ドライバー・HTTP の枠組み・SDK 等）の検査は scripts/check-lib-deps.sh（TASK-714。こちらは workspace 内の辺だけ）。
+# TODO(TASK-714): 禁止の表の充足（#5159〜#5161）と CI への搭載（#5164）
 # TODO(TASK-663): RP 向け crate・共有型・画面の crate の DB 非依存（DPOL-7）の検査を足す
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,8 +31,8 @@ cd "${ROOT_DIR}"
 # e2e-harness も試験専用で secret のみ（TASK-11。セッション ID を秘密値の型で持つ。SECR-30・SECR-31。どの crate からも
 # 依存されない。e2e-harness → secret の辺は利用者が 2026-11-20 に承認済み〔#5975〕）。
 # it-harness・minimal-host への辺は後続の段で足し、足すときに確かめる）。
-# load-harness も試験専用で、通常（normal・build）の依存は workspace 内になし。試験（dev）だけ it-harness・hub-stub に
-# 依存する（dev_only_deps の表。dev の辺に限って許可し、normal・build に現れたら拒否する）
+# load-harness も試験専用で、通常（normal・build）の依存は workspace 内になし。試験（dev）だけ it-harness・hub-stub・secret に
+# 依存する（secret は試験で作る署名鍵の秘密値を共有の秘密値型で持つため。#6050・SECR-31。dev_only_deps の表。dev の辺に限って許可し、normal・build に現れたら拒否する）
 # （TASK-12 (5/10)。it-harness の上で構成要素へ負荷をかける。どの crate からも依存されない。この行は人の確認待ち）。
 # trial-deps も試験専用で secret のみ（TASK-4 (6/6)・#35。どの crate からも依存されない。D-2026-11-20-8〜10。
 # この行（trial-deps → secret の辺）は利用者が 2026-11-20 に確認済み〔#35〕）。
@@ -58,7 +59,7 @@ allowed_deps() {
 # normal・build の辺で現れたら allowed_deps だけで判定し、ここに書いた crate でも拒否する（試験用の許可を本体側へ広げない）。
 dev_only_deps() {
   case "$1" in
-    fandhe-auth-load-harness) echo "fandhe-auth-it-harness fandhe-auth-hub-stub" ;;
+    fandhe-auth-load-harness) echo "fandhe-auth-it-harness fandhe-auth-hub-stub fandhe-auth-secret" ;;
     *) echo "" ;;
   esac
 }

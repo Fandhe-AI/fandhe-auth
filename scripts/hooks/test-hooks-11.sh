@@ -604,9 +604,39 @@ sc_hold_case "shellcheck-staged: a TERM after the batch records its shellcheck p
 #   - 親が子へ送った信号（差し込んだ kill の記録のうち、送った時点の親が親自身の行）が、1 つの pid への -CONT -TERM であること。
 #     記録が無い場合（バッチの子が先に終わった）は、本体が信号を送らずに済む正常な経路だが、この試験では子が眠り続けるため起きない。起きたら失敗にする（記録なしを成功にしない）。
 #   - 2 で終わること、10 秒未満であること、親が信号を送った子（バッチの子）と偽物が残らないこと。
-# sc_parent_hold_case <試験名> <止める trap の第 1 引数> <その何回目の呼び出しで止めるか> <1=trap を張った後で止める / 0=張る前で止める> <1=起動前の確認をする> <引数のファイル名...>
+#   - 記録（差し込んだ kill の全行）に、3 列目（宛先の親）が空の行が 1 件でもあれば失敗にする（#6147）。親の行だけを `$3 == 親` で選ぶので、
+#     `ps` が失敗して親が取れなかった行は黙って外れ、ループの中の確認を消す退行（宛先の数による判別）がまれに素通りするため。
+#   - 場合 A・B の「偽物が残らない」の確認は補助である。A・B ではバッチの子が shellcheck を起動する前に止められることが多く、偽物がまだ無くて空振りしやすい。
+#     B（ループの中の確認）を判別しているのは、記録のうち親が信号を送った宛先の pid の数（1 つ）である（#6147）。
+#   - 場合 C は、TERM を送る前に、親と同じ引数の子（バッチの子）がちょうど 1 つあることを確かめる。本体の `trap on_signal` の数が変わって止め所がずれたら、
+#     別の点を黙って試さずに setup failed にするため（#6147）。1 回だけ数えない理由: 止めている間、親は差し込んだ trap の中の `sleep` を繰り返し起動し、
+#     `sleep` は exec の前の一瞬、親と同じ引数の fork した bash に見える。このため 2 回続けて同じ pid が 1 つだけ見えたときに決める。
+# 止めている親の直接の子のうち、親と同じ引数のもの（バッチの子）がちょうど 1 つで、2 回続けて同じ pid のとき、その pid を出して 0 を返す。決まらなければ 1。
+# 止めている間の `sleep` の fork は毎回 pid が違うので、2 回続けて同じ pid にはならない。
+sc_hold_one_child() {
+  local sc_ho_prev="" sc_ho_cur="" sc_ho_i=0
+  while [ "${sc_ho_i}" -lt 50 ]; do
+    sc_ho_cur="$(sc_same_args_children "$1" 2> /dev/null || true)"
+    if [ "$(printf '%s\n' "${sc_ho_cur}" | grep -c . || true)" = 1 ]; then
+      case "${sc_ho_cur}" in
+        *[!0-9]*) sc_ho_cur="" ;;
+      esac
+    else
+      sc_ho_cur=""
+    fi
+    if [ -n "${sc_ho_cur}" ] && [ "${sc_ho_cur}" = "${sc_ho_prev}" ]; then
+      printf '%s\n' "${sc_ho_cur}"
+      return 0
+    fi
+    sc_ho_prev="${sc_ho_cur}"
+    sleep 0.1
+    sc_ho_i=$((sc_ho_i + 1))
+  done
+  return 1
+}
+# sc_parent_hold_case <試験名> <止める trap の第 1 引数> <その何回目の呼び出しで止めるか> <1=trap を張った後で止める / 0=張る前で止める> <止め所の確認: prestart=起動前（子も偽物も無い）/ launched=バッチの子がちょうど 1 つ> <引数のファイル名...>
 sc_parent_hold_case() {
-  local sc_hold_name="$1" sc_hold_arg="$2" sc_hold_nth="$3" sc_hold_first="$4" sc_hold_prestart="$5"
+  local sc_hold_name="$1" sc_hold_arg="$2" sc_hold_nth="$3" sc_hold_first="$4" sc_hold_check="$5"
   shift 5
   sc_pidfile="${work_dir}/sc.pid"
   sc_klog="${work_dir}/sc.klog"
@@ -624,6 +654,7 @@ sc_parent_hold_case() {
   sc_early_err=""
   sc_t0="${SECONDS}"
   sc_kj_note=""
+  sc_hold_batch=""
   sc_waited=0
   while [ ! -e "${sc_hold_held}" ] && [ "${sc_waited}" -lt 100 ]; do
     sleep 0.1
@@ -631,7 +662,11 @@ sc_parent_hold_case() {
   done
   if [ ! -e "${sc_hold_held}" ]; then
     sc_early_err="the parent never reached the point where it was to be held"
-  elif [ "${sc_hold_prestart}" = 1 ] && { [ -n "$(sc_same_args_children "${sc_script_pid}" || true)" ] || [ -s "${sc_pidfile}" ]; }; then
+  elif [ "${sc_hold_check}" != prestart ] && [ "${sc_hold_check}" != launched ]; then
+    sc_early_err="unknown stop-point check: ${sc_hold_check}"
+  elif [ "${sc_hold_check}" = launched ] && ! sc_hold_batch="$(sc_hold_one_child "${sc_script_pid}")"; then
+    sc_early_err="the parent was not held with exactly one batch child (the stop point moved)"
+  elif [ "${sc_hold_check}" = prestart ] && { [ -n "$(sc_same_args_children "${sc_script_pid}" || true)" ] || [ -s "${sc_pidfile}" ]; }; then
     sc_early_err="a batch or the fake shellcheck had already started"
   elif ! sc_kill_job TERM "${sc_script_pid}"; then
     sc_early_err="the TERM could not be sent to the parent"
@@ -668,9 +703,15 @@ sc_parent_hold_case() {
     sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
   fi
   # 親が子へ送った信号: 記録の 3 列目（送った時点の宛先の親）が親自身（sc_script_pid）の行だけを取り出す
-  sc_klog_read "${sc_klog}"
   sc_pp_sigs="$(awk -v p="${sc_script_pid}" '$3 == p { printf "%s%s", (n++ ? " " : ""), $1 }' "${sc_klog}" 2> /dev/null || true)"
   sc_pp_pids="$(awk -v p="${sc_script_pid}" '$3 == p { printf "%s%s", (n++ ? " " : ""), $2 }' "${sc_klog}" 2> /dev/null || true)"
+  # 記録の全行のうち 3 列目が空の行の数。読めない・awk の失敗は error（文字列で 0 と比べ、0 のときだけ合格）
+  sc_kl_gaps=error
+  sc_kl_all="(unreadable)"
+  if [ -f "${sc_klog}" ]; then
+    sc_kl_gaps="$(awk 'NF < 3 { n++ } END { print n + 0 }' "${sc_klog}" 2> /dev/null || echo error)"
+    sc_kl_all="$(awk '{ printf "%s%s %s %s", (n++ ? "; " : ""), ($1 == "" ? "(no signal)" : $1), ($2 == "" ? "(no pid)" : $2), ($3 == "" ? "(no parent)" : $3) } END { if (!n) printf "(empty)" }' "${sc_klog}" 2> /dev/null || echo "(unreadable)")"
+  fi
   sc_pp_ok=0
   sc_pp_target=""
   case "${sc_pp_pids}" in
@@ -682,6 +723,7 @@ sc_parent_hold_case() {
       ;;
   esac
   sc_pend_alive=0
+  # 偽物の確認は A・B では補助（偽物が未起動で空振りしやすい。判別は宛先の数）。C では偽物も見る
   for sc_pend_p in ${sc_pp_target} ${sc_fake_pid}; do
     sc_waited=0
     while kill -0 "${sc_pend_p}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
@@ -695,15 +737,19 @@ sc_parent_hold_case() {
       fi
     fi
   done
-  if [ -z "${sc_early_err}" ] && [ "${sc_pp_ok}" -eq 1 ] && [ "${sc_rc}" -eq 2 ] && [ "${sc_pend_alive}" -eq 0 ] && [ "${sc_pend_secs}" -lt 10 ]; then
+  sc_tgt_ok=1
+  if [ "${sc_hold_check}" = launched ] && [ "${sc_pp_target}" != "${sc_hold_batch}" ]; then
+    sc_tgt_ok=0
+  fi
+  if [ -z "${sc_early_err}" ] && [ "${sc_kl_gaps}" = 0 ] && [ "${sc_tgt_ok}" -eq 1 ] && [ "${sc_pp_ok}" -eq 1 ] && [ "${sc_rc}" -eq 2 ] && [ "${sc_pend_alive}" -eq 0 ] && [ "${sc_pend_secs}" -lt 10 ]; then
     pass "${sc_hold_name}"
   else
-    fail "${sc_hold_name}" "${sc_early_err:+setup failed: ${sc_early_err}; }exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_pend_alive}, seconds: ${sc_pend_secs}, signals the parent sent: ${sc_pp_sigs:-none} to pids [${sc_pp_pids:-none}] (expected: -CONT -TERM to one pid)" "output: $(cat "${work_dir}/out" 2> /dev/null || true)"
+    fail "${sc_hold_name}" "${sc_early_err:+setup failed: ${sc_early_err}; }exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_pend_alive}, seconds: ${sc_pend_secs}, signals the parent sent: ${sc_pp_sigs:-none} to pids [${sc_pp_pids:-none}] (expected: -CONT -TERM to one pid), kill log rows without a parent: ${sc_kl_gaps}, batch child at the stop point: ${sc_hold_batch:-none}, kill log: ${sc_kl_all}" "output: $(cat "${work_dir}/out" 2> /dev/null || true)"
   fi
 }
-sc_parent_hold_case "shellcheck-staged: a TERM to the parent before it starts the batches stops the batches and exits 2" "pending_signal=1" 1 1 1 hang.sh
-sc_parent_hold_case "shellcheck-staged: a TERM to the parent before it starts two batches stops only the batch started so far (the check inside the launch loop)" "pending_signal=1" 1 1 1 hang.sh hang2.sh
-sc_parent_hold_case "shellcheck-staged: a TERM to the parent after it launched every batch stops them and exits 2 (the check after the launch loop)" "on_signal" 2 0 0 hang.sh
+sc_parent_hold_case "shellcheck-staged: a TERM to the parent before it starts the batches stops the batches and exits 2" "pending_signal=1" 1 1 prestart hang.sh
+sc_parent_hold_case "shellcheck-staged: a TERM to the parent before it starts two batches stops only the batch started so far (the check inside the launch loop)" "pending_signal=1" 1 1 prestart hang.sh hang2.sh
+sc_parent_hold_case "shellcheck-staged: a TERM to the parent after it launched every batch stops them and exits 2 (the check after the launch loop)" "on_signal" 2 0 launched hang.sh
 
 # CONT が成功した直後に子が終わった（ジョブ表から消えた）場合は、TERM を送らない（pid が再利用されうるため。CONT と TERM の間の job_state）。
 # 差し込む jobs が、kill の記録に -CONT が現れた後は空の表を返す。本物の子は生きているため、記録に -TERM が現れないことを確かめた後、試験が偽物を止めて本体の wait を解く。

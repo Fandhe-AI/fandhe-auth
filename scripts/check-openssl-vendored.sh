@@ -19,7 +19,7 @@
 # 定めるため、試験専用 feature だけの経路で本番の違反として落とさない。
 # B は依存の列挙にだけ使い、ビルド・clippy には使わない（DPOL-31。check-crate-deps.sh と同じ扱い）。
 # 本番の範囲は normal・build（dev は見ない）。`cargo tree -i` は一致が無いと非 0 のため使わない。
-# 実行のたびに自己試験（陰性対照 F1〜F12）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに、R4 の設定の読み取りを最初の Cargo の前に済ませ（include 等は Cargo を起動せず 2）、自己試験（陰性対照 F1〜F12）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は件数と規則名だけ。cargo tree の生の出力には絶対パスが入るため出さない。
 # 限界: dev の依存・別 workspace の crates/trial-deps/fuzz・Hub の最終バイナリは対象外。
 #
@@ -188,6 +188,13 @@ print(n)
 # 読めない・TOML として不正なファイルは検査不能（2）。python の診断（パスを含み得る）は出さない。
 count_static_config() {
   local f c rc n=0
+  # .cargo 自体を先に確かめる。検索権限（x）が無いと配下の -e・-L が偽になり、設定が有っても「0 件」で通ってしまう（fail-closed）。
+  # ディレクトリでない（通常のファイル・リンク切れ等）も、設定ファイルのリンク切れを 2 にする扱いと同じく安全側に止める。
+  # 一覧の読み取り（r）は名前を指定した参照に要らないため求めない。
+  if [ -e "$1/.cargo" ] || [ -L "$1/.cargo" ]; then
+    [ -d "$1/.cargo" ] || return 2
+    [ -x "$1/.cargo" ] || return 2
+  fi
   # 優先順位で片方が無視されても、消えると残りが有効になるため、存在する両方のファイルを検査する（安全側）。
   for f in "$1/.cargo/config" "$1/.cargo/config.toml"; do
     # リンク切れのシンボリックリンクは -e が偽になるため -L も見て、読み取り検査（失敗は 2）へ進める。
@@ -267,6 +274,13 @@ expect_count() {
     log "FAIL selftest $1: ${2} not detected"
     exit 1
   fi
+}
+
+# f10c_child_count [NAME=VALUE...]: env -i で隔離した子の bash にこのスクリプトを source させ、R4 の環境変数の件数を返す（F10c 用）。
+# PATH は最上位の dirname に要る。PY は親で解決済みの実体を渡し、子では resolve_python を呼ばない（shim が HOME 無しで失敗する道を避ける）。
+# shellcheck disable=SC2016 # 単引用符の中身は子の bash が展開する（$1 は子の引数）。
+f10c_child_count() {
+  env -i "PATH=${PATH}" "PY=${PY}" "$@" "${BASH}" -c '. "$1"; count_static_env' _ "${DIR}/check-openssl-vendored.sh" 2>&1
 }
 
 selftest() {
@@ -395,18 +409,39 @@ selftest() {
   done
 
   # F10c: 子の bash を、環境に上流が読む正規化した名前（大文字・`-` を `_`）を入れて起動し、スクリプトを source して R4 の環境変数の側を数える。
-  # シェルが環境を加工した後に Python が見る経路を通る。出力が数字だけ（source したときに本体が走らず何も出さない）で、1 以上を期待する。
+  # シェルが環境を加工した後に Python が見る経路を通る。出力が数字だけ（source したときに本体が走らず何も出さない）で、件数は厳密に比べる。
+  # 子は env -i で隔離する（呼び出し元に別の R4 の対象変数があっても、注入した変数の検出の可否を取り違えない）。
   local out
   rc=0
-  # shellcheck disable=SC2016 # 単引用符の中身は子の bash が展開する（$1 は子の引数）。
-  out="$(env "X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=1" "${BASH}" -c '. "$1"; resolve_python; count_static_env' _ "${DIR}/check-openssl-vendored.sh" 2>&1)" || rc=$?
+  out="$(f10c_child_count "X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=1")" || rc=$?
   if [ "${rc}" -eq 2 ]; then
     log "error: selftest F10c: child exited 2; cannot inspect"
     exit 2
   fi
-  case "${out}" in '' | *[!0-9]*) rc=1 ;; *) [ "${out}" -ge 1 ] || rc=1 ;; esac
-  if [ "${rc}" -ne 0 ]; then
+  if [ "${rc}" -ne 0 ] || [ "${out}" != "1" ]; then
     log "FAIL selftest F10c: normalized target env not counted via sourced shell, or main ran on source"
+    exit 1
+  fi
+  # 対照: 注入しなければちょうど 0（隔離した環境に他の対象が紛れ込まない）
+  rc=0
+  out="$(f10c_child_count)" || rc=$?
+  if [ "${rc}" -eq 2 ]; then
+    log "error: selftest F10c: child exited 2; cannot inspect"
+    exit 2
+  fi
+  if [ "${rc}" -ne 0 ] || [ "${out}" != "0" ]; then
+    log "FAIL selftest F10c: isolated child env not clean (control)"
+    exit 1
+  fi
+  # 呼び出し元を汚しても、注入した 1 件だけを数える（env -i が外れると 2 になる）
+  rc=0
+  out="$(OPENSSL_STATIC=1 f10c_child_count "X86_64_UNKNOWN_LINUX_GNU_OPENSSL_STATIC=1")" || rc=$?
+  if [ "${rc}" -eq 2 ]; then
+    log "error: selftest F10c: child exited 2; cannot inspect"
+    exit 2
+  fi
+  if [ "${rc}" -ne 0 ] || [ "${out}" != "1" ]; then
+    log "FAIL selftest F10c: caller environment leaked into isolated child"
     exit 1
   fi
 
@@ -483,6 +518,41 @@ selftest() {
     exit 1
   fi
 
+  # F11d: .cargo 自体が読めない（検索権限なし）・ディレクトリでない・リンク切れは検査不能（2）。0 件に丸めない（fail-closed）
+  local pr
+  if ! mkdir -p "${f}/n1/.cargo" "${f}/n2" "${f}/n3" 2>/dev/null ||
+    ! printf '[env]\nOPENSSL_STATIC = "1"\n' 2>/dev/null >"${f}/n1/.cargo/config.toml" ||
+    ! : 2>/dev/null >"${f}/n2/.cargo" ||
+    ! ln -s missing "${f}/n3/.cargo" 2>/dev/null ||
+    ! chmod 000 "${f}/n1/.cargo" 2>/dev/null; then
+    log "error: cannot write fixture (f11d); cannot inspect"
+    exit 2
+  fi
+  rc=0
+  if [ ! -x "${f}/n1/.cargo" ]; then
+    count_static_config "${f}/n1" >/dev/null 2>&1 || rc=$?
+    pr=2
+  else
+    # root 等は権限が効かず設定が読める。0 件に丸められないこと（1 以上）だけを確かめる。
+    log "info: selftest F11d: search permission not enforced for this user; permission case relaxed"
+    cnt="$(count_static_config "${f}/n1" 2>/dev/null)" || rc=$?
+    if [ "${rc}" -eq 0 ] && [ "${cnt}" -ge 1 ]; then rc=1; else rc=9; fi
+    pr=1
+  fi
+  chmod u+rwx "${f}/n1/.cargo" 2>/dev/null || true
+  if [ "${rc}" -ne "${pr}" ]; then
+    log "FAIL selftest F11d: unreadable .cargo not treated as cannot-inspect"
+    exit 1
+  fi
+  for cfg in n2 n3; do
+    rc=0
+    count_static_config "${f}/${cfg}" >/dev/null 2>&1 || rc=$?
+    if [ "${rc}" -ne 2 ]; then
+      log "FAIL selftest F11d: non-directory .cargo not treated as cannot-inspect (${cfg})"
+      exit 1
+    fi
+  done
+
   # F12: openssl-sys の件数の報告。F3（vendored なしの openssl）は 1 以上、F4（依存なし）は 0
   t="$(run_tree "${f}/f3" offline)" || exit 2
   if [ "$(count_openssl_sys "${t}")" -lt 1 ]; then
@@ -502,10 +572,11 @@ selftest() {
     exit 1
   fi
 
-  log "selftest ok (F1-F12, F10b, F10c, F11c)"
+  log "selftest ok (F1-F12, F10b, F10c, F11c, F11d)"
 }
 
-cleanup() { rm -rf "${WORK}" 2>/dev/null || true; }
+# F11d の chmod 000 が残っていても消せるよう、先に権限を戻す。
+cleanup() { chmod -R u+rwx "${WORK}" 2>/dev/null || true; rm -rf "${WORK}" 2>/dev/null || true; }
 
 # scan_info <ラベル> <追加引数...>: 参考の走査。失敗しても終了コードに影響させず警告だけ出す（A の合否を上書きしない）。
 scan_info() {
@@ -558,6 +629,14 @@ main() {
     exit 2
   fi
 
+  # R4 の設定の読み取りは、最初の Cargo（selftest）より前に済ませる。Cargo が include の参照先を読んだ後に拒否する順番を避け、
+  # include・読み取り不能・不正な TOML は Cargo を起動する前に検査不能（2）で止める。合否の判定とログは selftest・R1〜R3 の後（下）。
+  s_env="$(count_static_env)" || exit 2
+  s_cfg="$(count_static_config "${ROOT_DIR}")" || {
+    log "error: cannot read .cargo config; cannot inspect"
+    exit 2
+  }
+
   # 偽 crate は repo の target/ の下に作る。誰でも書ける /tmp の下だと、親の .cargo/config.toml
   # （build.rustc-wrapper 等）を別の利用者に置かれて任意のコードが実行され得るため。
   # 準備の失敗は検査不能（2）。set -e の 1 では「違反」と区別できないため明示する。
@@ -594,12 +673,7 @@ main() {
     exit 1
   fi
 
-  # R4: 静的リンクを強いる設定（検査の環境変数と repo の .cargo/config*）。
-  s_env="$(count_static_env)" || exit 2
-  s_cfg="$(count_static_config "${ROOT_DIR}")" || {
-    log "error: cannot read .cargo config; cannot inspect"
-    exit 2
-  }
+  # R4: 静的リンクを強いる設定。読み取り（検査不能の判定）は最初の Cargo の前に済ませてあり、ここでは合否だけを判定する。
   log "scan A R4: $((s_env + s_cfg))"
   if [ $((s_env + s_cfg)) -ne 0 ]; then
     log "FAIL: static OpenSSL link forced (DPOL-13)"

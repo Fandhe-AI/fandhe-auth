@@ -36,6 +36,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 ## 暗号
 
 - 暗号・署名・乱数・パスワードハッシュ・WebAuthn の検証は保守されている既存 crate に任せ、自前の実装 0 件（DPOL-4・DPOL-47）。
+- 自前の実装 0 件は `scripts/check-crypto-primitives.sh`（`make crypto-scan`）で発見的に走査する（LIB-21・TASK-715 3/4）。合否は本番メンバーだけで、試験専用 crate は参考の警告にとどめ、含めるかは人が決める。規則は人のレビューの代わりにならない。
 - JWT の署名・検証は `aws-lc-rs` か `ring`（DPOL-10・DPOL-11）。
 - `jsonwebtoken` は `aws_lc_rs` feature だけ。`rust_crypto` は `rsa` を引くので有効にしない（DPOL-17）。
 
@@ -94,11 +95,13 @@ cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確か�
 ```bash
 # advisory DB の取得（実行の前に 1 回だけ。DPOL-33）。取得日・DB の版は記録しない（下の記録の項。TASK-679 で決める）。失敗の扱いは下の取得の失敗の項
 cargo deny fetch
-cargo audit --file Cargo.lock   # cargo-audit の DB の取得を兼ねる（QP-2 の手順）
+scripts/check-audit-config.sh fetch         # 取得を兼ねる先行実行の前の段（CARGO_HOME は未設定か空。非 0 なら流さない）
+cargo-audit audit --file Cargo.lock         # cargo-audit の DB の取得を兼ねる（QP-2 の手順。alias で覆われないよう直接起動する）
 
 # 取得なしで流す（DPOL-33・DPOL-34）
 cargo deny --locked check --disable-fetch   # advisories・bans・licenses・sources
-cargo audit --no-fetch --file Cargo.lock    # cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
+scripts/check-audit-config.sh no-fetch      # 設定が無いことと advisory-db の状態（非 0 なら cargo-audit を流さない。入口は cargo-audit audit を直接起動する）
+cargo-audit audit --no-fetch --file Cargo.lock   # cargo-audit 0.22.2 には --locked が無いため、下の git diff で書き換えが無いことを確かめる
 git diff --exit-code Cargo.lock      # 意図しない Cargo.lock の書き換えが無いこと（依存を足した変更では差分を目視で確かめる）
 
 # PROD_FEATURES: 本番のビルドで有効にする feature を `<crate>/<feature>` のカンマ区切りで明示する（無ければ空）。--all-features は使わない
@@ -111,8 +114,10 @@ cargo tree --locked --workspace -e normal,build --target all --features "$PROD_F
 ```
 
 - advisory DB の記録（DPOL-33）: DPOL-33 は Should で、使った DB の commit と取得日の両方の記録を求めるが、今は記録していない。取得日も DB の版も「未記録（TASK-679 で決める）」と書く。取得の開始ログ（`Fetching advisory database from` 等）・終了コード・DB の HEAD・取得元との照合（`ls-remote` 等）は、どれも取得や DB の版の根拠にしない。記録の手順は TASK-679 で決める。
-- advisory DB の取得の失敗（DPOL-33）: `cargo deny fetch` は、非 0 で終わったとき、または出力に DB の取得の誤りがあるときに取得の失敗とする（終了コード 0 でも失敗し得るため、出力も読む）。取得の失敗を PR 本文に書き、cargo deny の advisories の結果を「実行失敗」とする（手元に残った DB で得た「検出なし」を参考結果に入れない）。`cargo audit --file Cargo.lock` は取得と監査を兼ね、advisory の検出でも非 0 で終わるため、終了コードだけで取得の失敗と読まない。出力に DB の取得の誤りがあるとき、または取得の誤りか検出かを出力から読み分けられないときに取得の失敗とし、取得の失敗を PR 本文に書き、cargo-audit の結果を「実行失敗」とする。非 0 の終了は、cargo-deny では取得の失敗の記録に使い、cargo-audit では出力と合わせて読む。どちらの道具でも、終了コード 0 や失敗の表示が無いことは取得の成功や DB の版の根拠にしない（上の記録の項。`dependency-auditor` Agent の Step 2 と同じ扱い）。
-- cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、すべて参考結果とする。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 の判定は未評価とする。読まれ得る設定ファイルの名前は未確認の例として、`deny.toml`・`.deny.toml`・`.cargo/deny.toml`・`audit.toml` がある（確かめ方は決めていない。親ディレクトリの設定を探すかも未確認）。
+- advisory DB の取得の失敗（DPOL-33）: `cargo deny fetch` は、非 0 で終わったとき、または出力に DB の取得の誤りがあるときに取得の失敗とする（終了コード 0 でも失敗し得るため、出力も読む）。取得の失敗を PR 本文に書き、cargo deny の advisories の結果を「実行失敗」とする（手元に残った DB で得た「検出なし」を参考結果に入れない）。`cargo-audit audit --file Cargo.lock` は取得と監査を兼ね、advisory の検出でも非 0 で終わるため、終了コードだけで取得の失敗と読まない。出力に DB の取得の誤りがあるとき、または取得の誤りか検出かを出力から読み分けられないときに取得の失敗とし、取得の失敗を PR 本文に書き、cargo-audit の結果を「実行失敗」とする。非 0 の終了は、cargo-deny では取得の失敗の記録に使い、cargo-audit では出力と合わせて読む。どちらの道具でも、終了コード 0 や失敗の表示が無いことは取得の成功や DB の版の根拠にしない（上の記録の項。`dependency-auditor` Agent の Step 2 と同じ扱い）。
+- cargo-deny・cargo-audit の結果は、どの設定が読まれたかを確かめる手順が決まるまで（TASK-668・TASK-679）、すべて参考結果とする。DPOL-18・DPOL-20・DPOL-21・DPOL-22・DPOL-24・DPOL-25・DPOL-33・DPOL-34 の判定は未評価とする。cargo-deny が読まれ得る設定ファイルの名前は未確認の例として、`deny.toml`・`.deny.toml`・`.cargo/deny.toml` がある（確かめ方は決めていない。親ディレクトリの設定を探すかも未確認。TASK-668）。
+  cargo-audit が読む設定は 0.22.2 の実測で確かめ、`scripts/check-audit-config.sh fetch|no-fetch`（`make audit-cfg`・`make audit-cfg-nofetch`）で「承認済みは無し」と DB の置き場を検査する（暫定。DPOL-34・TASK-679）。実測: `<cwd>/.cargo/audit.toml` が読まれ、無いときに限り `$CARGO_HOME/audit.toml`（未設定・空なら `$HOME/.cargo/audit.toml`。相対パスの `CARGO_HOME` は cwd 基準）が読まれる。`<cwd>/audit.toml`・親ディレクトリ・`-f` の lockfile のディレクトリの `.cargo/audit.toml` は読まれない。設定の指定・無効化の CLI オプションは無い。壊れたシンボリックリンクは「無い」扱い、ディレクトリは誤りになる。版を上げたら測り直す。advisory DB の置き場は `$CARGO_HOME/advisory-db` で、どちらの段も `CARGO_HOME` が既定（未設定か空）であること、取得なしの前の段は DB が git の作業ツリー・advisory あり・変更なしであることを確かめる。HOME の差し替えと偽の git リポジトリ（作業ツリー・advisory 1 件以上・変更なしを満たす偽の DB）は防げない。DB の git の設定・index の細工（skip-worktree・assume-unchanged・sparse-checkout 等）も偽の git リポジトリと同じ種類で防げない（git status は `core.fsmonitor` を空にし、未追跡・無視されたファイルも出し、`--no-optional-locks` で流す）。限界として TASK-679 で追う（DPOL-33・DPOL-34）。
+  `.cargo/config.toml` の `[alias]` は `cargo audit` を覆い隠せるため、`cargo-audit audit` を直接起動する。
 - `cargo tree -i` は一致が無いとき `error: package ID specification ... did not match any packages` を出し、終了コードは
   0 にならない（cargo 1.100.0 で 101 を確認）。対象が `Cargo.lock` にあっても指定した依存の種類・feature のグラフに無いときは、終了コード 0 で `nothing to print` を出す。`--workspace` を付けないと、ルートが virtual manifest でない場合にルートの package の木しか見ない。他の誤りでも非 0 になるので、終了コードだけで合否を決めず、出力の文言を確かめる。
   「一致なし」と読むのは、stderr を取得でき、指定した `-i` の対象（例: `rsa`）についての `did not match any packages` の診断だけのとき、

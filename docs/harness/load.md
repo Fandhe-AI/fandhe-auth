@@ -191,11 +191,16 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
 - 出典の ID は ASCII の英数字・`-`・`_`だけ・1〜64 文字。1 行に並べる数の上限を置く（仮置きで 8）。
 - 自由文の欄を作らない（値はすべて上のフィールド別の規則で検証する）。
 - 改行・制御文字・行区切り（U+2028・U+2029）を含む入力は、記録を作る時点で誤りにする（fail-closed）。黙って省かない。
-  - 値の行の `measured`・`test_condition`（型で塞げないもの）: `ComparisonValue::new` は、この 2 区分では整数の値が有ること・出典が空であることだけを検査する。
-    渡された数値が `RunEvidence` の実測から出たものか（別の実行・定数・外部の計測でないか）は、型では区別できない（値の行は `RunEvidence` と結び付けず、呼び出し元が渡す。区別する由来の欄も持たない）。
-    区別できるのは、`RunSession::run` が作る段階の結果の行（`run:`・`metric:`・`worst_run:` 等）で、時計を引数で受けない経路を通ったものだけである。
+  - 値の行の `measured`（型で塞いだもの。#6049）: 測定値の行は `ComparisonValue::measured` が `RunEvidence` の段階の集計
+    （成功の分布。指定の段階・回・指標〔`MeasuredSource`〕。単位は `ns` 固定）から導いたものだけになった。`ComparisonValue::new` は `measured` を
+    `ClassNotAllowed` で拒否し、任意の整数を測定値として渡す口は無い。行は導いた実行に結び付き、別の実行の `RunEvidence` で `LoadRecord::new` すると
+    `MeasuredFromOtherRun` で拒否する（識別子はプロセス内の通し番号で、記録には出さない）。残る限界は、`RunEvidence` 自体に下の信頼の境界の (1)〜(4)
+    がかかること、`RunEvidence` の複製は同じ実行として通ること、外で測った値を由来を区別して載せる形は無いこと（未決）である。
+  - 値の行の `test_condition`（型で塞げないもの）: `ComparisonValue::new` は、この区分では整数の値が有ること・出典が空であることだけを検査する。
+    渡された数値が条件の実際の設定から出たものかは、型では区別できない。
+    段階の行（`run:`・`metric:`・`worst_run:` 等）は、時計を引数で受けない経路を通ったものだけである。
     ただし段階の行にも、下の信頼の境界の (1)〜(4)（閉包と申告の一致・測定の条件・実行の記録との結び付け・機材の条件）がかかる。
-    値の行の `class=measured` は「呼び出し元が測定値として渡した」という印で、真正性の証明ではない。記録が本物か・値の行の由来が正しいかの判定は人が行う（`ACPT-7`）。
+    記録が本物か・値の行の由来が正しいかの判定は人が行う（`ACPT-7`）。
     記録を repo に commit する場所と、人のレビューの手順は未定（人が決める）。
     ハーネスの中に、測定値を要件の値・初期値へ上げる経路は無い（規則 4）。要件の値・初期値は承認の手順が決まるまで常に拒否する（TASK-12・#111）。
   - 記録の出力先（`SECR-23`・`AAUD-30`）: `write_new` の出力先は呼び出し元が渡す追跡ツリーの外で、`make secret-scan`（追跡ファイルの走査）の対象に入らない。
@@ -206,15 +211,15 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
     64 バイト以下の英数字・base64url・16 進の秘密値は形では止められない。各欄の語彙・列挙・整数の検査が止めるのは、固定語彙の外の名前と、列挙・整数の外の値である。
     区間名・`ValueName`・`RefId` の語彙は crate の固定の定数（`RECORD_INTERVALS`・`VALUE_NAMES`・`REF_IDS`。中身は仮置きで人が確認する）で、記録に書く名前を渡す入力から独立している。
     呼び出し元は語彙を足せず（語彙を受ける引数・feature・環境変数を作らない）、値の名前・出典はコンストラクタ（作る時点）で形式検査（文字種・長さ。出典は予約語の拒否も）を通したうえで固定語彙との完全一致だけを受け付け、語彙にない文字列を拒否する（入力の由来は見ない。記録に載る名前と出典は固定語彙に限られる）。区間名は文字種と長さが妥当なら `IntervalName::new` が受理し、固定語彙との照合は `run_stages` が最初の回を開始する前に行って拒否する（語彙外の 16 進の文字列の拒否は `registry_hex_strings_outside_vocabulary_are_rejected_as_names`。#6038）。
-    語彙に足すのは人で、PR のレビューで決める（仮置き。[未決・人の確認待ち](#未決人の確認待ち)の「9/10 の固定語彙」の項を参照）。残る限界は、64 バイト以下の秘密値が名前以外の欄に流れる経路があれば形の網では止まらないこと、署名鍵の秘密値が登録簿の外であること（`TODO(TASK-500)`・`TASK-518`）。
+    語彙に足すのは人で、PR のレビューで決める（仮置き。[未決・人の確認待ち](#未決人の確認待ち)の「9/10 の固定語彙」の項を参照）。残る限界は、64 バイト以下の秘密値が名前以外の欄に流れる経路があれば形の網では止まらないこと、実環境の走査と、形の一覧から独立した固定ベクトルでの照合が未実施であること（`TODO(TASK-500)`・`TASK-518`・#6039）。
     整形は上限付きの書き込み先に行い、全体の 1 MiB を超えた時点で打ち切って `Format` にする（上限ちょうどは受理。拒否する場合も上限を大きく超える確保をしない）。
-    漏れは照合の試験（`tests/trial_run.rs`）で確かめる。実行時に作った登録簿（乱数の値と、stub の設定の 4 欄に入れた文字列の全文）の各値を、生・base64・base64url・16 進の形で負荷の記録と it-run の記録の全文に掛け、一致と JWT の形の語が 0 件であること、混ぜた場合に混ぜた形そのものが形ごとに検出されること（合計の件数では見ない。陽性対照。`write_new` を通る名前の経路は上の拒否の試験で塞ぐ）、符号化が RFC 4648 の例と一致することを見る。
+    漏れは照合の試験（`tests/trial_run.rs`）で確かめる。実行時に作った登録簿（乱数の値、stub の設定の 4 欄に入れた文字列の全文、試験の側で作った署名鍵の秘密値〔PKCS#8 の全文と秘密のスカラー `d`〕）の各値を、生・base64・base64url・16 進の形で負荷の記録と it-run の記録の全文に掛け、一致と JWT の形の語が 0 件であること、混ぜた場合に混ぜた形そのものが形ごとに検出されること（合計の件数では見ない。陽性対照。`write_new` を通る名前の経路は上の拒否の試験で塞ぐ）、符号化が RFC 4648 の例と一致することを見る。
     これは `AAUD-30`・`AAUD-31` の方法をハーネスの出力に当てはめたもので、`AAUD-30`・`AAUD-31` を満たしたものではない。実環境の走査は Hub（`AOPS-73`）が持つ。
     試験が見る範囲は次のとおり。(1) stub の設定の 4 欄から負荷の記録へ値が流れないことの回帰の検出。(2) 設定が it-run の記録に入る口（`with_hub_stub_record`）を通して書いた it-run の記録に、登録簿の値が現れないことの確認。
     it-run の記録に入るのは欄名（`&'static str`）と印（`ValueMark`）だけで、設定の値が届く経路は無いため、it-run の記録側の陽性対照は置かない（照合の検出力は負荷の記録側の陽性対照で見る）。
     JWT の形は `eyJ….eyJ….` の部分列を、語の頭に限らず本文のどこでも数える。
-    署名鍵（`AssertionSigningKey`）の秘密値は登録簿に入れておらず対象外で、未確認のまま持ち越し。
-    追跡先: 秘密値を登録簿に入れて走査するのは TASK-500（#1391。`AAUD-30`・`AAUD-31`）、出力の面の秘密値の扱いは TASK-518（#1407。`SECR-23`）。
+    (3) 主試験の it-run の記録と再書き出しも、読み戻して登録簿に掛ける（書き出した 3 種のファイルをすべて照合する。署名鍵の秘密値は `ring` で試験の側が作り、hub-stub の API は変えない。#6050）。
+    追跡先: 実環境の走査と固定ベクトルでの照合は TASK-500（#1391。`AAUD-30`・`AAUD-31`・#6039）、出力の面の秘密値の扱いは TASK-518（#1407。`SECR-23`）。
     出力先を追跡ツリーの中に置いて commit するなら、通常の `secret-scan` の対象になる。
 - 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない。誤りの文言は英語（`D-2026-11-20-13`）。
 - 設定の値・接続情報・ポート・パス・ホスト名・パスワードは記録に入れない（`SECR-11`・`SECR-23`）。環境変数は読まず、設定ファイルを自分では探さない（`DPOL-32`）。
@@ -308,7 +313,7 @@ judgment:
 - 本計測で対象が `Excluded` を返したら `InvalidOutcome`（除外は生成器だけが付ける）。
 - 停止の規則: 誤りの記録と停止は枠の取得と同じロックで 1 つの代入として確定する（#5984）。記録の後に新しく取得できる枠は 0 件（保証は枠の取得だけ）。記録より前に取得済みの枠の試行は止めない。記録時点で未完了の試行は各ワーカー最大 1 件（設定の並行数が上限）。対象の閉包の panic はワーカー内の `catch_unwind` が捕捉してその場で記録する。join で初めて記録されるのは、ワーカー内で捕捉されずにスレッドを終了させた panic（対象の閉包の外）だけで、検出・記録までに他のワーカーが新しく取得して進める件数の累計は上限を保証しない。立てたワーカーを join してから最初の誤りを返す。panic の中身・`io::Error` の文言は載せない。
 - 不変条件: 実測の最大同時実行数 <= 設定の並行数（2/10 の 4 の候補を閉ループで採る）、`executed == trials_planned`、`excluded == warmup`（違えば `CountMismatch`）。
-- ハーネスの上で動くこと: 試験（dev）だけ `it-harness`・`hub-stub` に依存する（`tests/on_it_harness.rs`。Docker・ネットワークなし）。許可表の行は人の確認待ち。
+- ハーネスの上で動くこと: 試験（dev）だけ `it-harness`・`hub-stub`・`secret`・`ring` に依存する（`tests/on_it_harness.rs`。Docker・ネットワークなし）。許可表の行は人の確認待ち。
 - 記録の出力（`fandhe-auth-load-record/1`）を担当する段は未決のまま持ち越す。
 
 ## 負荷の対象の呼び出し（6/10）
@@ -402,18 +407,19 @@ judgment:
 名前・語・上限はすべて仮置きで、人が確認する。合否は付けない（`ACPT-7`）。
 
 - API: `RunSession::new`（実行の記録のファイル名・起動時刻・機材と構成を受け、作る時点で整合を検査する）、`RunSession::run`（呼び出す構成要素を呼ぶ前に申告させて検査し、その場で `run_stages` を回して `RunEvidence` を返す。申告そのものは記録に残さない。時計は中で標準の単調な時計を作り、引数で受けない。文脈は消費する）、`LoadRecord::new`（`RunEvidence`・記録時刻・比べる値を受ける）、`LoadRecord::write_new(dir)`、
-  `ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`ApprovedValues`・`LoadRecordError`。`RunEvidence` を段階の結果から作る公開の口は無い（下の「信頼の境界」）。
+  `ComparisonValue`・`MeasuredSource`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`ApprovedValues`・`LoadRecordError`。`RunEvidence` を段階の結果から作る公開の口は無い（下の「信頼の境界」）。
 - 行の順: `format:` → `run_record_file:` → `run_started_at:` → `recorded_at:` → 条件 → 段階 → `value:` → `judgment:`（形式の 7 の見本どおり）。`judgment:` は常に空で、ハーネスは書かない。
 - 区分の規則は作る時点で検査する（fail-closed）。`requirement`・`initial` は、承認一覧の置き場・形・承認の手順が決まるまで（TASK-12。追跡は #111）常に `ClassNotAllowed` で拒否する（出典・数値・`ApprovedValues` の照合より先で、値を通さない。引数の `ApprovedValues` は使わない）。`ApprovedValues::load(path)` は承認一覧のファイル〔1 行 `項目|区分|数値|単位|出典,出典`。通常のファイルだけ・64 KiB まで〕を形式の検査つきで読む口として残す。フィールドは非公開で、作る口はこの `load` と空の一覧〔`Default`〕だけ、本文の文字列から作る公開の口はない〔書式の解析は非公開〕。読めなければ `ApprovedFile`。出典 ID は `RefId::new` と同じ形・予約語の検査を読み込み時に通し、満たさない行は `Format`。拒否する重複は 1 行の中の出典 ID だけで、同じ承認行を複数回書いても受理する。名前が同じで値・単位・出典が違う複数の行も受理する（今は照合に使わないため記録への影響は無い。照合を戻すとき〔TODO(TASK-12)・#111〕に、食い違う行を読み込みで拒否するかを決める）。照合を戻した後は、1 件と完全一致しなければ `NotInApprovedList` で拒否する（規則 4）。
   `poc_parameter` は比べる値として置かない（規則 5）ため `ClassNotAllowed` で拒否する、`undecided` は値なし、`external` は値なし・出典必須、
-  `test_condition`・`measured` は整数の値が必須で出典を受けず、行には固定の印（`harness_config`・`measured`）を出す。出典は 1 行 8 件まで・重複は誤り。
+  `test_condition` は整数の値が必須で出典を受けず、行には固定の印（`harness_config`）を出す。`measured` は `ComparisonValue::new` が常に `ClassNotAllowed` で拒否し（出典・数値の検査より先）、
+  `ComparisonValue::measured(名前, &RunEvidence, MeasuredSource)` が段階の集計から導いた行だけが `refs=measured` の印で載る（値なしは `ValueRequired`、範囲外の出どころは `SourceNotInRun`）。出典は 1 行 8 件まで・重複は誤り。
   ハーネスの中に測定値・既定値を要件の値へ上げる経路は作らない（要件の値・初期値は常に拒否する）。
 - 書き出し: `load-run-<起動時刻の秒>-<pid>-<通し番号>.txt`。無ければ `dir` を作る。隠し名の一時ファイルへ書ききってから、上書きなしの `hard_link` で最終名へ公開する
   （途中の失敗で不完全なファイルを完成品の名前で残さない。一時ファイルは作れたときだけ消しにいくが、削除の失敗は無視するため、失敗時は残りうる。名前が衝突して作れなかったときは既存のファイルを消さない）。乱数・環境変数・設定ファイルを使わない。出力先のファイルシステムはハードリンクに対応している必要がある（非対応だと `WriteFailed`）。
   利用条件: 出力先のディレクトリとその祖先は呼び出し元だけが変更できること。`create_new` の排他性は一時ファイルを開く時点だけで、書き込み後の `hard_link` はパスを引き直すため、他の利用者が書けるディレクトリでは「書ききった完成品だけを公開する」保証は成り立たない（検査済みと別のファイルを公開しうる）。「既存のファイルを上書きしない」は崩れない（`hard_link` は最終名が既にあれば `EEXIST` で失敗し `WriteFailed`）。一時ファイルの名前は予測できるため、他の利用者が書けるディレクトリでは名前を先に作られて `WriteFailed` になりうる（上書きではなく失敗で止まる）。
 - 入力の検査（仮置き。SECR-23）: `ValueName::new` は形式検査（文字種・長さ）を通したうえで、固定語彙 `VALUE_NAMES` に含まれる名前だけを受ける。`RefId::new` は形式検査（文字種・長さ）と予約語（`none`・`harness_config`・`measured`）の拒否を通したうえで、固定語彙 `REF_IDS`（spec の ID 等）に完全一致するものだけを受ける。入力の由来（人の入力か設定か）は検査しない。
   語彙は引数で受けず、固定語彙にない文字列は拒否される（入力の由来は検査しない。記録に載る名前は固定語彙に限られる）（6 の記録の出力先の段落。#6038・TASK-12）。語彙の中身は仮置きで、足すのは人。
-  `p99_target` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する（`AUDP-29`）。`requirement`・`initial` は出典に関係なく最初に拒否する。`external`・`test_condition`・`measured`・`poc_parameter` は、出典の件数〔9 件以上は `TooManyRefs`〕と重複〔`InvalidRef`〕の検査を通った場合に `ClassNotAllowed` になり、通らなければ先にそちらの誤りが返る。現在の語彙は `p99_target` だけのため、公開の口から記録できる比べる値の行は `p99_target` の `undecided` だけで、`external`・`test_condition`・`measured` の行は公開の口からは作れない（`ClassNotAllowed`。区分の規則自体は上のとおり保つ）。これらの区分の名前は、用途が決まったときに人がレビューして `VALUE_NAMES` へ足す（TASK-12）。`RunRecordFile` は生成元と同じ整数型で解析し、再整形した名前と一致しない名前（先頭ゼロ等）を拒否する。
+  `p99_target` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する（`AUDP-29`）。`requirement`・`initial`・`measured` は出典に関係なく最初に拒否する。`external`・`test_condition`・`poc_parameter` は、出典の件数〔9 件以上は `TooManyRefs`〕と重複〔`InvalidRef`〕の検査を通った場合に `ClassNotAllowed` になり、通らなければ先にそちらの誤りが返る。現在の語彙は `p99_target` だけのため、公開の口から記録できる比べる値の行は `p99_target` の `undecided` だけで、`external`・`test_condition`・`measured` の行は公開の口からは作れない（`ClassNotAllowed`。区分の規則自体は上のとおり保つ）。これらの区分の名前は、用途が決まったときに人がレビューして `VALUE_NAMES` へ足す（TASK-12）。`RunRecordFile` は生成元と同じ整数型で解析し、再整形した名前と一致しない名前（先頭ゼロ等）を拒否する。
   `RunRecordFile` の起動秒と `run_started_at` が違えば `RunSession::new` が `RunStartMismatch`。申告した構成要素が空、または測定の条件で起動していなければ、`RunSession::run` が対象を 1 回も呼ばずに `InvalidRunEvidence`（stub を申告した実行に stub の起動を載せない構成が付く組を作らない。stub の `note:` は条件の `Display`）。段階の実行の誤りは `Stage`。時刻は 9999-12-31T23:59:59Z（RFC 3339 の 4 桁年）まで、超えると `TimeOutOfRange`。
   値の行の違反の理由は固定の列挙 `InvalidValueReason` で持つ（`&'static str` を公開しない）。
 - 時刻の RFC 3339 の整形は、通常の依存を 0 に保つため it-harness の `UtcTimestamp` と同じ変換を `record` に重複して持つ。
@@ -459,7 +465,7 @@ judgment:
 3. 起動済みの構成（`composition_record`）を写して `ComponentConditions` を作り、`MeasurementConditions::detect` で測定の条件を作る（閉ループ）。
 4. `TargetSpec`（対象名・区間名）と `StagePlan::new(stages, by, limits)`（段階の `StageConfig`・比べる指標・`StageLimits`）を組む。区間名は crate の固定の語彙 `RECORD_INTERVALS` から選び、呼び出し元は語彙を渡せない。型で選ばせるのではなく、語彙の外の区間名は手順 5 の `.run(..)`（中の `run_stages`）が最初の回の前に `InvalidPlan`（`LoadRecordError::Stage`）で拒否する。語彙に足すのは人で、PR のレビューで決める（仮置き。[未決・人の確認待ち](#未決人の確認待ち)の「9/10 の固定語彙」の項を参照）。上限は実行環境に合わせて呼び出し元が明示する。既定値は無い。
 5. `RunSession::new(..)?`（`Result<RunSession, LoadRecordError>`）で実行を作り、`.run(申告する構成要素, &spec, &plan, 呼び出しの閉包)?`（これも `Result`）で回して `RunEvidence` を取り出す。見本は `.unwrap()` で取り出している。閉包は `CallResult` を返す。申告と閉包が実際に呼ぶ相手の一致は呼び出し元の責任で、見本は stub 側の呼び出し件数で確かめている。
-6. 比べる値は `ComparisonValue` で渡す。性能の目標は持ち越しなので `undecided` で渡す（`AUDP-29`）。`requirement`・`initial` は今は常に拒否される。
+6. 比べる値は `ComparisonValue` で渡す。性能の目標は持ち越しなので `undecided` で渡す（`AUDP-29`）。測定値を値の行に出すなら `ComparisonValue::measured` で `RunEvidence` から導く（今の語彙の名前では作れない）。`requirement`・`initial` は今は常に拒否される。
 7. `LoadRecord::new(&evidence, 記録時刻, 値)` を作り、`write_new(dir)` で書く。出力先 `dir` とその祖先は呼び出し元だけが変更できること（9/10 の利用条件）。
 8. 構成要素を `stop()` で止める。
 
@@ -511,7 +517,7 @@ judgment:
 - 区分の追加分（試験の条件・測定値・未決・他所有者の値）
 - 閉ループか開ループか（5/10）: 閉ループ（固定数のワーカー）を仮置きで採った。開ループは作っていない。人が確認する
 - 5/10 の仮置き: 並行数の上限 1024、暖機の段と本計測の段を分けること、本計測での `Excluded` の拒否、停止の順序（記録より前に枠を取り終えた試行は走り切る。#5984）、API の名前（`generate`・`run_closed_loop`・`LoadConfig`・`LoadRun`・`LoadError`）
-- 許可表の行: `fandhe-auth-load-harness` → `fandhe-auth-it-harness`・`fandhe-auth-hub-stub` の試験（dev）の辺（5/10）
+- 許可表の行: `fandhe-auth-load-harness` → `fandhe-auth-it-harness`・`fandhe-auth-hub-stub`・`fandhe-auth-secret` の試験（dev）の辺（5/10）
 - 記録への偽の行の差し込みへの対策（下の「結果の記録の形式」の 6 で扱った。内容は人が確認する）
 - 結果の記録の形式の型と出力の実装の置き場。3/10（#114）で別の crate `crates/load-harness`（仮称）に計測の部品を置いた。
   `it-harness` の crate doc が `TASK-12` を別のハーネスとしているため、`it-harness` の module にはしない。crate の追加・名前・許可表の行は人が決める
@@ -537,5 +543,7 @@ judgment:
   API の名前（`record`・`LoadRecord`・`ComparisonValue`・`ValueClass`・`ValueUnit`・`ValueName`・`RefId`・`RunRecordFile`・`LoadRecordError`）
 - 「小さな試し実行が終わり記録が出る」の読み: `make test` の中の試験でファイルが出ること（人が確認する。受け入れ条件を満たしたかの判定も人）
 - 承認一覧のファイルの置き場・形・承認の手順（repo に commit し人がレビューで承認する、という担保の具体）: 未定。人が決める（TASK-12。追跡は #111）。決まるまで `requirement`・`initial` は常に拒否する。現時点で repo に承認一覧のファイルは無い（性能の目標値は持ち越し。`AUDP-29`）
+- #6049 の仮置き: `MeasuredSource` の形（成功の分布だけ・単位は `ns` 固定）、実行の識別子をプロセス内の通し番号にしたこと、誤りと理由の名前（`MeasuredFromOtherRun`・`SourceNotInRun`）、
+  値の行に出どころ（指標・段階・回）を出さないこと（出すなら形式の版に関わる）。外で測った値を記録の上で由来を区別して扱うか（区分の語と形式の版）は未着手で、人が決める
 - 9/10 の追加の仮置き: `RunSession`（文脈を作ってから段階を回す形）、`InvalidValueReason::NotInApprovedList` の名前、`O_NONBLOCK` を置く対象の範囲と、置かない対象での開く前の種別の検査
 - 9/10 の固定語彙（#6038。仮置き）: 区間名 `RECORD_INTERVALS`（`client_response`・`stub_jwks`）、値の名前 `VALUE_NAMES`（`p99_target`）、出典 `REF_IDS`（`AUDP-29`・`TASK-15`・`TASK-21`・`D-2026-10-17-36`）の中身と、語彙を足す手順（足すのは人。PR のレビュー）、整形の上限（1 MiB。上限ちょうどは受理）を整形中に確かめる作り（`Format` で打ち切る）。

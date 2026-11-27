@@ -126,6 +126,18 @@ if [ -n "${EXTRA_LIST_ENTRY:-}" ]; then
     exit 0
   fi
 fi
+# ORDER_U0_FILE: -U0 の呼び出し（本文の差分）にだけ `-O<file>` を足し、区画の並びを一覧（--name-only）の並びからずらす。
+# diff.orderFile の設定は --name-only にも効くため、一覧と区画の不一致は設定では作れない（#6144）
+if [ -n "${ORDER_U0_FILE:-}" ]; then
+  has_u0=0
+  for arg in "$@"; do
+    [ "${arg}" = "-U0" ] && has_u0=1
+  done
+  if [ "${has_u0}" -eq 1 ]; then
+    "${REAL_GIT}" -c "diff.orderFile=${ORDER_U0_FILE}" "$@"
+    exit $?
+  fi
+fi
 # MAX_GIT_ARG_BYTES: 各引数の長さ + 1 + ポインタ 8 バイトの合計が上限を超える呼び出しを、macOS の E2BIG の代わりに失敗させる（#6053）
 if [ -n "${MAX_GIT_ARG_BYTES:-}" ]; then
   arg_total=0
@@ -136,6 +148,27 @@ if [ -n "${MAX_GIT_ARG_BYTES:-}" ]; then
     echo "git shim: argument list too long" >&2
     exit 126
   fi
+fi
+# TMP_MARKER: git の呼び出しの直前に、検出器の一時ディレクトリ（TMP_MARKER_DIR/secret-scan.*）のファイルに目印があれば TMP_MARKER_LOG へ 1 行足す
+# （登録名の下の本文が除外の前に一時領域へ書かれないことの確認用。#6143）
+if [ -n "${TMP_MARKER:-}" ]; then
+  if grep -rlF -- "${TMP_MARKER}" "${TMP_MARKER_DIR}"/secret-scan.* > /dev/null 2>&1; then
+    echo seen >> "${TMP_MARKER_LOG}"
+  fi
+fi
+# FAIL_GIT_NTH_ARG を含む呼び出しの FAIL_GIT_NTH 番目だけを失敗させる（数えは FAIL_GIT_NTH_COUNTER に 1 行ずつ追記。#6143）
+if [ -n "${FAIL_GIT_NTH_ARG:-}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "${FAIL_GIT_NTH_ARG}" ]; then
+      echo x >> "${FAIL_GIT_NTH_COUNTER}"
+      nth_now="$(wc -l < "${FAIL_GIT_NTH_COUNTER}" | tr -d ' ')"
+      if [ "${nth_now}" = "${FAIL_GIT_NTH}" ]; then
+        echo "git shim: forced failure on call ${nth_now}" >&2
+        exit 128
+      fi
+      break
+    fi
+  done
 fi
 for arg in "$@"; do
   if [ "${arg}" = "${FAIL_GIT_ARG:-}" ]; then

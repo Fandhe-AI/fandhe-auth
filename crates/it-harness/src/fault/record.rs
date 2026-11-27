@@ -116,6 +116,25 @@ pub struct FaultEvent {
     pub log_pos: Option<usize>,
 }
 
+/// 注入の段 1 つ（種類と相）。基準線と注入ありで同じ並びを持つかの照合に使う（TASK-13 の 7/8）。
+/// 時刻・位置を持たない点なので、基準線でも積める（事象ではない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultStep {
+    pub kind: FaultKind,
+    pub phase: FaultPhase,
+}
+
+/// [`FaultTimeline::inject`] の誤り。値・パスを載せない（SECR-11・SECR-23）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectError<E> {
+    /// 注入の操作自体の誤り（記録が済んでいれば記録は残る）。
+    Op(E),
+    /// 段の宣言の検査（パラメータ・解除の対応）に落ちた。何も積んでいない。
+    Record(FaultRecordError),
+    /// 操作が積んだ事象が宣言した段と一致しない（fail-closed。積まれた事象は記録に残る）。
+    Mismatch,
+}
+
 /// 事象を積む入口。`Instant` の原点と開始時刻を持つ。
 ///
 /// `Clone` は実装しない。複製すると事象列と開いている注入の記録が分かれ、複製側の解除が元に反映されないため
@@ -131,6 +150,10 @@ pub struct FaultTimeline {
     origin: Instant,
     events: Vec<FaultEvent>,
     open: Vec<FaultKind>,
+    /// 注入の段の並び。注入ありは操作が積んだ事象と照合した段、基準線は宣言だけの段（事象は積まない）。
+    points: Vec<FaultStep>,
+    /// 基準線で宣言した段の、解除の対応を確かめるための開いている一覧（`open` とは別。`unreleased` に数えない）。
+    shadow_open: Vec<FaultKind>,
 }
 
 /// Hub の stub の事象は公開の直接記録で積ませない（注入器を通さない確定を作らない。TASK-13 の 5/8）。
@@ -165,7 +188,79 @@ impl FaultTimeline {
             origin,
             events: Vec::new(),
             open: Vec::new(),
+            points: Vec::new(),
+            shadow_open: Vec::new(),
         })
+    }
+
+    /// 注入の段を、実行の種別で分岐せずに通す（TASK-13 の 7/8）。同じ本体を基準線と注入ありで流せるようにする。
+    ///
+    /// - 注入あり: `op` を呼び、積まれた事象が `steps` と同じ数・同じ順・同じ (種類, 相) かを確かめて、段を残す。
+    ///   `op` が記録の後で失敗しても（記録は事実なので）段に数え、`Op` で返す。
+    /// - 基準線: `op` を呼ばない。`steps` へ注入ありの記録と同じ検査（パラメータ・一回きりの事象の解除・対応する
+    ///   `Applied` の無い解除）を掛け、通れば段だけを残して `Ok(None)` を返す。事象は積まない（`EventsInBaseline` は変えない）。
+    ///
+    /// # Errors
+    /// 空の `steps` と検査落ちは `Record`（何も積まない）、宣言と積まれた事象の食い違いは `Mismatch`、`op` の失敗は `Op`。
+    pub fn inject<T, E>(
+        &mut self,
+        steps: &[FaultStep],
+        op: impl FnOnce(&mut FaultTimeline) -> Result<T, E>,
+    ) -> Result<Option<T>, InjectError<E>> {
+        if steps.is_empty() {
+            return Err(InjectError::Record(FaultRecordError::InvalidParam));
+        }
+        if self.mode == RunMode::Baseline {
+            let mut shadow = self.shadow_open.clone();
+            for st in steps {
+                st.kind
+                    .validate()
+                    .map_err(|_| InjectError::Record(FaultRecordError::InvalidParam))?;
+                match st.phase {
+                    FaultPhase::Applied => {
+                        if !st.kind.is_instantaneous() {
+                            shadow.push(st.kind);
+                        }
+                    }
+                    FaultPhase::Released => {
+                        if st.kind.is_instantaneous() {
+                            return Err(InjectError::Record(
+                                FaultRecordError::ReleaseOfInstantaneous,
+                            ));
+                        }
+                        let i = shadow
+                            .iter()
+                            .position(|k| *k == st.kind)
+                            .ok_or(InjectError::Record(FaultRecordError::ReleaseWithoutApply))?;
+                        shadow.remove(i);
+                    }
+                }
+            }
+            self.shadow_open = shadow;
+            self.points.extend_from_slice(steps);
+            return Ok(None);
+        }
+        let before = self.events.len();
+        let result = op(self);
+        let matched = self.events.len() - before == steps.len()
+            && self.events[before..]
+                .iter()
+                .zip(steps)
+                .all(|(e, st)| e.kind == st.kind && e.phase == st.phase);
+        if !matched {
+            // 1 件も積まずに失敗した操作は、宣言と食い違うのではなく操作の失敗として返す。
+            if self.events.len() == before
+                && let Err(e) = result
+            {
+                return Err(InjectError::Op(e));
+            }
+            return Err(InjectError::Mismatch);
+        }
+        self.points.extend_from_slice(steps);
+        match result {
+            Ok(t) => Ok(Some(t)),
+            Err(e) => Err(InjectError::Op(e)),
+        }
     }
 
     /// この実行の識別（プロセス内で一意）。注入器を単一の実行へ結ぶために使う。
@@ -371,6 +466,8 @@ impl FaultTimeline {
     /// 検査（`check_finishable`）を通した後の確定。
     pub(crate) fn into_record(self, recorded_at: UtcTimestamp) -> FaultRecord {
         FaultRecord {
+            run_id: self.run_id,
+            points: self.points,
             mode: self.mode,
             started_at: self.started_at,
             recorded_at,
@@ -400,6 +497,8 @@ impl fmt::Debug for FaultFinishFailure {
 /// 障害注入の記録。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultRecord {
+    run_id: u64,
+    points: Vec<FaultStep>,
     mode: RunMode,
     started_at: UtcTimestamp,
     recorded_at: UtcTimestamp,
@@ -418,19 +517,34 @@ impl FaultRecord {
         &self.events
     }
 
+    /// 注入の段の並び（[`FaultTimeline::inject`] で通した分）。基準線と注入ありで同じ並びかを照合する。
+    /// 記録の形式（`Display`）には出さない。
+    pub fn injection_points(&self) -> &[FaultStep] {
+        &self.points
+    }
+
+    /// 元の実行の識別（プロセス内で一意）。組の照合に使う。
+    pub(crate) fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
     /// 解除しなかった注入の件数。
     pub fn unreleased_count(&self) -> usize {
         self.unreleased
     }
 
     /// 新規のファイルへ書き出す。`RunRecord::write_new` と同じ約束（無ければ `dir` を作る・上書きしない・
-    /// 乱数を使わないファイル名）。
+    /// 乱数を使わないファイル名）。名前に実行の種別（`baseline`・`fault`）を入れ、基準線と注入ありの記録を分ける（7/8）。
     pub fn write_new(&self, dir: &Path) -> Result<PathBuf, FaultRecordError> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         std::fs::create_dir_all(dir).map_err(|_| FaultRecordError::WriteFailed)?;
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let mode = match self.mode {
+            RunMode::Baseline => "baseline",
+            RunMode::Fault => "fault",
+        };
         let name = format!(
-            "it-fault-{}-{}-{n}.txt",
+            "it-fault-{mode}-{}-{}-{n}.txt",
             self.started_at.unix_seconds(),
             std::process::id()
         );
