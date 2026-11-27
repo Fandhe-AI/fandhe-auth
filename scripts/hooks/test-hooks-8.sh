@@ -595,10 +595,10 @@ else
   fail "secret-scan: HEAD moved during the last index path re-check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-# T17: stat の起動の失敗（診断が ENOENT で終わっても、終了コードが 126・127）は「不在」と確かめられたとは言えず 2（path_enoent_confirmed。#6047）
+# T17: stat の起動の失敗（診断が ENOENT で終わっても、終了コードが 126・127）と、接頭辞 "stat: " の無い診断（終了コード 1）は「不在」と確かめられたとは言えず 2（path_enoent_confirmed。#6047）
 # 起動の失敗は、不在の index を空として 0 を返す経路になり得る（fail-open）。直しを外すと 0 を返し、この試験が落ちる。
 t17_i=0
-for t17_kind in bad-interpreter exit-127 exit-2; do
+for t17_kind in bad-interpreter exit-127 exit-2 no-prefix; do
   t17_i=$((t17_i + 1))
   new_repo; stage src/app.txt "hello"
   stat17_dir="${work_dir}/stat17-shim-${t17_i}"
@@ -612,6 +612,10 @@ for t17_kind in bad-interpreter exit-127 exit-2; do
       ;;
     exit-2)
       printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\nexit 2\n' > "${stat17_dir}/stat"
+      ;;
+    no-prefix)
+      # 終了コードは 1 だが、診断に接頭辞 "stat: " が無い（stat 自身の診断とは言えない形）
+      printf '#!/bin/sh\necho "x: No such file or directory" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
   esac
   chmod +x "${stat17_dir}/stat"
