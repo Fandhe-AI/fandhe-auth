@@ -522,8 +522,9 @@ mkdir -p "${shim6}"
 printf '#!/bin/sh\nexit 1\n' > "${shim6}/readlink"
 chmod +x "${shim6}/readlink"
 rc=0
+# readlink が失敗する shim の下では、検出器は起動でき（走査は走る）、案内を作る側だけが所在を失う: 終了コードは検出器の検査不能（2）に固定する（1 との取り違えを見逃さない）
 PATH="${shim6}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -ne 0 ] && grep -qF -- "the files this run needed cannot be identified" "${work_dir}/out" \
+if [ "${rc}" -eq 2 ] && grep -qF -- "the files this run needed cannot be identified" "${work_dir}/out" \
   && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
   && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
   && ! grep -qF -- "${work_dir}" "${work_dir}/out"; then
