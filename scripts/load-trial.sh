@@ -15,8 +15,6 @@ source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 require_cmd cargo
-require_cmd grep
-require_cmd cut
 require_cmd awk
 require_cmd env
 cd "${ROOT_DIR}"
@@ -37,7 +35,9 @@ if [ "${rc}" -ne 0 ]; then
   echo "error: load trial test failed (the output is not printed; run the test directly to inspect)" >&2
   exit 1
 fi
-if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' <<<"${out}"; then
+# 捕捉した出力 ${out} は、here-string（一時ファイルへ書き出す実装がある。macOS 標準の bash 3.2 等。TMPDIR に依る）に渡さず、printf（組み込み）からパイプで awk へ渡す（SECR-23）。
+# 抽出・集計の awk は入力を最後まで読む（途中で終わる grep -q・head をパイプの途中に置かない。pipefail の下で SIGPIPE を失敗と取り違えない）。
+if ! printf '%s\n' "${out}" | awk '/^test result: ok\. 1 passed; 0 failed; 0 ignored;/ {found = 1} END {exit !found}'; then
   # 捕捉した出力は、同じ接頭辞で始まる本文の行を含みうるため一切再掲しない（固定の文言だけ。SECR-23）
   echo "error: expected exactly one passed load trial main test (0 ignored)" >&2
   exit 1
@@ -47,28 +47,34 @@ fi
 # 文字列は crates/load-harness/tests/trial_run.rs の PRINT_BEGIN・PRINT_END と一致させる
 begin_line="-----BEGIN LOAD RECORD BODY-----"
 end_line="-----END LOAD RECORD BODY-----"
-n_begin="$(grep -cFx -- "${begin_line}" <<<"${out}" || true)"
-n_end="$(grep -cFx -- "${end_line}" <<<"${out}" || true)"
+# 行全体の一致（固定文字列）の件数。入力が空でも 0 を出す
+count_line() {
+  printf '%s\n' "${out}" | awk -v l="$1" '$0 == l {n++} END {print n + 0}'
+}
+# 行全体の一致の最初の行番号。無ければ空
+first_line_no() {
+  printf '%s\n' "${out}" | awk -v l="$1" '$0 == l && !seen {print NR; seen = 1}'
+}
+n_begin="$(count_line "${begin_line}")"
+n_end="$(count_line "${end_line}")"
 if [ "${n_begin}" != "1" ] || [ "${n_end}" != "1" ]; then
   echo "error: expected exactly one checked load record body block (begin=${n_begin} end=${n_end}); nothing is printed" >&2
   exit 1
 fi
 # 開始行が終了行より前にあること（順序が逆なら区画として扱わない）
-begin_no="$(grep -nFx -- "${begin_line}" <<<"${out}" | cut -d: -f1)" || {
+begin_no="$(first_line_no "${begin_line}")"
+end_no="$(first_line_no "${end_line}")"
+if [ -z "${begin_no}" ] || [ -z "${end_no}" ]; then
   echo "error: could not locate the load record body block; nothing is printed" >&2
   exit 1
-}
-end_no="$(grep -nFx -- "${end_line}" <<<"${out}" | cut -d: -f1)" || {
-  echo "error: could not locate the load record body block; nothing is printed" >&2
-  exit 1
-}
+fi
 # 通ってよい側（開始 < 終了）から書き、比較そのものが誤ったときも失敗の側に落とす
 if ! [ "${begin_no}" -lt "${end_no}" ]; then
   echo "error: the load record body block is out of order (end before begin); nothing is printed" >&2
   exit 1
 fi
-block="$(awk -v b="${begin_line}" -v e="${end_line}" '$0 == e {on = 0} on {print} $0 == b {on = 1}' <<<"${out}")"
-if [ -z "${block}" ] || ! grep -q '^format: fandhe-auth-load-record/' <<<"${block}"; then
+block="$(printf '%s\n' "${out}" | awk -v b="${begin_line}" -v e="${end_line}" '$0 == e {on = 0} on {print} $0 == b {on = 1}')"
+if [ -z "${block}" ] || ! printf '%s\n' "${block}" | awk '/^format: fandhe-auth-load-record\// {found = 1} END {exit !found}'; then
   echo "error: the load record body block is empty or malformed; nothing is printed" >&2
   exit 1
 fi
