@@ -334,13 +334,16 @@ selftest() {
 # 参考の走査（合否に入れない）: --all-features。cargo の stderr は run_tree が捨てる。log の出力（件数・warn）は捨てない。
 info_all_features() {
   local dir="$1" pkg="$2" tree viol n=0
-  if tree="$(run_tree "${dir}" locked -p "${pkg}" --all-features)"; then
+  # run_tree の fail-closed 用の "cannot inspect" 行は本検査の中断を示す文言なので、参考の走査では捨てて下の warn に置き換える。
+  if tree="$(run_tree "${dir}" locked -p "${pkg}" --all-features 2>/dev/null)"; then
     viol="$(find_violations "${tree}")"
     [ -n "${viol}" ] && n="$(printf '%s\n' "${viol}" | wc -l | tr -d ' ')"
     log "scan ${pkg} all-features (info, not gated): ${n}"
     if [ "${n}" -ne 0 ]; then
       log "warn: forbidden dependency behind a non-default feature (${pkg}); confirm it is not a production dependency"
     fi
+  else
+    log "warn: scan ${pkg} all-features (info, not gated) could not run; result not affected"
   fi
   return 0
 }
