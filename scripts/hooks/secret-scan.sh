@@ -39,7 +39,9 @@
 #   だけを除外にする（PR が登録を削除した名前は走査される。対象の index に一覧が無ければ除外は 0 件）。
 #   PR が自分の変更で一覧に名前を足して検査を免れる経路を作らないため（CI は保護された main の検出器を使う。
 #   #51・#6000）。パスの形（*.lock・.claude/skills/・未登録の .agents/skills/ の下）では除外しない。
-#   名前は `[a-z0-9-]` の規則に合うものだけを通し、literal の pathspec にする（glob・`..`・`/` を持ち込ませない）。
+#   名前は `[a-z0-9-]` の規則に合うものだけを通す。除外は pathspec に載せず、ファイル名の一覧と全体の diff を 1 回ずつ読み、
+#   登録名の下の区画を落とす（引数の長さも git の起動回数も登録名・ファイルの数に依らない。#6053。登録を外した名前があるときは、
+#   その名前の数だけ追加の差分の引数と起動 1 回が増える。#6054）。
 #   検出器の skills-lock.json が無いときの挙動は 3 つ: (1) 別の checkout なら除外なしで全部走査する。(2) 同じ checkout なら
 #   HEAD の一覧を検証する（壊れている・通常ファイルでないときは 2。有効なら除外なしで走査する）。(3) 未作成ブランチ・
 #   HEAD に一覧が無いときは除外なし。一覧があるときは、ファイル全体を（正しい UTF-8 かを確かめてから）JSON として厳格に解析し、読めない・形が想定と違う場合は終了コード 2（fail-closed）。
@@ -57,7 +59,7 @@
 #   固定時にあった index が終了時に無いときも 2（登録 0 件でも）。index がシンボリックリンクなら、開始時も終了時も辿らず 2。
 #   終了時に index のパスを git の解決で取り直し、開始時と違えば（親ディレクトリのシンボリックリンクの付け替え等）2（#6034）。
 #   複写の前に通常ファイルであることを確かめる（FIFO 等は複写せず 2。確認と cp の間の差し替えは窓を狭めるだけで、止まり得る。0 は返さない）。
-#   外部コマンド（git・readlink・mktemp・rm・cp・head・wc・sleep・tr・cmp）は使う前に確かめ、欠けていれば 2。
+#   外部コマンド（git・readlink・mktemp・rm・cp・head・wc・sleep・tr・cmp・awk・cat）は使う前に確かめ、欠けていれば 2。
 # 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
 # 本文のバイト列は照合するが、圧縮・エンコードの展開と、複数行に分かれた値の復元はしない。
 # 保守的なヒューリスティックであり網羅的なスキャナの代替ではない。AAUD-30 の実行時の登録簿による走査とも別物。
@@ -114,7 +116,7 @@ fi
 # 確認より前に外部コマンドを呼ばない（`command -v` はシェルの組み込み）。lib.sh は検出器の複製だけで動くよう読み込まない。
 # 欠けたコマンドは「失敗の吸収」になり得る（例: 監視の sleep を起動できず、待ち時間なしで読み取りを打ち切る）。
 # 固定の文言は fd 4 へ出す（--summary でも出る）。使うコマンドを足したら、この一覧にも足す（試験が踏む経路の漏れを検出する。踏まない経路は検出できない）。
-for _c in git readlink mktemp rm cp head wc sleep tr cmp; do
+for _c in git readlink mktemp rm cp head wc sleep tr cmp awk cat; do
   if ! command -v "${_c}" > /dev/null 2>&1; then
     echo "secret-scan: required command not found on PATH: ${_c}; aborting" >&4
     exit 2
@@ -1016,21 +1018,24 @@ dropped_cand=" "
 # set_dropped: 候補（dropped_cand。空白区切り）のうち、除外（skill_names）に残っていない名前を dropped_names に集める。
 # 名前は parse_lock で `[a-z0-9-]` に検証済みのものだけ。重複は除く。
 set_dropped() {
-  local c in_skill
+  local c n skill_str=" " dropped_str=" "
   dropped_names=()
+  # 名前は `[a-z0-9-]` だけ（パターンの特殊文字を含まない）。除外の集合を 1 つの文字列にして case で引く
+  # （候補ごとに除外の全件を回すと、一覧が 64 KiB に近いとき 2 乗の時間になる）。
+  for n in ${skill_names[@]+"${skill_names[@]}"}; do
+    skill_str+="${n} "
+  done
   for c in ${dropped_cand}; do
-    in_skill=0
-    for n in ${skill_names[@]+"${skill_names[@]}"}; do
-      if [ "${n}" = "${c}" ]; then
-        in_skill=1
-      fi
-    done
-    if [ "${in_skill}" -eq 0 ]; then
-      case " ${dropped_names[*]+${dropped_names[*]}} " in
-        *" ${c} "*) ;;
-        *) dropped_names+=("${c}") ;;
-      esac
-    fi
+    case "${skill_str}" in
+      *" ${c} "*) continue ;;
+    esac
+    case "${dropped_str}" in
+      *" ${c} "*) ;;
+      *)
+        dropped_names+=("${c}")
+        dropped_str+="${c} "
+        ;;
+    esac
   done
 }
 load_skill_names() {
@@ -1181,11 +1186,22 @@ if [ "${mode}" = staged ] && [ "${head_resolved}" -eq 0 ]; then
   resolve_head
 fi
 
-# 本文の走査の pathspec。`-- .` で始めて空にしない（bash 3.2 は set -u で空配列を展開できない）。
-# 名前ごとに literal・top・末尾 `/`（名前ちょうどの blob・前方一致の別名は外さない）で外す。
-body_pathspec=(-- .)
+# 本文の走査の除外（#6053）。登録名ごとに exclude を並べると、引数の長さが登録名の数に比例し、一覧の上限（64 KiB）の内側でも
+# macOS の引数の上限（256 KiB）を超えて git を起動できなくなる。そこで pathspec では外さず、git の呼び出しは
+# 「ファイル名の一覧」と「全体の diff」の 2 回に固定する。除外は、一覧の n 番目のファイルと diff の n 番目の区画
+# （`diff --git` の行で始まる）が対応することを使い、登録名の下の区画を diff から落とす（引数の長さも起動の回数も登録名・ファイルの数に依らない。
+# 登録を外した名前があるときだけ、その名前の数だけ追加の差分の引数が増え、git の起動が 1 回増える）。
+# 登録名の集合は、名前ごとの変数 SKSET_<名前の '-' を '_' に直したもの> で持ち、所属の確認はパスごとの一覧検索にせず
+# 変数の参照 1 回で済ませる（パス数 × 登録名数のコストを避ける。json_seen_add と同じ方式）。名前は `[a-z0-9-]` の規則を
+# 通過済みで '_' を含まないため、'-' を '_' に直しても衝突しない。環境から継いだ SKSET_* は、組み込みの `${!SKSET_*}` で
+# 失敗の余地なく先に消す（残ると未登録の名前が除外されて秘密値を見逃す）。
+for sk_var in ${!SKSET_*}; do
+  unset "${sk_var}"
+done
+skill_count=0
 for name in ${skill_names[@]+"${skill_names[@]}"}; do
-  body_pathspec+=(":(exclude,literal,top).agents/skills/${name}/")
+  printf -v "SKSET_${name//-/_}" '%s' 1
+  skill_count=$((skill_count + 1))
 done
 # 登録を外した名前（#6054）は staged で HEAD との差分から外し、空の tree との差分（固定した index の全行）で別に走査する
 # （二重に数えない）。tracked・未作成ブランチは元々全行の差分なので使わない。
@@ -1195,7 +1211,8 @@ if [ "${mode}" = tracked ] || [ -z "${head_id}" ]; then
   dropped_names=()
 fi
 for name in ${dropped_names[@]+"${dropped_names[@]}"}; do
-  body_pathspec+=(":(exclude,literal,top).agents/skills/${name}/")
+  # 全行は下の別の差分（diff.dropped）で走査する。主の差分の同じファイルの区画は、diff.dropped に同じヘッダの区画があると
+  # 確かめられたものだけを落とす（登録名の除外の判定とは別。登録名の除外の集合 SKSET_* には足さない）。
   dropped_pathspec+=(":(literal,top).agents/skills/${name}/")
   dropped_count=$((dropped_count + 1))
 done
@@ -1206,6 +1223,9 @@ done
 #   --text: .gitattributes の binary・-diff 属性で本文が検査から外れるのを防ぐ（PR 内の属性変更で
 #     検査を回避させない。SECR-23）。NUL を含むファイルも本文を走査する（fail-closed）
 #   --no-renames: リネームを削除 + 追加として扱い、移動先の全行を走査する（除外パスからの移動も含む）
+#   core.quotePath=false: 非 ASCII のパスをヘッダで 8 進に引用させない（引用すると一覧の生のパスとヘッダが食い違い、
+#     登録名の下の区画を落とせない。設定が true でも false でも同じ形にする。制御文字・二重引用符・バックスラッシュは
+#     設定に依らず引用され、その区画は突き合わせで落とさず走査する）
 #   --src-prefix / --dst-prefix: diff.noprefix・diff.mnemonicPrefix でヘッダが `+++ b/` 以外になる
 # --tracked では空の tree と index の差分を取る。追跡ファイルの全行が追加行になるため、
 # 名前の検査・除外パス・解析ループ・規則の判定を staged モードと共用できる（解析の二重実装を作らない）。
@@ -1220,7 +1240,7 @@ fi
 scan_diff_base() {
   local base="$1"
   shift
-  g diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames \
+  g -c core.quotePath=false diff --cached --no-color --no-ext-diff --no-textconv --text --no-renames --submodule=short \
     --src-prefix=a/ --dst-prefix=b/ "${base}" "$@"
 }
 scan_diff() {
@@ -1247,7 +1267,7 @@ add_flagged() {
 
 # 1. .env 系ファイル。-z で受け、非 ASCII を含むパスが core.quotePath で引用符付き・
 #    8 進エスケープになり末尾一致しなくなるのを防ぐ。
-# リビジョンの後ろは `--` で区切る（リビジョンと同名のパスがあっても、引数をパスと取り違えて止まらない。本文の側は body_pathspec が `--` で始まる）。
+# リビジョンの後ろは `--` で区切る（リビジョンと同名のパスがあっても、引数をパスと取り違えて止まらない。本文の側は `-- .` で始める）。
 if ! scan_diff --name-only -z --diff-filter=ACMR -- > "${tmp_dir}/names"; then
   echo "secret-scan: failed to list files; aborting" >&4
   exit 2
@@ -1276,30 +1296,130 @@ if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
 fi
 
 # 2. 追加行のみを走査する（削除行を対象にすると漏洩済み値の除去コミットを妨げる）
-if ! scan_diff -U0 --diff-filter=ACMR "${body_pathspec[@]}" > "${tmp_dir}/diff"; then
+if ! scan_diff -U0 --diff-filter=ACMR -- . > "${tmp_dir}/diff"; then
   echo "secret-scan: failed to read diff; aborting" >&4
   exit 2
 fi
+body_skip_filter=0
+if [ "${skill_count}" -gt 0 ] || [ "${dropped_count}" -gt 0 ]; then
+  # 登録名の下のファイルの印（区画ごとに 1 行。1 = 外す）。外すのは `.agents/skills/<登録名>/` の下だけで、
+  # 判定に迷う形（`.agents/skills/` で始まらない・直下のファイル・規則に合わない区画・未登録・前方一致の別名）は走査する。
+  if ! scan_diff --name-only -z --diff-filter=ACMR -- . > "${tmp_dir}/names"; then
+    echo "secret-scan: failed to list files; aborting" >&4
+    exit 2
+  fi
+  skills_prefix=".agents/skills/"
+  skip_total=0
+  skip_any=0
+  while IFS= read -r -d '' path; do
+    skip=0
+    case "${path}" in
+      "${skills_prefix}"*)
+        rest="${path#"${skills_prefix}"}"
+        case "${rest}" in
+          */*)
+            seg="${rest%%/*}"
+            if [[ "${seg}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+              sk_ref="SKSET_${seg//-/_}"
+              [ -z "${!sk_ref:-}" ] || skip=1
+            fi
+            ;;
+        esac
+        ;;
+    esac
+    # 外す区画は印に実際のパスを付ける（`1<パス>`）。diff 側の区画のヘッダと突き合わせる（改行を含むパスは外さず走査する）。
+    if [ "${skip}" -eq 1 ] && [[ "${path}" == *$'\n'* ]]; then
+      skip=0
+    fi
+    if [ "${skip}" -eq 1 ]; then
+      printf '1%s\n' "${path}"
+    else
+      printf '0\n'
+    fi
+    skip_total=$((skip_total + 1))
+    [ "${skip}" -eq 0 ] || skip_any=1
+  done < "${tmp_dir}/names" > "${tmp_dir}/skip-flags"
+  if [ "${skip_any}" -eq 1 ] || [ "${dropped_count}" -gt 0 ]; then
+    body_skip_filter=1
+  fi
+fi
+
 # 登録を外した名前の既存の本文（#6054）。外れた名前があるときだけ呼ぶ（正の pathspec が空だと index 全体になる）。
-# 区画は `diff --git` で始まるため、上の差分の後ろへ足せば以降の解析・集計を共用できる。
+# 主の差分（登録名・外れた名前の区画は上の印で落とす）とは別のファイルに書き、区画の数の照合に混ぜない。
+# 区画は `diff --git` で始まるため、正規化の後ろへ足せば以降の解析・集計を共用できる。
+: > "${tmp_dir}/diff.dropped"
 if [ "${dropped_count}" -gt 0 ]; then
-  if ! scan_diff_base "${empty_tree}" -U0 --diff-filter=ACMR "${dropped_pathspec[@]}" >> "${tmp_dir}/diff"; then
+  if ! scan_diff_base "${empty_tree}" -U0 --diff-filter=ACMR "${dropped_pathspec[@]}" > "${tmp_dir}/diff.dropped"; then
     echo "secret-scan: failed to read diff; aborting" >&4
     exit 2
   fi
+fi
+# 主の差分から落とす、外れた名前の区画のヘッダ（`diff --git ...` の行そのもの）。引用されるパス（制御文字・二重引用符・バックスラッシュ。
+# core.quotePath=false でも引用される）は、一覧の生のパスとヘッダが一致せず登録名の判定では突き合わせられないが、同じ git の
+# 同じ設定が両方の差分へ同じ文字列で書くため、ヘッダ全体の一致で「diff.dropped にも同じ区画がある」ことを確かめられる。
+# 一致しない区画は落とさない（走査する側に倒す。二重に数えても検出は漏れない）。ヘッダに NUL は入らない。
+if ! tr -d '\000' < "${tmp_dir}/diff.dropped" | LC_ALL=C awk '/^diff --git /' > "${tmp_dir}/dropped-headers"; then
+  echo "secret-scan: failed to normalize diff; aborting" >&4
+  exit 2
 fi
 
 # bash の read は NUL を保持できず（実装により NUL 以降を切る・NUL だけを捨てる）、NUL を含む行で
 # 後ろの秘密値や NUL で分割された語を見落とし得る（fail-open）。走査の前に NUL を取り除いた版と
 # 空白へ置き換えた版を作り、NUL を含む場合は両方を走査する（行番号は同じ。同じ行は二重に数えない）。
-if ! tr -d '\000' < "${tmp_dir}/diff" > "${tmp_dir}/diff.del"; then
+
+# NUL の有無は元の diff（主と外れた名前の本文）で確定する（フィルタ後の diff.del は元の diff と常に違うため、後で比べると二重に走査する）。
+# 0 = NUL なし・1 = あり・それ以外は後段で検査不能（2）。
+# cmp は差があると 1 を返す。パイプの末尾に置くと ERR の trap（set -E で子に継がれる）が子の中で exit 2 にしてしまい、
+# 「NUL あり」が検査不能と取り違えられるため、cmp は親のシェルの `||` の左で流す。取り除いた版はファイルに複製せず
+# （--tracked では登録名の本文も含む全体の複製になり、一時領域の最大が増える）、プロセス置換で流して元のファイルと比べる。
+# tr が途中で失敗しても出力が短くなるだけで、差あり（1）として両方の版を走査する側に倒れる（NUL の見落としにはならない）。
+# cmp は最初の差で読むのをやめるため、tr は SIGPIPE（141）で終わる。bash 3.2 は子（プロセス置換）の中でも ERR の trap を走らせ、
+# fd 4 へ "internal error" を余分に出すため、子の中で ERR の trap を外す（終了コードには影響しない。bash 3.2 の実機で確認）。
+cmp_rc=0
+for nul_src in diff diff.dropped; do
+  one_rc=0
+  cmp -s <(trap - ERR; tr -d '\000' < "${tmp_dir}/${nul_src}") "${tmp_dir}/${nul_src}" || one_rc=$?
+  if [ "${one_rc}" -gt "${cmp_rc}" ]; then
+    cmp_rc="${one_rc}"
+  fi
+done
+
+# 登録名の下の区画を落とす（#6053）。除外は正規化の流れの中（パイプ）で行い、除外対象の本文は生の diff と同じ一時領域にだけ、正規化が終わるまでの短い間置く
+# （除外した本文の複製を正規化の出力には残さない）。
+# 区画の数が一覧のファイル数と違えば（git の出力と一覧の対応が崩れている）検査不能（2）にする。
+# 落とす区画のヘッダ（`diff --git a/<パス> b/<パス>`。--no-renames のため同じパス）が一覧の n 番目のパスと一致しない区画
+# （git が引用・エスケープするタブ・二重引用符・バックスラッシュ・制御文字のパス、diff.orderFile 等の順序の変更）は、
+# 対応が取れないため落とさず走査する（走査する側に倒す。2 にはしない）。
+filter_sections() {
+  if [ "${body_skip_filter}" -eq 1 ]; then
+    # ファイル名は `-v` で渡さない（値のバックスラッシュがエスケープとして解釈され、TMPDIR にバックスラッシュがあると
+    # 振り分けが外れる）。環境変数で渡し、ENVIRON から読む。
+    SS_F1="${tmp_dir}/skip-flags" SS_F2="${tmp_dir}/dropped-headers" LC_ALL=C awk -v want="${skip_total}" '
+      FILENAME == ENVIRON["SS_F1"] { flag[FNR] = $0; next }
+      FILENAME == ENVIRON["SS_F2"] { dh[$0] = 1; next }
+      /^diff --git / {
+        sec++
+        drop = (substr(flag[sec], 1, 1) == "1")
+        if (drop && $0 != "diff --git a/" substr(flag[sec], 2) " b/" substr(flag[sec], 2)) drop = 0
+        if ($0 in dh) drop = 1
+      }
+      !drop { print }
+      END { if (sec != want) exit 3 }
+    ' "${tmp_dir}/skip-flags" "${tmp_dir}/dropped-headers" -
+  else
+    cat
+  fi
+}
+# 主の差分は除外を通し、外れた名前の本文（diff.dropped）はそのまま後ろへ足す。
+if ! { tr -d '\000' < "${tmp_dir}/diff" | filter_sections && tr -d '\000' < "${tmp_dir}/diff.dropped"; } > "${tmp_dir}/diff.del"; then
   echo "secret-scan: failed to normalize diff; aborting" >&4
   exit 2
 fi
-if ! tr '\000' ' ' < "${tmp_dir}/diff" > "${tmp_dir}/diff.sp"; then
+if ! { tr '\000' ' ' < "${tmp_dir}/diff" | filter_sections && tr '\000' ' ' < "${tmp_dir}/diff.dropped"; } > "${tmp_dir}/diff.sp"; then
   echo "secret-scan: failed to normalize diff; aborting" >&4
   exit 2
 fi
+rm -f -- "${tmp_dir}/diff" "${tmp_dir}/diff.dropped"
 
 # scan_pass <file>: `+++ b/<path>` のファイルヘッダは `diff --git` から最初の `@@` までの間でだけ解釈する。
 # hunk 内の追加行の本文が `++ b/...`・`++...` で始まると diff 上は `+++...` になるため、
@@ -1354,8 +1474,6 @@ scan_pass() {
   done < "$1"
 }
 # cmp の終了状態は 0 = 同じ（NUL なし）/ 1 = 違う（NUL あり）/ 2 以上 = エラー。後者は検査不能として止める。
-cmp_rc=0
-cmp -s "${tmp_dir}/diff" "${tmp_dir}/diff.del" || cmp_rc=$?
 case "${cmp_rc}" in
   0)
     scan_pass "${tmp_dir}/diff.del"
