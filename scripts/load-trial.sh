@@ -14,13 +14,18 @@ source "${DIR}/lib.sh"
 reject_args "$(basename "$0")" "$@"
 require_cmd cargo
 require_cmd grep
+require_cmd cut
+require_cmd awk
+require_cmd env
 cd "${ROOT_DIR}"
 
 # 記録を生成する主試験を完全一致で選んで流し、実行結果で合格がちょうど 1 件（無視 0 件）であることを確かめてから成功を返す（AUDB-6 の向き）。
 # `--list` は #[ignore] の試験も列挙するため、件数の確認には使わない
 main_test="small_trial_run_writes_record_without_requirement_values"
 rc=0
-out="$(FANDHE_AUTH_LOAD_TRIAL_PRINT=1 cargo test -p fandhe-auth-load-harness --test trial_run --locked -- --exact "${main_test}" --show-output)" || rc=$?
+# RUST_TEST_NOCAPTURE が有効だと試験の標準出力・標準エラーが捕捉されず、照合を通っていない出力が直接流れる。
+# 継承を外して libtest の捕捉（--show-output の対象は標準出力だけでなく標準エラーも含む）を保つ（SECR-23）
+out="$(env -u RUST_TEST_NOCAPTURE FANDHE_AUTH_LOAD_TRIAL_PRINT=1 cargo test -p fandhe-auth-load-harness --test trial_run --locked -- --exact "${main_test}" --show-output)" || rc=$?
 # 試験の失敗は契約どおり 1 に揃える（cargo の 101 等を伝播しない）。
 # 失敗時は捕捉した出力（libtest の診断・記録の本文を含みうる）を再掲しない。照合を通っていない本文を出さない（fail-closed。SECR-23）。
 # コンパイルの診断などは cargo が標準エラーへ直接出す
@@ -29,8 +34,7 @@ if [ "${rc}" -ne 0 ]; then
   exit 1
 fi
 if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' <<<"${out}"; then
-  # 件数の行（libtest の固定の形）だけを出し、本文は出さない
-  grep -E '^test result:' <<<"${out}" >&2 || true
+  # 捕捉した出力は、同じ接頭辞で始まる本文の行を含みうるため一切再掲しない（固定の文言だけ。SECR-23）
   echo "error: expected exactly one passed load trial main test (0 ignored)" >&2
   exit 1
 fi
