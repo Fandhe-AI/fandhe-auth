@@ -254,7 +254,7 @@ fn small_trial_run_writes_record_without_requirement_values() {
 #[ignore = "prints the checked record body; run via make load-trial"]
 fn print_checked_load_record_body() {
     let (text, registry) = run_small_trial();
-    // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 4 欄に入れた値の全文）の
+    // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 4 欄に入れた値の全文と、署名鍵の秘密値 2 件〔PKCS#8 の全文・`d`〕）の
     // 生・base64・base64url・16 進の各形と JWT の形で走査する。一致したら本文を出さず失敗させる。
     let body = printable_body(&text, &registry).unwrap();
     // `scripts/load-trial.sh` が照合済みの本文を見分けるための固定の開始行・終了行（ちょうど 1 区画だけ出す）。
@@ -262,6 +262,7 @@ fn print_checked_load_record_body() {
 }
 
 /// 主試験の照合の登録簿: 設定の 4 欄と、署名鍵の秘密値（PKCS#8 の全文・`d`）。
+/// 鍵の秘密値はここで生のバイト列へ戻り、登録簿は `run_small_trial` の戻り値として試験の間じゅう持たれる。
 fn trial_registry(cfg: &HubStubConfig, key_secrets: &[SecretString]) -> Vec<Vec<u8>> {
     let mut registry = stdout_registry(cfg);
     registry.extend(key_secrets.iter().map(secret_raw));
@@ -269,12 +270,14 @@ fn trial_registry(cfg: &HubStubConfig, key_secrets: &[SecretString]) -> Vec<Vec<
 }
 
 /// 秘密のバイト列は共有の秘密値の型 `SecretString`（16 進の文字列）で持ち、試験内に型を新設しない（SECR-15・SECR-31）。
-/// 生のバイト列へ戻すのは、照合の登録簿へ入れる時点だけ（`expose` を明示的に呼ぶ。SECR-10・SECR-16・SECR-29〜33）。
+/// 生のバイト列へ戻すのは `secret_raw` だけで、`trial_registry` が登録簿を作る時点で呼ぶ（`expose` を明示的に呼ぶ。SECR-10・SECR-16・SECR-29〜33）。
+/// ただし戻した登録簿（生のバイト列。鍵の秘密値を含む）は `run_small_trial` の戻り値として試験の間じゅう持つ。
+/// 型の保護が及ぶのは登録簿を作る前までで、以降は試験の関数の中に留め、ログ・誤り・記録に渡さない。
 fn secret_hex(bytes: &[u8]) -> SecretString {
     SecretString::new(hex(bytes, false))
 }
 
-/// `secret_hex` の逆。照合の直前だけで呼び、戻り値をログ・誤り・記録に渡さない。
+/// `secret_hex` の逆。`trial_registry` だけが呼ぶ。戻り値は登録簿の要素として試験の間じゅう生のバイト列のまま残るため、ログ・誤り・記録に渡さない。
 fn secret_raw(s: &SecretString) -> Vec<u8> {
     let h = s.expose().as_bytes();
     assert!(h.len().is_multiple_of(2), "malformed secret encoding");
