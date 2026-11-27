@@ -600,6 +600,35 @@ printf '#!/bin/sh\necho abc\nexit 0\n' > "${audit_root}/bin/grep"
 audit_case "error: non-numeric count exits 2" 2
 audit_has "record: reason (cannot read the nested count)" "cannot read the nested"
 
+# 必要なコマンドが PATH に無いときは 1（違反）ではなく 2（検査不能）で止まる（lib.sh の require_cmd は使わない）
+# audit_minbin <除くコマンド>: 必要最小限のコマンドだけを symlink した PATH 用のディレクトリを作る。
+audit_minbin() {
+  local c
+  rm -rf "${audit_root}/minbin"
+  mkdir -p "${audit_root}/minbin"
+  for c in dirname basename git grep tr find; do
+    if [ "$c" != "$1" ]; then ln -s "$(command -v "$c")" "${audit_root}/minbin/$c"; fi
+  done
+  cp "${audit_root}/bin/cargo-audit" "${audit_root}/minbin/cargo-audit"
+}
+audit_fx
+audit_minbin none
+audit_case "OK: minimal PATH with all required commands exits 0" 0 PATH="${audit_root}/minbin"
+for missing_cmd in grep tr find git; do
+  audit_minbin "${missing_cmd}"
+  audit_case "error: ${missing_cmd} missing from PATH exits 2" 2 PATH="${audit_root}/minbin"
+  audit_has "record: reason (${missing_cmd} not found)" "required command not found on PATH: ${missing_cmd}"
+done
+
+# 一覧のパイプの全段の終了: tr の失敗（空の出力・一部の出力）を件数 0 の合格に読まない
+audit_fx
+printf '#!/bin/sh\nexit 2\n' > "${audit_root}/bin/tr"; chmod +x "${audit_root}/bin/tr"
+audit_case "error: failing tr in the repo listing exits 2" 2
+audit_has "record: reason (cannot list repository files, tr)" "cannot list repository files"
+audit_lacks "record: no ok result when the listing failed" "audit-config: result: ok"
+printf '#!/bin/sh\ncat >/dev/null\nexit 1\n' > "${audit_root}/bin/tr"
+audit_case "error: tr failing after reading the listing exits 2" 2
+
 # 2 段の検査（DPOL-33・DPOL-34）
 audit_fx
 rc=0

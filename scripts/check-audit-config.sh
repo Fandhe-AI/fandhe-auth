@@ -30,7 +30,7 @@
 #            `--no-fetch` が 0 件の advisory を読み込んで走査を進める。
 #   限界（TASK-679 で追う。DPOL-33・DPOL-34）: HOME の差し替えと偽の git リポジトリ（作業ツリー・advisory 1 件以上・変更なしを満たす偽の DB）は防げない。
 #            DB の git の設定・index の細工（skip-worktree・assume-unchanged・sparse-checkout 等）も偽の git リポジトリと同じ種類で防げない
-#            （git status は core.fsmonitor を空にし、未追跡を全て出し、--no-optional-locks で index を書かない指定で流す）。
+#            （git status は core.fsmonitor を空にし、未追跡・無視されたファイルを全て出し、--no-optional-locks で index を書かない指定で流す）。
 #            取得と取得なしの実行が同じ DB を使うことの保証、DB の commit の記録の様式は TASK-679 の入口で決める。
 #
 # 出力は固定の書式の記録行（監査の記録に含める）。ファイルの中身・絶対パス・ホームのパスは出さない（SECR-23）。
@@ -41,7 +41,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
 
-require_cmd git grep tr
+# lib.sh の require_cmd は 1 つの名前しか見ず、欠けると 1（違反）で終わるため使わない。1 つずつ確かめ、欠ければ検査不能の 2 で止める。
+for required_cmd in git grep tr find; do
+  if ! command -v "${required_cmd}" > /dev/null 2>&1; then
+    echo "error: required command not found on PATH: ${required_cmd}" >&2
+    exit 2
+  fi
+done
 # 段の名前は必須。無い・未知なら誤用として 2 で止める。
 if [ "$#" -ne 1 ]; then
   echo "usage: $(basename "$0") fetch|no-fetch" >&2
@@ -177,8 +183,15 @@ fi
 report_path "CARGO_HOME/audit.toml (CARGO_HOME from ${cargo_home_src})" "${cargo_home}/audit.toml"
 
 # 4: repo 全体の多重の防御（ほかの cwd から起動される道を塞ぐ。追跡外も数える）
-listing=""
-if ! listing="$(git -C "${ROOT_DIR}" ls-files -z -co --exclude-standard 2> /dev/null | tr '\0' '\n'; exit "${PIPESTATUS[0]}")"; then
+# パイプの全段の終了（git ls-files・tr）を確かめる。tr の失敗で一覧が空・一部になり件数 0 で合格しないようにする。
+listing_raw=""
+listing_raw="$(
+  git -C "${ROOT_DIR}" ls-files -z -co --exclude-standard 2> /dev/null | tr '\0' '\n'
+  printf '\n%s' "${PIPESTATUS[*]}"
+)" || true
+listing_status="${listing_raw##*$'\n'}"
+listing="${listing_raw%$'\n'*}"
+if [ "${listing_status}" != "0 0" ]; then
   echo "error: cannot list repository files" >&2
   exit 2
 fi
