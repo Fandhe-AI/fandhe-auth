@@ -29,7 +29,7 @@ unset _src _src_dir
 source "${DIR}/lib.sh"
 
 # 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
-for _c in git mktemp grep rm head sleep; do
+for _c in git mktemp grep rm head sleep readlink; do
   require_cmd "${_c}" || exit 2
 done
 unset _c
@@ -171,7 +171,7 @@ bounded_copy() {
     trap 'kill $(jobs -p) > /dev/null 2>&1 || true; exit 0' TERM
     sleep 5 &
     wait $! || true
-    : > "${dst}.timeout" 2> /dev/null || true
+    : 2> /dev/null > "${dst}.timeout" || true
     kill "${pid}" > /dev/null 2>&1 || true
   ) > /dev/null 2>&1 < /dev/null &
   wd=$!
@@ -295,7 +295,8 @@ rescan_hint() {
   if [ "${det_ok}" = 1 ]; then
     trusted_sha="$(g -C "${det_root}" rev-parse --verify "HEAD^{commit}" 2> /dev/null)" || trusted_sha="unknown"
   fi
-  if [ "${det_ok}" = 1 ] && [ "${det_root}" = "${target}" ]; then
+  if [ -n "${det_root}" ] && [ "${det_root}" = "${target}" ]; then
+    # 除外の規則は、検出器の実体のルートと走査対象の一致で決まる（検出器の判定と同じ）。入口のルートとの一致は問わない。
     branch=same
   elif [ "${det_ok}" = 1 ] && [ "${det_linked}" = 0 ] && [ "${trusted_sha}" != "unknown" ] \
     && matches_commit "${det_root}" "${trusted_sha}" scripts/hooks/secret-scan.sh 0 0 \
@@ -375,13 +376,16 @@ rc=0
   trap - ERR
   set +E
   cd "${target}" 2> /dev/null || exit 2
+  # 起動できない検出器（通常のファイルでない・実行できない）は、shell による起動失敗の終了状態の差（1 と取り違え得る）に頼らず、
+  # 起動の前に検査不能（2）にする。起動できる検出器の判定・終了状態は変えない。
+  [ -f "${ROOT_DIR}/scripts/hooks/secret-scan.sh" ] && [ -x "${ROOT_DIR}/scripts/hooks/secret-scan.sh" ] || exit 2
   GIT_INDEX_FILE="${tmp_index}" "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary
 ) > "${out}" 2>&1 || rc=$?
 # 規則 ID は許可した一覧との完全一致だけを通す（任意の文字列・git の診断を公開ログへ通さない）。
 # grep の終了状態は 0 = 一致 / 1 = 該当なし / 2 以上 = エラー。1 だけを「該当なし」として許す。
 filtered="${work_dir}/filtered"
 grep_rc=0
-grep -aE '^secret-scan: (env-file|vendor-token|private-key|jwt|jwk-private|credential-url|assignment): [0-9]+ (line|file)\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) in [0-9]+ file\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) \([0-9]+ tracked file\(s\) checked\)$|^secret-scan: findings in tracked files$' "${out}" > "${filtered}" 2> /dev/null || grep_rc=$?
+grep -aE '^secret-scan: (env-file|vendor-token|private-key|jwt|jwk-private|credential-url|assignment): [0-9]+ (line|file)\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) in [0-9]+ file\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) \([0-9]+ tracked file\(s\) checked\)$|^secret-scan: findings in tracked files$' "${out}" 2> /dev/null > "${filtered}" || grep_rc=$?
 if [ "${grep_rc}" -gt 1 ]; then
   echo "secret-scan-ci: failed to filter the scanner output (grep exit ${grep_rc})" >&2
   exit 2
@@ -415,8 +419,10 @@ case "${rc}" in
   *)
     # 検査不能のときだけ、検出器の固定の診断文を許可リスト（lib.sh。陰性対照と共有）との行全体の完全一致で通す。
     # 値・パス・git の生の診断は通さない（SECR-23）。失敗は無視する（既に検査不能（2）で終える）。
-    secret_scan_fixed_diagnostics > "${work_dir}/allowed-diag" 2> /dev/null || true
-    grep -aFx -f "${work_dir}/allowed-diag" "${out}" >&2 2> /dev/null || true
+    # 許可リストを作れたときだけ照合する（作れなければ何も通さない）。標準エラーは先に抑える（開けない旨の文にパスが出るため。SECR-23）。
+    if secret_scan_fixed_diagnostics 2> /dev/null > "${work_dir}/allowed-diag"; then
+      grep -aFx -f "${work_dir}/allowed-diag" "${out}" >&2 2> /dev/null || true
+    fi
     echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log." >&2
     emit_hint || true
     exit 2

@@ -551,6 +551,48 @@ else
   fail "secret-scan-ci: stderr written while building the rescan hint does not reach the public log" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# 入口と検出器の実体のルートが違い、検出器の実体が走査対象の checkout の中にある: 検出器は同じ checkout の規則を使うので、
+# 案内も同じ checkout の案内にする（入口との一致はコミットとの照合の条件としてだけ使う）
+r6="${work_dir}/hint-entry-elsewhere"
+mk_hint_root "${r6}"
+printf 'x = %s\n' "${token}" > "${r6}/leaked.txt"
+hint_commit "${r6}"
+entry6="${work_dir}/hint-entry-elsewhere-entry"
+mkdir -p "${entry6}"
+ln -s "${r6}/scripts" "${entry6}/scripts"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${entry6}/scripts/secret-scan-ci.sh" "${r6}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qF -- "this run scanned this entry's own checkout" "${work_dir}/out" \
+  && grep -qF -- "and HEAD is still $(git -C "${r6}" rev-parse HEAD)" "${work_dir}/out" \
+  && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+  && ! grep -qF -- "${work_dir}" "${work_dir}/out" \
+  && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
+  pass "secret-scan-ci: a detector whose real root is the scanned checkout gets the same-checkout hint even via another entry root"
+else
+  fail "secret-scan-ci: a detector whose real root is the scanned checkout gets the same-checkout hint even via another entry root" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# 許可リストのファイルを開けない（検出器が同じ名前のディレクトリを作る）: 開けない旨の文（パスを含む）を公開ログへ出さない（SECR-23）
+r6="${work_dir}/hint-allowed-diag"
+mk_hint_root "${r6}"
+cat > "${r6}/scripts/hooks/secret-scan.sh" <<'EOF'
+#!/usr/bin/env bash
+# 入口が一時領域（TMPDIR）に作る許可リストの名前をふさぐ
+mkdir -p "${TMPDIR}/allowed-diag"
+echo 'secret-scan: cannot read HEAD; aborting'
+exit 2
+EOF
+chmod +x "${r6}/scripts/hooks/secret-scan.sh"
+hint_commit "${r6}"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF -- "scan could not be completed (exit 2)" "${work_dir}/out" \
+  && ! grep -qF -- "allowed-diag" "${work_dir}/out" && ! grep -qiF -- "Is a directory" "${work_dir}/out" \
+  && ! grep -qF -- "secret-scan: cannot read HEAD; aborting" "${work_dir}/out"; then
+  pass "secret-scan-ci: an unopenable allowlist file leaks no shell diagnostic and passes no detector line"
+else
+  fail "secret-scan-ci: an unopenable allowlist file leaks no shell diagnostic and passes no detector line" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 # 検出器がコミットに無い（未追跡）: 一覧と違い、無いことを一致とみなさない
 r6="${work_dir}/hint-detector-untracked"
 mk_hint_root "${r6}"
@@ -661,8 +703,8 @@ run_without_cmd() {
 }
 new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
 run_arg="${repo}"
-for missing in git mktemp grep rm head sleep; do
-  run_without_cmd "${missing}" "${CI_ENTRY}" git mktemp grep rm head sleep
+for missing in git mktemp grep rm head sleep readlink; do
+  run_without_cmd "${missing}" "${CI_ENTRY}" git mktemp grep rm head sleep readlink
   if [ "${rc}" -eq 2 ] && grep -q "required command not found on PATH: ${missing}" "${work_dir}/out"; then
     pass "secret-scan-ci: missing ${missing} exits 2 before starting"
   else

@@ -132,7 +132,7 @@ scanner_shebang=""
 # バイト単位でも、1 行目が同じ文言の行全体の一致（-x）であることを grep で確かめる。grep の終了状態は
 # 0 = 一致 / 1 = 不一致 / 2 以上 = エラー（検査不能）。一致した最初の行が 1 行目であることを行番号で見る。
 shebang_rc=0
-LC_ALL=C grep -anxF -- '#!/usr/bin/env bash' "${ROOT_DIR}/scripts/hooks/secret-scan.sh" > "${work_dir}/shebang" 2> /dev/null || shebang_rc=$?
+LC_ALL=C grep -anxF -- '#!/usr/bin/env bash' "${ROOT_DIR}/scripts/hooks/secret-scan.sh" 2> /dev/null > "${work_dir}/shebang" || shebang_rc=$?
 case "${shebang_rc}" in
   0) ;;
   1) die "the scanner's first line is not the expected shebang" ;;
@@ -173,8 +173,10 @@ case "${rc}" in
     # 検出器の固定の診断文（lib.sh の secret_scan_fixed_diagnostics。CI 入口と共有）だけを原因の調査用に出す。許可した文言との行全体の完全一致（-Fx）に限り、
     # 値・パスを含み得る行（形の緩い一致）は公開ログへ転送しない（SECR-23）。
     # grep の失敗はここでは無視する（既に検査不能（2）で終える）。
-    secret_scan_fixed_diagnostics > "${work_dir}/allowed-diag" 2> /dev/null || true
-    grep -aFx -f "${work_dir}/allowed-diag" "${work_dir}/out" >&2 2> /dev/null || true
+    # 許可リストを作れたときだけ照合する（作れなければ何も通さない）。標準エラーは先に抑える（開けない旨の文にパスが出るため。SECR-23）。
+    if secret_scan_fixed_diagnostics 2> /dev/null > "${work_dir}/allowed-diag"; then
+      grep -aFx -f "${work_dir}/allowed-diag" "${work_dir}/out" >&2 2> /dev/null || true
+    fi
     exit 2
     ;;
 esac
@@ -187,10 +189,10 @@ if ! printf '%s\n' \
   'secret-scan: private-key: 1 line(s)' \
   'secret-scan: env-file: 1 file(s)' \
   'secret-scan: total: 2 finding(s) in 2 file(s)' \
-  'replace values with a placeholder / env var reference, or unstage the file (`git restore --staged <file>`).' 2> /dev/null | sort > "${work_dir}/expected.sorted" 2> /dev/null; then
+  'replace values with a placeholder / env var reference, or unstage the file (`git restore --staged <file>`).' 2> /dev/null | sort 2> /dev/null > "${work_dir}/expected.sorted"; then
   die "failed to prepare the expected summary"
 fi
-if ! sort "${work_dir}/out" > "${work_dir}/out.sorted" 2> /dev/null; then
+if ! sort "${work_dir}/out" 2> /dev/null > "${work_dir}/out.sorted"; then
   die "failed to sort the scanner output"
 fi
 exact_rc=0
