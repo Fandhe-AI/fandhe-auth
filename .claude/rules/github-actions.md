@@ -73,7 +73,16 @@ TASK-680 が結線するときの契約は次のとおり。値は spec の ID �
     使った DB の commit と取得日を記録し、`Cargo.lock` を書き換えない。具体の手順は TASK-679 で決める（未定。cargo-audit の取得の方法、記録の様式、
     `--locked` を持たない cargo-audit 0.22.2 での lock の不変の確かめ方を含む）。`./dependency-policy.md` の手元の手順はこの契約の実装ではない。
 4. 対象はルートの `Cargo.lock` と、別 workspace の `crates/trial-deps/fuzz/Cargo.lock` の両方で、合否に両方を含める（`crates/trial-deps/README.md` の「依存の監査」。DPOL-33・DPOL-34）。
-5. 設定は TASK-668 の厳格版 `deny.toml` だけを使う。例外（`ignore`・`skip`・許可の追加）を足すかは人が決め、足すときは理由・期限・範囲を同じ場所に書く（DPOL-20・DPOL-35）。
+5. cargo-deny の設定は TASK-668 の厳格版 `deny.toml` だけを使う。例外（`ignore`・`skip`・許可の追加）を足すかは人が決め、足すときは理由・期限・範囲を同じ場所に書く（DPOL-20・DPOL-35）。
+    cargo-audit が読む設定は `deny.toml` では制御できないため、承認済みは「無し」（暫定。足すかは人が決める）に固定する（DPOL-34）。
+    cargo-audit を起動する前に毎回 `scripts/check-audit-config.sh`（2 段。DPOL-33・DPOL-34）を同じ環境・同じ cwd で通し、非 0 なら失敗にする（検査不能の 2 も失敗）。
+    - 取得を兼ねる cargo-audit の前は `scripts/check-audit-config.sh fetch`（`make audit-cfg`）。`CARGO_HOME` が未設定か空（既定の置き場）であることを確かめ、設定されていれば 2（両方の段で同じ）。
+    - `--no-fetch` の cargo-audit の前は `scripts/check-audit-config.sh no-fetch`（`make audit-cfg-nofetch`）。`CARGO_HOME` が設定されていれば 2。`$HOME/.cargo/advisory-db` が git の作業ツリーの最上位で、`crates/` に advisory があり（空でないことの確認）、変更（未追跡・無視されたファイルを含む）が無いことを確かめ、満たさなければ 2。cargo-audit 0.22.2 は DB の置き場を `$CARGO_HOME/advisory-db` から決め、空の DB でも `--no-fetch` が検出 0 で進むため。
+    - 限界: HOME の差し替えと偽の git リポジトリ（作業ツリー・advisory 1 件以上・変更なしを満たす偽の DB）は防げない。DB の git の設定・index の細工（skip-worktree・assume-unchanged・sparse-checkout 等）も偽の git リポジトリと同じ種類で防げない（git status は `core.fsmonitor` を空にし、未追跡・無視されたファイルも出し、`--no-optional-locks` で流す）。限界として TASK-679 で追う（DPOL-33・DPOL-34）。
+    - `cargo audit` ではなく `cargo-audit audit` を直接起動する（`.cargo/config.toml` の alias による差し替えを避ける。DPOL-34）。
+    - argv は固定し、`--ignore`・`--stale`・`--target-arch`・`--target-os`・`--no-yanked`・`--db`・`--url`・`-D` を外から渡し込まない（DPOL-34）。
+    - cwd は lockfile ごとに固定する（`-f` で渡す lockfile のディレクトリの設定は読まれない。DPOL-34）。
+    - ガードの出力の行を監査の記録に含める（様式は TASK-679 で決める。DPOL-33・DPOL-34）。
 6. 4 検査と cargo-audit の 5 つがすべて成功したときだけ緑にする（DPOL-34）。結線までの緑は道具の導入の成功だけを表し、DPOL-34 の合格ではない。
     結線したらジョブ名から「frame」を外す（必須チェックは `ci-complete` だけなので影響しない）。
 7. 同じ入口を定期の実行（`scheduled.yml`・TASK-681）からも呼べる形に保つ（DPOL-35）。
