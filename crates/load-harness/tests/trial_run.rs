@@ -18,9 +18,9 @@ use fandhe_auth_it_harness::{
 };
 use fandhe_auth_load_harness::{
     ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
-    IntervalName, LoadConfig, LoadRecord, LoadRecordError, LoopModel, MeasurementConditions,
-    MetricKey, RefId, RunRecordFile, RunSession, StageConfig, StageError, StageLimits, StagePlan,
-    TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
+    IntervalName, LoadConfig, LoadRecord, LoadRecordError, LoopModel, MeasuredSource,
+    MeasurementConditions, MetricKey, RefId, RunRecordFile, RunSession, StageConfig, StageError,
+    StageLimits, StagePlan, TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
 };
 use fandhe_auth_secret::SecretString;
 
@@ -797,4 +797,59 @@ fn printable_body_refuses_registered_forms_and_jwt() {
     );
     let err = printable_body(&jwt, &registry).unwrap_err();
     assert!(!err.contains("eyJ"));
+}
+
+/// #6049: 公開の口から測定値の行を任意の整数で作れない。導く口も名前ごとの区分の規則（AUDP-29）に従う。
+#[test]
+fn measured_row_cannot_be_made_from_arbitrary_values() {
+    let not_allowed = LoadRecordError::InvalidValue(
+        fandhe_auth_load_harness::InvalidValueReason::ClassNotAllowed,
+    );
+    let name = || ValueName::new("p99_target").unwrap();
+    assert_eq!(
+        ComparisonValue::new(
+            name(),
+            ValueClass::Measured,
+            Some(1),
+            ValueUnit::Ns,
+            vec![],
+            &ApprovedValues::default(),
+        )
+        .err(),
+        Some(not_allowed)
+    );
+    let conditions = MeasurementConditions::detect(
+        ComponentConditions::new(&[(ConditionComponent::HubStub, true)]).unwrap(),
+        LoopModel::Closed,
+    )
+    .unwrap();
+    let spec = TargetSpec::new(
+        TargetName::new("hub_stub_jwks").unwrap(),
+        IntervalName::new("client_response").unwrap(),
+    );
+    let plan = StagePlan::new(
+        vec![StageConfig::new(LoadConfig::new(1, 5, 1).unwrap(), 1).unwrap()],
+        MetricKey::P99Ns,
+        StageLimits::new(8, 8, 1_000, 10_000).unwrap(),
+    )
+    .unwrap();
+    let evidence = RunSession::new(
+        RunRecordFile::new("it-run-0-1-1.txt").unwrap(),
+        0,
+        conditions,
+    )
+    .unwrap()
+    .run(&[ConditionComponent::HubStub], &spec, &plan, || {
+        CallResult::Ok
+    })
+    .unwrap();
+    assert_eq!(
+        ComparisonValue::measured(
+            name(),
+            &evidence,
+            MeasuredSource::new(1, 1, MetricKey::P99Ns)
+        )
+        .err(),
+        Some(not_allowed)
+    );
 }
