@@ -6,6 +6,7 @@
 # 基本の外部依存は bash と git。msrv・install-msrv の節は cargo・jq・tomllib を持つ python3（3.11 以上）も要し、
 # 前提が足りなければ CI（CI か GITHUB_ACTIONS が設定されている）では失敗、ローカルでは skip する。
 # secret-scan の /dev/tcp 風のパスの試験（part 8 の T10）も python3 と bash の /dev/tcp のリダイレクトを要し、前提の扱いは同じ（CI では失敗、ローカルでは skip）。
+# vendored（check-openssl-vendored.sh）の節は tomllib を持つ python3（3.11 以上）を要し、前提が無ければ CI では失敗、ローカルでは skip する。
 # crate-deps の節は cargo が無ければ skip する。フックではなく CI で実行する（.claude/rules/git-hooks.md）。
 #
 # 回帰ケースは過去に見つかった fail-open の不具合クラスに対応する:
