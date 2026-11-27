@@ -358,11 +358,12 @@ index_absent_confirmed() {
 #   (2) 診断の受け皿を照会の前に消せて、照会の後も消せる（リダイレクトの open が失敗すると bash は stat を起動せず 1 を返し、
 #       前回の ENOENT の診断が残ったまま読まれる fail-open になるため。読む診断は必ず今回の照会のもの）
 #   (3) 終了コードが 1（起動の失敗は 126・127。bash 自身が「…: No such file or directory」を出し得るため区別する）
-#   (4) 診断がちょうど 1 行で、stat 自身の接頭辞 "stat: " で始まり、strerror の文言 ": No such file or directory" で終わる
-#       （LC_ALL=C 固定。文言は誤りの種類で決まる。GNU・uutils・BSD〔macOS〕は終了コード 1 と接頭辞 "stat: " と読んでいる。BSD は実機で未確認）
+#   (4) 診断が改行で終わるちょうど 1 行で、stat 自身の接頭辞 "stat: " で始まり、strerror の文言 ": No such file or directory" で終わる
+#       （LC_ALL=C 固定。文言は誤りの種類で決まる。GNU・uutils・BSD〔macOS〕は終了コード 1 と接頭辞 "stat: " と読んでいる。BSD は実機で未確認。
+#       busybox の stat はパスの改行をそのまま診断に出し、複数行になり得るため (1)(4) で 1 を返す）
 # 差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
 path_enoent_confirmed() {
-  local err="" extra="" more=0 rc=0 p="$1" errfile="${tmp_dir}/stat-err"
+  local err="" extra="" more=0 unterminated=0 rc=0 p="$1" errfile="${tmp_dir}/stat-err"
   case "${p}" in
     *$'\n'*) return 1 ;;
   esac
@@ -377,9 +378,11 @@ path_enoent_confirmed() {
   rm -f -- "${errfile}" || return 1
   LC_ALL=C stat -- "${p}" > /dev/null 2> "${errfile}" || rc=$?
   # 診断は 1 行目と、2 行目の有無だけを読む（空行の 2 行目も「有る」と数える）。
-  { IFS= read -r err || true; if IFS= read -r extra || [ -n "${extra}" ]; then more=1; fi; } < "${errfile}" || return 1
+  # 1 行目が改行で終わっていなければ（read が 0 を返さない）、途中で切れた診断として 1 を返す。
+  { IFS= read -r err || unterminated=1; if IFS= read -r extra || [ -n "${extra}" ]; then more=1; fi; } < "${errfile}" || return 1
   rm -f -- "${errfile}" || return 1
   [ "${rc}" -eq 1 ] || return 1
+  [ "${unterminated}" -eq 0 ] || return 1
   [ "${more}" -eq 0 ] || return 1
   case "${err}" in
     "stat: "*": No such file or directory") return 0 ;;

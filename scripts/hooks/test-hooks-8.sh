@@ -598,7 +598,7 @@ fi
 # T17: stat の起動の失敗（診断が ENOENT で終わっても、終了コードが 126・127）・接頭辞 "stat: " の無い診断・複数行の診断（終了コード 1）は「不在」と確かめられたとは言えず 2（path_enoent_confirmed。#6047）
 # 起動の失敗は、不在の index を空として 0 を返す経路になり得る（fail-open）。直しを外すと 0 を返し、この試験が落ちる。
 t17_i=0
-for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line; do
+for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-second-line unterminated; do
   t17_i=$((t17_i + 1))
   new_repo; stage src/app.txt "hello"
   stat17_dir="${work_dir}/stat17-shim-${t17_i}"
@@ -621,8 +621,18 @@ for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line; do
       # 終了コード 1・1 行目は ENOENT の形だが、診断が 2 行ある（1 行目だけでは判定しない）
       printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\necho "extra" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
+    empty-second-line)
+      # 1 行目は ENOENT の形で、2 行目が空行（空の 2 行目も「2 行目が有る」と数える）
+      printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\necho "" >&2\nexit 1\n' > "${stat17_dir}/stat"
+      ;;
+    unterminated)
+      # 1 行の ENOENT の形だが、改行で終わらない（途中で切れた診断）
+      printf '#!/bin/sh\nprintf "%%s" "stat: cannot statx x: No such file or directory" >&2\nexit 1\n' > "${stat17_dir}/stat"
+      ;;
   esac
   case "${t17_kind}" in
+    empty-second-line) t17_msg="a stat diagnostic with an empty second line" ;;
+    unterminated) t17_msg="an unterminated stat diagnostic" ;;
     no-prefix) t17_msg="a stat diagnostic without the stat: prefix" ;;
     multi-line) t17_msg="a multi-line stat diagnostic" ;;
     *) t17_msg="a stat that fails to run (${t17_kind})" ;;
@@ -639,14 +649,15 @@ done
 
 # T18: 診断の受け皿を開けず stat が起動されなかった呼び出しで、前回の ENOENT の診断を読まない（path_enoent_confirmed。#6047）
 # 1 回目の照会の後に受け皿を読み取り専用にして、2 回目のリダイレクトの open を失敗させる（bash は stat を起動せず 1 を返す）。
-# 照会の前に受け皿を消す直しがあれば、2 回目は新しく作られ、stat（shim）が起動されて Permission denied を返し、2 で止まる。
-# 直しを外すと、前回の ENOENT の診断が残ったまま読まれ、不在と確かめたことになって 0 を返し、この試験が落ちる。
+# 受け皿を消す処理（照会の前・読んだ後のどちらか一方があれば防げる）があれば、2 回目は新しく作られ、stat（shim）が起動されて
+# Permission denied を返し、2 で止まる。両方を外すと、前回の ENOENT の診断が残ったまま読まれ、不在と確かめたことになって 0 を返し、この試験が落ちる。
+# 読み取り専用になったこと（shim が chmod の後に [ ! -w ] で確かめた印）が無ければ、何も確かめていないため合格にせず、理由を付けて skip する。
 # ルートは権限を迂回するため、一般ユーザーのときだけ行い、ルートでは skip を明示する。
 if [ "$(id -u)" -ne 0 ]; then
   new_repo; stage src/app.txt "hello"
   stat18_dir="${work_dir}/stat18-shim"
   t18_tmp="${work_dir}/t18-tmp"
-  rm -rf "${stat18_dir}" "${t18_tmp}" "${work_dir}/t18-n" "${work_dir}/t18-second"
+  rm -rf "${stat18_dir}" "${t18_tmp}" "${work_dir}/t18-n" "${work_dir}/t18-ro" "${work_dir}/t18-second"
   mkdir -p "${stat18_dir}" "${t18_tmp}"
   cat > "${stat18_dir}/stat" <<'EOF18'
 #!/bin/sh
@@ -655,6 +666,9 @@ if [ ! -e "${T18_N}" ]; then
   : > "${T18_N}"
   for f in "${T18_TMP}"/secret-scan.*/stat-err; do
     chmod 444 "${f}"
+    if [ ! -w "${f}" ]; then
+      : > "${T18_RO}"
+    fi
   done
   exec "${REAL_STAT}" "$@"
 fi
@@ -664,9 +678,11 @@ exit 1
 EOF18
   chmod +x "${stat18_dir}/stat"
   rc=0
-  GIT_INDEX_FILE="${work_dir}/t18-absent-index" TMPDIR="${t18_tmp}" T18_TMP="${t18_tmp}" T18_N="${work_dir}/t18-n" T18_SECOND="${work_dir}/t18-second" \
+  GIT_INDEX_FILE="${work_dir}/t18-absent-index" TMPDIR="${t18_tmp}" T18_TMP="${t18_tmp}" T18_N="${work_dir}/t18-n" T18_RO="${work_dir}/t18-ro" T18_SECOND="${work_dir}/t18-second" \
     PATH="${stat18_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
-  if [ -e "${work_dir}/t18-second" ] && [ "${rc}" -eq 2 ] \
+  if [ ! -e "${work_dir}/t18-ro" ]; then
+    echo "ok - secret-scan: stale diagnostic test skipped (the diagnostic file could not be made read-only; nothing was checked)"
+  elif [ -e "${work_dir}/t18-second" ] && [ "${rc}" -eq 2 ] \
     && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
     pass "secret-scan: a stale ENOENT diagnostic is not read when the diagnostic file cannot be opened (2)"
   else
@@ -674,6 +690,18 @@ EOF18
   fi
 else
   echo "ok - secret-scan: stale diagnostic test skipped (running as root bypasses permissions)"
+fi
+
+# T19: 改行を含む不在のパスは、ENOENT と確かめられず 2（path_enoent_confirmed。診断が複数行になり得る stat の実装があるため。#6047）
+new_repo; stage src/app.txt "hello"
+t19_nl=$'t19-dir\nwith-newline'
+mkdir -p "${work_dir}/${t19_nl}"
+rc=0
+GIT_INDEX_FILE="${work_dir}/${t19_nl}/absent-index" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: an absent index path containing a newline is not confirmed absent (2)"
+else
+  fail "secret-scan: an absent index path containing a newline is not confirmed absent (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 finish "part 8"
