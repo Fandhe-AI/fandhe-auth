@@ -240,6 +240,9 @@ impl RunBound<HubJwksEndpoint> {
 mod sealed {
     /// 外の crate が作れない印（名前を出せず、作る口もこの module の外へ出さない）。
     /// 総称の境界（`impl BoundReceiver<R>`）経由でメソッドを呼べても、印を作れないので `&mut R` を取り出せない。
+    ///
+    /// `Default`・`Clone`・`Copy` 等を派生しない（足すと外の crate が `Default::default()` 等で印を作れ、
+    /// `&mut R` を取り出せる。`BoundReceiver` の `compile_fail` の doctest が検出する）。
     pub struct Token(());
 
     impl Token {
@@ -260,10 +263,30 @@ mod sealed {
 /// 外から実装できず、`&mut R` を取り出すメソッドは外の crate が作れない印の引数を要る（注入器の内側だけが使う）。
 /// 総称の境界から `&mut R` を取り出す試みはコンパイルできない（下の陰性対照）。
 ///
+/// 陽性対照（同じ `use` と署名でコンパイルが通る。import や trait 名が崩れて陰性対照が空振りしないことを確かめる）:
+///
+/// ```
+/// use fandhe_auth_it_harness::fault::BoundReceiver;
+/// fn leak<R>(b: &mut impl BoundReceiver<R>) -> &mut R {
+///     unimplemented!()
+/// }
+/// ```
+///
+/// 陰性対照 1（印を渡さずに呼ぶ。stable の rustdoc は誤りの符号を照合しないので、符号は読み手への目印）:
+///
 /// ```compile_fail,E0061
 /// use fandhe_auth_it_harness::fault::BoundReceiver;
 /// fn leak<R>(b: &mut impl BoundReceiver<R>) -> &mut R {
 ///     b.receiver_mut()
+/// }
+/// ```
+///
+/// 陰性対照 2（印を `Default` で作る。`Token` に派生を足すと通ってしまうので、足さない）:
+///
+/// ```compile_fail
+/// use fandhe_auth_it_harness::fault::BoundReceiver;
+/// fn leak<R>(b: &mut impl BoundReceiver<R>) -> &mut R {
+///     b.receiver_mut(&Default::default())
 /// }
 /// ```
 pub trait BoundReceiver<R>: sealed::Sealed<R> {}

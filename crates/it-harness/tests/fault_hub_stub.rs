@@ -636,8 +636,6 @@ fn borrowed_session_receiver_is_rejected_for_another_run() {
     assert_eq!(r.unwrap().status, 200);
 }
 
-/// 借用の形でも `FaultPair` の照合が効く。基準線・注入ありの順に、同じセッションの口を実行ごとに借りて流す。
-/// 正常な組はセッションの鍵を保ち、段と事象が合わなければ `ShapeMismatch`、別の実行の口は `Body` の `RunMismatch`。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StepsMode {
     Inject,
@@ -645,6 +643,8 @@ enum StepsMode {
     Skip,
 }
 
+/// 借用の形でも `FaultPair` の照合が効く。基準線・注入ありの順に、同じセッションの口を実行ごとに借りて流す。
+/// 正常な組はセッションの鍵を保ち、段と事象が合わなければ `ShapeMismatch`、別の実行の口は `Body` の `RunMismatch`。
 fn borrowed_pair_body(
     handle: &HubStubHandle,
     mut tl: FaultTimeline,
