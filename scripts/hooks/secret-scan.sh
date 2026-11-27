@@ -59,7 +59,7 @@
 #   固定時にあった index が終了時に無いときも 2（登録 0 件でも）。index がシンボリックリンクなら、開始時も終了時も辿らず 2。
 #   終了時に index のパスを git の解決で取り直し、開始時と違えば（親ディレクトリのシンボリックリンクの付け替え等）2（#6034）。
 #   複写の前に通常ファイルであることを確かめる（FIFO 等は複写せず 2。確認と cp の間の差し替えは窓を狭めるだけで、止まり得る。0 は返さない）。
-#   外部コマンド（git・readlink・mktemp・rm・cp・head・wc・sleep・tr・cmp・awk・cat）は使う前に確かめ、欠けていれば 2。
+#   外部コマンド（git・readlink・mktemp・rm・cp・head・wc・sleep・tr・cmp・stat・awk・cat）は使う前に確かめ、欠けていれば 2。
 # 範囲外で検出力が無いもの: コミット履歴・submodule の中・規則に無い形（長い 16 進や base64 の塊単体）。
 # 本文のバイト列は照合するが、圧縮・エンコードの展開と、複数行に分かれた値の復元はしない。
 # 保守的なヒューリスティックであり網羅的なスキャナの代替ではない。AAUD-30 の実行時の登録簿による走査とも別物。
@@ -116,7 +116,7 @@ fi
 # 確認より前に外部コマンドを呼ばない（`command -v` はシェルの組み込み）。lib.sh は検出器の複製だけで動くよう読み込まない。
 # 欠けたコマンドは「失敗の吸収」になり得る（例: 監視の sleep を起動できず、待ち時間なしで読み取りを打ち切る）。
 # 固定の文言は fd 4 へ出す（--summary でも出る）。使うコマンドを足したら、この一覧にも足す（試験が踏む経路の漏れを検出する。踏まない経路は検出できない）。
-for _c in git readlink mktemp rm cp head wc sleep tr cmp awk cat; do
+for _c in git readlink mktemp rm cp head wc sleep tr cmp stat awk cat; do
   if ! command -v "${_c}" > /dev/null 2>&1; then
     echo "secret-scan: required command not found on PATH: ${_c}; aborting" >&4
     exit 2
@@ -341,6 +341,107 @@ fi
 index_is_link() {
   [ -L "${raw_index}" ] || [ -L "${orig_index}" ]
 }
+# index_absent_confirmed: 「元の index が無い」と読んだ状態が、本当に無い（ENOENT）と確かめられたときだけ 0 を返す（#6047）。
+# `[ -e ]` は ENOENT 以外（親ディレクトリの検索権限が走査中に外れた等の EACCES）でも偽になり、そのまま「無い（空）」と読むと
+# 0 を返し得る（fail-open）。親ディレクトリが検索できることを、存在の確認の前後で確かめて挟む（祖先の検索可否はシェルの test、不在の誤りの種類の判別は path_enoent_confirmed が stat で行う）。
+# 権限の付け外しが確認の間に往復する窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。パスを出力しない。
+index_absent_confirmed() {
+  index_ancestor_searchable || return 1
+  { [ ! -e "${orig_index}" ] && [ ! -e "${raw_index}" ] && [ ! -L "${raw_index}" ] && [ ! -L "${orig_index}" ]; } || return 1
+  # 解いた先と解く前の両方が ENOENT と確かめられること。`-e` は ENAMETOOLONG 等でも偽になるため、メタデータの照会（開かない）の誤りの種類で区別する。
+  path_enoent_confirmed "${orig_index}" && path_enoent_confirmed "${raw_index}" || return 1
+  index_ancestor_searchable || return 1
+  return 0
+}
+# path_enoent_confirmed <パス>: メタデータの照会（stat。ファイルを開かない）が ENOENT で失敗したときだけ 0 を返す
+# （それ以外の誤り・成功は 1。#6047）。入力リダイレクトで開く方式は使わない（/dev/tcp 等の特殊パスがソケット接続になる・
+# 照会の間に FIFO が現れると書き手を待って止まる、の 2 点を避ける）。0 にする条件はすべてそろったときだけ（1 つでも欠ければ 1）:
+#   (1) 診断の受け皿を照会の前に消せて、照会の後も消せる（リダイレクトの open が失敗すると bash は stat を起動せず 1 を返し、
+#       前回の ENOENT の診断が残ったまま読まれる fail-open になるため。読む診断は必ず今回の照会のもの）
+#   (2) 終了コードが 1（起動の失敗は 126・127。bash 自身が「…: No such file or directory」を出し得るため区別する）
+#   (3) 診断の全体が 64 KiB 以下で NUL を含まず、stat 自身の接頭辞 "stat: " で始まり、strerror の文言 ": No such file or directory" と
+#       改行 1 つで終わる（LC_ALL=C 固定）。診断の途中にはパスが入り得る（BSD〔macOS〕の stat・busybox の stat は、パスの改行を
+#       そのまま出して複数行になる）が、末尾は strerror が占める。途中の行は問わず、先頭と末尾だけを見る。末尾の改行は必須。
+#       ただし、照会するパス自身が ": No such file or directory" と改行の並びを含むときは、診断がその並びの直後で途中で切れても
+#       完結した診断と区別できないため、1（確定しない。診断が改行で終わることだけでは完結の証明にならない）。
+#       この並びを含まない改行入りのパスは、上のとおり確定できる。
+#       GNU・uutils・BSD〔macOS〕は終了コード 1 と接頭辞 "stat: " と読んでいる（BSD は macOS の CI の bash 3.2 でも通っているが、実機の確認ではない）。
+# 診断は 1 行ずつ bash の read で読む（コマンド置換は使わない。末尾の改行を落とすため。外部コマンドは head・cmp・tr だけで、いずれも確認済みの一覧にある）。
+# 差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
+path_enoent_confirmed() {
+  local line="" first="" last="" n=0 rc=0 p="$1" errfile="${tmp_dir}/stat-err" capfile="${tmp_dir}/stat-err-cap"
+  # パス自身が ": No such file or directory" と改行の並びを含むなら確定しない（診断の末尾がパスの中身と見分けられないため）。
+  # 置換を使わず case で見る（bash 3.2 の ERR トラップの扱いを避ける）。
+  case "${p}" in
+    *": No such file or directory"$'\n'*) return 1 ;;
+  esac
+  # 先頭が "/" でない相対パスには "./" を付ける。GNU stat は "--" の後でも単独の "-" を標準入力として扱い、
+  # 未作成の代替 index "-" を誤って「ある」と読むため（#6047）。
+  case "${p}" in
+    /*) ;;
+    *) p="./${p}" ;;
+  esac
+  # 置換を使わず、一時ファイルへ診断を書き出して終了状態をそのまま受ける（resolve_head と同じ。コマンド置換の中で 1 を返すと、
+  # bash 3.2〔macOS〕は ERR トラップをサブシェルで実行して 2 に化かし、本物の ENOENT を取り違える）。
+  rm -f -- "${errfile}" "${capfile}" || return 1
+  LC_ALL=C stat -- "${p}" > /dev/null 2> "${errfile}" || rc=$?
+  # 大きさの上限: 先頭の 64 KiB と全体が同じでなければ、上限を超えている。
+  head -c 65536 -- "${errfile}" > "${capfile}" || return 1
+  cmp -s -- "${errfile}" "${capfile}" || return 1
+  # NUL を含む診断は 1。bash 4.3 以降の read は入力の NUL を読み飛ばすため、行の解析の前にバイトで確かめる
+  # （NUL を除いた複写と元が同じでなければ NUL が有る。置換・パイプは使わず、親のシェルの || で受ける。bash 3.2 の ERR トラップの扱いを避ける）。
+  tr -d '\000' < "${errfile}" > "${capfile}" || return 1
+  cmp -s -- "${errfile}" "${capfile}" || return 1
+  # 全体を 1 行ずつ読む。最後の行が改行で終わっていなければ（read が非 0 で、残りが有る）、途中で切れた診断として 1。
+  while :; do
+    if IFS= read -r line; then
+      n=$((n + 1))
+      [ "${n}" -ne 1 ] || first="${line}"
+      last="${line}"
+    else
+      [ -z "${line}" ] || return 1
+      break
+    fi
+  done < "${errfile}" || return 1
+  rm -f -- "${errfile}" "${capfile}" || return 1
+  [ "${rc}" -eq 1 ] || return 1
+  [ "${n}" -ge 1 ] || return 1
+  case "${first}" in
+    "stat: "*) ;;
+    *) return 1 ;;
+  esac
+  case "${last}" in
+    *": No such file or directory") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# index_ancestor_searchable: index の祖先のうち、実在する最も近いディレクトリが検索できる（-x）ときだけ 0 を返す。
+# 解いた後の絶対パス（orig_index）と、解く前の参照経路（raw_index。親の経路にリンクがあり得る）の両方を確かめる。
+# 解いた先の祖先だけを見ると、リンクに至るディレクトリの検索権限が外れても、raw_index の -L が参照エラーで偽になり、空と取り違える（#6047）。
+# 途中のディレクトリが未作成（代替 index の親が未作成。従来どおり空として扱う）でも、実在する祖先が検索できれば ENOENT と言える。
+# 実在はするがディレクトリでない祖先・検索できない祖先は確かめられないため 1（2 にする）。
+index_ancestor_searchable() {
+  path_ancestor_searchable "${orig_index}" && path_ancestor_searchable "${raw_index}"
+}
+# path_ancestor_searchable <パス>: 相対パスは作業ツリーのルート基準（カレントディレクトリ）で読む。
+path_ancestor_searchable() {
+  local p="$1"
+  case "${p}" in
+    */*) p="${p%/*}" ;;
+    *) p="." ;;
+  esac
+  [ -n "${p}" ] || p="/"
+  while [ ! -d "${p}" ]; do
+    { [ ! -e "${p}" ] && [ ! -L "${p}" ]; } || return 1
+    [ "${p}" != "/" ] || return 1
+    case "${p}" in
+      */*) p="${p%/*}" ;;
+      *) p="." ;;
+    esac
+    [ -n "${p}" ] || p="/"
+  done
+  [ -x "${p}" ]
+}
 if index_is_link; then
   echo "secret-scan: cannot snapshot the index; aborting" >&4
   exit 2
@@ -359,6 +460,10 @@ if [ -e "${orig_index}" ]; then
     echo "secret-scan: cannot snapshot the index; aborting" >&4
     exit 2
   fi
+elif ! index_absent_confirmed; then
+  # 「無い」と読んだ理由が ENOENT と確かめられない（権限の変化等）。空として扱わず 2（#6047）。
+  echo "secret-scan: cannot snapshot the index; aborting" >&4
+  exit 2
 fi
 export GIT_INDEX_FILE="${snap_index}"
 # 空の tree の ID は常に解決する。未作成ブランチの staged も、基準を暗黙にせず空の tree を明示して固定する
@@ -1491,68 +1596,128 @@ case "${cmp_rc}" in
 esac
 
 # 走査中に元の index の内容が変わっていたら、固定した複写に基づく結果は実際の内容と食い違う。合格を返さず検査不能（2）にする。
-# 終了時も元の index を固定時と同じ方法で 1 回だけ複写し、2 つの一覧（ls-files -s と intent-to-add の印）を同じ複写から取る。
+# 終了時の確認は 2 回行う（#6047）。1 回目は HEAD の取り直しの前、2 回目は HEAD の取り直しの後（その後に HEAD の再照合・最後の経路の取り直し・集計の直前の HEAD の照合し直しが続く）。どちらも元の index を
+# 固定時と同じ方法で 1 回だけ複写し、2 つの一覧（ls-files -s と intent-to-add の印）を同じ複写から取って固定時の一覧と内容で比べる
+# （バイト比較にしない。stat 情報だけの更新で index のバイトは変わるが、一覧は変わらず、フックを時々落とす誤検出になる）。
 # 元の index を一覧ごとに開くと、2 つの呼び出しの間の更新で 2 つの一覧が別の版を見て、どちらの版とも違う組で一致し得る（#6011）。
-# git は index を lock ファイルの rename で置き換えるため、cp は 1 つの版を読む。元の index が無いときは存在しない複写のパスを
-# 指し（空として扱う）。固定時にあった index が終了時に無ければ、一覧の差とは別に有無の記録（index_pinned）で 2 にする
-# （登録 0 件の index は一覧が空のままのため）。複写の失敗は 2。固定したパスが終了時に通常ファイルでなく（FIFO・リンク等に）
-# 替わっていれば、複写せず 2。リンクは開始時も終了時も辿らず 2（解く前のパスで判定する）。
-after_index="${tmp_dir}/index-after"
-if index_is_link; then
-  # 走査中にリンクへ替わった（固定時はリンクでなかった）。辿らず 2。
-  echo "secret-scan: cannot snapshot the index; aborting" >&4
-  exit 2
-fi
-if [ -e "${orig_index}" ]; then
-  if [ ! -f "${orig_index}" ]; then
+# git は index を lock ファイルの rename で置き換えるため、cp は 1 つの版を読む。
+# 元の index が無いときは、ENOENT と確かめられた場合だけ存在しない複写のパスを指し（空として扱う）、確かめられなければ 2（index_absent_confirmed）。
+# 固定時にあった index が終了時に無ければ、一覧の差とは別に有無の記録（index_pinned）で 2 にする（登録 0 件の index は一覧が空のままのため）。
+# 複写の失敗は 2。固定したパスが終了時に通常ファイルでなく（FIFO・リンク等に）替わっていれば、複写せず 2。
+# リンクは開始時も終了時も辿らず 2（解く前のパスで判定する）。
+# 残る窓: 2 回目の複写から exit までの間の index の置き換え、最後の経路の取り直しから exit までの間の親リンクの付け替え、
+# 集計の直前の HEAD の照合から exit までの間に動いた HEAD。窓を狭めるだけで、無くならない
+# （監視付きの複写・ロックの取得はしない。git-hooks.md の (f)）。
+# index_paths_unchanged: 固定前と同じ環境で index の経路（解く前・解いた後）を取り直し、開始時の値と同じときだけ 0 を返す（#6047）。
+# 親ディレクトリのシンボリックリンクの参照先が走査中に変わると、末尾だけを見る index_is_link では検出できず、
+# 古い index を 2 回比べて 0 を返し得る。取得の失敗は 1、解いた後の食い違いは 2、解く前の食い違いは 3（どれも呼び出し側が 2 で止める）。パスを出力しない。
+# shellcheck disable=SC2030,SC2031 # 固定前の環境で取り直すため、サブシェルの中でだけ GIT_INDEX_FILE を戻す（意図）
+index_paths_unchanged() {
+  local now_abs now_raw
+  now_abs="$(resolve_index_path)" || return 1
+  now_raw="$(
+    if [ "${caller_index_set}" -eq 1 ]; then export GIT_INDEX_FILE="${caller_index}"; else unset GIT_INDEX_FILE; fi
+    g rev-parse --git-path index && printf x
+  )" || return 1
+  now_abs="${now_abs%x}"
+  now_abs="${now_abs%$'\n'}"
+  now_raw="${now_raw%x}"
+  now_raw="${now_raw%$'\n'}"
+  # 解いた後のパスが開始時と違う（親ディレクトリのリンクの付け替え。#6034）ときは 2、解く前のパスだけが違うときは 3
+  # （呼び出し側で診断文を分ける。どちらも 2 で止める）。
+  [ "${now_abs}" = "${orig_index}" ] || return 2
+  [ "${now_raw}" = "${raw_index}" ] || return 3
+  return 0
+}
+# require_index_paths_unchanged: index_paths_unchanged の結果を診断に変え、食い違い・取得の失敗は 2 で止める。
+# verify_index_unchanged が複写の前と後（cmp の後）の両方で呼び、複写を前後から挟む。加えて、最後の HEAD の再照合の後にも呼ぶ（この後に集計の直前の HEAD の照合し直しが続く）（#6047）。
+# 複写の後の確認が無いと、前の確認の後・複写の最中に親のリンクが付け替わったとき、古い実体を読んだまま 0 を返し得る。
+require_index_paths_unchanged() {
+  local paths_rc=0
+  index_paths_unchanged || paths_rc=$?
+  case "${paths_rc}" in
+    0) ;;
+    2)
+      # 解いた後のパスの食い違いは、複写できない（実体と git が読む index がずれた）ことと走査中の変化の両方を示す。
+      # 既存の 2 系統の診断（#6034 の「変化」・#6047 の「複写不能」）を満たすため、固定の 2 行を出す。
+      echo "secret-scan: cannot snapshot the index; aborting" >&4
+      echo "secret-scan: the index changed during the scan; aborting" >&4
+      exit 2
+      ;;
+    *)
+      echo "secret-scan: cannot snapshot the index; aborting" >&4
+      exit 2
+      ;;
+  esac
+}
+# verify_index_unchanged <複写先> <一覧の出力先>
+verify_index_unchanged() {
+  local copy="$1" listing="$2" cmp_rc=0
+  require_index_paths_unchanged
+  if index_is_link; then
+    # 走査中にリンクへ替わった（固定時はリンクでなかった）。辿らず 2。
     echo "secret-scan: cannot snapshot the index; aborting" >&4
     exit 2
   fi
-  if ! cp -- "${orig_index}" "${after_index}" 2> /dev/null; then
+  if [ -e "${orig_index}" ]; then
+    if [ ! -f "${orig_index}" ]; then
+      echo "secret-scan: cannot snapshot the index; aborting" >&4
+      exit 2
+    fi
+    if ! cp -- "${orig_index}" "${copy}" 2> /dev/null; then
+      echo "secret-scan: cannot snapshot the index; aborting" >&4
+      exit 2
+    fi
+  elif ! index_absent_confirmed; then
+    echo "secret-scan: cannot snapshot the index; aborting" >&4
+    exit 2
+  elif [ "${index_pinned}" -eq 1 ]; then
+    # 固定時にあった index が無い。登録 0 件の index は一覧が空のまま変わらないため、有無そのものを見て止める。
+    echo "secret-scan: the index changed during the scan; aborting" >&4
+    exit 2
+  fi
+  if ! GIT_INDEX_FILE="${copy}" index_listing "${listing}" 2> /dev/null; then
     echo "secret-scan: cannot snapshot the index; aborting" >&4
     exit 2
   fi
-elif [ "${index_pinned}" -eq 1 ]; then
-  # 固定時にあった index が無い。登録 0 件の index は一覧が空のまま変わらないため、有無そのものを見て止める。
-  echo "secret-scan: the index changed during the scan; aborting" >&4
-  exit 2
-fi
-if ! GIT_INDEX_FILE="${after_index}" index_listing "${tmp_dir}/index-listing-after" 2> /dev/null; then
-  echo "secret-scan: cannot snapshot the index; aborting" >&4
-  exit 2
-fi
-index_cmp_rc=0
-cmp -s "${tmp_dir}/index-listing-before" "${tmp_dir}/index-listing-after" || index_cmp_rc=$?
-if [ "${index_cmp_rc}" -ne 0 ]; then
-  echo "secret-scan: the index changed during the scan; aborting" >&4
-  exit 2
-fi
-# 親ディレクトリのシンボリックリンクの付け替え（#6034）: orig_index は git がリンクを解いた実体で、上の複写も一覧もその実体から
-# 取っている。走査中に index の親ディレクトリのリンクが別の場所へ付け替わると、実体は古いままで一覧が一致し、git が実際に
-# 読む index（新しい側）の追加分を見ないまま 0 を返し得る。複写の後に git 自身の解決をやり直し、開始時と 1 バイトでも違えば 2 にする。
-# 確認の後の付け替えは窓として残る（HEAD の取り直しと同じ。窓を狭めるだけで、0 を返す経路は増やさない）。パスは出さない。
-if ! resolved_after="$(resolve_index_path)"; then
-  echo "secret-scan: cannot snapshot the index; aborting" >&4
-  exit 2
-fi
-resolved_after="${resolved_after%x}"
-resolved_after="${resolved_after%$'\n'}"
-if [ "${resolved_after}" != "${orig_index}" ]; then
-  echo "secret-scan: the index changed during the scan; aborting" >&4
-  exit 2
-fi
+  cmp -s "${tmp_dir}/index-listing-before" "${listing}" || cmp_rc=$?
+  if [ "${cmp_rc}" -ne 0 ]; then
+    echo "secret-scan: the index changed during the scan; aborting" >&4
+    exit 2
+  fi
+  # 複写・一覧・比較の後にも経路を取り直す（複写を前後から挟む。確認の後の付け替えは窓として残る）。
+  require_index_paths_unchanged
+}
+verify_index_unchanged "${tmp_dir}/index-after" "${tmp_dir}/index-listing-after"
 
+# recheck_head: 固定した HEAD の ID を取り直し、違えば 2 で止める（未解決で始まったときは何もしない）。
+recheck_head() {
+  if [ "${head_resolved}" -eq 1 ]; then
+    pinned_head="${head_id}"
+    resolve_head
+    if [ "${head_id}" != "${pinned_head}" ]; then
+      echo "secret-scan: HEAD changed during the scan; aborting" >&4
+      exit 2
+    fi
+  fi
+}
 # 走査中に HEAD が動いていたら、固定した ID を基準にした結果は古い。合格を返さず検査不能（2）にする
 # （未作成ブランチ・空の ID のまま始まり、走査中にブランチが作られた場合も違いに含む）。
-# 取り直しは終了時の index の検証より後、集計の直前に置く（検証の途中に動いた HEAD も見落とさない。git-hooks.md の (f)。#6011）。
-if [ "${head_resolved}" -eq 1 ]; then
-  pinned_head="${head_id}"
-  resolve_head
-  if [ "${head_id}" != "${pinned_head}" ]; then
-    echo "secret-scan: HEAD changed during the scan; aborting" >&4
-    exit 2
-  fi
-fi
+# 取り直しは終了時の index の 1 回目の検証より後に置く（検証の途中に動いた HEAD も見落とさない。git-hooks.md の (f)。#6011）。
+recheck_head
+
+# 2 回目の確認（#6047。この後に HEAD の再照合・最後の経路の取り直し・集計の直前の HEAD の照合し直しが続く）。1 回目から HEAD の取り直しまでの間に置き換わった index を見落とさない。
+verify_index_unchanged "${tmp_dir}/index-final" "${tmp_dir}/index-listing-final"
+
+# 2 回目の index の検証の途中に動いた HEAD も見落とさないよう、検証の後にもう一度 HEAD を照合する（#6047。git-hooks.md の (f)）。
+recheck_head
+
+# 最後の HEAD の再照合（2 回目の確認の後）の後にも、index の経路を取り直す（#6047。複写の後の付け替えを、HEAD の再照合の後まで見る）。この後に集計の直前の HEAD の照合し直しが続く。
+require_index_paths_unchanged
+
+# 経路の取り直し（git を 2 回呼ぶ）の間に動いた HEAD も見落とさないよう、集計の直前に HEAD を固定した ID と照合し直す
+# （#6047。集計の前の最後の確認。この後に git を呼ばない）。
+recheck_head
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
 total="${env_hits}"
