@@ -279,12 +279,30 @@ GitHub Actions のキャッシュ（`actions/cache`・`actions/setup-node` の `
 追加・変更するときの方針。効かないキャッシュは復元時間と容量を浪費し、他のキャッシュを追い出すため、
 「入れれば速くなる」とは考えない。
 
-### 現状（2026-10-11 時点）
+### 現状（2026-11-27 時点）
 
-- 本リポジトリは GitHub Actions のキャッシュを使っていない（キャッシュ 0 件・0 バイト）。
-  `ci.yml` のツールは `env` に宣言した版を SHA256 で検証して毎回導入する方式で、所要時間は数十秒
-  （Rust のジョブの toolchain だけは例外で、rustup で毎回導入する。チェックリストの 9）
-- 言語固有のジョブを足してキャッシュを入れる場合は、本節に従う
+- Rust の 3 ジョブ（`build-test`・`lint`・`it-db-ci`）に cargo の依存と `target/` のキャッシュを入れた（TASK-6 8/10・#55）。
+  方式は公式の `actions/cache/restore` と `actions/cache/save` の分離（v6.1.0。SHA 固定）で、第三者の action は使わない。
+  保存は `main` への push だけ（PR は復元のみ）。キャッシュはジョブごとに分ける
+- キー: `cargo-<ジョブ名>-v1-<OS>-<rustc -vV のハッシュ>-<ルートの Cargo.lock のハッシュ>`。restore-keys は同じジョブ・同じ toolchain の版までで、
+  toolchain の版が変われば cold にする。版セグメントを上げる条件は `ci.yml` の `build-test` 直前のコメントに書く
+- パス: cargo の registry（index・cache）・cargo の取得元 DB・`target/`。`target/tmp`（試験の一時ファイル・記録）は保存から外す
+- 入れる前の計測（手元の cold ビルド）: `Compiling` は build で 33 件・test の build で 32 件、`target/` は約 780 MB、registry の index と cache は約 370 MB。
+  1 件約 1.2 GB 以下 × 3 ジョブ × 1 OS で 10 GB に収まる見積もり。手元は速く CI の runner の秒数とは別で、導入後の hit の効果は未検証（main への merge 後に測る。効果が無ければ撤去を人が判定する）
+- 入れていないもの: toolchain（毎回の導入は約 10 秒）・Docker のイメージ・依存の検査の advisory DB（TASK-680・TASK-681 の結線のときに考える）。
+  ほかのツールは `env` に宣言した版を SHA256 で検証して毎回導入する方式（チェックリストの 9）
+
+### 信頼の境界と汚染を疑ったとき（cargo のキャッシュ。この repo の運用）
+
+registry と `target/` をジョブ間で共有する方式は、そのまま受け入れている（利用者の決定。spec に定めは無い）。受け入れる前提は次の 2 点である。
+
+- `main` のスコープでキャッシュに書ける workflow は、すべて信頼の境界になる。`ci.yml` の `main` への push だけでなく、
+  `update-external.yml`（`schedule` で動き、可変タグと外部の道具を使う）も含む。ここで任意のコードが動くと、
+  `restore-keys` の前方一致に合う項目を作れる。復元した `target/` の依存は再ビルドされないため、混入した成果物がそのまま使われる。
+  キャッシュに書ける workflow を足す・発火を変えるときは、この境界に入るかを見る（`scheduled.yml` に `schedule` を足す TASK-681 も同じ）
+- 汚染を疑ったときの手順:
+    1. `main` スコープの `cargo-*-v1-*` のキャッシュを消す（`gh cache list -L 100 --ref refs/heads/main --key cargo- --json id,key` で確かめ、`gh cache delete <id>`）
+    2. `ci.yml` の key と restore-keys の版のセグメント（`v1`）を同時に上げる。上げないと、消す前に作られた項目や、消した後の `main` の push が同じ世代を作り直す
 
 ### 前提: 容量と課金
 
