@@ -107,6 +107,20 @@ impl FaultPair {
                 fault,
             })));
         }
+        // 注入ありの全事象が照合済みの段と一対一で対応すること（`inject` を経ない直接記録を通さない）。
+        let ev = fault.events();
+        let pts = fault.injection_points();
+        if ev.len() != pts.len()
+            || !ev
+                .iter()
+                .zip(pts)
+                .all(|(e, p)| e.kind == p.kind && e.phase == p.phase)
+        {
+            return Err(PairError::ShapeMismatch(Box::new(PairedRecords {
+                baseline,
+                fault,
+            })));
+        }
         Ok(PairedRecords { baseline, fault })
     }
 

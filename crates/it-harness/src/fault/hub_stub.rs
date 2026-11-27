@@ -44,7 +44,7 @@ use fandhe_auth_hub_stub::fault::{
     JwksRefusal, Refusal, Wait,
 };
 use fandhe_auth_hub_stub::heartbeat::{Heartbeat, HeartbeatReceiver};
-use fandhe_auth_hub_stub::jwks::{HubJwksEndpoint, JwksResponse};
+use fandhe_auth_hub_stub::jwks::{HubJwksEndpoint, InvalidKey, JwksResponse};
 use fandhe_auth_hub_stub::logout::{LogoutReceipt, LogoutRejection, LogoutTokenReceiver};
 use fandhe_auth_hub_stub::presentation::{
     IdentityTokenReceiver, PresentationRejection, ReceivedIdentity,
@@ -212,10 +212,22 @@ impl<T> RunBound<T> {
     pub fn get(&self) -> &T {
         &self.inner
     }
+    // 可変参照（`get_mut`・`DerefMut`）は出さない。出すと `mem::replace` で使用済みの受け口を取り出し、
+    // 別の実行の注入器へ結び直せる。準備が要るなら、必要な操作だけを個別のメソッドで足す。
+}
 
-    /// 内側の受け口の可変参照（鍵の公開などの準備用）。
-    pub fn get_mut(&mut self) -> &mut T {
-        &mut self.inner
+impl RunBound<HubJwksEndpoint> {
+    /// 鍵の公開（準備用。受け口を取り出さず、必要な操作だけを個別に出す）。
+    ///
+    /// # Errors
+    /// 鍵が不正なら `InvalidKey`。
+    pub fn publish_es256(&mut self, kid: &str, point: &[u8]) -> Result<(), InvalidKey> {
+        self.inner.publish_es256(kid, point)
+    }
+
+    /// 注入器を介さず配信する（キャッシュを作る準備用。呼び出しの記録には入らない）。
+    pub fn serve_uninjected(&mut self, now: u64) -> JwksResponse {
+        self.inner.serve(now)
     }
 }
 
@@ -223,12 +235,6 @@ impl<T> std::ops::Deref for RunBound<T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.inner
-    }
-}
-
-impl<T> std::ops::DerefMut for RunBound<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.inner
     }
 }
 

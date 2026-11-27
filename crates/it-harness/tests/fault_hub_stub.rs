@@ -215,7 +215,7 @@ fn jwks_status_refusal_then_release() {
     jwks.publish_es256("k-expected", key.public_key().as_ref())
         .unwrap();
     // 拒否の前にキャッシュを作っておく（OCL-36: 拒否はキャッシュを変えない）。
-    let warm = jwks.serve(NOW);
+    let warm = jwks.serve_uninjected(NOW);
     assert!(!warm.from_cache);
     let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503));
     inj.apply(&mut tl, k).unwrap();

@@ -248,6 +248,29 @@ fn branching_body_is_a_shape_mismatch() {
     );
 }
 
+/// `inject` を経ない直接記録の事象は、基準線に何も無くても `ShapeMismatch`（段と事象が一対一でない）。
+#[test]
+fn direct_record_without_inject_is_a_shape_mismatch() {
+    let n = Cell::new(0);
+    let err = FaultPair::run(|mut tl| -> Result<FaultRecord, ()> {
+        n.set(n.get() + 1);
+        if n.get() == 2 {
+            tl.record_now(FaultKind::DbBlock, FaultPhase::Applied)
+                .map_err(|_| ())?;
+            tl.record_now(FaultKind::DbBlock, FaultPhase::Released)
+                .map_err(|_| ())?;
+        }
+        tl.finish(finished_at()).map_err(|_| ())
+    })
+    .unwrap_err();
+    let PairError::ShapeMismatch(p) = err else {
+        panic!("shape mismatch")
+    };
+    assert!(p.baseline().events().is_empty());
+    assert_eq!(p.fault().events().len(), 2);
+    assert!(p.fault().injection_points().is_empty());
+}
+
 /// 渡していない別の実行の記録を返す本体は `RunMismatch`。
 #[test]
 fn record_of_another_run_is_a_run_mismatch() {
