@@ -31,7 +31,8 @@ pub use clock::{ClockSkewError, ClockSkewInjector, SkewedClock};
 pub use db::{DbFaultError, DbFaultProxy, StallExit, UpstreamStall};
 pub use external_store::{ExternalStoreFaultError, ExternalStoreFaultProxy};
 pub use hub_stub::{
-    HubStubCallError, HubStubFaultError, HubStubFaultInjector, HubStubFinishFailure, RunBound,
+    BoundReceiver, HubStubCallError, HubStubFaultError, HubStubFaultInjector, HubStubFinishFailure,
+    RunBound,
 };
 #[cfg(unix)]
 pub use instance::{InstanceExit, InstanceFaultError, InstanceFaultHandle};

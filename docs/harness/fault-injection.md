@@ -173,10 +173,12 @@ hub-stub の実装をそのまま使い、作り直さない。
   確定した記録を返す。注入器は本体の中で実行ごとに作る。返った記録が渡した実行のものでなければ `RunMismatch`、両方の段の並びが
   一致しなければ `ShapeMismatch`（両方の記録を返す）。注入ありで 0 件なら本体の確定が `NoInjectionInFaultRun` を返す。
 - `PairedRecords::write_new(dir)`: 2 つを別のファイルへ書く。ファイル名にモードを入れた（`it-fault-<baseline|fault>-<started>-<pid>-<n>.txt`）。
-- 受け口の実行への結び付け（5/8 への指摘の対応）: `HubStubFaultInjector::bind_receiver` で作った `RunBound` だけが、その注入器の受け口へ渡せる。
-  別の実行の注入器の受け口は、内側へ委ねる前に `RunMismatch`（内側のログに入れず、`used` も立てない）。取り出して結び直す口は出さない
-  （`Deref` で内側のメソッドは使える）。ハーネスで起動した stub へは、実行ごとに `handle.with(|s| inj.bind_receiver(HubJwksEndpoint::new(s.config())))`
-  で受け口を作り直す。
+- 受け口の実行への結び付け（5/8 への指摘の対応）: `HubStubFaultInjector::bind_receiver`（所有）・`bind_receiver_mut`（借用。
+  セッションの口 `&mut session.jwks` を所有権を取らずに結ぶ）で作った `RunBound` だけが、その注入器の受け口へ渡せる。
+  別の実行の注入器の受け口は、内側へ委ねる前に `RunMismatch`（内側のログに入れず、`used` も立てない）。結んだ受け口から
+  `&mut` を取り出して結び直す口（`get_mut`・`DerefMut`）は出さない（`Deref` で内側の共有参照のメソッドは使える）。
+  ハーネスで起動した stub へは、`handle.with_injector(&mut inj, |s, inj| inj.bind_receiver_mut(&mut s.jwks))` の形でセッションの口へ
+  直接注入できる（公開した鍵・キャッシュは引き継がれる）。実行ごとに新しい受け口を作る形（`bind_receiver`）も残す。
 - `HubStubHandle::with_injector(&mut inj, |session, inj| ..)`: 遅れの `Wait` をセッションのロックを放した後・戻る前に流す。
 - 試験: `cargo test -p fandhe-auth-it-harness --test fault_baseline`（`make test` に含む。Docker なし）。上流の試験用サーバーは
   `tests/support/upstream.rs` へ移し、各接続に書き込みの打ち切りを置いた（`drop` の join に期限を持たせる）。
@@ -249,8 +251,8 @@ note: ...
 - Hub の stub の注入（5/8）: 窓を「以降すべて」に限ったこと・同じ口の遅れと拒否の合成・`validate` を狭めたこと（`MalformedBody` は JWKS だけ）・
   眠る `Wait` を出さないこと（出すなら上限の決定が要る）・stub の呼び出しの記録そのものを記録の形式に入れないこと（入れるなら版を上げる。事象行の `log_pos` は `/2` で足した）・型名と文言
 - 基準線の実行（7/8）: `inject`・`FaultPair`・`PairedRecords`・`RunBound`・`with_injector` の名前と形・注入の段を記録の行に出さないこと
-  （出すなら形式の版上げ）・ファイル名にモードを入れたこと・基準線を先に流す順序・注入の対象をセッションの受け口から実行ごとに作る受け口へ
-  変えたこと（振る舞いの変更）・上流の書き込みの打ち切り 1 秒（試験用の仮の値）・`Applied` の順序の観測が未実施であること
+  （出すなら形式の版上げ）・ファイル名にモードを入れたこと・基準線を先に流す順序・`bind_receiver_mut`（借用の結び付け）の名前と形
+  （セッションの口へ直接注入する。実行ごとに作る受け口の形も残した）・上流の書き込みの打ち切り 1 秒（試験用の仮の値）・`Applied` の順序の観測が未実施であること
 - 記録のファイルを秘密値の走査の対象に入れること（`secret-values.md`）。本段は canary の試験で代える。出力先は追跡ツリーの外（`target/`）
 - DB の遮断の形を「直ちに閉じる」にしたこと。「受けて黙る（blackhole）」を入れるか（2/8）
 - 遅延を応答の向きの塊ごとに足す形（2/8）

@@ -22,7 +22,7 @@
 //!   遅れは内側の呼び出しが戻った直後に溜め場から `Wait` へ流す（応答を返す前）。`HubStubHandle::with` の中で受け口を
 //!   直接呼ぶと、今までどおりセッションのロックを握ったまま `Wait` が走る。ロックの外で流すには `HubStubHandle::with_injector`
 //!   を使う（7/8）。
-//! - 受け口は [`RunBound`] に包んで実行に結ぶ（`bind_receiver`）。別の実行の注入器の受け口には、この実行の注入が効かず、
+//! - 受け口は [`RunBound`] に包んで実行に結ぶ（所有は `bind_receiver`、借用は `bind_receiver_mut`。後者はセッションの口を所有権を取らずに結ぶ）。別の実行の注入器の受け口には、この実行の注入が効かず、
 //!   内側へ委ねる前に `RunMismatch`（7/8）。
 //! - 受け口は `timeline` を受け、注入器の実行と一致しなければ内側を呼ばず `RunMismatch`（基準線の呼び出しを注入器のログへ入れない）。
 //! - hub-stub の呼び出しの記録（`InjectionLog.at` は試験の論理時刻）は [`FaultRecord`](super::FaultRecord) に入れず、
@@ -36,7 +36,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use fandhe_auth_hub_stub::fault::{
@@ -193,9 +193,11 @@ pub(crate) struct DelayBuf(Arc<Mutex<Vec<Duration>>>);
 
 impl Wait for DelayBuf {
     fn wait(&mut self, delay: Duration) {
-        if let Ok(mut g) = self.0.lock() {
-            g.push(delay);
-        }
+        // 毒化していても中身を使い、注入した遅れを黙って捨てない（`db.rs` と同じ扱い）。
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(delay);
     }
 }
 
@@ -230,6 +232,40 @@ impl RunBound<HubJwksEndpoint> {
         self.inner.serve(now)
     }
 }
+
+mod sealed {
+    /// 実行に結んだ受け口（所有・借用）を注入器の口へ渡すための私的な trait。外から実装できない。
+    pub trait Sealed<R> {
+        fn run_id(&self) -> u64;
+        fn receiver_mut(&mut self) -> &mut R;
+    }
+}
+
+/// 実行に結んだ `R` の受け口。所有の [`RunBound<R>`] と、所有権を取らない借用の [`RunBound<&mut R>`] がある。
+/// 外から実装できず、`&mut R` を外へ出す口はない（注入器の内側だけが使う）。
+pub trait BoundReceiver<R>: sealed::Sealed<R> {}
+
+impl<R> sealed::Sealed<R> for RunBound<R> {
+    fn run_id(&self) -> u64 {
+        self.run_id
+    }
+    fn receiver_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+}
+
+impl<R> BoundReceiver<R> for RunBound<R> {}
+
+impl<R> sealed::Sealed<R> for RunBound<&mut R> {
+    fn run_id(&self) -> u64 {
+        self.run_id
+    }
+    fn receiver_mut(&mut self) -> &mut R {
+        self.inner
+    }
+}
+
+impl<R> BoundReceiver<R> for RunBound<&mut R> {}
 
 impl<T> std::ops::Deref for RunBound<T> {
     type Target = T;
@@ -482,9 +518,19 @@ impl<W: Wait> HubStubFaultInjector<W> {
         }
     }
 
+    /// 受け口を所有権を取らずにこの注入器の実行に結ぶ（例: セッションの口 `&mut session.jwks`）。
+    /// 結んだ値から `&mut R` は取り出せず（`get` は共有参照だけ）、借用が切れれば受け口は元の持ち主へ戻る。
+    /// 別の実行・別の注入器へ結び直すには、新しく `bind_receiver_mut` を呼ぶ（その注入器の照合が効く）。
+    pub fn bind_receiver_mut<'a, R>(&self, inner: &'a mut R) -> RunBound<&'a mut R> {
+        RunBound {
+            run_id: self.run_id,
+            inner,
+        }
+    }
+
     /// 受け口がこの実行のものかを、内側へ委ねる前に確かめる。
-    fn guard_receiver<T>(&self, bound: &RunBound<T>) -> Result<(), HubStubCallError> {
-        if bound.run_id == self.run_id {
+    fn guard_receiver<R>(&self, bound: &impl BoundReceiver<R>) -> Result<(), HubStubCallError> {
+        if sealed::Sealed::run_id(bound) == self.run_id {
             Ok(())
         } else {
             Err(HubStubCallError::RunMismatch)
@@ -501,10 +547,8 @@ impl<W: Wait> HubStubFaultInjector<W> {
     /// 溜めた遅れを利用者の `wait` へ渡す（受け口の呼び出しの後、または `with_injector` がロックを放した後）。
     /// 溜め場のロックは `wait` を呼ぶ前に放す（`wait` の中の再入で止まらない）。
     pub(crate) fn flush_delays(&mut self) {
-        let taken = match self.delays.0.lock() {
-            Ok(mut g) => std::mem::take(&mut *g),
-            Err(_) => Vec::new(),
-        };
+        let taken =
+            std::mem::take(&mut *self.delays.0.lock().unwrap_or_else(PoisonError::into_inner));
         for d in taken {
             self.wait.wait(d);
         }
@@ -519,7 +563,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
     pub fn present(
         &mut self,
         timeline: &FaultTimeline,
-        inner: &mut RunBound<IdentityTokenReceiver>,
+        inner: &mut impl BoundReceiver<IdentityTokenReceiver>,
         token: &str,
         now: u64,
     ) -> Result<Result<ReceivedIdentity, PresentationRejection>, HubStubCallError> {
@@ -529,7 +573,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
         self.used = true;
         let r = self
             .inner
-            .present(&mut inner.inner, token, now)
+            .present(sealed::Sealed::receiver_mut(inner), token, now)
             .map_err(HubStubCallError::Injected);
         self.after_call();
         r
@@ -539,7 +583,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
     pub fn receive_logout(
         &mut self,
         timeline: &FaultTimeline,
-        inner: &mut RunBound<LogoutTokenReceiver>,
+        inner: &mut impl BoundReceiver<LogoutTokenReceiver>,
         token: &str,
         now: u64,
     ) -> Result<Result<LogoutReceipt, LogoutRejection>, HubStubCallError> {
@@ -549,7 +593,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
         self.used = true;
         let r = self
             .inner
-            .receive_logout(&mut inner.inner, token, now)
+            .receive_logout(sealed::Sealed::receiver_mut(inner), token, now)
             .map_err(HubStubCallError::Injected);
         self.after_call();
         r
@@ -559,7 +603,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
     pub fn receive_heartbeat(
         &mut self,
         timeline: &FaultTimeline,
-        inner: &mut RunBound<HeartbeatReceiver>,
+        inner: &mut impl BoundReceiver<HeartbeatReceiver>,
         heartbeat: &Heartbeat,
         now: u64,
     ) -> Result<(), HubStubCallError> {
@@ -569,7 +613,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
         self.used = true;
         let r = self
             .inner
-            .receive_heartbeat(&mut inner.inner, heartbeat, now)
+            .receive_heartbeat(sealed::Sealed::receiver_mut(inner), heartbeat, now)
             .map_err(HubStubCallError::Injected);
         self.after_call();
         r
@@ -579,7 +623,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
     pub fn serve_jwks(
         &mut self,
         timeline: &FaultTimeline,
-        inner: &mut RunBound<HubJwksEndpoint>,
+        inner: &mut impl BoundReceiver<HubJwksEndpoint>,
         now: u64,
     ) -> Result<JwksResponse, HubStubCallError> {
         self.guard(timeline)?;
@@ -588,9 +632,30 @@ impl<W: Wait> HubStubFaultInjector<W> {
         self.used = true;
         let r = self
             .inner
-            .serve_jwks(&mut inner.inner, now)
+            .serve_jwks(sealed::Sealed::receiver_mut(inner), now)
             .map_err(HubStubCallError::Injected);
         self.after_call();
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ロックが毒化していても、注入した遅れを捨てずに溜め、流す（`db.rs` と同じ `into_inner` の扱い）。
+    #[test]
+    fn delay_buf_keeps_delays_after_poison() {
+        let mut buf = DelayBuf::default();
+        let shared = Arc::clone(&buf.0);
+        let _ = std::thread::spawn(move || {
+            let _g = shared.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(buf.0.is_poisoned());
+        buf.wait(Duration::from_millis(7));
+        let got = buf.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        assert_eq!(got, [Duration::from_millis(7)]);
     }
 }
