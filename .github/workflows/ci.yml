@@ -142,7 +142,7 @@ jobs:
   # 保存は main への push だけにする（PR は復元だけ）。キーは ジョブ名・版セグメント・OS・rustc -vV のハッシュ・ルートの Cargo.lock のハッシュ。
   # 版セグメント（v1）を上げる条件: ルートの Cargo.toml の [profile]・RUSTFLAGS や CARGO_PROFILE_* の env・.cargo/config.toml・rust-toolchain.toml の
   # 追加と変更、各ジョブが流す cargo のコマンドとフラグの変更。上げるときは restore-keys の版も同時に上げる。
-  # 部分復元のあとの保存で古い成果物が混ざって 1 件が見積もりを大きく超えたときも版を上げる。target/tmp（試験の一時ファイル・記録）は保存しない。
+  # 部分復元のあとの保存で古い成果物が混ざって 1 件が見積もりを大きく超えたときも版を上げる。target/tmp（試験の一時ファイル・記録）は保存の前に消して保存しない。
   build-test:
     name: "make build + make test"
     runs-on: ubuntu-latest
@@ -180,7 +180,6 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            !target/tmp
           key: cargo-build-test-v1-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-build-test-v1-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-
@@ -191,6 +190,11 @@ jobs:
       - name: make test
         run: make test
 
+      - name: Remove target/tmp before cache save
+        # actions/cache の除外パターン（!）は子孫に効かず target/tmp が保存されるため、保存の前に消す（#55）。
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: rm -rf target/tmp
+
       - name: Save cargo cache
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -200,7 +204,6 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            !target/tmp
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # Rust の整形の差分検査と lint（TASK-6）。ローカルの `make lint` と同じ契約で、rustfmt の差分・
@@ -249,13 +252,17 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            !target/tmp
           key: cargo-lint-v1-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-lint-v1-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-
 
       - name: make lint
         run: make lint
+
+      - name: Remove target/tmp before cache save
+        # actions/cache の除外パターン（!）は子孫に効かず target/tmp が保存されるため、保存の前に消す（#55）。
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: rm -rf target/tmp
 
       - name: Save cargo cache
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
@@ -266,7 +273,6 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            !target/tmp
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # 追跡ファイル全体の秘密情報の混入検査（TASK-6 4/10。#51）。処理は scripts/secret-scan-ci.sh に置き、ここは呼ぶだけ。
@@ -384,13 +390,17 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            !target/tmp
           key: cargo-it-db-ci-v1-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-it-db-ci-v1-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-
 
       - name: make it-db-ci
         run: make it-db-ci
+
+      - name: Remove target/tmp before cache save
+        # actions/cache の除外パターン（!）は子孫に効かず target/tmp が保存されるため、保存の前に消す（#55）。
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: rm -rf target/tmp
 
       - name: Save cargo cache
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
@@ -401,7 +411,6 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            !target/tmp
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # 依存の検査の枠（TASK-6 6/10。#53）。cargo-deny・cargo-audit を版固定 + SHA256 検証で導入するだけで、検査は流さない。
