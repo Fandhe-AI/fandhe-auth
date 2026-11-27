@@ -171,6 +171,52 @@ else
   echo "ok - crate-deps: skipped (cargo not found)"
 fi
 
+# ---- check-openssl-vendored.sh: R4 の設定の読み取りは最初の Cargo の前に済み、読めない・include は fail-closed（#6037）
+# 偽の cargo（目印を作って 1 で終わる）を PATH の先頭に置き、Cargo を起動する前に 2 で止まることを目印の有無で確かめる。
+# 前提: tomllib を持つ python3（3.11 以上）。CI（CI または GITHUB_ACTIONS が設定）では前提が無ければ失敗、ローカルでは skip する。
+if ! command -v python3 > /dev/null 2>&1 || ! python3 -I -c 'import tomllib' > /dev/null 2>&1; then
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "vendored: prerequisites (python3 with tomllib) are required in CI" "missing prerequisite" ""
+  else
+    echo "ok - vendored: skipped (python3 with tomllib not found)"
+  fi
+else
+  vend_fx="${work_dir}/vendored-fx"
+  vend_bin="${work_dir}/vendored-fakebin"
+  vend_mark="${work_dir}/vendored-cargo-ran"
+  mkdir -p "${vend_fx}/scripts" "${vend_bin}"
+  cp "${HOOKS_DIR}/../check-openssl-vendored.sh" "${HOOKS_DIR}/../lib.sh" "${vend_fx}/scripts/"
+  printf '#!/bin/sh\n: > "%s"\nexit 1\n' "${vend_mark}" > "${vend_bin}/cargo"
+  chmod +x "${vend_bin}/cargo"
+  # vendored_case <名前> <期待の終了コード> <stderr に含むべき文字列（空なら不問）> <目印の期待: ran|none>
+  vendored_case() {
+    local name="$1" want_rc="$2" want_msg="$3" want_mark="$4" rc=0 out mark="none"
+    rm -f "${vend_mark}"
+    out="$(PATH="${vend_bin}:${PATH}" "${HOOK_BASH}" "${vend_fx}/scripts/check-openssl-vendored.sh" 2>&1)" || rc=$?
+    [ -e "${vend_mark}" ] && mark="ran"
+    if [ "${rc}" -eq "${want_rc}" ] && [ "${mark}" = "${want_mark}" ] && { [ -z "${want_msg}" ] || [[ "${out}" == *"${want_msg}"* ]]; }; then
+      pass "vendored: ${name}"
+    else
+      fail "vendored: ${name}" "expected rc=${want_rc} cargo=${want_mark} msg='${want_msg}', got rc=${rc} cargo=${mark}: ${out}"
+    fi
+  }
+  # V0 対照: .cargo なし。偽の cargo が実際に呼ばれて 2（目印が作られる）
+  vendored_case "control: fake cargo is invoked when no .cargo config" 2 "cargo tree failed" ran
+  # V1: include を含む設定は Cargo を起動する前に拒否する
+  mkdir -p "${vend_fx}/.cargo"
+  printf 'include = ["extra.toml"]\n' > "${vend_fx}/.cargo/config.toml"
+  vendored_case "NG: include is rejected before cargo runs" 2 "include is not supported" none
+  # V2: .cargo に検索権限が無い設定は検査不能（2）。権限が効かない利用者（root 等）では確かめられないため緩める
+  printf '[env]\nOPENSSL_STATIC = "1"\n' > "${vend_fx}/.cargo/config.toml"
+  chmod 000 "${vend_fx}/.cargo"
+  if [ ! -x "${vend_fx}/.cargo" ]; then
+    vendored_case "NG: .cargo without search permission is cannot-inspect before cargo runs" 2 "cannot read .cargo config" none
+  else
+    echo "ok - vendored: .cargo permission case skipped (search permission not enforced for this user)"
+  fi
+  chmod u+rwx "${vend_fx}/.cargo"
+fi
+
 # ---- scripts/msrv.sh: cargo metadata の解決結果から読む（表記の違い・複数行の文字列に左右されない。読めなければ 2）
 # 前提: cargo・jq・tomllib を持つ python3（3.11 以上）。CI（CI または GITHUB_ACTIONS が設定）では前提が足りなければ
 # skip せず失敗にする（検査が黙って素通りしないため）。ローカルでは skip する。
