@@ -21,7 +21,7 @@ tools:
 | 区分 | 内容 |
 |------|------|
 | ✅ 読む | `Cargo.toml`・`Cargo.lock`・`crates/*/Cargo.toml` |
-| ✅ 実行 | `cargo deny fetch`・`cargo-audit audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ。直前に `scripts/check-audit-config.sh fetch`）・`cargo deny --locked check <検査> --disable-fetch`・`cargo-audit audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`scripts/check-audit-config.sh`（cargo-audit の前に流す検査。何も変更しない）・`git diff --exit-code Cargo.lock`・`cargo deny --version`・`cargo audit --version` |
+| ✅ 実行 | `cargo deny fetch`・`cargo-audit audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ。直前に `scripts/check-audit-config.sh fetch`）・`cargo deny --locked check <検査> --disable-fetch`・`cargo-audit audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`scripts/check-audit-config.sh fetch`・`scripts/check-audit-config.sh no-fetch`（cargo-audit の前に流す検査。何も変更しない）・`git diff --exit-code Cargo.lock`・`cargo deny --version`・`cargo audit --version` |
 | ❌ 禁止 | `cargo update`・`cargo add` / `remove`・`cargo install`・ファイルの編集・例外の追加・`cargo deny` / `cargo tree` を `--locked` なしで流すこと・`cargo tree` に `--all-features` を付けること |
 
 ## 遵守する規約

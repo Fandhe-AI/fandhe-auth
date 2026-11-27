@@ -66,7 +66,7 @@ no-vendored: ## openssl-sys の vendored の検査（合否は本番メンバー
 audit-cfg: ## cargo-audit が読む設定が無いこと（承認済みは無し）の検査。取得の前の段（CARGO_HOME は既定のみ。cargo-audit 0.22.2 の読み込み先。検査のみ）。直接: scripts/check-audit-config.sh fetch
 	@scripts/check-audit-config.sh fetch
 
-# audit-cfg-nofetch も暫定の名前。取得なし（--no-fetch）の cargo-audit の前の段で、advisory-db が git の作業ツリー・advisory 1 件以上・変更なしであることも確かめる。
+# audit-cfg-nofetch も暫定の名前。取得なし（--no-fetch）の cargo-audit の前の段で、advisory-db が git の作業ツリーの最上位・advisory 1 件以上・変更なしであることも確かめる（CARGO_HOME は両方の段で既定のみ）。
 audit-cfg-nofetch: ## audit-cfg の取得なしの段（cargo-audit --no-fetch の前。advisory-db の状態の検査を加える。検査のみ）。直接: scripts/check-audit-config.sh no-fetch
 	@scripts/check-audit-config.sh no-fetch
 

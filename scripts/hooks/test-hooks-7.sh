@@ -542,17 +542,25 @@ audit_fx; mkdir crates/trial-deps/fuzz/.cargo; printf '%s\n' "${audit_ignore_tom
 audit_case "NG: fuzz .cargo/audit.toml" 1
 
 audit_fx; mkdir "${audit_root}/ch"; audit_db "${audit_root}/ch/advisory-db"; printf '%s\n' "${audit_ignore_toml}" > "${audit_root}/ch/audit.toml"
-audit_stage=no-fetch
-audit_case "NG: CARGO_HOME/audit.toml" 1 CARGO_HOME="${audit_root}/ch"
-audit_stage=fetch
-audit_has "record: CARGO_HOME from env" "(CARGO_HOME from env): present (not approved)"
+audit_case "error: CARGO_HOME set (with audit.toml) exits 2 at the fetch stage" 2 CARGO_HOME="${audit_root}/ch"
+audit_has "record: reason (CARGO_HOME is set, fetch)" "CARGO_HOME is set; the fetch stage"
 audit_lacks "record: no absolute path" "${audit_root}"
-
-audit_fx; mkdir "${audit_root}/home/.cargo"; audit_db "${audit_root}/home/.cargo/advisory-db"; printf '%s\n' "${audit_ignore_toml}" > "${audit_root}/home/.cargo/audit.toml"
-audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME unset" 1
-audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME empty" 1 CARGO_HOME=
 audit_stage=no-fetch
-audit_case "NG: HOME/.cargo/audit.toml at the no-fetch stage" 1
+audit_case "error: CARGO_HOME set (with audit.toml) exits 2 at the no-fetch stage" 2 CARGO_HOME="${audit_root}/ch"
+audit_has "record: reason (CARGO_HOME is set, no-fetch)" "CARGO_HOME is set; the no-fetch stage"
+audit_stage=fetch
+
+# HOME は fixture の repo の外に置く（repo 内に置くと手順 4 の repo 内の件数にも数えられ、HOME 側の検査を消しても通る）
+audit_fx; audit_home="${audit_root}.home"; mkdir -p "${audit_home}/.cargo"; audit_db "${audit_home}/.cargo/advisory-db"; printf '%s\n' "${audit_ignore_toml}" > "${audit_home}/.cargo/audit.toml"
+audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME unset" 1 HOME="${audit_home}"
+audit_has "record: HOME-side location is present" "(CARGO_HOME from HOME): present (not approved)"
+audit_has "record: nothing nested in the repo" "(tracked or untracked): 0"
+audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME empty" 1 CARGO_HOME= HOME="${audit_home}"
+audit_has "record: HOME-side location is present (CARGO_HOME empty)" "(CARGO_HOME from HOME): present (not approved)"
+audit_stage=no-fetch
+audit_case "NG: HOME/.cargo/audit.toml at the no-fetch stage" 1 HOME="${audit_home}"
+audit_has "record: HOME-side location is present (no-fetch)" "(CARGO_HOME from HOME): present (not approved)"
+audit_has "record: nothing nested in the repo (no-fetch)" "(tracked or untracked): 0"
 audit_stage=fetch
 
 audit_fx; mkdir .cargo; ln -s "${audit_root}/missing-target" .cargo/audit.toml
@@ -586,9 +594,11 @@ audit_fx
 printf '#!/bin/sh\nexit 2\n' > "${audit_root}/bin/grep"
 chmod +x "${audit_root}/bin/grep"
 audit_case "error: failing grep (empty count) exits 2" 2
+audit_has "record: reason (cannot count nested)" "cannot count nested"
 audit_lacks "record: no ok result when count is unreadable" "audit-config: result: ok"
 printf '#!/bin/sh\necho abc\nexit 0\n' > "${audit_root}/bin/grep"
 audit_case "error: non-numeric count exits 2" 2
+audit_has "record: reason (cannot read the nested count)" "cannot read the nested"
 
 # 2 段の検査（DPOL-33・DPOL-34）
 audit_fx
@@ -617,7 +627,21 @@ audit_has "record: advisory count" "git work tree, advisories: 1"
 audit_has "record: no changes" "audit-config: advisory-db changes: 0"
 audit_lacks "record: no absolute path (db)" "${audit_root}"
 audit_fx; audit_db "${audit_root}/ch/advisory-db"
-audit_case "OK: no-fetch stage with CARGO_HOME set to a clean advisory-db" 0 CARGO_HOME="${audit_root}/ch"
+audit_case "error: no-fetch stage with CARGO_HOME set to a clean advisory-db exits 2" 2 CARGO_HOME="${audit_root}/ch"
+audit_has "record: reason (CARGO_HOME is set)" "CARGO_HOME is set; the no-fetch stage"
+
+# no-fetch 段の advisory の件数の読み取り: grep・find の失敗を 0 件・一部の件数に読まない
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+printf '#!/bin/sh\nexit 2\n' > "${audit_root}/bin/grep"; chmod +x "${audit_root}/bin/grep"
+audit_case "error: no-fetch stage with failing grep exits 2" 2
+audit_has "record: reason (cannot count advisories, grep)" "cannot count advisories"
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+printf '#!/bin/sh\nexit 2\n' > "${audit_root}/bin/find"; chmod +x "${audit_root}/bin/find"
+audit_case "error: no-fetch stage with failing find exits 2" 2
+audit_has "record: reason (cannot count advisories, find)" "cannot count advisories"
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; echo "ignored-file" > "${audit_root}/home/.cargo/advisory-db/.gitignore"; git -C "${audit_root}/home/.cargo/advisory-db" add .gitignore; git -C "${audit_root}/home/.cargo/advisory-db" commit -q -m "chore: ignore"; echo x > "${audit_root}/home/.cargo/advisory-db/ignored-file"
+audit_case "error: no-fetch stage with an ignored file exits 2" 2
+audit_has "record: reason (has changes, ignored)" "has changes"
 
 audit_fx
 audit_case "error: no-fetch stage without advisory-db exits 2" 2
