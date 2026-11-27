@@ -1,0 +1,45 @@
+# 定期の実行の系統の枠（TASK-6 7/10。#54）。
+#
+# PR ごとの系統（pull_request・main への push）は ci.yml が持つ。ci.yml 内のジョブでマージを止める検査は ci-complete で束ねる
+# （codex / * と trust-root-secret-scan.yml は別に要求される。.claude/rules/github-actions.md の「必須チェックと集約ジョブ」）。本ファイルは、コードが変わらなくても結果が変わりうる検査（advisory DB の更新で
+# 新しい advisory が出る等）を置くための枠で、pull_request・push は持たない。
+#
+# 今は検査を結線していない。緑でも DPOL-35 を満たしたことにならない（ジョブ名に frame を入れているのはそのため）。
+# 定期の依存の監査・advisory DB の取得日の記録・警報の結線は TASK-681（#1046）。警報の経路は Hub の AOPS-3。
+# 結線の契約は .claude/rules/github-actions.md の「PR ごとの実行と定期の実行の振り分け」。
+#
+# 例外（利用者が承認済み。2026-11-26）: PR の検査を担わない定期ジョブに限り、ci-complete の needs に入れず、必須チェックにも登録しない。
+# 集約できない理由は needs が別ワークフローを参照できないこと、必須に登録しない理由は PR で起動せずチェックが報告されないこと。
+# 承認の範囲は、本ファイルが workflow_dispatch だけで動く間に限る。schedule などの発火を足すとき（TASK-681）は例外を見直す（承認は人が行う。ACPT-7）。
+# 道具の版と SHA256 の宣言は ci.yml の env の 1 か所だけで、ここに複製しない（共有の方法は TASK-681 で決める）。
+name: Scheduled
+
+on:
+  # 例外の承認の範囲は workflow_dispatch だけで動く間（手動の workflow_dispatch だけ）。
+  # schedule（頻度の上限は .claude/rules/github-actions.md の「日次以下」のまま。候補は日次で暫定。時刻とあわせて TASK-681 で人が決める）は TASK-681 の結線と一緒に、例外を見直してから足す（承認は人が行う。ACPT-7）。
+  workflow_dispatch:
+
+permissions: {}
+
+# schedule など途中で止めると不整合が残るものは取り消さない。group 名は ci.yml の ci- 接頭辞と重ねない。
+concurrency:
+  group: scheduled-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # TODO(TASK-681): 定期の依存の監査をここに結線し、結線したらジョブ名から「frame」を外す。
+  # リポジトリを読まないので checkout は置かない。要るときは SHA 固定・persist-credentials: false で足す。
+  scheduled-frame:
+    name: "scheduled frame (no checks wired; TASK-681)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Report trigger
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          echo "event=${EVENT_NAME} ref=${REF_NAME}"
+          echo "scheduled checks are not wired yet (TASK-681); this run proves only that the trigger works"

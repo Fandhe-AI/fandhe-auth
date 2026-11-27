@@ -5,8 +5,9 @@ use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use fandhe_auth_load_harness::{
-    CallResult, IntervalName, LoadConfig, MeterError, MetricKey, MonotonicClock, StageConfig,
-    StageError, StageLimits, StagePlan, TargetError, TargetName, TargetSpec, run_stages,
+    CallResult, IntervalName, LoadConfig, MeterError, MetricKey, MonotonicClock, RECORD_INTERVALS,
+    StageConfig, StageError, StageLimits, StagePlan, TargetError, TargetName, TargetSpec,
+    run_stages,
 };
 
 /// 呼ぶたびに `step` ずつ進む時計。
@@ -39,16 +40,12 @@ impl MonotonicClock for BrokenClock {
 fn spec() -> TargetSpec {
     TargetSpec::new(
         TargetName::new("route_a").unwrap(),
-        IntervalName::new("op").unwrap(),
+        IntervalName::new("client_response").unwrap(),
     )
 }
 
 fn limits() -> StageLimits {
     StageLimits::new(64, 1024, 1_000_000, u64::MAX).unwrap()
-}
-
-fn vocab() -> Vec<IntervalName> {
-    vec![IntervalName::new("op").unwrap()]
 }
 
 fn sc(c: u64, n: u64, w: u64, reps: u64) -> StageConfig {
@@ -59,7 +56,7 @@ fn sc(c: u64, n: u64, w: u64, reps: u64) -> StageConfig {
 fn plan_validation() {
     let one = sc(1, 1, 0, 1);
     let lim = StageLimits::new(3, 5, 12, u64::MAX).unwrap();
-    let new = |v: Vec<StageConfig>, l: StageLimits| StagePlan::new(v, MetricKey::P99Ns, l, vocab());
+    let new = |v: Vec<StageConfig>, l: StageLimits| StagePlan::new(v, MetricKey::P99Ns, l);
     assert_eq!(new(vec![], lim), Err(StageError::InvalidPlan));
     assert_eq!(new(vec![one; 4], lim), Err(StageError::InvalidPlan));
     assert!(new(vec![one; 3], lim).is_ok());
@@ -95,22 +92,27 @@ fn plan_validation() {
         new(two, StageLimits::new(2, 3, 12, 71).unwrap()),
         Err(StageError::InvalidPlan)
     );
-    // 語彙が空なら計画を作れない。
-    assert_eq!(
-        StagePlan::new(vec![one], MetricKey::P99Ns, lim, vec![]),
-        Err(StageError::InvalidPlan)
-    );
+}
+
+/// SECR-23・#6038: 固定語彙は空でなく、各要素が区間名の形を満たし、重複が無い。
+#[test]
+fn record_intervals_are_well_formed() {
+    assert!(!RECORD_INTERVALS.is_empty());
+    let mut seen = std::collections::BTreeSet::new();
+    for n in RECORD_INTERVALS {
+        assert!(IntervalName::new(n).is_ok());
+        assert!(seen.insert(n));
+    }
 }
 
 #[test]
 fn interval_outside_vocabulary_is_rejected_before_any_run() {
-    let plan = StagePlan::new(
-        vec![sc(1, 2, 0, 1)],
-        MetricKey::P99Ns,
-        limits(),
-        vec![IntervalName::new("other").unwrap()],
-    )
-    .unwrap();
+    let plan = StagePlan::new(vec![sc(1, 2, 0, 1)], MetricKey::P99Ns, limits()).unwrap();
+    // 固定語彙の外の区間名（設定由来の値の代わり）。語彙を足す口は無い。
+    let spec = TargetSpec::new(
+        TargetName::new("route_a").unwrap(),
+        IntervalName::new("other").unwrap(),
+    );
     let calls = AtomicU64::new(0);
     let clocks = AtomicU64::new(0);
     let r = run_stages(
@@ -118,7 +120,7 @@ fn interval_outside_vocabulary_is_rejected_before_any_run() {
             clocks.fetch_add(1, Ordering::SeqCst);
             Ok(step_clock(10))
         },
-        &spec(),
+        &spec,
         &plan,
         || {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -133,7 +135,7 @@ fn interval_outside_vocabulary_is_rejected_before_any_run() {
 #[test]
 fn results_are_kept_per_stage() {
     let cfgs = vec![sc(1, 5, 1, 2), sc(2, 6, 0, 3), sc(4, 8, 2, 1)];
-    let plan = StagePlan::new(cfgs.clone(), MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let plan = StagePlan::new(cfgs.clone(), MetricKey::P99Ns, limits()).unwrap();
     let r = run_stages(|| Ok(step_clock(10)), &spec(), &plan, || CallResult::Ok).unwrap();
     assert_eq!(r.stages().len(), 3);
     assert_eq!(r.target().as_str(), "route_a");
@@ -164,7 +166,6 @@ fn stages_and_runs_do_not_overlap() {
         vec![sc(3, 6, 1, 2), sc(2, 4, 0, 3)],
         MetricKey::P99Ns,
         limits(),
-        vocab(),
     )
     .unwrap();
     let in_flight = AtomicU64::new(0);
@@ -205,7 +206,6 @@ fn error_stops_and_discards_finished_stages() {
         vec![sc(1, 3, 0, 2), sc(1, 3, 0, 2), sc(1, 3, 0, 2)],
         MetricKey::P99Ns,
         limits(),
-        vocab(),
     )
     .unwrap();
     let clock_calls = AtomicU64::new(0);
@@ -241,7 +241,7 @@ fn error_stops_and_discards_finished_stages() {
 
 #[test]
 fn worst_run_picks_largest_and_smallest_on_tie() {
-    let plan = StagePlan::new(vec![sc(1, 4, 0, 3)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 4, 0, 3)], MetricKey::P99Ns, limits()).unwrap();
     let steps = [10, 30, 30];
     let n = AtomicU64::new(0);
     let r = run_stages(
@@ -259,7 +259,7 @@ fn worst_run_picks_largest_and_smallest_on_tie() {
 
 #[test]
 fn all_timeouts_give_none_and_none_tokens() {
-    let plan = StagePlan::new(vec![sc(1, 3, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 3, 0, 1)], MetricKey::P99Ns, limits()).unwrap();
     let r = run_stages(
         || Ok(step_clock(10)),
         &spec(),
@@ -269,17 +269,17 @@ fn all_timeouts_give_none_and_none_tokens() {
     .unwrap();
     assert_eq!(r.stages()[0].worst_run(), None);
     let text = r.to_string();
-    assert!(
-        text.contains("worst_run: 1 by=p99_ns interval=op run=none class=measured refs=measured\n")
-    );
     assert!(text.contains(
-        "metric: 1.1 interval=op class=measured n=0 p50_ns=none p95_ns=none p99_ns=none max_ns=none max_trial=none refs=measured\n"
+        "worst_run: 1 by=p99_ns interval=client_response run=none class=measured refs=measured\n"
+    ));
+    assert!(text.contains(
+        "metric: 1.1 interval=client_response class=measured n=0 p50_ns=none p95_ns=none p99_ns=none max_ns=none max_trial=none refs=measured\n"
     ));
 }
 
 #[test]
 fn display_lines_in_order() {
-    let plan = StagePlan::new(vec![sc(1, 4, 0, 1)], MetricKey::MaxNs, limits(), vocab()).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 4, 0, 1)], MetricKey::MaxNs, limits()).unwrap();
     let seq = AtomicU64::new(0);
     let r = run_stages(
         || Ok(step_clock(10)),
@@ -298,9 +298,9 @@ stage: 1 class=test_condition refs=harness_config concurrency_configured=1 repet
 run: 1.1 class=measured refs=measured concurrency_observed_max=1 executed=4 success=1 failure=2 timeout=1 excluded=0
 failure_kind: 1.1 class=measured refs=measured kind=rejected count=1
 failure_kind: 1.1 class=measured refs=measured kind=unavailable count=1
-metric: 1.1 interval=op class=measured n=1 p50_ns=10 p95_ns=10 p99_ns=10 max_ns=10 max_trial=1 refs=measured
-failure_metric: 1.1 interval=op class=measured n=2 p50_ns=10 p95_ns=10 p99_ns=10 max_ns=10 max_trial=2 refs=measured
-worst_run: 1 by=max_ns interval=op run=1 class=measured refs=measured
+metric: 1.1 interval=client_response class=measured n=1 p50_ns=10 p95_ns=10 p99_ns=10 max_ns=10 max_trial=1 refs=measured
+failure_metric: 1.1 interval=client_response class=measured n=2 p50_ns=10 p95_ns=10 p99_ns=10 max_ns=10 max_trial=2 refs=measured
+worst_run: 1 by=max_ns interval=client_response run=1 class=measured refs=measured
 ";
     assert_eq!(r.to_string(), expected);
 }
@@ -328,7 +328,6 @@ fn clock_factory_error_is_numbered_and_stops() {
         vec![sc(1, 3, 0, 3), sc(1, 3, 0, 2)],
         MetricKey::P99Ns,
         limits(),
-        vocab(),
     )
     .unwrap();
     let clocks = AtomicU64::new(0);
@@ -369,11 +368,11 @@ fn clock_error_display_and_debug_hide_target_name() {
     let canary = "canary_clock_err_target_qv";
     let spec = TargetSpec::new(
         TargetName::new(canary).unwrap(),
-        IntervalName::new("op").unwrap(),
+        IntervalName::new("client_response").unwrap(),
     );
     // 目印が対象の名前まで届いていること（届いていなければ出ないのは当然になる）。
     assert_eq!(spec.name().as_str(), canary);
-    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits()).unwrap();
     let kinds = [
         MeterError::InvalidName,
         MeterError::InvalidIntervals,
@@ -420,7 +419,7 @@ fn clock_error_display_and_debug_hide_target_name() {
 /// 文言を伏せる保証は `Result` の経路だけで、panic の文言は生成関数の書き手が持つ（`run_stages` の doc）。
 #[test]
 fn clock_factory_panic_propagates_unchanged() {
-    let plan = StagePlan::new(vec![sc(1, 3, 0, 3)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 3, 0, 3)], MetricKey::P99Ns, limits()).unwrap();
     let clocks = AtomicU64::new(0);
     let calls = AtomicU64::new(0);
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -483,7 +482,7 @@ impl Drop for PanicOnDropValue {
 /// 生成関数が所有する値の破棄の panic も捕捉せず、誤りに変わらずにその値のまま伝わる。
 #[test]
 fn generator_drop_panic_propagates_unchanged() {
-    let plan = StagePlan::new(vec![sc(1, 3, 0, 2)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 3, 0, 2)], MetricKey::P99Ns, limits()).unwrap();
     let clocks = AtomicU64::new(0);
     let calls = AtomicU64::new(0);
     let held = PanicOnDropValue;
@@ -515,13 +514,8 @@ fn generator_drop_panic_propagates_unchanged() {
 #[test]
 fn clock_drop_panic_propagates_unchanged() {
     for concurrency in [1_u64, 3] {
-        let plan = StagePlan::new(
-            vec![sc(concurrency, 6, 1, 2)],
-            MetricKey::P99Ns,
-            limits(),
-            vocab(),
-        )
-        .unwrap();
+        let plan =
+            StagePlan::new(vec![sc(concurrency, 6, 1, 2)], MetricKey::P99Ns, limits()).unwrap();
         let clocks = AtomicU64::new(0);
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_stages(
@@ -550,9 +544,9 @@ fn staged_run_debug_hides_target_name() {
     let canary = "canary_target_zq";
     let spec = TargetSpec::new(
         TargetName::new(canary).unwrap(),
-        IntervalName::new("op").unwrap(),
+        IntervalName::new("client_response").unwrap(),
     );
-    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits()).unwrap();
     let run = run_stages(|| Ok(step_clock(10)), &spec, &plan, || CallResult::Ok).unwrap();
     let out = format!("{run:?}");
     assert!(!out.contains(canary));
@@ -567,11 +561,11 @@ fn staged_run_debug_hides_target_name() {
 #[test]
 fn plan_and_result_debug_hide_interval_names() {
     // SECR-23: 区間名に目印を渡し、計画・結果（回の集計のキーを含む）の Debug に含まれないことを確かめる。
-    let canary = "canary_interval_zq";
+    // 目印は語彙の区間名（語彙の外は run_stages が拒否するため、語彙の中の名前で Debug の秘匿を見る）。
+    let canary = "client_response";
     let name = IntervalName::new(canary).unwrap();
     let spec = TargetSpec::new(TargetName::new("op_target").unwrap(), name.clone());
-    let plan =
-        StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits(), vec![name]).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 1, 0, 1)], MetricKey::P99Ns, limits()).unwrap();
     let plan_out = format!("{plan:?}");
     assert!(!plan_out.contains(canary));
     assert_eq!(plan_out, "StagePlan(..)");
@@ -596,7 +590,6 @@ fn multi_stage_display_numbers_runs_per_stage_and_worst_run_stays_in_stage() {
         vec![sc(1, 2, 0, 3), sc(1, 3, 0, 2)],
         MetricKey::MaxNs,
         limits(),
-        vocab(),
     )
     .unwrap();
     // 回の実行順（段階 1 の 3 回、段階 2 の 2 回）に対応する時計の刻み。最大が段階 1 は 2 回目、段階 2 は 1 回目。
@@ -631,13 +624,13 @@ fn multi_stage_display_numbers_runs_per_stage_and_worst_run_stays_in_stage() {
     assert_eq!(
         worst,
         [
-            "worst_run: 1 by=max_ns interval=op run=2 class=measured refs=measured",
-            "worst_run: 2 by=max_ns interval=op run=1 class=measured refs=measured",
+            "worst_run: 1 by=max_ns interval=client_response run=2 class=measured refs=measured",
+            "worst_run: 2 by=max_ns interval=client_response run=1 class=measured refs=measured",
         ]
     );
     // 第 2 段階の metric 行は第 2 段階の番号で出る。
-    assert!(text.contains("metric: 2.1 interval=op class=measured n=3 "));
-    assert!(text.contains("metric: 2.2 interval=op class=measured n=3 "));
+    assert!(text.contains("metric: 2.1 interval=client_response class=measured n=3 "));
+    assert!(text.contains("metric: 2.2 interval=client_response class=measured n=3 "));
 }
 
 /// 同時に実行中の呼び出し数の最大値を記録する（共有ロックを持たない対象。重なりの観測だけに使う）。
@@ -660,7 +653,7 @@ impl Overlap {
 #[test]
 fn concurrency_one_stage_never_overlaps() {
     // 並行数 1 の段階では呼び出しが重ならない（記録した同時実行数の最大が 1）。
-    let plan = StagePlan::new(vec![sc(1, 20, 2, 2)], MetricKey::P99Ns, limits(), vocab()).unwrap();
+    let plan = StagePlan::new(vec![sc(1, 20, 2, 2)], MetricKey::P99Ns, limits()).unwrap();
     let ov = Overlap {
         in_flight: AtomicU64::new(0),
         max: AtomicU64::new(0),
@@ -692,7 +685,6 @@ fn multi_worker_stages_really_overlap() {
         vec![sc(4, 8, 0, 2), sc(3, 6, 0, 2)],
         MetricKey::P99Ns,
         limits(),
-        vocab(),
     )
     .unwrap();
     // (到着数, 今の回の待ち合わせ人数)
