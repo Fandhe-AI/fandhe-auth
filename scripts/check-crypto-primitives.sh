@@ -63,7 +63,12 @@ run_grep() {
     log "error: grep failed (rule ${rule}); cannot inspect"
     exit 2
   fi
-  sed "s|^\\([0-9]*\\):.*|${rule}	${file}:\\1|" "${g}" >>"${out}"
+  # file は sed のプログラムへ展開しない（'|'・';'・'&'・'\\' 等を含む名前で式が壊れる・e コマンドが実行される経路を断つ）。
+  # 行番号だけを sed で取り出し、パスは引用付きの printf の引数で組み立てる。
+  local ln
+  while IFS= read -r ln || [ -n "${ln}" ]; do
+    printf '%s\t%s:%s\n' "${rule}" "${file}" "${ln}" >>"${out}"
+  done < <(sed 's/:.*//' "${g}")
   rm -f -- "${g}"
 }
 
@@ -137,9 +142,15 @@ selftest() {
   mk s6.rs 'const K: u32 = 0x6A09_E667;'
   mk s7.rs 'fn sha256_digest() {}'
   mk s8.rs 'fn r(a: u32) -> u32 { a.rotate_left(7) }'
+  mk 'x|;e id;#&\1 y.rs' 'const IV: u32 = 0x6a09e667;'
   mk s9.rs 'fn clock_reversal_is_error() {} fn unparsable() {} // Signer'
   scan_rs "${out}" "${t}/s1.rs"
   expect_count S1 C1 pos "${out}"
+  : >"${out}"
+  # S11: 記号・空白を含むファイル名でも、名前が sed の式に入らず、そのままの名前で報告される
+  scan_rs "${out}" "${t}/x|;e id;#&\\1 y.rs"
+  expect_count S11 C1 pos "${out}"
+  grep -qF -- "x|;e id;#&\\1 y.rs:1" "${out}" || fail_selftest S11 "file name not preserved"
   : >"${out}"
   scan_rs "${out}" "${t}/s2.rs"
   expect_count S2 C2 pos "${out}"
