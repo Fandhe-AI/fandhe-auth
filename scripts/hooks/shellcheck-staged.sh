@@ -67,21 +67,27 @@ pending_signal=0
 # 状態名は bash が翻訳するため、`jobs` は LC_ALL=C で実行して ASCII の名前で照合する（git-hooks.md の (b)）。
 # 前提は、非対話の bash で LC_ALL=C を使うこと（状態語の照合は ASCII の英語名に限る）。
 # owned = Running・Stopped*・Suspended* のジョブとして載っている、none = 載っていない・終了済み（Running・Stopped・Suspended 以外の空でない状態語。信号で死んだ子の Hangup・Interrupt 等を含む）、
-# unknown = 一覧を取れない・読めない・一致した pid の状態語が空（所有を確かめられない）。
+# unknown = 一覧を取れない・最後まで読み切れない・一致した pid の状態語が空（所有を確かめられない）。
+# `read` の読み取りエラーは EOF と同じ非 0 で、終了コードでは区別できない（`done < f || ...` では拾えない）。そこで、jobs が成功したら
+# ファイルの末尾へ終端の印の行を足し、ループがその行まで読めたときだけ一覧を信頼する。読み取りが途中で失敗すれば印を読めず unknown になる（git-hooks.md の (a)）。
 # jobs は現在のシェルで実行する（command substitution やパイプラインのサブシェルは、bash 3.2 等で空のジョブ表を見る）。出力はファイルへのリダイレクトで受け、
 # >| で開くため継承した noclobber に左右されない。確認と kill の間の窓は残るが、回収済みの pid を無条件に狙う経路は無くなる。
 job_state_result=none
 job_state() {
   # 関数の局所の LC_ALL: 戻ると元のロケールに戻る
   local LC_ALL=C
-  local f="${tmp_dir}/jobs.$1" _jn jp js _jrest
+  local f="${tmp_dir}/jobs.$1" _jn jp js _jrest end_mark="fandhe-jobs-end" seen_end=0
   job_state_result=none
-  if ! jobs -l >| "${f}" 2> /dev/null; then
+  if ! jobs -l >| "${f}" 2> /dev/null || ! printf '%s\n' "${end_mark}" >> "${f}" 2> /dev/null; then
+    rm -f "${f}" || true
     job_state_result=unknown
     return 0
   fi
   while read -r _jn jp js _jrest; do
-    if [ "${jp}" = "$1" ]; then
+    # ジョブの行は `[N]` で始まるため、終端の印と取り違えない
+    if [ "${_jn}" = "${end_mark}" ]; then
+      seen_end=1
+    elif [ "${jp}" = "$1" ]; then
       case "${js}" in
         # Suspended*: macOS/BSD では、ジョブ制御が有効な bash の `jobs -l` が停止中の子を Suspended・Suspended (signal) と出しうる
         Running | Stopped* | Suspended*) job_state_result=owned ;;
@@ -90,7 +96,11 @@ job_state() {
         *) job_state_result=none ;;
       esac
     fi
-  done < "${f}" || job_state_result=unknown
+  done < "${f}" || true
+  # 終端の印まで読めなかった（読み取りエラー・ファイルを開けない）なら、一覧は不完全で、pid が載っていないことを確かめられない
+  if [ "${seen_end}" -ne 1 ]; then
+    job_state_result=unknown
+  fi
   # 一覧の削除の失敗で set -e が中断の後始末を飛ばさない
   rm -f "${f}" || true
 }

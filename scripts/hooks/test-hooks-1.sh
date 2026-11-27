@@ -776,11 +776,23 @@ done
 # 一致した pid の状態語が空・ジョブ表を取れないときだけ unknown（信号を送らない）。
 sc_js_fn="$(awk '/^job_state\(\) \{/ {p=1} p {print} p && /^\}/ {exit}' "${SC_STAGED}")"
 sc_js_check() {
-  # sc_js_check <期待> <説明> <jobs の出力の 1 行。"FAIL" なら jobs が失敗する>
+  # sc_js_check <期待> <説明> <jobs の出力の 1 行。"FAIL" なら jobs が失敗する> [読み取りの失敗: first=最初の read から失敗する / second=2 回目の read から失敗する]
+  # 読み取りの失敗は、read を差し替えて起こす（読み取りエラーは EOF と同じ非 0 で終わるため、一覧を最後まで読めたかを終端の印で確かめる）。
   sc_js_got="$(
     # shellcheck disable=SC2034 # eval で取り出した job_state が使う
     tmp_dir="${work_dir}"
     SC_FAKE_LINE="$3"
+    sc_js_reads=0
+    sc_js_readfail="${4:-}"
+    # shellcheck disable=SC2329 # eval で取り出した job_state が呼ぶ
+    read() {
+      sc_js_reads=$((sc_js_reads + 1))
+      case "${sc_js_readfail}" in
+        first) return 1 ;;
+        second) [ "${sc_js_reads}" -lt 2 ] || return 1 ;;
+      esac
+      builtin read -r "${@:2}"
+    }
     # shellcheck disable=SC2329 # eval で取り出した job_state が呼ぶ
     jobs() {
       [ "${SC_FAKE_LINE}" != "FAIL" ] || return 1
@@ -812,11 +824,17 @@ sc_js_check none "Segmentation fault" "[1]+ 4242 Segmentation fault        sleep
 sc_js_check none "a pid not in the table" "[1]+ 9999 Running                    sleep 30 &"
 sc_js_check unknown "an empty state word" "[1]+ 4242"
 sc_js_check unknown "a failing jobs" "FAIL"
+# 退行を捕まえる（#6136）: 読み取りエラーを EOF と同じにすると、載っているジョブの一覧を読めないまま none（停止済み）になる
+sc_js_check unknown "a read error before the listed child (an incomplete table)" "[1]+ 4242 Running                    sleep 30 &" first
+sc_js_check unknown "a read error after the listed child (the end mark is not reached)" "[1]+ 4242 Running                    sleep 30 &" second
+sc_js_check unknown "a read error on a table without the child" "[1]+ 9999 Running                    sleep 30 &" first
 
 # sc_klog_read <記録>: 差し込んだ kill の記録（1 行 = 信号と宛先の pid）から、信号の並び（sc_kr_sigs）と宛先の pid の並び（sc_kr_pids）を空白区切りで取り出す。
 sc_klog_read() {
   sc_kr_sigs="$(awk '{ printf "%s%s", (NR > 1 ? " " : ""), $1 }' "$1" 2> /dev/null || true)"
   sc_kr_pids="$(awk '{ printf "%s%s", (NR > 1 ? " " : ""), $2 }' "$1" 2> /dev/null || true)"
+  # 3 列目: 送った時点の宛先の親の pid（取れなければ空）
+  sc_kr_ppids="$(awk '{ printf "%s%s", (NR > 1 ? " " : ""), $3 }' "$1" 2> /dev/null || true)"
 }
 
 # 子への信号の送り先を固定する補助（pid の再利用・短く終わる別の子へ信号を送らない。sc_kill_job・sc_orphan_signal と同じ規律）。
@@ -858,7 +876,7 @@ sc_wait_batch() {
 sc_write_kill_env() {
   {
     printf '%s\n' "$2"
-    printf '%s\n' "kill() { printf '%s %s\\n' \"\$1\" \"\${2:-}\" >> \"\${SC_KLOG}\"; ${3:-true}; builtin kill \"\$@\"; }"
+    printf '%s\n' "kill() { printf '%s %s %s\\n' \"\$1\" \"\${2:-}\" \"\$(ps -p \"\${2:-0}\" -o ppid= 2> /dev/null | tr -d ' ')\" >> \"\${SC_KLOG}\"; ${3:-true}; builtin kill \"\$@\"; }"
   } > "$1"
 }
 # sc_signal_child <信号> <pid> <親>: 送る直前に、pid が今も親の直接の子で、引数が親と同じことを確かめ直してから送る。
@@ -993,8 +1011,9 @@ sc_unk_check "a TERM to a batch child whose kill fails does not wait" '' '[ -z "
 # 読み手を付けると、shellcheck の起動・pid の記録・trap の差し替えの後に保留の旗を見て batch_stop が止める。旗を外すと、眠りの終わりまで待ち、10 秒を超える。
 # 確かめる範囲:
 #   - TERM を送る前に FIFO が在り、バッチの子が一意に定まっていること。TERM の後もバッチの子が生きていること（trap を張る前に既定の動作で死んだ・open が信号で失敗した場合は仕立ての失敗）。
-#   - 保留の旗の経路を通った正の証拠: 差し込んだ kill の記録が -CONT -TERM で、宛先が偽物の pid（pidfile が現れた場合）であること（shellcheck の pid を持った状態で stop_job に入った）。
-#     pidfile は偽物が書く前に止められることがあるため、これだけを証拠にはしない。
+#   - 保留の旗の経路を通った正の証拠: 差し込んだ kill の記録が -CONT -TERM で、宛先が 2 回とも同じ pid で、送った時点の親が TERM の前に見つけたバッチの子であり、
+#     その pid が残っていないこと（バッチが記録した $! の宛先と消滅。shellcheck の pid を持った状態で stop_job に入った）。pidfile が現れた場合は、それとも一致すること。
+#     pidfile は偽物が書く前に止められることがあるため、これには頼らない。
 #   - 本体の診断 "no valid result for hang.sh (the check did not finish)"（バッチの子が .rc を書かずに 2 で終わった）が出ていて、出力先を開けなかった診断が無いこと。
 #   - 2 で終わること、偽物が残らないこと、10 秒未満で終わること。親の pending_signal の区間は対象外（同期できる口が無い）。
 # 中断された open をやり直すかは bash の版・OS による。この bash がやり直すかを先に確かめ、やり直さないことを正の証拠（open が EINTR で終わった）で判定できたときだけ
@@ -1010,19 +1029,23 @@ EOF
 chmod +x "${sc_fifo_dir}/mktemp"
 # probe: 子の bash が TERM を trap して open を始めるまで待ち（ready の印の後に少し待つ）、TERM を送る。
 #   interrupted = 読み手の付く前に子が終わり、終了コードが 0 でなく、標準エラーに EINTR の診断（Interrupted）がある（open がやり直されなかった正の証拠）
-#   restarted   = 読み手を付けると、open が完了して書けた
-#   unknown     = どちらでもない（時間切れを含む。「やり直さない」とは扱わない）
+#   restarted   = TERM の送信が成功し、子の trap が走った印があり、読み手を付けると open が完了して書けた
+#   unknown     = どちらでもない（TERM を送れなかった・trap が走った印が無い・時間切れを含む。「やり直さない」とは扱わない）
+# TERM が届かなかった場合も open は完了して書けるため、送信の失敗と trap の印の欠けを restarted にしない。
 sc_probe_fifo="${work_dir}/probe.fifo"
 sc_probe_ready="${work_dir}/probe.ready"
 sc_probe_got="${work_dir}/probe.got"
 sc_probe_err="${work_dir}/probe.err"
-rm -f "${sc_probe_fifo}" "${sc_probe_ready}" "${sc_probe_got}" "${sc_probe_err}"
+sc_probe_trapped="${work_dir}/probe.trapped"
+rm -f "${sc_probe_fifo}" "${sc_probe_ready}" "${sc_probe_got}" "${sc_probe_err}" "${sc_probe_trapped}"
 mkfifo "${sc_probe_fifo}"
 : > "${sc_probe_ready}"
 : > "${sc_probe_got}"
+: > "${sc_probe_trapped}"
 sc_probe_result="unknown"
+sc_probe_sent=0
 # shellcheck disable=SC2016 # 子の bash へ渡すコードは、展開せずにそのまま渡す
-LC_ALL=C "${HOOK_BASH}" -c 'trap ":" TERM; echo ready >> "$2"; { echo ok; } > "$1"' sh "${sc_probe_fifo}" "${sc_probe_ready}" 2> "${sc_probe_err}" &
+LC_ALL=C "${HOOK_BASH}" -c 'trap "echo trapped >> \"\$3\"" TERM; echo ready >> "$2"; { echo ok; } > "$1"' sh "${sc_probe_fifo}" "${sc_probe_ready}" "${sc_probe_trapped}" 2> "${sc_probe_err}" &
 sc_probe_pid=$!
 sc_waited=0
 while [ ! -s "${sc_probe_ready}" ] && [ "${sc_waited}" -lt 100 ]; do
@@ -1031,13 +1054,18 @@ while [ ! -s "${sc_probe_ready}" ] && [ "${sc_waited}" -lt 100 ]; do
 done
 if [ -s "${sc_probe_ready}" ]; then
   sleep 0.3
-  sc_kill_job TERM "${sc_probe_pid}" || true
+  # 送信の失敗は判定不能（unknown のまま）。失敗を無視すると、TERM が届かないまま open が完了して restarted になる
+  if sc_kill_job TERM "${sc_probe_pid}"; then
+    sc_probe_sent=1
+  fi
   sc_waited=0
-  while kill -0 "${sc_probe_pid}" 2> /dev/null && [ "${sc_waited}" -lt 20 ]; do
+  while [ "${sc_probe_sent}" -eq 1 ] && kill -0 "${sc_probe_pid}" 2> /dev/null && [ "${sc_waited}" -lt 20 ]; do
     sleep 0.1
     sc_waited=$((sc_waited + 1))
   done
-  if ! kill -0 "${sc_probe_pid}" 2> /dev/null; then
+  if [ "${sc_probe_sent}" -ne 1 ]; then
+    :
+  elif ! kill -0 "${sc_probe_pid}" 2> /dev/null; then
     if wait "${sc_probe_pid}" 2> /dev/null; then
       sc_probe_rc=0
     else
@@ -1054,7 +1082,13 @@ if [ -s "${sc_probe_ready}" ]; then
       sleep 0.1
       sc_waited=$((sc_waited + 1))
     done
-    if grep -qx ok "${sc_probe_got}" 2> /dev/null; then
+    # trap は open がやり直された後に走ることもあるため、印は少し待つ
+    sc_waited=0
+    while [ ! -s "${sc_probe_trapped}" ] && [ "${sc_waited}" -lt 20 ]; do
+      sleep 0.1
+      sc_waited=$((sc_waited + 1))
+    done
+    if grep -qx ok "${sc_probe_got}" 2> /dev/null && grep -qx trapped "${sc_probe_trapped}" 2> /dev/null; then
       sc_probe_result="restarted"
     fi
     sc_reap "${sc_probe_reader}" || true
@@ -1137,32 +1171,46 @@ else
   if [ -z "${sc_fake_pid}" ]; then
     sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
   fi
+  sc_klog_read "${sc_klog}"
+  sc_pend_sent="${sc_kr_sigs}"
+  # 宛先: バッチが記録した shellcheck の pid（$!）は、差し込んだ kill の記録の宛先として試験側で取れる。偽物が書く pidfile には頼らない。
+  # 記録の宛先が 2 回（CONT・TERM）とも同じ数字の pid で、送った時点の親が TERM の前に見つけたバッチの子であること。
+  # pidfile が現れた場合は、それとも一致すること（偽物が書く pid と、バッチが記録した pid が別なら失敗）。
+  sc_pend_dest_ok=0
+  sc_pend_target=""
+  case "${sc_kr_pids}" in
+    [0-9]*" "[0-9]*)
+      sc_pend_first="${sc_kr_pids%% *}"
+      sc_pend_second="${sc_kr_pids#* }"
+      if [ "${sc_pend_first}" = "${sc_pend_second}" ] && [ "${sc_kr_ppids}" = "${sc_batch_pid} ${sc_batch_pid}" ] \
+        && { [ -z "${sc_fake_pid}" ] || [ "${sc_fake_pid}" = "${sc_pend_first}" ]; }; then
+        sc_pend_dest_ok=1
+        sc_pend_target="${sc_pend_first}"
+      fi
+      ;;
+  esac
+  # 子の消滅: 宛先（pidfile があればそれも）が残っていないこと
   sc_pend_alive=0
-  if [ -n "${sc_fake_pid}" ]; then
+  for sc_pend_p in ${sc_pend_target} ${sc_fake_pid}; do
     sc_waited=0
-    while kill -0 "${sc_fake_pid}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
+    while kill -0 "${sc_pend_p}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
       sleep 0.1
       sc_waited=$((sc_waited + 1))
     done
-    if kill -0 "${sc_fake_pid}" 2> /dev/null; then
+    if kill -0 "${sc_pend_p}" 2> /dev/null; then
       sc_pend_alive=1
       # 残った偽物は、pidfile が現れた時点で控えた開始時刻が一致し、まだ sleep であるときだけ止める
-      sc_orphan_signal TERM "${sc_fake_pid}" "${sc_fake_start}" || true
+      if [ "${sc_pend_p}" = "${sc_fake_pid}" ]; then
+        sc_orphan_signal TERM "${sc_fake_pid}" "${sc_fake_start}" || true
+      fi
     fi
-  fi
+  done
   sc_pend_out="$(cat "${work_dir}/out" 2> /dev/null || true)"
-  sc_klog_read "${sc_klog}"
-  sc_pend_sent="${sc_kr_sigs}"
-  # 宛先: 記録された pid が全て偽物の pid と一致する（pidfile が現れた場合）。現れなければ、宛先は照合できない（信号の並びだけを見る）。
-  sc_pend_dest_ok=1
-  if [ -n "${sc_fake_pid}" ] && [ "${sc_kr_pids}" != "${sc_fake_pid} ${sc_fake_pid}" ]; then
-    sc_pend_dest_ok=0
-  fi
   if [ -z "${sc_early_err}" ] && [ "${sc_pend_sent}" = "-CONT -TERM" ] && [ "${sc_pend_dest_ok}" -eq 1 ] && [ "${sc_rc}" -eq 2 ] && [ "${sc_pend_alive}" -eq 0 ] && [ "${sc_pend_secs}" -lt 10 ] \
     && [[ "${sc_pend_out}" == *"no valid result for hang.sh (the check did not finish)"* ]] && [[ "${sc_pend_out}" != *"cannot open the output file of batch 0"* ]]; then
     pass "${sc_fifo_test_name}"
   else
-    fail "${sc_fifo_test_name}" "${sc_early_err:+setup failed: ${sc_early_err}; }exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_pend_alive}, seconds: ${sc_pend_secs}, kill calls of the batch child: ${sc_pend_sent:-none} to pids [${sc_kr_pids:-none}] (expected: -CONT -TERM to the fake pid)${sc_kj_note}" "output: ${sc_pend_out}"
+    fail "${sc_fifo_test_name}" "${sc_early_err:+setup failed: ${sc_early_err}; }exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_pend_alive}, seconds: ${sc_pend_secs}, kill calls of the batch child: ${sc_pend_sent:-none} to pids [${sc_kr_pids:-none}] with parents [${sc_kr_ppids:-none}] (expected: -CONT -TERM to one pid, whose parent is the batch child ${sc_batch_pid:-none}, which is gone afterwards)${sc_kj_note}" "output: ${sc_pend_out}"
   fi
 fi
 
