@@ -568,4 +568,13 @@ audit_case "error: failing cargo-audit exits 2" 2
 printf '#!/bin/sh\nexit 0\n' > "${audit_root}/bin/cargo-audit"
 audit_case "error: silent cargo-audit exits 2" 2
 
+# 件数の読み取りの陰性対照: grep が失敗（2）・数字でない出力を返しても合格へ進まない
+audit_fx
+printf '#!/bin/sh\nexit 2\n' > "${audit_root}/bin/grep"
+chmod +x "${audit_root}/bin/grep"
+audit_case "error: failing grep (empty count) exits 2" 2
+audit_lacks "record: no ok result when count is unreadable" "audit-config: result: ok"
+printf '#!/bin/sh\necho abc\nexit 0\n' > "${audit_root}/bin/grep"
+audit_case "error: non-numeric count exits 2" 2
+
 finish "part 7"

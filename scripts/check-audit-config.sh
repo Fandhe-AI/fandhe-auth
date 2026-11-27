@@ -30,6 +30,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DIR}/lib.sh"
 
 reject_args "$(basename "$0")" "$@"
+require_cmd git grep tr
 
 # 読み込み先を実測した版。ci.yml の CARGO_AUDIT_VERSION と一致させる（試験で照合する）。
 VERIFIED_CARGO_AUDIT_VERSION="0.22.2"
@@ -100,7 +101,20 @@ if ! listing="$(git -C "${ROOT_DIR}" ls-files -z -co --exclude-standard | tr '\0
   echo "error: cannot list repository files" >&2
   exit 2
 fi
-nested="$(printf '%s\n' "${listing}" | grep -c -E '(^|/)\.cargo/audit\.toml$' || true)"
+# grep は 0 件で 1、実行の失敗で 2 を返す。1 は件数 0 として読み、それ以外の非 0・数字でない出力は検査不能（fail-closed）にする。
+grep_rc=0
+nested="$(printf '%s\n' "${listing}" | grep -c -E '(^|/)\.cargo/audit\.toml$')" || grep_rc=$?
+if [ "${grep_rc}" -gt 1 ]; then
+  echo "error: cannot count nested .cargo/audit.toml files" >&2
+  exit 2
+fi
+case "${nested}" in
+  '' | *[!0-9]*)
+    echo "error: cannot read the nested .cargo/audit.toml count" >&2
+    exit 2
+    ;;
+  *) ;;
+esac
 echo "audit-config: .cargo/audit.toml in repo (tracked or untracked): ${nested}"
 if [ "${nested}" -gt 0 ]; then
   violations=$((violations + 1))

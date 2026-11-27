@@ -74,11 +74,11 @@ TASK-680 が結線するときの契約は次のとおり。値は spec の ID �
     `--locked` を持たない cargo-audit 0.22.2 での lock の不変の確かめ方を含む）。`./dependency-policy.md` の手元の手順はこの契約の実装ではない。
 4. 対象はルートの `Cargo.lock` と、別 workspace の `crates/trial-deps/fuzz/Cargo.lock` の両方で、合否に両方を含める（`crates/trial-deps/README.md` の「依存の監査」。DPOL-33・DPOL-34）。
 5. cargo-deny の設定は TASK-668 の厳格版 `deny.toml` だけを使う。例外（`ignore`・`skip`・許可の追加）を足すかは人が決め、足すときは理由・期限・範囲を同じ場所に書く（DPOL-20・DPOL-35）。
-    cargo-audit が読む設定は `deny.toml` では制御できないため、承認済みは「無し」（暫定。足すかは人が決める）に固定する。
-    cargo-audit を起動する前に毎回 `scripts/check-audit-config.sh`（`make audit-cfg`）を同じ環境・同じ cwd で通し、非 0 なら失敗にする（検査不能の 2 も失敗）。
-    - `cargo audit` ではなく `cargo-audit audit` を直接起動する（`.cargo/config.toml` の alias による差し替えを避ける）。
-    - argv は固定し、`--ignore`・`--stale`・`--target-arch`・`--target-os`・`--no-yanked`・`--db`・`--url`・`-D` を外から渡し込まない。
-    - cwd は lockfile ごとに固定する（`-f` で渡す lockfile のディレクトリの設定は読まれない）。
+    cargo-audit が読む設定は `deny.toml` では制御できないため、承認済みは「無し」（暫定。足すかは人が決める）に固定する（DPOL-34）。
+    cargo-audit を起動する前に毎回 `scripts/check-audit-config.sh`（`make audit-cfg`）を同じ環境・同じ cwd で通し、非 0 なら失敗にする（検査不能の 2 も失敗。DPOL-34）。
+    - `cargo audit` ではなく `cargo-audit audit` を直接起動する（`.cargo/config.toml` の alias による差し替えを避ける。DPOL-34）。
+    - argv は固定し、`--ignore`・`--stale`・`--target-arch`・`--target-os`・`--no-yanked`・`--db`・`--url`・`-D` を外から渡し込まない（DPOL-34）。
+    - cwd は lockfile ごとに固定する（`-f` で渡す lockfile のディレクトリの設定は読まれない。DPOL-34）。
     - ガードの出力の行を監査の記録に含める（様式は TASK-679 で決める。DPOL-33・DPOL-34）。
 6. 4 検査と cargo-audit の 5 つがすべて成功したときだけ緑にする（DPOL-34）。結線までの緑は道具の導入の成功だけを表し、DPOL-34 の合格ではない。
     結線したらジョブ名から「frame」を外す（必須チェックは `ci-complete` だけなので影響しない）。
