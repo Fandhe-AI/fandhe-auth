@@ -15,7 +15,9 @@ workspace = true
 [dependencies]
 
 # 試験（dev）だけ it-harness の上で構成要素へ負荷をかける（TASK-12 5/10）。hub-stub は試験が設定・鍵の型を直接使うため。
-# 外部の crate は足さない。許可表の行は人の確認待ち。
+# 試験で作る署名鍵の秘密値を照合の登録簿に入れるため、ring を試験（dev）だけに置く（#6050・SECR-23・AAUD-30）。
+# 版は hub-stub・it-harness と同じ。本番の依存の木には入らない。許可表の行は人の確認待ち。
 [dev-dependencies]
 fandhe-auth-it-harness = { path = "../it-harness" }
 fandhe-auth-hub-stub = { path = "../hub-stub" }
+ring = "0.17.14"
