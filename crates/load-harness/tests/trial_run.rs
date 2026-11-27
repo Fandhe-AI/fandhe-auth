@@ -469,7 +469,7 @@ fn written_records_have_no_registered_secret_in_any_form() {
 
 /// 陽性対照 1（照合の検出力）: 登録簿の全値・全形（生・`+` を含む base64 も含む）を出力に混ぜると、
 /// 照合は形ごとに検出する（混ぜた値の、混ぜた形そのものの件数が 1 以上。合計の件数では見ない）。JWT の形の語も数える。生のバイトと `+` を含む base64 は形の網の外にあり、
-/// `write_new` を通らない。ここは照合そのものの検出力を見る（`write_new` を通る経路は、設定由来の値が名前に入らないことを次の試験で見る）。
+/// `write_new` を通らない。ここは照合そのものの検出力を見る（`write_new` を通る経路は、登録簿の 16 進の文字列が語彙外として名前に入らないことを次の試験で見る）。
 #[test]
 fn matcher_detects_every_form_mixed_into_output() {
     let (registry, cfg) = canary_registry_and_config();
@@ -511,13 +511,14 @@ fn matcher_detects_every_form_mixed_into_output() {
     assert_eq!(count_jwt_like(b"eyJabc.def.ghi"), 0);
 }
 
-/// 設定由来の値は、値の名前・出典・区間名として記録に出せない（SECR-23・#6038。語彙は crate の固定の定数で、
-/// 呼び出し元は足せない）。登録簿の 16 進の値（文字種の規則には合う）を名前・出典に渡すと拒否され、
+/// 登録簿から取った 16 進の文字列（固定語彙の外。文字種の規則には合う）は、値の名前・出典・区間名として記録に出せない
+/// （SECR-23・#6038。語彙は crate の固定の定数で、呼び出し元は足せない）。設定由来の値を一律に拒否するわけではなく、
+/// 固定語彙に一致する文字列（`p99_target` 等）は由来を問わず通る。この試験は、語彙外の 16 進の文字列を名前・出典に渡すと拒否され、
 /// 区間名にした対象は 1 回も呼ばれない（実行の前の拒否と呼び出し 0 件。記録のファイルの未作成までは確かめない）。
 /// 以前はここで「語彙にも入れた 16 進の値が書き出される」ことを陽性対照にしていたが、その経路を塞いだため
 /// 拒否の試験に置き換えた。照合の検出力は陽性対照 1（`matcher_detects_every_form_mixed_into_output`）で見る。
 #[test]
-fn config_derived_values_cannot_be_recorded_as_names() {
+fn registry_hex_strings_outside_vocabulary_are_rejected_as_names() {
     let (registry, _cfg) = canary_registry_and_config();
     let candidates: Vec<String> = registry.iter().take(3).map(|raw| hex(raw, false)).collect();
     for c in &candidates {

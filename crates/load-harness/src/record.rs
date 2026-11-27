@@ -53,6 +53,10 @@ const MAX_WORD_BYTES: usize = 64;
 /// 現在の語彙は `p99_target` だけで、これは `AUDP-29` により `undecided`（値なし）の区分にだけ使える（`NAME_CLASS_RULES`）。
 /// そのため公開の口から作れる比べる値の行は `p99_target` の `undecided` だけで、`external`・`test_condition`・`measured` の行は
 /// 公開の口からは作れない（`ClassNotAllowed`）。これらの区分の名前は、用途が決まったときに人がレビューして語彙へ足す（TASK-12）。
+///
+/// `ComparisonValue::new` の拒否の順序: `requirement`・`initial` は出典に関係なく最初に `ClassNotAllowed` で拒否する。
+/// それ以外の区分は、出典の件数（`TooManyRefs`）と重複（`InvalidRef`）の検査が名前ごとの区分の検査より先に来るため、
+/// 出典が 9 件以上または重複していれば `ClassNotAllowed` より先にそちらの誤りが返る。
 pub const VALUE_NAMES: [&str; 1] = ["p99_target"];
 
 /// 記録に出してよい出典の ID の固定語彙（仮置き。人が確認する。SECR-23・`load.md` の 6）。
@@ -249,7 +253,8 @@ pub struct ValueName(String);
 
 impl ValueName {
     /// 記録に出してよい名前だけを作る。語彙の外は誤りにする（自由な名前を出さない。SECR-23）。
-    /// 現在の語彙は `p99_target` だけで、`ComparisonValue::new` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する
+    /// 現在の語彙は `p99_target` だけで、`ComparisonValue::new` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する。
+    /// 検査の順序は、`requirement`・`initial` が最初で、それ以外は出典の件数（`TooManyRefs`）と重複（`InvalidRef`）の検査の後
     /// （[`VALUE_NAMES`] の説明）。
     ///
     /// # Errors
