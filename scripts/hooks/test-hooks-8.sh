@@ -34,7 +34,7 @@ case "${CP8_MODE:-}:${last}" in
   link-final:*/index-final)
     # index-final の複写の直後に、親ディレクトリのリンクを別の（同じ内容の index を持つ）ディレクトリへ付け替える。
     # 一覧は一致するため、複写の後の経路の取り直し（verify_index_unchanged の末尾・最後の HEAD の再照合の後）だけがこれを検出する。
-    # どちらでも検出するため、片方だけを外しても落ちない（最後の取り直しだけを固定するのは mark-final と T15）。
+    # 前者で止まることは T14 が git の shim で確かめる（後者だけを固定するのは mark-final と T15）。
     "${REAL_CP}" "$@" || exit $?
     ln -sfn "${CP8_TO}" "${CP8_LINK}" || exit 1
     : > "${CP8_FLAG}.final"
@@ -257,61 +257,100 @@ else
   fail "secret-scan: an index with a too-long name (not ENOENT) is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-# T10: （python3 が無いと待ち受けを立てられず、port が空のまま失敗する。検査を省かない fail-closed）
-# index のパスが有効な /dev/tcp 風でも、不在の確認で開かない（接続の試行を待ち受け側で観測する）（#6047）
-# 127.0.0.1 の待ち受けを立て、その実ポートを /dev/tcp のパスに入れる。ファイルを開く（Bash の TCP リダイレクト）実装だと待ち受けが接続を受け、印ができる。
+# T10: index のパスが有効な /dev/tcp 風でも、不在の確認で開かない（接続の試行を待ち受け側で観測する）（#6047）
+# 127.0.0.1 の待ち受けを立て、その実ポートを /dev/tcp のパスに入れる。ファイルを開く（Bash の TCP リダイレクト）実装だと待ち受けが接続を受け、記録が残る。
+# 待ち受けは時間に頼らず同期する: 走査の後に番兵の接続（先頭の 1 バイトが S）を送り、待ち受けが番兵を受けて正常終了するまで待つ。
+# 接続は受け付けの待ち行列に順に溜まるため、番兵より前の接続はすべて先に記録される（溜まった接続の確認が済んだことが、番兵の受領で分かる）。
+# 前提: python3 で待ち受けを立てる。CI（CI または GITHUB_ACTIONS が設定）では python3 が無ければ skip せず失敗にする
+# （検出の試験が黙って消えないため）。ローカルでは理由を出して飛ばす。
+t10_prereq="ok"
+if ! command -v python3 > /dev/null 2>&1 || ! python3 -I -c 'import socket' > /dev/null 2>&1; then
+  t10_prereq="missing"
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "secret-scan: a valid /dev/tcp-like index path is never opened (python3 is required in CI)" "missing prerequisite: python3" ""
+  else
+    echo "ok - secret-scan: /dev/tcp-like index path test skipped (python3 not found)"
+  fi
+fi
+if [ "${t10_prereq}" = "ok" ]; then
 new_repo; stage src/app.txt "hello"
 t10_listen="${work_dir}/t10-listen.py"
 cat > "${t10_listen}" <<'EOF10'
-import socket, sys, time
+import socket, sys
+# 引数: ポートの書き出し先・接続の記録先。接続ごとに記録を 1 行足す（先頭の 1 バイトが S なら S、それ以外は C）。S を受けたら 0 で終わる。
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
-s.listen(5)
-s.settimeout(0.2)
+s.listen(16)
+s.settimeout(120)
 with open(sys.argv[1], "w") as f:
     f.write(str(s.getsockname()[1]))
-end = time.time() + 120
-while time.time() < end:
+while True:
+    c, _ = s.accept()
+    c.settimeout(5)
     try:
-        c, _ = s.accept()
+        first = c.recv(1)
     except socket.timeout:
-        continue
-    open(sys.argv[2], "w").close()
+        first = b""
     c.close()
+    kind = "S" if first == b"S" else "C"
+    with open(sys.argv[2], "a") as f:
+        f.write(kind + "\n")
+    if kind == "S":
+        sys.exit(0)
 EOF10
 rm -f "${work_dir}/t10-port" "${work_dir}/t10-conn"
 python3 -I "${t10_listen}" "${work_dir}/t10-port" "${work_dir}/t10-conn" &
 t10_pid=$!
-for _ in $(seq 1 50); do
+for _ in $(seq 1 100); do
   [ -s "${work_dir}/t10-port" ] && break
   sleep 0.1
 done
 t10_port="$(cat "${work_dir}/t10-port" 2> /dev/null || true)"
-# 陽性対照: 待ち受けが接続を記録できることを、/dev/tcp への 1 回の接続で先に確かめる（印が付かない待ち受けでは T10 が何も検出できない）。
+# 陽性対照: 待ち受けが接続を記録できることを、/dev/tcp への 1 回の接続で先に確かめる（記録できない待ち受けでは T10 が何も検出できない）。
 t10_ctl=0
 if [ -n "${t10_port}" ]; then
   # bash の /dev/tcp への接続を、サブシェルで 1 回だけ開いて閉じる
   ( exec 3<> "/dev/tcp/127.0.0.1/${t10_port}" ) 2> /dev/null || true
-  for _ in $(seq 1 30); do
-    [ -e "${work_dir}/t10-conn" ] && break
+  for _ in $(seq 1 100); do
+    [ -s "${work_dir}/t10-conn" ] && break
     sleep 0.1
   done
-  if [ -e "${work_dir}/t10-conn" ]; then
+  if [ "$(cat "${work_dir}/t10-conn" 2> /dev/null || true)" = "C" ]; then
     t10_ctl=1
   fi
-  rm -f "${work_dir}/t10-conn"
+  : > "${work_dir}/t10-conn"
 fi
 rc=0
-if [ -n "${t10_port}" ] && [ "${t10_ctl}" -eq 1 ]; then
+t10_sentinel=0
+if [ "${t10_ctl}" -eq 1 ]; then
   GIT_INDEX_FILE="/dev/tcp/127.0.0.1/${t10_port}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
-  sleep 0.5
+  # 番兵: 走査の前に溜まった接続はこれより先に記録される。待ち受けが番兵を受けて 0 で終わるまで待つ（待ちは上限付きで、時間経過を合格の根拠にしない）
+  if ( exec 3<> "/dev/tcp/127.0.0.1/${t10_port}" && printf 'S' >&3 ) 2> /dev/null; then
+    t10_sentinel=1
+  fi
 fi
-kill "${t10_pid}" 2> /dev/null || true
-wait "${t10_pid}" 2> /dev/null || true
-if [ "${t10_ctl}" -eq 1 ] && [ ! -e "${work_dir}/t10-conn" ] && [ "${rc}" -eq 0 ]; then
+t10_lrc=1
+if [ "${t10_sentinel}" -eq 1 ]; then
+  for _ in $(seq 1 100); do
+    kill -0 "${t10_pid}" 2> /dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "${t10_pid}" 2> /dev/null; then
+    kill "${t10_pid}" 2> /dev/null || true
+  fi
+  t10_lrc=0
+  wait "${t10_pid}" 2> /dev/null || t10_lrc=$?
+else
+  kill "${t10_pid}" 2> /dev/null || true
+  wait "${t10_pid}" 2> /dev/null || true
+fi
+t10_log="$(cat "${work_dir}/t10-conn" 2> /dev/null || true)"
+# 合格: 陽性対照が済み・走査が 0・番兵を受けて待ち受けが正常終了し・記録が番兵の 1 行だけ（走査からの接続が無い）
+if [ "${t10_ctl}" -eq 1 ] && [ "${t10_sentinel}" -eq 1 ] && [ "${t10_lrc}" -eq 0 ] && [ "${rc}" -eq 0 ] && [ "${t10_log}" = "S" ]; then
   pass "secret-scan: a valid /dev/tcp-like index path is never opened (no connection reaches the listener)"
 else
-  fail "secret-scan: a valid /dev/tcp-like index path is never opened (no connection reaches the listener)" "port ${t10_port:-none} positive-control ${t10_ctl} rc ${rc} conn $([ -e "${work_dir}/t10-conn" ] && echo yes || echo no)" "output: $(cat "${work_dir}/out" 2> /dev/null)"
+  fail "secret-scan: a valid /dev/tcp-like index path is never opened (no connection reaches the listener)" "port ${t10_port:-none} positive-control ${t10_ctl} sentinel ${t10_sentinel} listener-rc ${t10_lrc} rc ${rc} log $(printf '%s' "${t10_log}" | tr '\n' ',')" "output: $(cat "${work_dir}/out" 2> /dev/null)"
+fi
 fi
 
 # T10b: 未作成の代替 index "-"（作業ツリーのルート基準）は標準入力と取り違えず、空の index として扱う（#6047）
@@ -444,7 +483,7 @@ fi
 
 # T14: 2 回目の複写の直後に親ディレクトリのリンクが付け替わったら、一覧が一致しても 2（複写の後の経路の取り直し。#6047）
 # 複写の前の経路の確認だけでは、前の確認の後・複写の最中の付け替えを見落とし、古い実体を読んで 0 を返す。
-# 複写の後の取り直し（verify_index_unchanged の末尾）と最後の取り直し（HEAD の再照合の後）のどちらでも検出するため、片方だけを外しても落ちない（最後の取り直しだけの固定は T15）。
+# 付け替えは複写の後の取り直し（verify_index_unchanged の末尾）で検出され、最後の HEAD の再照合には進まないことも確かめる（末尾の取り直しを外すと落ちる。最後の取り直しだけの固定は T15）。
 new_repo; stage src/app.txt "hello"
 t14_dir="${work_dir}/t14"
 rm -rf "${t14_dir}"
@@ -452,11 +491,28 @@ mkdir -p "${t14_dir}/real1" "${t14_dir}/real2"
 cp "$(git rev-parse --git-path index)" "${t14_dir}/real1/index"
 cp "$(git rev-parse --git-path index)" "${t14_dir}/real2/index"
 ln -s "${t14_dir}/real1" "${t14_dir}/lnk"
-rm -f "${work_dir}/t14-flag.final"
+rm -f "${work_dir}/t14-flag.final" "${work_dir}/t14-headchk"
+# 複写の後の取り直しで止まったことも確かめる: index-final の複写の完了の後に最後の HEAD の再照合（symbolic-ref）まで進んだら印を残す。
+# 末尾の取り直しを外すと、付け替えは最後の取り直し（HEAD の再照合の後）まで検出されず、印が残って落ちる。
+mkdir -p "${work_dir}/git14-shim"
+cat > "${work_dir}/git14-shim/git" <<'EOF14'
+#!/bin/sh
+if [ -e "${T14_MARK}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "symbolic-ref" ]; then
+      : > "${T14_HEADCHK}"
+      break
+    fi
+  done
+fi
+exec "${REAL_GIT}" "$@"
+EOF14
+chmod +x "${work_dir}/git14-shim/git"
 rc=0
 GIT_INDEX_FILE="${t14_dir}/lnk/index" CP8_MODE=link-final CP8_FLAG="${work_dir}/t14-flag" CP8_TO="${t14_dir}/real2" CP8_LINK="${t14_dir}/lnk" \
-  PATH="${cp8_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ -e "${work_dir}/t14-flag.final" ] && [ "${rc}" -eq 2 ] \
+  T14_MARK="${work_dir}/t14-flag.final" T14_HEADCHK="${work_dir}/t14-headchk" \
+  PATH="${work_dir}/git14-shim:${cp8_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/t14-flag.final" ] && [ ! -e "${work_dir}/t14-headchk" ] && [ "${rc}" -eq 2 ] \
   && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
   pass "secret-scan: a parent link retargeted right after the final index copy is a scan failure (2)"
 else

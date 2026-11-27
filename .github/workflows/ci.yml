@@ -103,6 +103,7 @@ jobs:
   # フックスクリプト（scripts/hooks/*.sh）自体の回帰テスト（.claude/rules/git-hooks.md）。
   # テストはフックに置かず CI で実行する。基本は bash + git。msrv・install-msrv の試験は
   # cargo・jq・tomllib を持つ python3（3.11 以上）を要し、ランナー導入済みのものを使う（このジョブでは導入しない）。
+  # secret-scan の /dev/tcp 風のパスの試験（part 8）も python3 を要する。
   # CI では前提が足りなければ試験が失敗する（ローカルでは skip）。
   # 開発者の多くは macOS でフックを実行するため、BSD 系の挙動と macOS 標準の bash 3.2
   # （lefthook は PATH 上の bash で起動する）でも検証する。
