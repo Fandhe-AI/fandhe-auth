@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps no-vendored crypto-scan audit-cfg pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps no-vendored crypto-scan audit-cfg audit-cfg-nofetch pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -63,8 +63,12 @@ no-vendored: ## openssl-sys の vendored の検査（合否は本番メンバー
 	@scripts/check-openssl-vendored.sh
 
 # audit-cfg は暫定の名前（人が確定する）。DPOL-34・TASK-679。cargo-audit を起動する前に必ず呼ぶ検査で、cargo-audit 自体は流さない。
-audit-cfg: ## cargo-audit が読む設定が無いこと（承認済みは無し）の検査（cargo-audit 0.22.2 の読み込み先。検査のみ）。直接: scripts/check-audit-config.sh
-	@scripts/check-audit-config.sh
+audit-cfg: ## cargo-audit が読む設定が無いこと（承認済みは無し）の検査。取得の前の段（CARGO_HOME は既定のみ。cargo-audit 0.22.2 の読み込み先。検査のみ）。直接: scripts/check-audit-config.sh fetch
+	@scripts/check-audit-config.sh fetch
+
+# audit-cfg-nofetch も暫定の名前。取得なし（--no-fetch）の cargo-audit の前の段で、advisory-db が git の作業ツリー・advisory 1 件以上・変更なしであることも確かめる。
+audit-cfg-nofetch: ## audit-cfg の取得なしの段（cargo-audit --no-fetch の前。advisory-db の状態の検査を加える。検査のみ）。直接: scripts/check-audit-config.sh no-fetch
+	@scripts/check-audit-config.sh no-fetch
 
 # crypto-scan は暫定の名前（人が確定する）。LIB-21・DPOL-4・DPOL-47・TASK-715 (3/4)。
 crypto-scan: ## 自作の暗号処理の走査（合否は本番メンバーの C1〜C5。試験専用 crate と N1・N2 は参考の警告。発見的で人のレビューの代わりにならない。検査のみ）。直接: scripts/check-crypto-primitives.sh

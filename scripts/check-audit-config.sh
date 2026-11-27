@@ -21,6 +21,15 @@
 # 限界: ガードの後に置かれた設定は防げない（TOCTOU。入口は直前に呼ぶ）。CLI の --ignore 等はここでは見えない。入口が固定の argv で塞ぐ
 #   （github-actions.md の契約）。
 #
+# 2 段（DPOL-33・DPOL-34）: 引数は段の名前を 1 つだけ取る（検査を外す引数ではなく、どちらの段も設定の検査を行う）。
+#   fetch    取得（DB の取得を兼ねる cargo-audit の先行実行）の前。CARGO_HOME が未設定か空（既定の置き場）であることを確かめる。設定されていれば 2。
+#   no-fetch 取得なし（--no-fetch）の実行の前。解決した advisory-db（$CARGO_HOME/advisory-db。未設定なら $HOME/.cargo/advisory-db）が
+#            git の作業ツリーで、crates/ に advisory が 1 件以上あり（空でないことの確認）、変更（未追跡を含む git status の差分）が無いことを確かめる。
+#            どれかが満たされなければ 2。実測: cargo-audit 0.22.2 の advisory DB の置き場は $CARGO_HOME/advisory-db で、空の DB を置いた CARGO_HOME では
+#            `--no-fetch` が 0 件の advisory を読み込んで走査を進める。
+#   限界（TASK-679 で追う。DPOL-33・DPOL-34）: HOME の差し替えと偽の git リポジトリ（作業ツリー・advisory 1 件以上・変更なしを満たす偽の DB）は防げない。
+#            取得と取得なしの実行が同じ DB を使うことの保証、DB の commit の記録の様式は TASK-679 の入口で決める。
+#
 # 出力は固定の書式の記録行（監査の記録に含める）。ファイルの中身・絶対パス・ホームのパスは出さない（SECR-23）。
 # 終了コード: 0 合格 / 1 違反 / 2 検査不能（fail-closed）。`make` 経由では GNU Make が 1 も 2 に変える。
 set -euo pipefail
@@ -29,8 +38,20 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
 
-reject_args "$(basename "$0")" "$@"
 require_cmd git grep tr
+# 段の名前は必須。無い・未知なら誤用として 2 で止める。
+if [ "$#" -ne 1 ]; then
+  echo "usage: $(basename "$0") fetch|no-fetch" >&2
+  exit 2
+fi
+stage="$1"
+case "${stage}" in
+  fetch | no-fetch) ;;
+  *)
+    echo "usage: $(basename "$0") fetch|no-fetch" >&2
+    exit 2
+    ;;
+esac
 
 # 読み込み先を実測した版。ci.yml の CARGO_AUDIT_VERSION と一致させる（試験で照合する）。
 VERIFIED_CARGO_AUDIT_VERSION="0.22.2"
@@ -55,6 +76,7 @@ if [ "${actual_version}" != "cargo-audit-audit ${VERIFIED_CARGO_AUDIT_VERSION}" 
 fi
 echo "audit-config: cargo-audit ${VERIFIED_CARGO_AUDIT_VERSION} (read locations measured on ${VERIFIED_CARGO_AUDIT_VERSION})"
 echo "audit-config: approved config: none"
+echo "audit-config: stage: ${stage}"
 
 # report_path <記録の表示名> <パス>: 存在（壊れたリンク・ディレクトリを含む）すれば違反として数える。
 report_path() {
@@ -93,6 +115,56 @@ case "${cargo_home}" in
     exit 2
     ;;
 esac
+if [ "${stage}" = "fetch" ]; then
+  # 取得の前の段: CARGO_HOME は既定の置き場（未設定か空）だけを認める。
+  if [ "${cargo_home_src}" = "env" ]; then
+    echo "error: CARGO_HOME is set; the fetch stage requires the default location (unset or empty)" >&2
+    exit 2
+  fi
+  echo "audit-config: CARGO_HOME for advisory-db: default"
+else
+  db="${cargo_home}/advisory-db"
+  if [ ! -d "${db}" ]; then
+    echo "error: advisory-db is missing (CARGO_HOME from ${cargo_home_src})" >&2
+    exit 2
+  fi
+  db_phys="$(cd "${db}" && pwd -P)" || {
+    echo "error: cannot enter advisory-db" >&2
+    exit 2
+  }
+  db_top=""
+  if ! db_top="$(git -C "${db}" rev-parse --show-toplevel 2> /dev/null)" || [ "${db_top}" != "${db_phys}" ]; then
+    echo "error: advisory-db is not the top of a git work tree" >&2
+    exit 2
+  fi
+  advisory_count=""
+  if ! advisory_count="$(find "${db}/crates" -type f -name 'RUSTSEC-*.md' 2> /dev/null | grep -c .)" && [ "${advisory_count:-}" != "0" ]; then
+    echo "error: cannot count advisories in advisory-db" >&2
+    exit 2
+  fi
+  case "${advisory_count}" in
+    '' | *[!0-9]*)
+      echo "error: cannot read the advisory count" >&2
+      exit 2
+      ;;
+    *) ;;
+  esac
+  echo "audit-config: advisory-db (CARGO_HOME from ${cargo_home_src}): git work tree, advisories: ${advisory_count}"
+  if [ "${advisory_count}" -lt 1 ]; then
+    echo "error: advisory-db has no advisory (empty)" >&2
+    exit 2
+  fi
+  db_status=""
+  if ! db_status="$(git -C "${db}" status --porcelain 2> /dev/null)"; then
+    echo "error: cannot read the advisory-db status" >&2
+    exit 2
+  fi
+  if [ -n "${db_status}" ]; then
+    echo "error: advisory-db has changes (modified or untracked entries: $(printf '%s\n' "${db_status}" | grep -c .))" >&2
+    exit 2
+  fi
+  echo "audit-config: advisory-db changes: 0"
+fi
 report_path "CARGO_HOME/audit.toml (CARGO_HOME from ${cargo_home_src})" "${cargo_home}/audit.toml"
 
 # 4: repo 全体の多重の防御（ほかの cwd から起動される道を塞ぐ。追跡外も数える）

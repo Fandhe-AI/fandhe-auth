@@ -27,7 +27,8 @@ cat <<'EOF'
   crate-deps  scripts/check-crate-deps.sh    crate 間の依存の向きの検査（許可表との照合）
   no-vendored scripts/check-openssl-vendored.sh openssl-sys の vendored の検査（合否は本番メンバーの normal・build 依存で、既定 feature と PROD_FEATURES で明示した feature だけ。全 feature の走査は参考（警告）。静的リンクを強いる設定の検出を含む。検査のみ）
   crypto-scan scripts/check-crypto-primitives.sh 自作の暗号処理の走査（合否は本番メンバーの C1〜C5。試験専用 crate と N1・N2 は参考の警告。発見的で人のレビューの代わりにならない。検査のみ）
-  audit-cfg   scripts/check-audit-config.sh  cargo-audit が読む設定が無いこと（承認済みは無し）の検査（cargo-audit 0.22.2 の読み込み先。検査のみ）
+  audit-cfg   scripts/check-audit-config.sh fetch  cargo-audit が読む設定が無いこと（承認済みは無し）の検査。取得の前の段（CARGO_HOME は既定のみ。cargo-audit 0.22.2 の読み込み先。検査のみ）
+  audit-cfg-nofetch scripts/check-audit-config.sh no-fetch  audit-cfg の取得なしの段（cargo-audit --no-fetch の前。advisory-db の状態の検査を加える。検査のみ）
   pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
   it-db       scripts/it-db.sh               ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）
   it-db-ci    scripts/it-db-ci.sh            CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験だけを流す。0 件は失敗）

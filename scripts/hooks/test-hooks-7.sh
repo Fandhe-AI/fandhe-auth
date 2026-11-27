@@ -478,6 +478,14 @@ else
 fi
 
 audit_fx_seq=0
+# audit_stage: audit_case が渡す段（fetch か no-fetch）。既定は fetch。
+audit_stage=fetch
+# audit_db <dir>: 使い捨ての advisory DB（git の作業ツリー・advisory 1 件・変更なし）を作る。
+audit_db() {
+  mkdir -p "$1/crates/x"
+  echo "id = RUSTSEC-2099-0001" > "$1/crates/x/RUSTSEC-2099-0001.md"
+  (cd "$1" && git -c init.defaultBranch=main init -q && git add -A && git commit -q -m "chore: db")
+}
 # audit_fx: 使い捨ての git repo を作り、cwd をそこへ移す。偽の cargo-audit は AUDIT_FAKE_VER の版を名乗る（中身は固定）。
 audit_fx() {
   audit_fx_seq=$((audit_fx_seq + 1))
@@ -497,7 +505,7 @@ audit_case() {
   local name="$1" want="$2" rc=0
   shift 2
   env -u CARGO_HOME AUDIT_FAKE_VER="${audit_ver}" PATH="${audit_root}/bin:${PATH}" HOME="${audit_root}/home" ${@+"$@"} \
-    "${HOOK_BASH}" scripts/check-audit-config.sh > "${work_dir}/out" 2>&1 || rc=$?
+    "${HOOK_BASH}" scripts/check-audit-config.sh "${audit_stage}" > "${work_dir}/out" 2>&1 || rc=$?
   if [ "${rc}" -eq "${want}" ]; then
     pass "audit-config: ${name}"
   else
@@ -533,14 +541,19 @@ audit_lacks "record: file content is not printed" "RUSTSEC-2099-0001"
 audit_fx; mkdir crates/trial-deps/fuzz/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/trial-deps/fuzz/.cargo/audit.toml
 audit_case "NG: fuzz .cargo/audit.toml" 1
 
-audit_fx; mkdir "${audit_root}/ch"; printf '%s\n' "${audit_ignore_toml}" > "${audit_root}/ch/audit.toml"
+audit_fx; mkdir "${audit_root}/ch"; audit_db "${audit_root}/ch/advisory-db"; printf '%s\n' "${audit_ignore_toml}" > "${audit_root}/ch/audit.toml"
+audit_stage=no-fetch
 audit_case "NG: CARGO_HOME/audit.toml" 1 CARGO_HOME="${audit_root}/ch"
+audit_stage=fetch
 audit_has "record: CARGO_HOME from env" "(CARGO_HOME from env): present (not approved)"
 audit_lacks "record: no absolute path" "${audit_root}"
 
-audit_fx; mkdir "${audit_root}/home/.cargo"; printf '%s\n' "${audit_ignore_toml}" > "${audit_root}/home/.cargo/audit.toml"
+audit_fx; mkdir "${audit_root}/home/.cargo"; audit_db "${audit_root}/home/.cargo/advisory-db"; printf '%s\n' "${audit_ignore_toml}" > "${audit_root}/home/.cargo/audit.toml"
 audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME unset" 1
 audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME empty" 1 CARGO_HOME=
+audit_stage=no-fetch
+audit_case "NG: HOME/.cargo/audit.toml at the no-fetch stage" 1
+audit_stage=fetch
 
 audit_fx; mkdir .cargo; ln -s "${audit_root}/missing-target" .cargo/audit.toml
 audit_case "NG: dangling symlink .cargo/audit.toml" 1
@@ -576,5 +589,54 @@ audit_case "error: failing grep (empty count) exits 2" 2
 audit_lacks "record: no ok result when count is unreadable" "audit-config: result: ok"
 printf '#!/bin/sh\necho abc\nexit 0\n' > "${audit_root}/bin/grep"
 audit_case "error: non-numeric count exits 2" 2
+
+# 2 段の検査（DPOL-33・DPOL-34）
+audit_fx
+rc=0
+env -u CARGO_HOME AUDIT_FAKE_VER="${audit_ver}" PATH="${audit_root}/bin:${PATH}" HOME="${audit_root}/home" \
+  "${HOOK_BASH}" scripts/check-audit-config.sh > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then pass "audit-config: error: stage argument is required"; else fail "audit-config: error: stage argument is required" "exit ${rc}"; fi
+rc=0
+env -u CARGO_HOME AUDIT_FAKE_VER="${audit_ver}" PATH="${audit_root}/bin:${PATH}" HOME="${audit_root}/home" \
+  "${HOOK_BASH}" scripts/check-audit-config.sh unknown > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then pass "audit-config: error: unknown stage is rejected"; else fail "audit-config: error: unknown stage is rejected" "exit ${rc}"; fi
+
+audit_fx
+audit_case "OK: fetch stage with CARGO_HOME unset (no DB needed)" 0
+audit_has "record: fetch stage" "audit-config: stage: fetch"
+audit_case "OK: fetch stage with CARGO_HOME empty" 0 CARGO_HOME=
+audit_case "error: fetch stage with CARGO_HOME set exits 2" 2 CARGO_HOME="${audit_root}/ch"
+audit_has "record: reason (CARGO_HOME is set)" "CARGO_HOME is set"
+audit_lacks "record: no absolute path (CARGO_HOME set)" "${audit_root}"
+
+audit_stage=no-fetch
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+audit_case "OK: no-fetch stage with a clean advisory-db" 0
+audit_has "record: no-fetch stage" "audit-config: stage: no-fetch"
+audit_has "record: advisory count" "git work tree, advisories: 1"
+audit_has "record: no changes" "audit-config: advisory-db changes: 0"
+audit_lacks "record: no absolute path (db)" "${audit_root}"
+audit_fx; audit_db "${audit_root}/ch/advisory-db"
+audit_case "OK: no-fetch stage with CARGO_HOME set to a clean advisory-db" 0 CARGO_HOME="${audit_root}/ch"
+
+audit_fx
+audit_case "error: no-fetch stage without advisory-db exits 2" 2
+audit_has "record: reason (advisory-db is missing)" "advisory-db is missing"
+
+audit_fx; mkdir -p "${audit_root}/home/.cargo/advisory-db/crates/x"; echo "id = RUSTSEC-2099-0001" > "${audit_root}/home/.cargo/advisory-db/crates/x/RUSTSEC-2099-0001.md"
+audit_case "error: no-fetch stage with advisory-db not a git work tree exits 2" 2
+audit_has "record: reason (not the top of a git work tree)" "not the top of a git work tree"
+
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; git -C "${audit_root}/home/.cargo/advisory-db" rm -q -r crates; git -C "${audit_root}/home/.cargo/advisory-db" commit -q -m "chore: empty"; mkdir "${audit_root}/home/.cargo/advisory-db/crates"
+audit_case "error: no-fetch stage with empty crates/ exits 2" 2
+audit_has "record: reason (has no advisory)" "has no advisory"
+
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; echo "x" >> "${audit_root}/home/.cargo/advisory-db/crates/x/RUSTSEC-2099-0001.md"
+audit_case "error: no-fetch stage with a modified advisory exits 2" 2
+audit_has "record: reason (has changes)" "has changes"
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; echo "x" > "${audit_root}/home/.cargo/advisory-db/crates/x/RUSTSEC-2099-0002.md"
+audit_case "error: no-fetch stage with an untracked advisory exits 2" 2
+audit_has "record: reason (has changes)" "has changes"
+audit_stage=fetch
 
 finish "part 7"
