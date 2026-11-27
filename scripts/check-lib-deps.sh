@@ -214,7 +214,7 @@ expect_viol() {
 
 # selftest: 陰性対照 L1〜L11。実の表の中身によらず、fixture 専用の表で検出器が働くことを示す。
 selftest() {
-  local f="${WORK}/fx" t rc real=()
+  local f="${WORK}/fx" t rc out real=()
   if ! mkdir -p "${f}" 2>/dev/null; then
     log "error: cannot create selftest dir; cannot inspect"
     exit 2
@@ -303,8 +303,46 @@ selftest() {
     exit 1
   fi
 
+  # L12: --all-features の参考の走査は warn を stderr に出す（出力を捨てない）。禁止 crate が無ければ warn なし。
+  out="$( (cd "${f}/l6" && cargo generate-lockfile --offline) >/dev/null 2>&1; info_all_features "${f}/l6" l6 2>&1 >/dev/null)" || true
+  case "${out}" in
+    *"all-features (info, not gated): 1"*"warn: forbidden dependency behind a non-default feature (l6)"*) ;;
+    *)
+      log "FAIL selftest L12: all-features warn not emitted"
+      exit 1
+      ;;
+  esac
+  out="$( (cd "${f}/l9" && cargo generate-lockfile --offline) >/dev/null 2>&1; info_all_features "${f}/l9" l9 2>&1 >/dev/null)" || true
+  case "${out}" in
+    *"all-features (info, not gated): 0"*) ;;
+    *)
+      log "FAIL selftest L12B: all-features count not emitted"
+      exit 1
+      ;;
+  esac
+  case "${out}" in
+    *warn:*)
+      log "FAIL selftest L12B: unexpected warn"
+      exit 1
+      ;;
+  esac
+
   FORBIDDEN=(${real[@]+"${real[@]}"})
-  log "selftest ok (L1-L11)"
+  log "selftest ok (L1-L12)"
+}
+
+# 参考の走査（合否に入れない）: --all-features。cargo の stderr は run_tree が捨てる。log の出力（件数・warn）は捨てない。
+info_all_features() {
+  local dir="$1" pkg="$2" tree viol n=0
+  if tree="$(run_tree "${dir}" locked -p "${pkg}" --all-features)"; then
+    viol="$(find_violations "${tree}")"
+    [ -n "${viol}" ] && n="$(printf '%s\n' "${viol}" | wc -l | tr -d ' ')"
+    log "scan ${pkg} all-features (info, not gated): ${n}"
+    if [ "${n}" -ne 0 ]; then
+      log "warn: forbidden dependency behind a non-default feature (${pkg}); confirm it is not a production dependency"
+    fi
+  fi
+  return 0
 }
 
 # main: 直接起動したときの本体（引数の拒否・外部コマンドの確認・表の確認・自己試験・走査の順）。
@@ -353,14 +391,8 @@ main() {
 
   # 参考の走査（合否に入れない）: --all-features。失敗しても合否は変えない。
   for pkg in "${BODY_PKGS[@]}"; do
-    if tree="$(run_tree "${ROOT_DIR}" locked -p "${pkg}" --all-features)"; then
-      n=0
-      viol="$(find_violations "${tree}")"
-      [ -n "${viol}" ] && n="$(printf '%s\n' "${viol}" | wc -l | tr -d ' ')"
-      log "scan ${pkg} all-features (info, not gated): ${n}"
-      [ "${n}" -ne 0 ] && log "warn: forbidden dependency behind a non-default feature (${pkg}); confirm it is not a production dependency"
-    fi
-  done 2>/dev/null || true
+    info_all_features "${ROOT_DIR}" "${pkg}"
+  done
   log "ok: no forbidden dependency in body crates (LIB-2)"
 }
 
