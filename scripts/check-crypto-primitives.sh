@@ -72,6 +72,42 @@ run_grep() {
   rm -f -- "${g}"
 }
 
+# has_match <grep の引数>... <file>: 0（一致）・1（なし）だけを通常として返す。
+# 2 以上（読み取り不能・不正な式）は検査不能で、握りつぶさず終了コード 2 で止める。
+has_match() {
+  local rc=0
+  grep -q "$@" || rc=$?
+  if [ "${rc}" -gt 1 ]; then
+    log "error: grep failed (exit ${rc}); cannot inspect"
+    exit 2
+  fi
+  return "${rc}"
+}
+
+# count_lines <式> <file>: 行頭一致の件数を COUNT に入れる。grep -c の 1（0 件）は通常、2 以上は検査不能（2）。
+# サブシェルでは exit が親に届かないため、結果は大域変数で返す。
+COUNT=0
+count_lines() {
+  local rc=0
+  COUNT="$(grep -c -- "$1" "$2")" || rc=$?
+  if [ "${rc}" -gt 1 ]; then
+    log "error: grep failed (exit ${rc}); cannot inspect"
+    exit 2
+  fi
+}
+
+# show_lines <式> <file>: 行頭一致の行を整形して stderr へ出す。1（なし）は通常、2 以上は検査不能（2）。
+show_lines() {
+  local rc=0 g
+  g="$(grep -- "$1" "$2")" || rc=$?
+  if [ "${rc}" -gt 1 ]; then
+    log "error: grep failed (exit ${rc}); cannot inspect"
+    exit 2
+  fi
+  [ -n "${g}" ] && printf '%s\n' "${g}" | sed "$3" >&2
+  return 0
+}
+
 # scan_rs <出力先> <file>: Rust のソース 1 ファイルに C1・C2・C4・C5 を当てる。
 # shellcheck disable=SC2094 # file は読む入力で、出力先とは別のファイル
 scan_rs() {
@@ -79,7 +115,7 @@ scan_rs() {
   tr -d '_' <"${f}" | run_grep "${out}" C1 "${f}" -i -E -- "${CONSTS}"
   run_grep "${out}" C2 "${f}" -E -- "${ASM}" <"${f}"
   run_grep "${out}" C4 "${f}" -E -- "${C4RE}" <"${f}"
-  if grep -q -E 'rotate_(left|right)' "${f}" && grep -q -E 'wrapping_(add|sub|mul)' "${f}"; then
+  if has_match -E 'rotate_(left|right)' "${f}" && has_match -E 'wrapping_(add|sub|mul)' "${f}"; then
     printf 'C5\t%s:1\n' "${f}" >>"${out}"
   fi
 }
@@ -119,7 +155,8 @@ fail_selftest() {
 # expect_count <S 名> <規則> <pos|neg> <出力ファイル>: 規則の検出が 1 件以上（pos）・0 件（neg）であることを確かめる。
 expect_count() {
   local n
-  n="$(grep -c "^$2	" "$4" || true)"
+  count_lines "^$2	" "$4"
+  n="${COUNT}"
   case "$3" in
     pos) [ "${n}" -ge 1 ] || fail_selftest "$1" "$2 not detected" ;;
     neg) [ "${n}" -eq 0 ] || fail_selftest "$1" "$2 false positive" ;;
@@ -127,7 +164,7 @@ expect_count() {
 }
 
 selftest() {
-  local t out
+  local t out rc
   t="$(mktemp -d)" || {
     log "error: cannot create selftest dir; cannot inspect"
     exit 2
@@ -177,6 +214,13 @@ selftest() {
   scan_names "${out}" "${t}/s9.rs"
   scan_native "${out}" "${t}/s9.rs"
   [ ! -s "${out}" ] || fail_selftest S9 "clean fixture produced findings"
+  # S12: grep が 2 を返す（読み取り不能なファイル）場合は、未検出（1）に畳まず終了コード 2 で止まる
+  rc=0
+  (has_match -E 'x' "${t}/no-such-file" 2>/dev/null) || rc=$?
+  [ "${rc}" -eq 2 ] || fail_selftest S12 "has_match did not stop with 2 (got ${rc})"
+  rc=0
+  (count_lines 'x' "${t}/no-such-file" 2>/dev/null) || rc=$?
+  [ "${rc}" -eq 2 ] || fail_selftest S12 "count_lines did not stop with 2 (got ${rc})"
   ! non_empty 0 || fail_selftest S10 "empty target accepted"
   non_empty 1 || fail_selftest S10 "non-empty target rejected"
   rm -rf -- "${t}"
@@ -282,9 +326,10 @@ non_empty "${prod_n}" || {
 # 規則ごとの件数と検出の行を出す。
 report() { # <接頭辞の正規表現> <規則名> <ラベル>
   local n
-  n="$(grep -c "^$1	" "${OUT}" || true)"
+  count_lines "^$1	" "${OUT}"
+  n="${COUNT}"
   log "$3: ${n}"
-  grep "^$1	" "${OUT}" | sed 's/^[^	]*	/  /' >&2 || true
+  show_lines "^$1	" "${OUT}" 's/^[^	]*	/  /'
   REPORTED="${n}"
 }
 
@@ -295,9 +340,10 @@ for r in C1 C2 C3 C4 C5; do
 done
 report N1 N1 "warning N1 (production, advisory)"
 report N2 N2 "warning N2 (production, advisory)"
-tn="$(grep -c '^T:' "${OUT}" || true)"
+count_lines '^T:' "${OUT}"
+tn="${COUNT}"
 log "warning test-only crates (advisory, not counted): ${tn}"
-grep '^T:' "${OUT}" | sed 's/^T://' | tr '\t' ' ' | sed 's/^/  /' >&2 || true
+show_lines '^T:' "${OUT}" 's/^T://;s/\t/ /g;s/^/  /'
 
 log "scanned: production files ${prod_n}, test-only files ${test_n}; violations ${fails}"
 if [ "${fails}" -gt 0 ]; then
