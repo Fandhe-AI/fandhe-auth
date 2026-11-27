@@ -17,7 +17,7 @@ cat <<'EOF'
   doctor      scripts/doctor.sh              開発環境を診断する（読み取りのみ。何も導入・修復しない）
   setup       scripts/setup.sh               Git hooks 有効化と .env 雛形の配置（再実行しても安全）
   check       scripts/check.sh               editorconfig-checker + shellcheck（ソースは変更しない）
-  test-hooks  scripts/hooks/test-hooks.sh    フックスクリプト自体の回帰テスト（bash + git のみ）
+  test-hooks  scripts/hooks/test-hooks.sh    フックスクリプト自体の回帰テスト（bash + git が基本。part 12 の lib-deps だけ cargo が要り、無ければローカルは SKIP、CI では失敗）
   secret-scan scripts/hooks/secret-scan.sh --tracked   追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定）
   scan-canary scripts/secret-scan-canary.sh   secret-scan の陰性対照（ダミーで検出器が 1 を返し、集計行が期待と完全に一致し、ダミー値が出ないことを確かめる。何も変更しない）
   build       cargo build --workspace --locked   workspace 全体をビルドする（--locked。--all-features は使わない）
@@ -27,6 +27,7 @@ cat <<'EOF'
   crate-deps  scripts/check-crate-deps.sh    crate 間の依存の向きの検査（許可表との照合）
   lib-deps    scripts/check-lib-deps.sh      本体の crate の通常の依存の禁止 crate の検査（cargo tree。陰性対照つき。検査のみ）
   no-vendored scripts/check-openssl-vendored.sh openssl-sys の vendored の検査（合否は本番メンバーの normal・build 依存で、既定 feature と PROD_FEATURES で明示した feature だけ。全 feature の走査は参考（警告）。静的リンクを強いる設定の検出を含む。検査のみ）
+  crypto-scan scripts/check-crypto-primitives.sh 自作の暗号処理の走査（合否は本番メンバーの C1〜C5。試験専用 crate と N1・N2 は参考の警告。発見的で人のレビューの代わりにならない。検査のみ）
   pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
   it-db       scripts/it-db.sh               ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）
   it-db-ci    scripts/it-db-ci.sh            CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験だけを流す。0 件は失敗）

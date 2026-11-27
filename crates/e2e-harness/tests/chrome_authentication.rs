@@ -64,6 +64,9 @@ fn authentication_fails_when_user_verification_fails_with_chrome() {
     let control = control_result.expect("control");
     assert!(control.succeeded(), "error_name={:?}", control.error_name());
     assert!(control_check_ok, "credential check failed");
+    // ACPT-7・ACPT-8: 〔仮想〕の証跡は成否に依らず実機・Safari に数えない。
+    assert!(!control.evidence().counts_as_real_device());
+    assert!(!control.evidence().counts_as_safari());
     // 登録の後に UV を失敗にする。判定は authenticator 側で完結し、ネットワークに出ない。
     handle.set_user_verified(&aid, false).expect("set uv");
     let result = authenticate_once(&handle, &origin.origin(), "localhost", &cred);
@@ -75,6 +78,9 @@ fn authentication_fails_when_user_verification_fails_with_chrome() {
     // HarnessTimeout とは別の名前で、対照が成功した同一条件から UV だけを変えた後の結果としてだけ読み、原因の判別とは読まない。
     assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
     assert!(check_ok, "credential check failed");
+    // 拒否で終わった操作も Ok(outcome) なので、拒否の場合も証跡を確かめる。
+    assert!(!outcome.evidence().counts_as_real_device());
+    assert!(!outcome.evidence().counts_as_safari());
     running.stop().expect("stop");
     sink.finish().expect("record");
 }

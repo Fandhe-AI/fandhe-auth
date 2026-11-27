@@ -14,9 +14,9 @@ use super::{
 use crate::{
     ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
     ConditionError, IntervalName, InvalidValueReason, LOAD_RECORD_FORMAT, LoadConfig, LoadRecord,
-    LoadRecordError, LoopModel, MeasurementConditions, MetricKey, RunEvidence, RunRecordFile,
-    RunSession, StageConfig, StageError, StageLimits, StagePlan, TargetName, TargetSpec,
-    ValueClass, ValueUnit,
+    LoadRecordError, LoopModel, MeasuredSource, MeasurementConditions, MetricKey, RunEvidence,
+    RunRecordFile, RunSession, StageConfig, StageError, StageLimits, StagePlan, TargetName,
+    TargetSpec, ValueClass, ValueUnit,
 };
 use std::cell::Cell;
 use std::fmt::{self, Write as _};
@@ -153,8 +153,7 @@ fn requirement_and_initial_always_rejected() {
         assert_eq!(approval(c, 5, &nine, &ok).err(), Some(ca));
         assert_eq!(approval(c, 5, &["A", "A"], &ok).err(), Some(ca));
     }
-    // 測定値・試験の条件・未決・他所有者の値は、これまでどおり通る。
-    assert!(approval(Measured, 5, &[], &ok).is_ok());
+    // 試験の条件・未決・他所有者の値は、これまでどおり通る（測定値は measured_rejected_by_new）。
     assert!(approval(TestCondition, 5, &[], &ok).is_ok());
     assert!(val("v", Undecided, None, &[]).is_ok());
     assert!(val("v", External, None, &["X-1"]).is_ok());
@@ -278,10 +277,25 @@ fn class_rules_fail_closed() {
     assert!(invalid(val("v", External, None, &[])));
     assert!(invalid(val("v", External, Some(1), &["X-1"])));
     assert!(val("v", External, None, &["X-1"]).is_ok());
-    for c in [TestCondition, Measured] {
-        assert!(invalid(val("v", c, None, &[])));
-        assert!(invalid(val("v", c, Some(1), &["X-1"])));
-        assert!(val("v", c, Some(1), &[]).is_ok());
+    assert!(invalid(val("v", TestCondition, None, &[])));
+    assert!(invalid(val("v", TestCondition, Some(1), &["X-1"])));
+    assert!(val("v", TestCondition, Some(1), &[]).is_ok());
+}
+
+/// #6049: `ComparisonValue::new` は測定値を常に ClassNotAllowed で拒否する（出典・値・重複の検査より先）。
+#[test]
+fn measured_rejected_by_new() {
+    let ca = LoadRecordError::InvalidValue(InvalidValueReason::ClassNotAllowed);
+    let nine: Vec<String> = (0..9).map(|i| format!("R-{i}")).collect();
+    let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+    for (v, ids) in [
+        (Some(1), &[][..]),
+        (None, &[][..]),
+        (Some(1), &["X-1"][..]),
+        (Some(1), &nine[..]),
+        (Some(1), &["A", "A"][..]),
+    ] {
+        assert_eq!(val("v", ValueClass::Measured, v, ids).unwrap_err(), ca);
     }
 }
 
@@ -437,10 +451,18 @@ fn value_line_shapes() {
         l(val("c", ValueClass::TestCondition, Some(3), &[]).unwrap()),
         "value: c class=test_condition value=3 unit=ns refs=harness_config"
     );
-    assert_eq!(
-        l(val("m", ValueClass::Measured, Some(7), &[]).unwrap()),
-        "value: m class=measured value=7 unit=ns refs=measured"
-    );
+    let ev = evidence(0).unwrap();
+    let m = ComparisonValue::measured(vname("m"), &ev, MeasuredSource::new(1, 1, MetricKey::P99Ns))
+        .unwrap();
+    let line = l(m.clone());
+    let n = line
+        .strip_prefix("value: m class=measured value=")
+        .and_then(|r| r.strip_suffix(" unit=ns refs=measured"))
+        .unwrap();
+    assert!(n.bytes().all(|b| b.is_ascii_digit()));
+    // 行の値は同じ記録の段階の行の p99_ns と一致する。
+    let text = LoadRecord::new(&ev, 1, vec![m]).unwrap().to_string();
+    assert!(text.contains(&format!("p99_ns={n}")));
     assert_eq!(
         l(val("e", ValueClass::External, None, &["A", "B"]).unwrap()),
         "value: e class=external value=none unit=ns refs=A,B"
@@ -673,7 +695,7 @@ fn value_row_limits_and_duplicates() {
     );
     let dup = vec![
         val("v", ValueClass::Undecided, None, &[]).unwrap(),
-        val("v", ValueClass::Measured, Some(1), &[]).unwrap(),
+        val("v", ValueClass::TestCondition, Some(1), &[]).unwrap(),
     ];
     assert_eq!(
         build(0, 0, dup).unwrap_err(),
@@ -697,21 +719,36 @@ fn debug_and_errors_do_not_leak() {
     let secret_m = "canary_meas_zz";
     let m = ComparisonValue::new(
         vname(secret_m),
-        ValueClass::Measured,
+        ValueClass::TestCondition,
         Some(424_242),
         ValueUnit::Ns,
         vec![],
         &ApprovedValues::default(),
     )
     .unwrap();
+    let ev = evidence(0).unwrap();
+    let derived = ComparisonValue::measured(
+        vname("canary_derived_zz"),
+        &ev,
+        MeasuredSource::new(1, 1, MetricKey::P99Ns),
+    )
+    .unwrap();
     let dbg = format!(
-        "{v:?} {m:?} {:?} {:?}",
+        "{v:?} {m:?} {derived:?} {:?} {:?} {:?}",
         vname(secret),
-        refs(&["CANARY-REF"])
+        refs(&["CANARY-REF"]),
+        MeasuredSource::new(1, 1, MetricKey::P99Ns)
     );
-    let rec = build(0, 1, vec![v, m]).unwrap();
+    let rec = LoadRecord::new(&ev, 1, vec![v, m, derived]).unwrap();
     let dbg = format!("{dbg} {rec:?} {:?}", file());
-    for bad in [secret, secret_m, "CANARY-REF", "424242", "it-run-0-1-1"] {
+    for bad in [
+        secret,
+        secret_m,
+        "canary_derived_zz",
+        "CANARY-REF",
+        "424242",
+        "it-run-0-1-1",
+    ] {
         assert!(!dbg.contains(bad));
     }
     let e = RunRecordFile::new("bad\nlines").unwrap_err().to_string();
@@ -843,4 +880,75 @@ fn fixed_vocabularies_are_well_formed() {
         assert!(seen.insert(r));
         assert!(RefId::new(r).is_ok());
     }
+}
+
+/// 時間は実時計で決まるため、導いた行の値は記録の中の段階の行と比べる。
+fn derived(ev: &RunEvidence, stage: u64, run: u64) -> Result<ComparisonValue, LoadRecordError> {
+    ComparisonValue::measured(
+        vname("m"),
+        ev,
+        MeasuredSource::new(stage, run, MetricKey::P99Ns),
+    )
+}
+
+/// #6049: 同じ実行（複製を含む）の測定値の行は通る。別の実行・別の実行の複製でない値は拒否する。
+#[test]
+fn measured_row_bound_to_its_run() {
+    let ev = evidence(0).unwrap();
+    let row = derived(&ev, 1, 1).unwrap();
+    assert!(LoadRecord::new(&ev, 1, vec![row.clone()]).is_ok());
+    assert!(LoadRecord::new(&ev.clone(), 1, vec![row.clone()]).is_ok());
+    // 起動秒・構成が同じでも、別の実行は拒否する（識別子で区別する）。
+    let other = evidence(0).unwrap();
+    assert_eq!(
+        LoadRecord::new(&other, 1, vec![row.clone()]).unwrap_err(),
+        LoadRecordError::MeasuredFromOtherRun
+    );
+    assert_eq!(
+        compose(&other, 1, &[row], 1 << 20).unwrap_err(),
+        LoadRecordError::MeasuredFromOtherRun
+    );
+}
+
+#[test]
+fn measured_source_must_be_in_run() {
+    let ev = evidence(0).unwrap();
+    let nr = LoadRecordError::InvalidValue(InvalidValueReason::SourceNotInRun);
+    for (st, run) in [(0, 1), (2, 1), (1, 0), (1, 2)] {
+        assert_eq!(derived(&ev, st, run).unwrap_err(), nr);
+    }
+}
+
+#[test]
+fn measured_requires_a_value_and_allowed_name() {
+    let calls = AtomicU64::new(0);
+    let ev = RunSession::new(file(), 0, conditions())
+        .unwrap()
+        .run(&[ConditionComponent::HubStub], &spec(), &plan(), || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            CallResult::Rejected
+        })
+        .unwrap();
+    assert_eq!(
+        derived(&ev, 1, 1).unwrap_err(),
+        LoadRecordError::InvalidValue(InvalidValueReason::ValueRequired)
+    );
+    let ev = evidence(0).unwrap();
+    assert_eq!(
+        ComparisonValue::measured(
+            vname("p99_target"),
+            &ev,
+            MeasuredSource::new(1, 1, MetricKey::P99Ns)
+        )
+        .unwrap_err(),
+        LoadRecordError::InvalidValue(InvalidValueReason::ClassNotAllowed)
+    );
+}
+
+#[test]
+fn measured_errors_are_fixed_text() {
+    let a = LoadRecordError::MeasuredFromOtherRun.to_string();
+    assert_eq!(a, "load record error: measured value from another run");
+    let b = LoadRecordError::InvalidValue(InvalidValueReason::SourceNotInRun).to_string();
+    assert_eq!(b, "load record error: invalid value (source_not_in_run)");
 }

@@ -222,7 +222,7 @@ impl MetricKey {
         }
     }
 
-    fn pick(&self, s: &IntervalStats) -> Option<u64> {
+    pub(crate) fn pick(&self, s: &IntervalStats) -> Option<u64> {
         match self {
             Self::P50Ns => s.p50_ns,
             Self::P95Ns => s.p95_ns,
