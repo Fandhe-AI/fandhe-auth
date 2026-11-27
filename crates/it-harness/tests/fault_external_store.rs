@@ -672,6 +672,8 @@ fn stop_returns_while_held_at_accept_sync_point() {
     assert!(stall.wait_entered(Duration::from_secs(5)));
     stall.release();
     assert!(stall.wait_accept_sync_entered(Duration::from_secs(5)));
+    // 通知は送らず、停止の前に上流側の accept だけを完了させてストリームを保つ（閉じた後の accept を避ける）。
+    let (mut c, _) = up.accept().unwrap();
     let started = Instant::now();
     p.stop();
     assert!(
@@ -679,7 +681,6 @@ fn stop_returns_while_held_at_accept_sync_point() {
         "stop waited for the accept sync point"
     );
     assert_eq!(stall.accept_sync_exit(), Some(AcceptSyncExit::Stopped));
-    let (mut c, _) = up.accept().unwrap();
     c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     assert_eq!(read_until_eof(&mut c), UpstreamObservation::Received(0));
 }
