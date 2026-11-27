@@ -594,10 +594,69 @@ for qp in true false; do
   expect_out "only the unregistered non-ASCII path is counted (core.quotePath=${qp})" "secret-scan: total: 1 finding(s) in 1 file(s)"
 done
 
-# ヘッダが引用される登録名の下のパス（二重引用符）は、落とさず走査する（2 にしない。検出があれば 1）
+# 引用されるパス（制御文字・DEL・二重引用符・バックスラッシュ。#6144）: 登録名の下は除外、未登録の下は走査する。
+# 一覧の生のパスから git と同じ規則で引用したヘッダを組み、区画のヘッダ全体と突き合わせる（引用形は照合にだけ使う）
+quoted_bytes="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 34 92 127"
+quoted_n=0
+# stage_quoted <名前>: 引用が要る 1 バイトごとに 1 ファイルを index へ置く（件数は quoted_n）
+stage_quoted() {
+  local name="$1" b blob ch
+  quoted_n=0
+  blob="$(printf 'x = %s\n' "${token}" | git hash-object -w --stdin)"
+  for b in ${quoted_bytes}; do
+    printf -v ch '%b' "\\0$(printf '%03o' "${b}")"
+    printf '100644 %s 0\t.agents/skills/%s/a%sb.md\0' "${blob}" "${name}" "${ch}" | git update-index --add -z --index-info
+    quoted_n=$((quoted_n + 1))
+  done
+}
+for qp in true false; do
+  for scan_arg in "" --tracked; do
+    new_repo; stage_lock
+    git config core.quotePath "${qp}"
+    stage_quoted vendored-a
+    if [ -n "${scan_arg}" ]; then git commit -q -m "test: quoted"; fi
+    SCAN_ARG="${scan_arg}" SCAN_BIN="${small_bin}" check_scan "quoted paths under a registered name are excluded (core.quotePath=${qp} ${scan_arg})" 0
+    stage_quoted unreg
+    if [ -n "${scan_arg}" ]; then git commit -q -m "test: quoted 2"; fi
+    SCAN_ARG="${scan_arg}" SCAN_BIN="${small_bin}" check_scan "quoted paths under an unregistered name are scanned (core.quotePath=${qp} ${scan_arg})" 1
+    expect_out "only the unregistered quoted paths are counted (core.quotePath=${qp} ${scan_arg})" "secret-scan: total: ${quoted_n} finding(s) in ${quoted_n} file(s)"
+  done
+done
+SCAN_ARG=
+
+# 同じ名前の未登録の兄弟（二重引用符）は 1 件だけ数えられる
 new_repo; stage_lock
 stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
-SCAN_BIN="${small_bin}" check_scan "a quoted header under a registered name is scanned, not an error" 1
-expect_out "the quoted-header path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
+SCAN_BIN="${small_bin}" check_scan "a quoted path under a registered name is excluded" 0
+stage '.agents/skills/unreg/q"x.md' "x = ${token}"
+SCAN_BIN="${small_bin}" check_scan "a quoted path under an unregistered sibling is scanned" 1
+expect_out "only the unregistered quoted path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
+# 非 ASCII と二重引用符・DEL・タブ・改行を含むパスも、登録名の下は除外・未登録の下は走査
+for qp in true false; do
+  new_repo; stage_lock
+  git config core.quotePath "${qp}"
+  blob="$(printf 'x = %s\n' "${token}" | git hash-object -w --stdin)"
+  mixed_names=("caf$(printf '\303\251')\"z.md" "a$(printf '\177')b.md" "a$(printf '\t')b.md" "a$(printf '\n')b.md")
+  for nm in "${mixed_names[@]}"; do
+    printf '100644 %s 0\t.agents/skills/vendored-a/%s\0' "${blob}" "${nm}" | git update-index --add -z --index-info
+  done
+  SCAN_BIN="${small_bin}" check_scan "mixed quoted paths under a registered name are excluded (core.quotePath=${qp})" 0
+  for nm in "${mixed_names[@]}"; do
+    printf '100644 %s 0\t.agents/skills/unreg/%s\0' "${blob}" "${nm}" | git update-index --add -z --index-info
+  done
+  SCAN_BIN="${small_bin}" check_scan "mixed quoted paths under an unregistered name are scanned (core.quotePath=${qp})" 1
+  expect_out "only the four unregistered paths are counted (core.quotePath=${qp})" "secret-scan: total: 4 finding(s) in 4 file(s)"
+done
+
+# diff.orderFile で登録名と未登録の引用されるパスの順序を入れ替えても、落とすべきでない区画は落とさない
+new_repo; stage_lock
+stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
+stage '.agents/skills/unreg/q"x.md' "x = ${token}"
+printf '%s\n' '.agents/skills/unreg/*' '.agents/skills/vendored-a/*' > "${PWD}/order.txt"
+git config diff.orderFile "${PWD}/order.txt"
+SCAN_BIN="${small_bin}" check_scan "reordered quoted sections: the unregistered one is still scanned" 1
+expect_out "reordered quoted sections: only the unregistered path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
+git config --unset diff.orderFile
 
 finish "part 5"
