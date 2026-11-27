@@ -556,4 +556,72 @@ else
   fail "secret-scan: a parent link retargeted during the final HEAD re-check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# T16: 最後の経路の取り直しの間に HEAD が動いたら 2（集計の直前の HEAD の照合し直しの固定。#6047）
+# 最後の経路の取り直し（git rev-parse を 2 回呼ぶ）は、最後の HEAD の再照合（symbolic-ref）の後に走る。その最初の呼び出しで HEAD を動かす。
+# 経路の取り直しの後の HEAD の照合し直しを外すと、HEAD の移動を見落として 0 を返し、この試験が落ちる。
+new_repo; stage src/app.txt "hello"
+t16_first="$(git rev-parse HEAD)"
+git commit -q --allow-empty -m "chore: second"
+t16_second="$(git rev-parse HEAD)"
+git reset -q --hard "${t16_first}"
+mkdir -p "${work_dir}/git16-shim"
+rm -f "${work_dir}/t16-flag.final" "${work_dir}/t16-seen" "${work_dir}/t16-moved"
+cat > "${work_dir}/git16-shim/git" <<'EOF16'
+#!/bin/sh
+# index-final の複写の完了の後、最初の symbolic-ref（最後の HEAD の再照合）より後の最初の経路の取得（rev-parse --git-path）の前に、一度だけ HEAD を動かす
+if [ -e "${T16_MARK}" ]; then
+  for arg in "$@"; do
+    case "${arg}" in
+      symbolic-ref) : > "${T16_SEEN}" ;;
+      --git-path)
+        if [ -e "${T16_SEEN}" ] && [ ! -e "${T16_MOVED}" ]; then
+          : > "${T16_MOVED}"
+          (unset GIT_INDEX_FILE; "${REAL_GIT}" update-ref HEAD "${T16_TO}") || exit 1
+        fi
+        ;;
+    esac
+  done
+fi
+exec "${REAL_GIT}" "$@"
+EOF16
+chmod +x "${work_dir}/git16-shim/git"
+rc=0
+CP8_MODE=mark-final CP8_FLAG="${work_dir}/t16-flag" T16_MARK="${work_dir}/t16-flag.final" T16_SEEN="${work_dir}/t16-seen" T16_MOVED="${work_dir}/t16-moved" T16_TO="${t16_second}" \
+  PATH="${work_dir}/git16-shim:${cp8_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/t16-moved" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: HEAD changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: HEAD moved during the last index path re-check is a scan failure (2)"
+else
+  fail "secret-scan: HEAD moved during the last index path re-check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T17: stat の起動の失敗（診断が ENOENT で終わっても、終了コードが 126・127）は「不在」と確かめられたとは言えず 2（path_enoent_confirmed。#6047）
+# 起動の失敗は、不在の index を空として 0 を返す経路になり得る（fail-open）。直しを外すと 0 を返し、この試験が落ちる。
+t17_i=0
+for t17_kind in bad-interpreter exit-127 exit-2; do
+  t17_i=$((t17_i + 1))
+  new_repo; stage src/app.txt "hello"
+  stat17_dir="${work_dir}/stat17-shim-${t17_i}"
+  mkdir -p "${stat17_dir}"
+  case "${t17_kind}" in
+    bad-interpreter)
+      printf '#!/nonexistent-interpreter-t17\n' > "${stat17_dir}/stat"
+      ;;
+    exit-127)
+      printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\nexit 127\n' > "${stat17_dir}/stat"
+      ;;
+    exit-2)
+      printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\nexit 2\n' > "${stat17_dir}/stat"
+      ;;
+  esac
+  chmod +x "${stat17_dir}/stat"
+  rc=0
+  GIT_INDEX_FILE="${work_dir}/t17-absent-index-${t17_i}" PATH="${stat17_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+    pass "secret-scan: a stat that fails to run (${t17_kind}) does not confirm an absent index (2)"
+  else
+    fail "secret-scan: a stat that fails to run (${t17_kind}) does not confirm an absent index (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+done
+
 finish "part 8"

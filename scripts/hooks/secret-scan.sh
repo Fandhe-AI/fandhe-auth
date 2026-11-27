@@ -364,9 +364,14 @@ path_enoent_confirmed() {
     *) p="./${p}" ;;
   esac
   err="$(LC_ALL=C stat -- "${p}" 2>&1 >/dev/null)" || rc=$?
-  [ "${rc}" -ne 0 ] || return 1
+  # 照会の失敗だけを ENOENT の候補にする。起動の失敗（実行ファイルが無い・実行できない・インタープリタが無い）は
+  # 終了コード 126・127 で、bash 自身が「…: No such file or directory」を出し得る。診断の末尾だけでは照会の ENOENT と区別できず、
+  # 起動できていない stat を「不在」と読むと fail-open になる（#6047）。
+  # stat の照会の失敗は終了コード 1（GNU・uutils・BSD〔macOS〕。BSD は 1 を返すと読んでいる。実機で未確認）で、診断は stat 自身の接頭辞 "stat: " で始まる
+  # （bash の起動失敗の診断は "bash: …" や実行ファイルのパスで始まる）。終了コードと診断の形がそろわなければ「不在とは言えない」（1）。
+  [ "${rc}" -eq 1 ] || return 1
   case "${err}" in
-    *": No such file or directory") return 0 ;;
+    "stat: "*": No such file or directory") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1529,33 +1534,34 @@ verify_index_unchanged() {
 }
 verify_index_unchanged "${tmp_dir}/index-after" "${tmp_dir}/index-listing-after"
 
+# recheck_head: 固定した HEAD の ID を取り直し、違えば 2 で止める（未解決で始まったときは何もしない）。
+recheck_head() {
+  if [ "${head_resolved}" -eq 1 ]; then
+    pinned_head="${head_id}"
+    resolve_head
+    if [ "${head_id}" != "${pinned_head}" ]; then
+      echo "secret-scan: HEAD changed during the scan; aborting" >&4
+      exit 2
+    fi
+  fi
+}
 # 走査中に HEAD が動いていたら、固定した ID を基準にした結果は古い。合格を返さず検査不能（2）にする
 # （未作成ブランチ・空の ID のまま始まり、走査中にブランチが作られた場合も違いに含む）。
 # 取り直しは終了時の index の 1 回目の検証より後に置く（検証の途中に動いた HEAD も見落とさない。git-hooks.md の (f)。#6011）。
-if [ "${head_resolved}" -eq 1 ]; then
-  pinned_head="${head_id}"
-  resolve_head
-  if [ "${head_id}" != "${pinned_head}" ]; then
-    echo "secret-scan: HEAD changed during the scan; aborting" >&4
-    exit 2
-  fi
-fi
+recheck_head
 
 # 2 回目の確認（#6047。この後に HEAD の再照合と最後の経路の取り直しが続く）。1 回目から HEAD の取り直しまでの間に置き換わった index を見落とさない。
 verify_index_unchanged "${tmp_dir}/index-final" "${tmp_dir}/index-listing-final"
 
 # 2 回目の index の検証の途中に動いた HEAD も見落とさないよう、検証の後にもう一度 HEAD を照合する（#6047。git-hooks.md の (f)）。
-if [ "${head_resolved}" -eq 1 ]; then
-  pinned_head="${head_id}"
-  resolve_head
-  if [ "${head_id}" != "${pinned_head}" ]; then
-    echo "secret-scan: HEAD changed during the scan; aborting" >&4
-    exit 2
-  fi
-fi
+recheck_head
 
-# 最後の HEAD の照合の後にも、index の経路を取り直す（#6047。複写の後の付け替えを、HEAD の再照合の後まで見る。集計の前の最後の確認）。
+# 最後の HEAD の照合の後にも、index の経路を取り直す（#6047。複写の後の付け替えを、HEAD の再照合の後まで見る）。
 require_index_paths_unchanged
+
+# 経路の取り直し（git を 2 回呼ぶ）の間に動いた HEAD も見落とさないよう、集計の直前に HEAD を固定した ID と照合し直す
+# （#6047。集計の前の最後の確認。この後に git を呼ばない）。
+recheck_head
 
 # 合計件数で判定する。出力は規則 ID ごとの件数・合計・ファイル名だけで、値は出さない。
 total="${env_hits}"
