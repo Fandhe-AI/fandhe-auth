@@ -409,16 +409,49 @@ enum UpstreamObservation {
     Received(usize),
     /// accept か読み取りが失敗し、バイトが届いたかを確かめられない。
     Unverifiable(ErrorKind),
+    /// 期限内に上流が接続を受理せず、バイトが届いたかを確かめられない（#6040。読み取りの期限切れとは区別する）。
+    NotAccepted(Duration),
 }
 
-/// 上流の接続を 1 本だけ受け、閉じられるまでの受信バイト数を数える。呼び出し側は blocking のリスナーを渡す。
-fn observe_upstream(up: TcpListener) -> thread::JoinHandle<UpstreamObservation> {
+/// 観測のスレッドが上流の accept を待つ期限。観測のスレッドは転送器より先に起動し、上流への接続は
+/// 停止点の解放の後に起こる。その前の待ち（到達 5 秒・停止点 5 秒・上流への接続 5 秒）より先に切れると、
+/// リスナーを捨てて原因の分かりにくい失敗になるため、合計 15 秒に余裕を足す（#6040）。
+const OBSERVE_ACCEPT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// accept のポーリング間隔。短く保ち、受理前に接続が待ち行列に残る窓を広げない。
+const OBSERVE_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// 上流の接続を 1 本だけ受け、閉じられるまでの受信バイト数を数える。
+/// accept は非ブロッキングで `accept_deadline` までポーリングし、期限までに受理できなければ `NotAccepted` を返す
+/// （受理されないまま `join` で止まる経路を作らない。判定は失敗。ORST-17・AUDB-6・#6040）。
+fn observe_upstream(
+    up: TcpListener,
+    accept_deadline: Duration,
+) -> thread::JoinHandle<UpstreamObservation> {
     thread::spawn(move || {
-        let mut c = match up.accept() {
-            Ok((c, _)) => c,
-            Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
+        if let Err(e) = up.set_nonblocking(true) {
+            return UpstreamObservation::Unverifiable(e.kind());
+        }
+        let deadline = Instant::now() + accept_deadline;
+        let mut c = loop {
+            match up.accept() {
+                Ok((c, _)) => break c,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+                    if Instant::now() >= deadline {
+                        return UpstreamObservation::NotAccepted(accept_deadline);
+                    }
+                    thread::sleep(OBSERVE_POLL_INTERVAL);
+                }
+                Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
+            }
         };
-        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        // macOS/BSD では accept したソケットが O_NONBLOCK を受け継ぐため、blocking に戻してから期限を付ける。
+        if let Err(e) = c.set_nonblocking(false) {
+            return UpstreamObservation::Unverifiable(e.kind());
+        }
+        if let Err(e) = c.set_read_timeout(Some(Duration::from_secs(5))) {
+            return UpstreamObservation::Unverifiable(e.kind());
+        }
         read_until_eof(&mut c)
     })
 }
@@ -491,6 +524,9 @@ fn judge_upstream(obs: UpstreamObservation) -> Result<(), String> {
         UpstreamObservation::Unverifiable(kind) => Err(format!(
             "could not verify that no bytes reached upstream: {kind:?}"
         )),
+        UpstreamObservation::NotAccepted(d) => Err(format!(
+            "upstream did not accept within {d:?}; could not verify that no bytes reached upstream"
+        )),
     }
 }
 
@@ -503,6 +539,20 @@ fn judge_upstream_accepts_only_zero_bytes() {
     for kind in [ErrorKind::ConnectionAborted, ErrorKind::ConnectionReset] {
         assert!(judge_upstream(UpstreamObservation::Unverifiable(kind)).is_err());
     }
+    assert!(judge_upstream(UpstreamObservation::NotAccepted(Duration::from_secs(1))).is_err());
+}
+
+/// ORST-17・AUDB-6（#6040）: 上流が接続を受理しないとき、観測のスレッドは期限内に戻り、判定は失敗になる
+/// （`join` で止まらない）。時間は下限だけを確かめる。
+#[test]
+fn observe_upstream_fails_when_upstream_never_accepts() {
+    let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let deadline = Duration::from_millis(200);
+    let start = Instant::now();
+    let obs = observe_upstream(up, deadline).join().unwrap();
+    assert!(start.elapsed() >= deadline);
+    assert_eq!(obs, UpstreamObservation::NotAccepted(deadline));
+    assert!(judge_upstream(obs).is_err());
 }
 
 /// 観測のスレッドは、実際に届いたバイトを数える（陽性対照。0 と数え違えると回帰を見逃す）。
@@ -510,7 +560,7 @@ fn judge_upstream_accepts_only_zero_bytes() {
 fn observe_upstream_counts_delivered_bytes() {
     let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = up.local_addr().unwrap().port();
-    let h = observe_upstream(up);
+    let h = observe_upstream(up, OBSERVE_ACCEPT_DEADLINE);
     let mut c = connect(port);
     c.write_all(b"abc").unwrap();
     drop(c);
@@ -528,9 +578,9 @@ fn observe_upstream_counts_delivered_bytes() {
 fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let upstream_port = up.local_addr().unwrap().port();
-    // blocking の accept で待つ観測のスレッドを、転送器の起動の前に作る（待ち行列に残って切られる前に受ける）。
-    up.set_nonblocking(false).unwrap();
-    let observer = observe_upstream(up);
+    // 期限付きの非ブロッキングの accept で待つ観測のスレッドを、転送器の起動の前に作る
+    // （待ち行列に残って切られる前に受ける。ポーリングの間隔は短く保つ）。
+    let observer = observe_upstream(up, OBSERVE_ACCEPT_DEADLINE);
     let stall = UpstreamStall::new();
     let mut p =
         ExternalStoreFaultProxy::start_to_port_with_stall(upstream_port, stall.clone()).unwrap();
@@ -587,7 +637,7 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
         p.generation_refused_count()
     );
     // 遮断前のバイトが上流へ届いていないことを、上流側の受信バイト数で確かめる（ORST-17・AUDB-6）。
-    // 観測は上で起動した専用のスレッド（blocking の accept）が行う。観測できない場合（accept・読み取りの失敗、
+    // 観測は上で起動した専用のスレッド（期限付きの accept）が行う。観測できない場合（期限内に受理されない・accept・読み取りの失敗、
     // macOS の `ConnectionAborted`・`ConnectionReset` を含む）は合格にせず失敗にする。計数だけでは、
     // 世代の検査より前にバイトを送る回帰を検出できないため、どの OS でも同じ判定を通す。
     if let Err(why) = judge_upstream(observer.join().unwrap()) {
