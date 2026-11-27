@@ -564,7 +564,7 @@ if [ "${rc}" -eq 1 ] && grep -qF -- "this run scanned this entry's own checkout"
 else
   fail "secret-scan-ci: a detector linked inside its own directory still gets the same-checkout hint" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
-# 案内の組み立ての中の stderr（bash 自身の診断等）は公開ログへ出さない（SECR-23）: pwd の差し替えで、案内の組み立ての中（resolve_detector_root）だけ印を stderr へ書かせる
+# 案内の組み立ての中の stderr（bash 自身の診断等）は公開ログへ出さない（SECR-23）: pwd の差し替えで、案内の組み立ての中（resolve_real_file）だけ印を stderr へ書かせ、呼ばれた証拠は公開ログと別の非公開ファイルへ残す
 r6="${work_dir}/hint-stderr"
 mk_hint_root "${r6}"
 hint_commit "${r6}"
@@ -572,14 +572,17 @@ hint_stderr_env="${work_dir}/hint-stderr-env.sh"
 cat > "${hint_stderr_env}" <<'EOF'
 pwd() {
   case " ${FUNCNAME[*]} " in
-    *" resolve_detector_root "*) echo "HINT-STDERR-MARK" >&2 ;;
+    *" resolve_real_file "*) echo "HINT-STDERR-MARK" >&2; echo called >> "${HINT_STDERR_CALLED}" ;;
   esac
   builtin pwd "$@"
 }
 EOF
+hint_stderr_called="${work_dir}/hint-stderr-called"
+rm -f "${hint_stderr_called}"
 rc=0
-BASH_ENV="${hint_stderr_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+HINT_STDERR_CALLED="${hint_stderr_called}" BASH_ENV="${hint_stderr_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
 if [ "${rc}" -eq 1 ] && grep -qF -- "cannot prove which version the scan read" "${work_dir}/out" \
+  && [ -s "${hint_stderr_called}" ] \
   && ! grep -qF -- "HINT-STDERR-MARK" "${work_dir}/out"; then
   pass "secret-scan-ci: stderr written while building the rescan hint does not reach the public log"
 else
