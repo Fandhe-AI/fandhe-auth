@@ -176,9 +176,12 @@ hub-stub の実装をそのまま使い、作り直さない。
 - 受け口の実行への結び付け（5/8 への指摘の対応）: `HubStubFaultInjector::bind_receiver`（所有）・`bind_receiver_mut`（借用。
   セッションの口 `&mut session.jwks` を所有権を取らずに結ぶ）で作った `RunBound` だけが、その注入器の受け口へ渡せる。
   別の実行の注入器の受け口は、内側へ委ねる前に `RunMismatch`（内側のログに入れず、`used` も立てない）。結んだ受け口から
-  `&mut` を取り出して結び直す口（`get_mut`・`DerefMut`）は出さない（`Deref` で内側の共有参照のメソッドは使える）。
-  ハーネスで起動した stub へは、`handle.with_injector(&mut inj, |s, inj| inj.bind_receiver_mut(&mut s.jwks))` の形でセッションの口へ
-  直接注入できる（公開した鍵・キャッシュは引き継がれる）。実行ごとに新しい受け口を作る形（`bind_receiver`）も残す。
+  `&mut` を取り出して結び直す口は出さない（`get_mut`・`DerefMut` はなく、封印した trait のメソッドは外の crate が作れない印を要る。
+  総称の境界から取り出す試みは `BoundReceiver` の `compile_fail` の doctest で確かめる）。`Deref` で内側の共有参照のメソッドは使える。
+  ハーネスで起動した stub へは、`handle.with_injector(&mut inj, |s, inj| { let mut b = inj.bind_receiver_mut(&mut s.jwks); inj.serve_jwks(&tl, &mut b, now) })`
+  の形でセッションの口へ直接注入できる（借用はクロージャの中で使い、外へ返さない。公開した鍵・キャッシュは引き継がれる）。
+  借用の形は同じ口を実行をまたいで結べ、状態を持ち越す。守られるのは結んだ注入器との一致（`RunMismatch`）だけで、持ち越しは防がない。
+  実行ごとに新しい受け口を作る形（`bind_receiver`）も残す。
 - `HubStubHandle::with_injector(&mut inj, |session, inj| ..)`: 遅れの `Wait` をセッションのロックを放した後・戻る前に流す。
 - 試験: `cargo test -p fandhe-auth-it-harness --test fault_baseline`（`make test` に含む。Docker なし）。上流の試験用サーバーは
   `tests/support/upstream.rs` へ移し、各接続に書き込みの打ち切りを置いた（`drop` の join に期限を持たせる）。
@@ -252,7 +255,7 @@ note: ...
   眠る `Wait` を出さないこと（出すなら上限の決定が要る）・stub の呼び出しの記録そのものを記録の形式に入れないこと（入れるなら版を上げる。事象行の `log_pos` は `/2` で足した）・型名と文言
 - 基準線の実行（7/8）: `inject`・`FaultPair`・`PairedRecords`・`RunBound`・`with_injector` の名前と形・注入の段を記録の行に出さないこと
   （出すなら形式の版上げ）・ファイル名にモードを入れたこと・基準線を先に流す順序・`bind_receiver_mut`（借用の結び付け）の名前と形
-  （セッションの口へ直接注入する。実行ごとに作る受け口の形も残した）・上流の書き込みの打ち切り 1 秒（試験用の仮の値）・`Applied` の順序の観測が未実施であること
+  （セッションの口へ直接注入する。実行ごとに作る受け口の形も残した）・借用の形で同じ口を実行をまたいで結べ状態を持ち越すことを許すか・上流の書き込みの打ち切り 1 秒（試験用の仮の値）・`Applied` の順序の観測が未実施であること
 - 記録のファイルを秘密値の走査の対象に入れること（`secret-values.md`）。本段は canary の試験で代える。出力先は追跡ツリーの外（`target/`）
 - DB の遮断の形を「直ちに閉じる」にしたこと。「受けて黙る（blackhole）」を入れるか（2/8）
 - 遅延を応答の向きの塊ごとに足す形（2/8）

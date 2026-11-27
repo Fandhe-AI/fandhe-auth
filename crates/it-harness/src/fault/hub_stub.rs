@@ -203,7 +203,11 @@ impl Wait for DelayBuf {
 
 /// 実行に結んだ受け口（TASK-13 の 7/8）。別の実行の注入が効かないよう、受け口は
 /// [`HubStubFaultInjector::bind_receiver`] でだけ作り、結んだ実行の注入器にだけ渡せる（違えば内側へ委ねる前に `RunMismatch`）。
-/// 一度結んだ受け口を取り出して別の実行へ結び直す口（`into_inner`）は出さない。
+/// 一度結んだ受け口を取り出して別の実行へ結び直す口（`into_inner`・`&mut` を返す口）は出さない。
+///
+/// 借用の形（`bind_receiver_mut`）は、同じ受け口（セッションの口）を実行をまたいで結べ、状態（公開した鍵・キャッシュ）を
+/// 引き継ぐ。守られるのは、結んだ注入器・実行との一致（`RunMismatch`）だけで、持ち越しを防ぐ仕組みではない。
+/// 持ち越しを許すかは人の確認の項目（`docs/harness/fault-injection.md`）。
 pub struct RunBound<T> {
     run_id: u64,
     inner: T,
@@ -234,22 +238,41 @@ impl RunBound<HubJwksEndpoint> {
 }
 
 mod sealed {
-    /// 実行に結んだ受け口（所有・借用）を注入器の口へ渡すための私的な trait。外から実装できない。
+    /// 外の crate が作れない印（名前を出せず、作る口もこの module の外へ出さない）。
+    /// 総称の境界（`impl BoundReceiver<R>`）経由でメソッドを呼べても、印を作れないので `&mut R` を取り出せない。
+    pub struct Token(());
+
+    impl Token {
+        pub(super) fn new() -> Self {
+            Self(())
+        }
+    }
+
+    /// 実行に結んだ受け口（所有・借用）を注入器の口へ渡すための私的な trait。外から実装できず、
+    /// メソッドは印を要るので外からは呼べない。
     pub trait Sealed<R> {
-        fn run_id(&self) -> u64;
-        fn receiver_mut(&mut self) -> &mut R;
+        fn run_id(&self, token: &Token) -> u64;
+        fn receiver_mut(&mut self, token: &Token) -> &mut R;
     }
 }
 
 /// 実行に結んだ `R` の受け口。所有の [`RunBound<R>`] と、所有権を取らない借用の [`RunBound<&mut R>`] がある。
-/// 外から実装できず、`&mut R` を外へ出す口はない（注入器の内側だけが使う）。
+/// 外から実装できず、`&mut R` を取り出すメソッドは外の crate が作れない印の引数を要る（注入器の内側だけが使う）。
+/// 総称の境界から `&mut R` を取り出す試みはコンパイルできない（下の陰性対照）。
+///
+/// ```compile_fail,E0061
+/// use fandhe_auth_it_harness::fault::BoundReceiver;
+/// fn leak<R>(b: &mut impl BoundReceiver<R>) -> &mut R {
+///     b.receiver_mut()
+/// }
+/// ```
 pub trait BoundReceiver<R>: sealed::Sealed<R> {}
 
 impl<R> sealed::Sealed<R> for RunBound<R> {
-    fn run_id(&self) -> u64 {
+    fn run_id(&self, _: &sealed::Token) -> u64 {
         self.run_id
     }
-    fn receiver_mut(&mut self) -> &mut R {
+    fn receiver_mut(&mut self, _: &sealed::Token) -> &mut R {
         &mut self.inner
     }
 }
@@ -257,10 +280,10 @@ impl<R> sealed::Sealed<R> for RunBound<R> {
 impl<R> BoundReceiver<R> for RunBound<R> {}
 
 impl<R> sealed::Sealed<R> for RunBound<&mut R> {
-    fn run_id(&self) -> u64 {
+    fn run_id(&self, _: &sealed::Token) -> u64 {
         self.run_id
     }
-    fn receiver_mut(&mut self) -> &mut R {
+    fn receiver_mut(&mut self, _: &sealed::Token) -> &mut R {
         self.inner
     }
 }
@@ -519,6 +542,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
     }
 
     /// 受け口を所有権を取らずにこの注入器の実行に結ぶ（例: セッションの口 `&mut session.jwks`）。
+    /// 同じ口を実行をまたいで結べ、状態を引き継ぐ（守られるのは結んだ注入器との一致だけ。[`RunBound`] の文書）。
     /// 結んだ値から `&mut R` は取り出せず（`get` は共有参照だけ）、借用が切れれば受け口は元の持ち主へ戻る。
     /// 別の実行・別の注入器へ結び直すには、新しく `bind_receiver_mut` を呼ぶ（その注入器の照合が効く）。
     pub fn bind_receiver_mut<'a, R>(&self, inner: &'a mut R) -> RunBound<&'a mut R> {
@@ -530,7 +554,7 @@ impl<W: Wait> HubStubFaultInjector<W> {
 
     /// 受け口がこの実行のものかを、内側へ委ねる前に確かめる。
     fn guard_receiver<R>(&self, bound: &impl BoundReceiver<R>) -> Result<(), HubStubCallError> {
-        if sealed::Sealed::run_id(bound) == self.run_id {
+        if sealed::Sealed::run_id(bound, &sealed::Token::new()) == self.run_id {
             Ok(())
         } else {
             Err(HubStubCallError::RunMismatch)
@@ -573,7 +597,11 @@ impl<W: Wait> HubStubFaultInjector<W> {
         self.used = true;
         let r = self
             .inner
-            .present(sealed::Sealed::receiver_mut(inner), token, now)
+            .present(
+                sealed::Sealed::receiver_mut(inner, &sealed::Token::new()),
+                token,
+                now,
+            )
             .map_err(HubStubCallError::Injected);
         self.after_call();
         r
@@ -593,7 +621,11 @@ impl<W: Wait> HubStubFaultInjector<W> {
         self.used = true;
         let r = self
             .inner
-            .receive_logout(sealed::Sealed::receiver_mut(inner), token, now)
+            .receive_logout(
+                sealed::Sealed::receiver_mut(inner, &sealed::Token::new()),
+                token,
+                now,
+            )
             .map_err(HubStubCallError::Injected);
         self.after_call();
         r
@@ -613,7 +645,11 @@ impl<W: Wait> HubStubFaultInjector<W> {
         self.used = true;
         let r = self
             .inner
-            .receive_heartbeat(sealed::Sealed::receiver_mut(inner), heartbeat, now)
+            .receive_heartbeat(
+                sealed::Sealed::receiver_mut(inner, &sealed::Token::new()),
+                heartbeat,
+                now,
+            )
             .map_err(HubStubCallError::Injected);
         self.after_call();
         r
@@ -632,7 +668,10 @@ impl<W: Wait> HubStubFaultInjector<W> {
         self.used = true;
         let r = self
             .inner
-            .serve_jwks(sealed::Sealed::receiver_mut(inner), now)
+            .serve_jwks(
+                sealed::Sealed::receiver_mut(inner, &sealed::Token::new()),
+                now,
+            )
             .map_err(HubStubCallError::Injected);
         self.after_call();
         r
@@ -657,5 +696,27 @@ mod tests {
         buf.wait(Duration::from_millis(7));
         let got = buf.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
         assert_eq!(got, [Duration::from_millis(7)]);
+    }
+
+    /// 毒化したロックの溜め場からも、溜めた遅れを利用者の `wait` へ流す（`flush_delays`）。
+    #[test]
+    fn flush_delays_passes_delays_after_poison() {
+        let tl =
+            FaultTimeline::start(std::time::Instant::now(), std::time::SystemTime::now()).unwrap();
+        let seen: Arc<Mutex<Vec<Duration>>> = Arc::default();
+        let s2 = Arc::clone(&seen);
+        let mut inj =
+            HubStubFaultInjector::new(move |d: Duration| s2.lock().unwrap().push(d), &tl).unwrap();
+        let mut buf = inj.delays.clone();
+        buf.wait(Duration::from_millis(3));
+        let shared = Arc::clone(&inj.delays.0);
+        let _ = std::thread::spawn(move || {
+            let _g = shared.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(inj.delays.0.is_poisoned());
+        inj.flush_delays();
+        assert_eq!(*seen.lock().unwrap(), [Duration::from_millis(3)]);
     }
 }

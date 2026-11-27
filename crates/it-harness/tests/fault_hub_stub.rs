@@ -638,11 +638,18 @@ fn borrowed_session_receiver_is_rejected_for_another_run() {
 
 /// 借用の形でも `FaultPair` の照合が効く。基準線・注入ありの順に、同じセッションの口を実行ごとに借りて流す。
 /// 正常な組はセッションの鍵を保ち、段と事象が合わなければ `ShapeMismatch`、別の実行の口は `Body` の `RunMismatch`。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StepsMode {
+    Inject,
+    Direct,
+    Skip,
+}
+
 fn borrowed_pair_body(
     handle: &HubStubHandle,
     mut tl: FaultTimeline,
     foreign: Option<&HubStubFaultInjector<impl Wait>>,
-    direct_apply: bool,
+    steps_mode: StepsMode,
     statuses: &RefCell<Vec<Result<u16, InjectedRefusal>>>,
 ) -> Result<FaultRecord, HubStubCallError> {
     let mut inj = HubStubFaultInjector::new(|_: Duration| {}, &tl).unwrap();
@@ -657,12 +664,17 @@ fn borrowed_pair_body(
             phase: FaultPhase::Released,
         },
     ];
-    if direct_apply {
+    match steps_mode {
         // `inject` を経ない直接の記録（段が残らない）。
-        inj.apply(&mut tl, k).unwrap();
-        inj.release(&mut tl, k).unwrap();
-    } else {
-        tl.inject(&steps[..1], |tl| inj.apply(tl, k)).unwrap();
+        StepsMode::Direct => {
+            inj.apply(&mut tl, k).unwrap();
+            inj.release(&mut tl, k).unwrap();
+        }
+        StepsMode::Inject => {
+            tl.inject(&steps[..1], |tl| inj.apply(tl, k)).unwrap();
+        }
+        // 段も操作も呼ばない（基準線で両方の段を空にそろえる）。
+        StepsMode::Skip => {}
     }
     let r = handle
         .with_injector(&mut inj, |s, inj| match foreign {
@@ -681,7 +693,7 @@ fn borrowed_pair_body(
         Err(HubStubCallError::Injected(i)) => statuses.borrow_mut().push(Err(i)),
         Err(e) => return Err(e),
     }
-    if !direct_apply {
+    if steps_mode == StepsMode::Inject {
         tl.inject(&steps[1..], |tl| inj.release(tl, k)).unwrap();
     }
     Ok(inj
@@ -708,7 +720,8 @@ fn fault_pair_checks_hold_for_borrowed_session_receiver() {
     // 正常: 基準線は 200、注入ありは 503。セッションの鍵は引き継がれる。
     let statuses = RefCell::new(Vec::new());
     let pair =
-        FaultPair::run(|tl| borrowed_pair_body(&handle, tl, none, false, &statuses)).unwrap();
+        FaultPair::run(|tl| borrowed_pair_body(&handle, tl, none, StepsMode::Inject, &statuses))
+            .unwrap();
     assert_eq!(
         *statuses.borrow(),
         [Ok(200), Err(InjectedRefusal::Status(503))]
@@ -722,18 +735,37 @@ fn fault_pair_checks_hold_for_borrowed_session_receiver() {
     let n = Cell::new(0);
     let err = FaultPair::run(|tl| {
         n.set(n.get() + 1);
-        let direct = n.get() == 2;
-        // 基準線では直接の適用が拒否されるため、基準線は通常の形で流す。
-        borrowed_pair_body(&handle, tl, none, direct, &RefCell::default())
+        // 基準線は段も操作も呼ばず、注入ありは `inject` を経ず直接記録する。両方の段が空でそろい、
+        // 段の比較（pair.rs の最初）を通って、事象と段の照合で `ShapeMismatch` になる。
+        let mode = if n.get() == 1 {
+            StepsMode::Skip
+        } else {
+            StepsMode::Direct
+        };
+        borrowed_pair_body(&handle, tl, none, mode, &RefCell::default())
     })
     .unwrap_err();
-    assert!(matches!(err, PairError::ShapeMismatch(_)));
+    let PairError::ShapeMismatch(p) = err else {
+        panic!("shape mismatch")
+    };
+    assert_eq!(
+        p.baseline().injection_points(),
+        p.fault().injection_points()
+    );
+    assert!(p.fault().injection_points().is_empty());
+    assert_eq!(p.fault().events().len(), 2);
     // 別の実行の注入器が結んだ口: 本体の誤りとして `RunMismatch` が返る。
     let tl_x = timeline();
     let (foreign, _) = injector(&tl_x);
     let before = handle.with(|s| s.jwks.records().len()).unwrap();
     let err = FaultPair::run(|tl| {
-        borrowed_pair_body(&handle, tl, Some(&foreign), false, &RefCell::default())
+        borrowed_pair_body(
+            &handle,
+            tl,
+            Some(&foreign),
+            StepsMode::Inject,
+            &RefCell::default(),
+        )
     })
     .unwrap_err();
     assert!(matches!(
