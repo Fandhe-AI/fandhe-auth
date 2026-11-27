@@ -177,9 +177,10 @@ run_index_mutation "a file staged during the scan is a scan failure (2)" other.t
 new_repo; stage src/app.txt "hello"; : > .env; git add -N .env
 check_scan "an intent-to-add .env is not part of the commit" 0
 run_index_mutation "an intent-to-add file really staged during the scan is a scan failure (2)" .env
-# 走査後の比較は、元の index を 1 回だけ複写し、ls-files -s と intent-to-add の印の 2 つの一覧を同じ複写から取る（#6011）。
-# 元の index を別々に開くと、2 つの呼び出しの間の更新で一覧が別の版を見る。本文の diff（-U0）より後の 2 つの呼び出しが、
-# 同じ index のファイルを読み、それが元の index でも固定時の複写（本文の diff が読むもの）でもないことを確かめる
+# 走査後の比較は 2 回（#6047）。どちらも元の index を 1 回だけ複写し、ls-files -s と intent-to-add の印の 2 つの一覧を同じ複写から取る（#6011）。
+# 1 回目は index-after（HEAD の取り直しの前）、2 回目は index-final（集計の直前）。元の index を別々に開くと、
+# 2 つの呼び出しの間の更新で一覧が別の版を見る。本文の diff（-U0）より後の 4 つの呼び出し（2 組）が、各組で同じ index のファイルを読み、
+# それが元の index でも固定時の複写（本文の diff が読むもの）でもないことを確かめる
 # 検出器の一時ディレクトリの親（TMPDIR）を既知の場所にし、パスは実パス（pwd -P）に直して比べる（macOS の /var と /private/var）
 new_repo; stage src/app.txt "hello"
 scan_tmp="${work_dir}/scan-tmp"
@@ -187,7 +188,7 @@ mkdir -p "${scan_tmp}"
 scan_tmp_real="$(cd "${scan_tmp}" && pwd -P)"
 orig_idx="$(cd "$(git rev-parse --absolute-git-dir)" && pwd -P)/index"
 : > "${work_dir}/gitindex"
-TMPDIR="${scan_tmp}" LOG_GIT_INDEX="${work_dir}/gitindex" PATH="${shim_dir}:${PATH}" check_scan "the post-scan index comparison runs on a fresh copy" 0
+TMPDIR="${scan_tmp}" LOG_GIT_INDEX="${work_dir}/gitindex" PATH="${shim_dir}:${PATH}" check_scan "the post-scan index comparison runs on fresh copies" 0
 body_idx=""
 after_ls=""
 after_ita=""
@@ -208,19 +209,26 @@ while IFS=$'\t' read -r idx args; do
   esac
 done < "${work_dir}/gitindex"
 # 記録したパスの TMPDIR の部分を実パスに置き換える（一時ディレクトリは走査の後に消えるため、親だけを正規化する）
-after_one="${after_ls%$'\n'}"
-after_real="${after_one}"
-case "${after_one}" in
-  "${scan_tmp}"/*) after_real="${scan_tmp_real}/${after_one#"${scan_tmp}"/}" ;;
+first_one="${after_ls%%$'\n'*}"
+second_one="${after_ls#*$'\n'}"
+second_one="${second_one%$'\n'}"
+first_real="${first_one}"
+second_real="${second_one}"
+case "${first_one}" in
+  "${scan_tmp}"/*) first_real="${scan_tmp_real}/${first_one#"${scan_tmp}"/}" ;;
+esac
+case "${second_one}" in
+  "${scan_tmp}"/*) second_real="${scan_tmp_real}/${second_one#"${scan_tmp}"/}" ;;
 esac
 body_dir="${body_idx%/*}"
-if [ -n "${body_idx}" ] && [ "${after_ls}" = "${after_ita}" ] && [ "$(printf '%s' "${after_ls}" | wc -l | tr -d ' ')" = 1 ] \
-  && [ "${body_idx}" = "${body_dir}/index-snap" ] && [ "${after_one}" = "${body_dir}/index-after" ] \
-  && [[ "${after_real}" == "${scan_tmp_real}"/secret-scan.*/index-after ]] \
-  && [ "${after_real}" != "${orig_idx}" ] && [ "${after_one}" != "${body_idx}" ]; then
-  pass "secret-scan: both post-scan listings read the same fresh copy of the index"
+if [ -n "${body_idx}" ] && [ "${after_ls}" = "${after_ita}" ] && [ "$(printf '%s' "${after_ls}" | wc -l | tr -d ' ')" = 2 ] \
+  && [ "${body_idx}" = "${body_dir}/index-snap" ] && [ "${first_one}" = "${body_dir}/index-after" ] && [ "${second_one}" = "${body_dir}/index-final" ] \
+  && [[ "${first_real}" == "${scan_tmp_real}"/secret-scan.*/index-after ]] && [[ "${second_real}" == "${scan_tmp_real}"/secret-scan.*/index-final ]] \
+  && [ "${first_real}" != "${orig_idx}" ] && [ "${second_real}" != "${orig_idx}" ] \
+  && [ "${first_one}" != "${body_idx}" ] && [ "${second_one}" != "${body_idx}" ]; then
+  pass "secret-scan: each pair of post-scan listings reads the same fresh copy of the index"
 else
-  fail "secret-scan: both post-scan listings read the same fresh copy of the index" "git calls: $(cat "${work_dir}/gitindex")"
+  fail "secret-scan: each pair of post-scan listings reads the same fresh copy of the index" "git calls: $(cat "${work_dir}/gitindex")"
 fi
 
 # 固定時にあった元の index が走査中に消えたら、一覧の差か有無の記録（index_pinned）のどちらでも 2（#6011）

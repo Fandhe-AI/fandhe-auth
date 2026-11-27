@@ -22,7 +22,7 @@ rm -f -- "${idx_path}"
 
 # 外部コマンドは使う前に確かめ、欠けていれば 2（固定の診断文）。使うコマンドの一覧は検出器の確認ループと同じ。
 # 一覧にあるコマンドだけを置いた PATH で通常の走査が通る（= 一覧に漏れが無い。同じ checkout・リンク経由の起動で readlink・head・sleep も踏む）
-req_cmds="git readlink mktemp rm cp head wc sleep tr cmp"
+req_cmds="git readlink mktemp rm cp head wc sleep tr cmp stat awk cat"
 # make_minpath <ディレクトリ> [置かないコマンド]
 make_minpath() {
   local c

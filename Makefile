@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps no-vendored pg-check it-db it-db-ci e2e-chrome e2e-firefox
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps no-vendored pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -83,3 +83,7 @@ e2e-chrome: ## ハーネスの Chrome の E2E（chromedriver 必須・#[ignore] 
 # e2e-firefox は暫定の名前（人が確定する）。geckodriver を使う E2E（#[ignore]）の明示の入口。CI には載せない（TASK-6）。
 e2e-firefox: ## ハーネスの Firefox の E2E（geckodriver・Firefox 必須（記録のある組み合わせは Firefox 156〜158 + geckodriver 0.37.1。詳細は scripts/e2e-firefox.sh）・#[ignore] の試験を流す。CI 外）。直接: scripts/e2e-firefox.sh
 	@scripts/e2e-firefox.sh
+
+# load-trial は暫定の名前（人が確定する）。計測・負荷のハーネスの小さな試し実行の明示の入口。CI には載せない（同じ試験は make test に入っている。TASK-12 10/10）。
+load-trial: ## 計測・負荷のハーネスの小さな試し実行（Docker 不要・stub が相手・記録の本文を標準出力に出す・0 件は失敗。CI 外）。直接: scripts/load-trial.sh
+	@scripts/load-trial.sh

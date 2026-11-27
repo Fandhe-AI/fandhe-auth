@@ -24,6 +24,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 | `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `deps audit frame (tool install only; ...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
 | `trust-root-secret-scan.yml` | `trusted secret scan (tracked files)` | `pull_request`（`branches` を一致しにくい名前に絞っており、通常は発火しない。組織の ruleset の「Require workflows to pass」から呼ばれたときに動く。発火の前提は「必須チェックと集約ジョブ」の節の例外を参照） | `ubuntu-latest` |
+| `scheduled.yml` | `scheduled frame (no checks wired; TASK-681)` | `workflow_dispatch` のみ（`schedule` は持たない。足すときに例外を見直す（TASK-681）。`pull_request`・`push` は持たない） | `ubuntu-latest` |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
 
 `ci.yml` の Rust のジョブ（`build-test`・`lint`・`it-db-ci`）は、toolchain を MSRV の版で入れて流す（利用者の指示、2026-11-20）。
@@ -31,10 +32,39 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・edition・整形」を正とし、ここには写さない。
 新しい stable での検査は無く、足すかは未定。入れ方の例外は「ジョブ・ワークフローを追加するときのチェックリスト」の 9 を参照する。
 
+## PR ごとの実行と定期の実行の振り分け（TASK-6 7/10。#54）
+
+- PR の系統は `ci.yml`（`pull_request`・main への `push`）。`ci.yml` 内のジョブでマージを止める検査はここに置き、`ci-complete` で束ねる。
+  `ci-complete` の集約は `ci.yml` 内のジョブに限る。`codex / *` の必須ステータスチェックと `trust-root-secret-scan.yml` は別に要求される（「必須チェックと集約ジョブ」の節を参照）。
+  依存の変更ごとの監査（DPOL-34）も PR の系統の `deps-audit` が持つ（TASK-680）。
+- 定期の系統は `scheduled.yml`（今は `workflow_dispatch` のみ。`schedule` は持たない。足すときは下の例外を見直す）。コードが変わらなくても結果が変わりうる検査を置き、マージは止めない。PR の系統の代わりにしない。
+  今は検査を結線しない枠で、緑でも DPOL-35 を満たしたことにならない。結線・advisory DB の取得日の記録・警報は TASK-681（#1046）、警報の経路は Hub の `AOPS-3`。
+- 定期のジョブも `make`・`scripts/` の同じ入口を呼び、CI 側に検査のロジックを書かない。
+- 道具の版と SHA256 を宣言するのは `ci.yml` の `env` の 1 か所だけ。定期の系統で共有する方法（`workflow_call` か宣言の移設）は未定（TASK-681 で決める）。
+- 例外: PR の検査を担わない定期ジョブに限り、`scheduled.yml` を `ci-complete` の `needs` に入れず、required にも登録しない。
+  この例外は利用者が承認した（2026-11-26。承認は人が行う。ACPT-7）。承認の範囲は、`scheduled.yml` が `workflow_dispatch` だけで動く間に限る。
+  例外の根拠は 2 点に分ける。
+  (1) 集約できない理由: `needs` は同一ワークフロー内のジョブしか参照できず、別ワークフローの `scheduled.yml` のジョブを `ci.yml` の `ci-complete` に直接束ねられない（GitHub Actions の仕様）。
+  (2) required に登録しない理由: `scheduled.yml` は PR で起動しないため、required に登録するとチェックの結果が報告されないこと自体がマージを妨げる。
+  `schedule` などの発火を足すとき（TASK-681）は、承認の範囲の外なので、この例外を見直す。見直して承認が記録されるまで `schedule` は有効にしない。
+  チェックリスト 2 は追加ジョブを `ci-complete` に含めるよう求めるが、`scheduled.yml` はこの承認の範囲で例外とする。PR の検査を担うジョブを足すときは `ci.yml` に置く。
+  - 承認の記録
+    - 根拠: 定期ジョブは PR を検査しないため、`ci-complete` に入れても PR の判定に使われず、失敗が無関係な PR を止める
+    - 2026-11-27 追記: 例外の根拠を 2 点に分けた記述は、上の (1)(2) を参照する（承認時の根拠とは別に足した説明。codex の指摘による補足。承認の範囲は変えない）
+    - 適用範囲: PR の検査を担わない `scheduled.yml` のジョブに限り、かつ `scheduled.yml` が `workflow_dispatch` だけで動く間に限る。PR の検査を担うジョブには広げない
+    - 承認者: 利用者
+    - 承認日: 2026-11-26
+    - 見直し: `schedule` などの発火を足すとき（TASK-681）
+  - `ci-complete` で束ねない代わりの失敗の検知経路: 今は実装に在る経路は無く、GitHub の既定の通知だけ（下の「失敗の通知」の項。失敗時の通知・Issue 起票の結線は `scheduled.yml` に無い）。運用の警報への結線は TASK-681（Hub の `AOPS-3`）で、結線までは定期ジョブの失敗を人が Actions の画面で確かめる。この経路で足りるかは、見直しのときに人が判断する
+- `workflow_dispatch` は、ワークフローのファイルがデフォルトブランチ（main）にあるときだけ起動できる（GitHub の公式の手順書。PR ブランチにしか `scheduled.yml` が無いあいだは手動で起動できない）。起動できる状態では main 以外の ref も指定して流せる。check 名は必須のものと違うのでマージの判定には使われない（読み。〔実機〕では未確認）。
+- 失敗の通知は GitHub の既定だけで、運用の警報には結線していない。
+- schedule は default ブランチ（main）の定義で動く。活動の無い public の repo では GitHub が止めることがある。
+- cron の時刻と頻度は暫定で、人が決める（TASK-681）。頻度の上限は下の「schedule は日次以下」の項の規則のままで、`scheduled.yml` に足すときの候補（日次）だけが暫定。
+
 ## 依存の検査の拡張点（`deps-audit`。TASK-6 6/10）
 
 `ci.yml` の `deps-audit` は、cargo-deny・cargo-audit を版固定 + SHA256 検証で導入して版を照合するだけの枠で、検査は流さない。
-緑でも DPOL-34 を満たしたことにならない（ジョブ名の「frame」はそのため）。結線は TASK-680（前提は TASK-668・TASK-679）で、定期の実行は TASK-681（#54）。
+緑でも DPOL-34 を満たしたことにならない（ジョブ名の「frame」はそのため）。結線は TASK-680（前提は TASK-668・TASK-679）で、定期の系統の枠は `scheduled.yml`（#54）で、定期の監査の結線は TASK-681（#1046）。
 TASK-680 が結線するときの契約は次のとおり。値は spec の ID で引き、本文は写さない。
 
 1. ジョブ ID `deps-audit` を変えず、`ci-complete` の `needs` から外さない。`if:` による skip・`continue-on-error`・`paths` フィルタを付けない（DPOL-34）。
@@ -46,7 +76,7 @@ TASK-680 が結線するときの契約は次のとおり。値は spec の ID �
 5. 設定は TASK-668 の厳格版 `deny.toml` だけを使う。例外（`ignore`・`skip`・許可の追加）を足すかは人が決め、足すときは理由・期限・範囲を同じ場所に書く（DPOL-20・DPOL-35）。
 6. 4 検査と cargo-audit の 5 つがすべて成功したときだけ緑にする（DPOL-34）。結線までの緑は道具の導入の成功だけを表し、DPOL-34 の合格ではない。
     結線したらジョブ名から「frame」を外す（必須チェックは `ci-complete` だけなので影響しない）。
-7. 同じ入口を定期の実行（#54・TASK-681）からも呼べる形に保つ（DPOL-35）。
+7. 同じ入口を定期の実行（`scheduled.yml`・TASK-681）からも呼べる形に保つ（DPOL-35）。
 8. 道具の版は `env` の版と SHA256 を同時に更新する。現在の版は暫定で、人が確定する。
 9. 公開ログには版・件数・advisory ID 程度だけを出し、秘密値は出さない（SECR-23）。
 
@@ -199,14 +229,16 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - 現状の `ci.yml` は全体で数十秒のため導入していない（費用対効果が見合う重いジョブを足した時に検討する）
 - draft PR の skip は現状入れていない。入れる場合は `if: github.event.pull_request.draft == false` とし、
   trigger の `types` に `ready_for_review` を加える（加えないと ready にしても CI が走らない）
-- schedule は日次以下の頻度にする（`update-external.yml` は 00:00 UTC の 1 回）
+- schedule は日次以下の頻度にする（`update-external.yml` は 00:00 UTC の 1 回。`scheduled.yml` に足すときの候補は日次で、暫定。決めるのは TASK-681）
 
 ## ジョブ・ワークフローを追加するときのチェックリスト
 
 1. 新規ワークフローを作らず、まず既存の `ci.yml` へのジョブ追加で済むか検討する（同じトリガーなら `ci.yml` に集約）
+    - 例外: `scheduled.yml`。トリガーが `schedule`・`workflow_dispatch` の定期の系統は別にする（「PR ごとの実行と定期の実行の振り分け」。例外は利用者が承認済み。2026-11-26。範囲は `workflow_dispatch` だけで動く間。`schedule` を足すときは見直す〔TASK-681〕）
     - 例外: `trust-root-secret-scan.yml`。(a) 先行配置の期間と、(b) 組織の ruleset が workflow のファイルを固定して要求する間は、`ci.yml` に入れられない（要求されうる）（「必須チェックと集約ジョブ」の例外）
 2. 追加したジョブを `ci-complete` の `needs` に必ず加える（漏れると未検査のままマージ可能になる）。条件付きで skip
     するジョブは、許容する条件を `ci-complete` の jq 式に明示する
+    - 例外: `scheduled.yml` は `needs` に入れない（PR を検査しない。利用者が承認済み。2026-11-26。範囲は `workflow_dispatch` だけで動く間）
     - 例外: `trust-root-secret-scan.yml` は `needs` に入れない。(a)・(b) の期間の間だけ（「必須チェックと集約ジョブ」の節の例外）
 3. 処理は `make <target>` / `scripts/*.sh` を呼ぶ。CI 側に複数行のロジックを書かない
     （ツール導入のように CI 固有のステップは例外。secret-scan ジョブの走査対象の取得も例外で、理由は「秘密情報の検査ジョブ」の節を参照）
@@ -417,7 +449,7 @@ gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt
   新しい skill を足す PR は、main の一覧にまだ名前が無いため中身が全部走査される。誤検出が出たときの扱い（除外の範囲・手順）は人が決める。
   lock だけを先に main へ入れて名前を事前登録する運用は、後続の PR が足す本文を初回から走査対象外にするため案内しない
 - 取得は匿名で `GITHUB_TOKEN` を使わないため、ジョブの権限は `permissions: {}` にする
-- 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。`if:` で skip せず、`ci-complete` の `needs` に入れる
+- 公開ログへ出すのは規則 ID・件数の集計行だけ（`--summary` の契約）。検査不能（2）のときは、共有の許可リスト（`scripts/lib.sh`）と行全体が完全一致する固定の診断文も出す（#6036）。再走査の案内の 1 行は、検出器が 1（検出）または 2 以上・その他（検査不能）で終わり、出力の集計行のフィルタまで進んだときだけ出る。対象 HEAD の解決の失敗・一時 index の構築の失敗・検出器が 0 でも集計行が 1 行でない不整合・陰性対照の失敗では、入口は非ゼロで終わっても案内は出ない（案内の有無で原因を判断しない。原因は出力の固定の診断文で見る）。案内の行に出る値は、走査対象の HEAD と、検出器の HEAD（別の checkout のとき。比べられなければ `unknown`）の 2 つの sha だけで、パス・秘密値・git の診断は含まない。案内は、詳細付きの再走査を非公開のローカル端末で行い、出力を公開の場へ出さないことも示す（SECR-23）。案内の行は、集計行のフィルタが成功した後にだけ出る（上記）。案内の処理は検出の結果（終了コード 1・2）を変えない。案内は元の実行の形で分かれる。検出器の実体のルートは、検出器と同じ規則（自身のリンクを辿り、親ディレクトリのリンクは物理パスで解決して 2 階層上。sha での案内と照合は、検出器自身がリンクのときは使わない）で求め、(a) の判定には走査対象との一致だけを使い、入口のルートと一致し git のルートそのものであることは (b) のコミットとの照合の条件としてだけ使う。一致しなければ (b) の作業ツリーの案内に倒す。起動できない検出器（通常のファイルでない・実行できない）は、起動の前に検査不能（2）にする。(a) 走査対象が検出器の実体のルートと同じ checkout（引数なし、または同じパスを明示したローカル実行。入口のルートが別でも、検出器の実体が走査対象の中にあれば同じ）なら、検出器と一覧はその作業ツリーのもので、検出器は同じ checkout の規則（作業ツリー・HEAD・index の共通部分だけを除外。一覧は今の HEAD のものも読む）を選ぶため、別の場所へ移さず、その checkout の中で対象の引数なしに流すよう案内する。条件は、検出器と一覧が元の実行と同じ版のままで、HEAD も走査した sha のままであること。(b) 別の checkout（CI で PR の head を走査する形）なら、検出器と一覧の作業ツリーのファイルをコミットの blob と直接照合する。通常のファイルか、実行ビットがコミットの mode と合うか（100755 なら実行者にとって実行できること、100644 なら実行できないこと）、内容が同じかを見る（skip-worktree・assume-unchanged・ignore された未追跡も見落とさない）。読む量は blob の大きさ + 1 バイト、一覧は検出器と同じ 65,536 バイトまで、時間は検出器と同じく読み取りごとに 5 秒で打ち切り、超えたら照合できないものとして扱う。コミットにも作業ツリーにも無いときに一致とみなすのは `skills-lock.json` だけで（検出器が除外なしで読む）、検出器の本体は無ければ不一致である。一致したときだけ、かつ走査の前にも同じ sha で一致していたときだけ（走査の間に checkout や中身が切り替わった版を案内しない）、検出器の HEAD の sha を案内し、一致しない・照合できないときは、sha では再現できないとして作業ツリーの版を使う案内にする（fail-closed）。検出器自身がリンクのときは、検出器と同じ規則でリンクを辿って求めた実体のルート（2 階層上）から一覧が読まれることを案内の文に書く。その所在を求められないときは「再現に要るファイルを特定できない」と案内する。いずれもパスは出さない。`if:` で skip せず、`ci-complete` の `needs` に入れる
 - 既知の限界: `ci.yml` のジョブの定義（この節の `secret scan (tracked files)`・`ci-complete`）は、今も PR が書き換えられる（`D-2026-11-21-18`。#5985 で追跡。人の担当）
   - これを補うのが、組織の ruleset が固定した SHA で要求する `trust-root-secret-scan.yml`（`D-2026-11-21-19`・`D-2026-11-22-4`）。
     補えるのは「必須チェックと集約ジョブ」の節の (b) の条件が満たされている間だけ。(a) の間と、(a)・(b) のどちらでもない間は補えない

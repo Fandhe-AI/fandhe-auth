@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-hooks-8.sh・test-hooks-9.sh が共有する shellcheck-staged.sh の試験の道具（TASK-6）。単体では実行せず、part から source する。
+# test-hooks-9.sh〜test-hooks-11.sh が共有する shellcheck-staged.sh の試験の道具（TASK-6）。単体では実行せず、part から source する。
 # part が test-hooks-core.sh を source し、cd "${work_dir}" した後に source する。part の間で状態は引き継がない。
 # 名前は test-hooks-<数字>.sh に当たらない（test-hooks.sh の parts の突き合わせの対象外）。
 
@@ -17,6 +17,7 @@ cat > "${sc_shim_dir}/shellcheck" <<'EOF'
 # #6076 では、共有の 1 ファイルへ追記した並列の呼び出しの記録が行の境界で入り混じった（macOS の /bin/sh は bash。観測した条件に限る）。printf が出力の各行を個別の write(2) で書くとは保証されず、1 回の printf が複数の書き込みに分かれ得るため、O_APPEND は 1 回の write(2) の中しか保護せず、呼び出し単位の記録をまとめては保護できない。
 # 名前は pid と連番で、noclobber の排他的な作成で確保する（pid が再利用されても既存の記録を上書きしない）。
 # 確保できない・書けないときは、記録の欠落を成功と取り違えないよう 99 で落とす。
+# 確保した後の書き込みは >| で行う（環境から受け継いだ noclobber でも、予約済みのファイルへ書けるように。#6063）。
 # 記録先が渡っていないときは、記録せずに通る経路を作らないよう 99 で落とす。
 [ -n "${SC_LOG:-}" ] || exit 99
 # 同期モード（SC_SYNC_DIR と SC_BARRIER の両方が空でないときだけ。並列に進むことと同時実行の上限を確かめる）。片方だけなら 99 で落とす。
@@ -108,15 +109,27 @@ while :; do
     exit 99
   fi
 done
-{ printf 'call\n' && printf 'arg:%s\n' "$@"; } > "${sc_f}" || exit 99
+{ printf 'call\n' && printf 'arg:%s\n' "$@"; } >| "${sc_f}" || exit 99
 rc=0
 for arg in "$@"; do
   case "${arg}" in
     *slow*) sleep 0.3 ;;
     *die*) kill -9 "${PPID}" ;;
     *hang*)
-      echo "$$" > "${SC_PIDFILE}"
+      echo "$$" >| "${SC_PIDFILE}"
       exec sleep 30
+      ;;
+    *sigtrap*)
+      # 受けた CONT・TERM を SC_SIGLOG へ記録する（sleep を exec しないので、信号を受けても生き続け、記録できる）。眠りは 60 秒で自分から終わる。
+      echo "$$" >| "${SC_PIDFILE}"
+      trap 'echo CONT >> "${SC_SIGLOG}"' CONT
+      trap 'echo TERM >> "${SC_SIGLOG}"; exit 0' TERM
+      sc_i=0
+      while [ "${sc_i}" -lt 600 ]; do
+        sleep 0.1
+        sc_i=$((sc_i + 1))
+      done
+      exit 0
       ;;
     *err*)
       echo "${arg}: could not be read"

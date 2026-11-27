@@ -152,6 +152,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make it-db-ci` | `scripts/it-db-ci.sh` | CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験 `db_job_frame` だけを流す。0 件は失敗。名前は暫定） |
 | `make e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネスの Chrome の E2E（chromedriver 必須・`#[ignore]` の試験を流す。結果は〔仮想〕。CI では流さない。名前は暫定） |
 | `make e2e-firefox` | `scripts/e2e-firefox.sh` | ハーネスの Firefox の E2E（geckodriver と Firefox 本体が必須。仮想 authenticator の WebDriver エンドポイントが使える組み合わせであること〔記録のある組み合わせは Firefox 156〜158 + geckodriver 0.37.1。2 つの pref は `moz:firefoxOptions.prefs` で渡す。この repo では未実行〕・`#[ignore]` の試験を流す。結果は〔仮想〕。CI では流さない。名前は暫定） |
+| `make load-trial` | `scripts/load-trial.sh` | 計測・負荷のハーネスの小さな試し実行 `trial_run`（Docker 不要・stub が相手・負荷の記録の本文を標準出力に出す・0 件は失敗。結果は〔仮想〕。CI では流さない〔同じ試験は `make test` に入っている〕。名前は暫定。手順は `docs/harness/load.md`） |
 | `make pg-check` | `scripts/dev-pg-check.sh` | 開発・検証用 PostgreSQL の起動の確かめ（起動中のインスタンスが対象。起動・停止はしない。CI では流さない。名前は暫定） |
 | `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。`.env` 系の名前の検査は全パスに掛かり、本文の走査の除外は、検出器の repo の `skills-lock.json` に登録された `.agents/skills/<名前>/` だけで、本文の走査にだけ効く〔`*.lock`・`.claude/skills/` は除外しない。#6000。登録名のディレクトリの下は既存ファイルへの追記・新規ファイル・リネームによる移動も走査されない残る限界で、TASK-6・#6000 で追跡し人のレビューで確かめる〕。ローカルの走査（検出器と走査対象が同じ checkout）では、HEAD にコミット済みの一覧・作業ツリーの一覧・index の一覧のすべてに登録された名前（共通部分）だけを除外し、一部にしか無い名前は走査する。CI では保護された main の検出器の一覧の名前だけを使い、PR の head の一覧から名前を足さない（head の index の一覧は検証し、不正なら 2。除外は検出器の一覧と head の index の一覧の共通部分だけで、PR が登録を削除した名前は走査する）。index は走査の最初に固定し、走査中に変われば 2。`secret scan (tracked files)` ジョブが `scripts/secret-scan-ci.sh` 経由で呼ぶ〔#51〕。名前は暫定） |
 | `make scan-canary` | `scripts/secret-scan-canary.sh` | `make secret-scan` の陰性対照（ダミーで検出器が 1 を返し、`--summary` の集計行が期待と完全に一致し、ダミー値が出力に無いことを確かめる。何も変更しない。名前は暫定） |
@@ -191,11 +192,12 @@ Linux・macOS（標準の bash 3.2 を含む）について実行します。`sc
 |---|---|
 | `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`build-test`: `make build` と `make test`（Rust の workspace のビルドと試験。ubuntu-latest）。`lint`: `make lint`（rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向き + vendored の検査。ubuntu-latest）。`it-db-ci`: `make it-db-ci`（DB を使う結合試験の枠。Docker はハーネスが起動する。ubuntu-latest）。`deps-audit`: cargo-deny・cargo-audit の版を固定し、SHA256 を検証して導入するだけの枠（検査は未結線で TASK-680）。`ci-complete`: 全ジョブ結果の集約 |
 | `ai-review.yml` | Fandhe-AI/actions の ai-review（codex）による PR 自動レビュー。Actions variable `CODEX_HOME_DIR` が未設定の間は skip される |
+| `scheduled.yml` | 定期の実行の系統の枠（現状は手動起動 `workflow_dispatch` のみ。`pull_request`・`push` は持たない）。schedule の起動は、例外の見直しの後に TASK-681 で追加する予定。頻度の上限は規約の「日次以下」のままで、候補は日次、時刻とあわせて暫定。決めるのは TASK-681。検査は未結線で、緑でも DPOL-35 を満たしたことにはならない（TASK-681） |
 | `update-external.yml` | エージェントスキル（`skills-lock.json`）と submodule（`.gitmodules`）の日次自動追従 PR。secrets は org の `SUBMODULE_PAT` を使う（`SKILLS_PAT` 未登録時は共通側が `SUBMODULE_PAT` へフォールバック）。作成する PR には `dependencies` / `automated` ラベルが付く |
 
 - ruleset の required status checks には `ci-complete`（と ai-review の `codex / *`）を登録する。
   ruleset・マージ設定の導入は `setup-repo-guards` スキルの手順に従う
-- CI にジョブを追加したら `ci-complete` の `needs` にも必ず追加する
+- `ci.yml` にジョブを追加したら `ci-complete` の `needs` にも必ず追加する（`scheduled.yml` の定期ジョブの扱いは `.claude/rules/github-actions.md` の「PR ごとの実行と定期の実行の振り分け」の節を参照）
 - runner 方針（public は GitHub ホステッド、ai-review の review ジョブのみ self-hosted の例外）・発火条件・
   ジョブ追加時のチェックリスト・キャッシュ方針は `.claude/rules/github-actions.md` に定義している
 

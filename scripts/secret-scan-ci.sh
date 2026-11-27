@@ -3,6 +3,7 @@
 #   scripts/secret-scan-ci.sh [<走査対象のリポジトリのパス>]   既定は本スクリプトのあるリポジトリ
 # 検出器・陰性対照は本スクリプトと同じリポジトリ（CI では PR が書き換えられない版。PR では保護された main の先端）のものを使い、
 # 走査対象はデータとして渡す。公開ログには規則 ID・件数・固定の診断文だけを出す。
+# 検査不能（2）のときは、lib.sh の許可リストと行全体が完全一致する検出器の診断文も通す（#6036）。
 # 走査するのは HEAD を sha に固定して作った専用の一時 index（作業ツリーの index は読まない）。
 # 検出器の出力は一度ファイルへ受け、規則 ID・件数の行（--summary の出力形）だけを通す。ファイル名・値・
 # git のエラー文は出さない（パスに値が含まれ得る。SECR-23）。
@@ -28,7 +29,7 @@ unset _src _src_dir
 source "${DIR}/lib.sh"
 
 # 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
-for _c in git mktemp grep rm; do
+for _c in git mktemp grep rm head sleep readlink; do
   require_cmd "${_c}" || exit 2
 done
 unset _c
@@ -141,6 +142,231 @@ if ! GIT_INDEX_FILE="${tmp_index}" g -C "${target}" read-tree "${head_sha}" > /d
   exit 2
 fi
 
+# 再走査の案内を出す。案内する検出器・除外一覧は、この実行が使った信頼済みの版に揃える。
+# 保護された main の先端ではない（trust-root-secret-scan.yml は組織の ruleset が固定した SHA の版を使うため）。
+# secret-scan.sh --tracked はコミットを引数に取らず index を走査するので、走査したコミットから専用の一時 index を作って渡す。
+# 検出器は、走査対象と同じ checkout にあるか（pwd -P と検出器のルートが一致）で除外の規則が変わる（同じ checkout は
+# 作業ツリー・HEAD・index の共通部分、別の checkout は検出器側と対象 index の共通部分）。別の checkout へ複写して流すと
+# 除外が変わり得るため、元の実行が同じ checkout だったかを区別して案内する。
+# 検出器の実体のルートは、検出器と同じ規則（自身のリンクを辿り、親ディレクトリは cd -P で解決し、2 階層上）で求め、
+# 入口のルートと一致し git のルートそのものであるときだけ、判定と照合に使う（一致しなければ作業ツリーの案内に倒す）。
+# 別の checkout のときは、検出器（scripts/hooks/secret-scan.sh）と除外一覧（skills-lock.json）の作業ツリーのファイルを、
+# コミットの blob と直接照合する（通常のファイルか・実行者にとって実行できるかがコミットの mode（100755 は実行できる・100644 は実行できない）と合うか・内容が同じか。skip-worktree・assume-unchanged・
+# ignore された未追跡も見落とさない。読む量は blob の大きさ + 1、一覧は 65,536 バイトまで、時間は読み取りごとに 5 秒で、検出器の読み取りと同じ上限）。
+# 一致したときだけ sha で案内し、一致しない・照合できないときは作業ツリーの版を使う案内にする（fail-closed）。
+# 案内は検出の結果を変えない（終了コードは呼び出し側が決める。案内の失敗は無視する）。
+# 詳細付きの再走査はファイル名・git の生の診断を出すため、非公開の端末で行い出力を公開の場へ出さないよう明記する（SECR-23）。
+# 出す値は公開してよい 2 つの sha だけ（秘密値・パスを含まない）。
+# bounded_copy <元> <先> <上限バイト>: 元の先頭から上限バイトだけを先へ複写する。検出器の一覧の読み取りと同じく読み取りごとに 5 秒で打ち切る
+# （FIFO への差し替えで止まり続けない）。打ち切り・失敗は 1。案内のための処理であり、検出の結果は変えない。
+bounded_copy() {
+  local src="$1" dst="$2" limit="$3" pid wd rc=0
+  rm -f -- "${dst}.timeout" 2> /dev/null || true
+  head -c "${limit}" 2> /dev/null < "${src}" > "${dst}" &
+  pid=$!
+  # 監視は、最初に TERM の trap を張ってから sleep を起こす（trap より前に TERM が届いても sleep はまだ無く、残らない）。
+  # trap は jobs -p で起動済みの子をすべて終わらせる（sleep の PID を変数へ入れる前に届いても残らない）。
+  (
+    trap - ERR EXIT
+    trap 'kill $(jobs -p) > /dev/null 2>&1 || true; exit 0' TERM
+    sleep 5 &
+    wait $! || true
+    : 2> /dev/null > "${dst}.timeout" || true
+    kill "${pid}" > /dev/null 2>&1 || true
+  ) > /dev/null 2>&1 < /dev/null &
+  wd=$!
+  wait "${pid}" 2> /dev/null || rc=$?
+  kill "${wd}" > /dev/null 2>&1 || true
+  wait "${wd}" > /dev/null 2>&1 || true
+  [ "${rc}" -eq 0 ] && [ ! -e "${dst}.timeout" ]
+}
+# matches_commit <ルート> <sha> <パス> <無くてよいか 0|1> <上限バイト 0 は無し>:
+# ルートの作業ツリーのファイルがコミットの blob と同じ（検出器が読むものと同じ）なら 0。照合できない・違うなら 1。
+# 検出器の規則に合わせる: コミットに無いものは、無くてよい（skills-lock.json）で作業ツリーにも無いときだけ一致。
+# 通常のファイルのみ（シンボリックリンクは不一致）、実行者にとって実行できるかはコミットの mode と一致、読む量と読み取りごとの時間（5 秒）に上限を置く。
+matches_commit() {
+  local root="$1" sha="$2" path="$3" optional="$4" max_bytes="$5"
+  local file="${root}/${path}" ls_out want_mode want_id have_id blob_size copy
+  ls_out="$(g -C "${root}" ls-tree --full-tree "${sha}" -- "${path}" 2> /dev/null && printf x)" || return 1
+  ls_out="${ls_out%x}"
+  if [ -z "${ls_out}" ]; then
+    [ "${optional}" = 1 ] && [ ! -e "${file}" ] && [ ! -L "${file}" ]
+    return
+  fi
+  want_mode="${ls_out%% *}"
+  case "${want_mode}" in
+    100644 | 100755) ;;
+    *) return 1 ;;
+  esac
+  { [ -f "${file}" ] && [ ! -L "${file}" ]; } || return 1
+  if [ "${want_mode}" = 100755 ]; then
+    [ -x "${file}" ] || return 1
+  else
+    [ ! -x "${file}" ] || return 1
+  fi
+  want_id="$(g -C "${root}" rev-parse --verify "${sha}:${path}" 2> /dev/null)" || return 1
+  blob_size="$(g -C "${root}" cat-file -s "${want_id}" 2> /dev/null)" || return 1
+  case "${blob_size}" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  if [ "${max_bytes}" -gt 0 ] && [ "${blob_size}" -gt "${max_bytes}" ]; then
+    return 1
+  fi
+  # コミットの大きさ + 1 バイトだけ読む。それより大きい作業ツリーのファイルは、複写の内容が blob と一致しない。
+  copy="${work_dir}/hint-copy"
+  bounded_copy "${file}" "${copy}" $((blob_size + 1)) || return 1
+  { [ -f "${file}" ] && [ ! -L "${file}" ]; } || return 1
+  have_id="$(g -C "${root}" hash-object --no-filters -- "${copy}" 2> /dev/null)" || return 1
+  [ -n "${want_id}" ] && [ "${want_id}" = "${have_id}" ]
+}
+# resolve_detector_root: 検出器が除外の一覧を読む実体のルートを、検出器と同じ規則で求める。
+# 入口から起動する検出器自身のリンクを（最大 40 回）辿り、その実体のディレクトリを物理パスで取って 2 階層上がルート。
+# 結果は det_real_root（求まらなければ空）と det_linked（自身がリンクなら 1）へ入れる。求まらないときは 1。
+resolve_detector_root() {
+  local src hops=0 link link_dir real_dir
+  det_real_root=""
+  det_linked=0
+  src="${ROOT_DIR}/scripts/hooks/secret-scan.sh"
+  [ -e "${src}" ] || return 1
+  while [ -L "${src}" ]; do
+    det_linked=1
+    hops=$((hops + 1))
+    [ "${hops}" -le 40 ] || return 1
+    link="$(readlink -- "${src}" 2> /dev/null && printf x)" || return 1
+    link="${link%x}"
+    link="${link%$'\n'}"
+    [ -n "${link}" ] || return 1
+    case "${link}" in
+      /*) src="${link}" ;;
+      *)
+        case "${src}" in
+          */*) link_dir="${src%/*}" ;;
+          *) link_dir="." ;;
+        esac
+        [ -n "${link_dir}" ] || link_dir="/"
+        src="${link_dir}/${link}"
+        ;;
+    esac
+  done
+  case "${src}" in
+    */*) link_dir="${src%/*}" ;;
+    *) link_dir="." ;;
+  esac
+  [ -n "${link_dir}" ] || link_dir="/"
+  real_dir="$(cd -P -- "${link_dir}" 2> /dev/null && pwd -P && printf x)" || return 1
+  real_dir="${real_dir%x}"
+  real_dir="${real_dir%$'\n'}"
+  case "${real_dir}" in
+    /*/*) ;;
+    *) return 1 ;;
+  esac
+  det_real_root="${real_dir%/*}"
+  det_real_root="${det_real_root%/*}"
+  [ -n "${det_real_root}" ] || det_real_root="/"
+}
+# rescan_hint [state]: 再走査の案内の文を標準出力へ返す（出力は emit_hint が受ける）。
+# state を渡すと、案内の分岐と検出器の HEAD だけを返す（走査の前の記録に使う。pre_state と走査の後の状態を比べる）。
+rescan_hint() {
+  local mode="${1:-hint}" trusted_sha root_real det_root top_real detector_src tail_text no_run_text private_text det_ok=0 branch=fallback loc_state=resolved
+  local det_real_root="" det_linked=0
+  if resolve_detector_root; then
+    det_root="${det_real_root}"
+  else
+    det_root=""
+    loc_state=unresolved
+  fi
+  root_real="$(cd "${ROOT_DIR}" 2> /dev/null && pwd -P && printf x)" || root_real=""
+  root_real="${root_real%x}"
+  root_real="${root_real%$'\n'}"
+  # 実体のルート（検出器自身がリンクでも、辿った先の実体から求める）が入口のルートと一致し、git のリポジトリのルートそのものであるときだけ、
+  # 以降の判定と照合に使う（それ以外は作業ツリーの案内に倒す）。
+  if [ -n "${det_root}" ] && [ "${det_root}" = "${root_real}" ]; then
+    top_real="$(g -C "${det_root}" rev-parse --show-toplevel 2> /dev/null && printf x)" || top_real=""
+    top_real="${top_real%x}"
+    top_real="${top_real%$'\n'}"
+    if [ -n "${top_real}" ]; then
+      top_real="$(cd "${top_real}" 2> /dev/null && pwd -P && printf x)" || top_real=""
+      top_real="${top_real%x}"
+      top_real="${top_real%$'\n'}"
+    fi
+    [ -n "${top_real}" ] && [ "${top_real}" = "${det_root}" ] && det_ok=1
+  fi
+  trusted_sha="unknown"
+  if [ "${det_ok}" = 1 ]; then
+    trusted_sha="$(g -C "${det_root}" rev-parse --verify "HEAD^{commit}" 2> /dev/null)" || trusted_sha="unknown"
+  fi
+  if [ -n "${det_root}" ] && [ "${det_root}" = "${target}" ]; then
+    # 除外の規則は、検出器の実体のルートと走査対象の一致で決まる（検出器の判定と同じ）。入口のルートとの一致は問わない。
+    branch=same
+  elif [ "${det_ok}" = 1 ] && [ "${det_linked}" = 0 ] && [ "${trusted_sha}" != "unknown" ] \
+    && matches_commit "${det_root}" "${trusted_sha}" scripts/hooks/secret-scan.sh 0 0 \
+    && matches_commit "${det_root}" "${trusted_sha}" skills-lock.json 1 65536; then
+    branch=sha
+  fi
+  if [ "${mode}" = state ]; then
+    printf '%s %s' "${branch}" "${trusted_sha}"
+    return 0
+  fi
+  # 走査の前にも同じ sha で一致していたときだけ、sha での再現を案内する（走査の間に checkout や中身が切り替わった版を、
+  # 走査に使った版として案内しない）。前の記録が無い・違うときは作業ツリーの案内に倒す。
+  if [ "${branch}" = sha ] && [ "${pre_state}" != "sha ${trusted_sha}" ]; then
+    branch=fallback
+  fi
+  if [ "${branch}" = same ]; then
+    # 同じ checkout の実行: 検出器は走査対象の作業ツリーにある。別の場所から流すと別の checkout の規則になるので、
+    # この checkout の中で、対象の引数なしのまま流す（検出器と一覧がこの実行の時と同じ版で、HEAD も同じままであること）。
+    detector_src="this run scanned this entry's own checkout, so its detector and exclusion list come from that checkout's working tree and the same-checkout exclusion rules apply (the detector also reads the exclusion list at HEAD); do not copy the detector elsewhere or run it from another checkout, because that selects the other-checkout rules and can change which files are excluded; rescan inside this same checkout only while scripts/hooks/secret-scan.sh and skills-lock.json are unchanged from this run and HEAD is still ${head_sha}"
+    tail_text="run ./scripts/hooks/secret-scan.sh --tracked (without --summary and without a target argument) from the root of this same checkout with the same GIT_INDEX_FILE"
+    no_run_text="do not run make"
+  elif [ "${branch}" = sha ]; then
+    detector_src="check out the trusted detector and exclusion list at the commit this job used (${trusted_sha}), not the main tip"
+    tail_text="run <trusted checkout>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE"
+    no_run_text="do not run make or any script from the scanned commit"
+  elif [ "${loc_state}" = unresolved ]; then
+    # 検出器の実体の所在を求められない: 再現に要るファイルを特定できない。コミットも main の先端も当てにしない。
+    detector_src="the files this run needed cannot be identified, because the location of the detector it used could not be resolved; do not rely on any commit or the main tip, and reproduce the rescan from the original run environment (the detector and skills-lock.json exactly as that run read them)"
+    tail_text="run <detector copy>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE"
+    no_run_text="do not run make or any script from the scanned commit"
+  else
+    # 所在は求まったが、コミットと同じとは言えない（変更・リンク・別のルート等）。検出器の規則どおり、除外の一覧は
+    # 実体のルート（リンクを辿った検出器のファイルの 2 階層上）から読まれる。パスは出さず、その規則だけを書く。
+    detector_src="use the detector and exclusion list exactly as this run used them: the working-tree copies of scripts/hooks/secret-scan.sh and skills-lock.json differ from, or cannot be compared with, the commit (${trusted_sha}), so that commit does not reproduce them; the detector reads skills-lock.json from its real root, i.e. two directories above the directory of the detector file after following symbolic links, which can differ from this entry's own root; keep copies of the resolved detector file and of that skills-lock.json (do not rely on the commit or the main tip)"
+    if [ "${det_linked}" = 1 ]; then
+      detector_src="${detector_src}; the detector was started through a symbolic link, so copy the file it resolves to and place skills-lock.json at the matching root"
+    fi
+    tail_text="run <detector copy>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE, with skills-lock.json at the root two directories above it, as in the original layout"
+    no_run_text="do not run make or any script from the scanned commit"
+  fi
+  private_text="Run this rescan only in a private local terminal: without --summary it prints file names and raw git diagnostics, which can contain secret values (SECR-23); never run it in a public CI job and never paste or upload its output to a public log, PR or issue."
+  echo "secret-scan-ci: to see file names and diagnostics, ${detector_src}; then, with the scanned repository as the working directory and every existing GIT_* variable unset for both commands below, as this entry does (e.g. env -u GIT_DIR -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_NAMESPACE; list others with env | grep ^GIT_), build a dedicated index from the scanned commit (${head_sha}) with GIT_NO_REPLACE_OBJECTS=1 GIT_INDEX_FILE=<new file> git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree ${head_sha}, and ${tail_text}; ${no_run_text}. ${private_text}"
+}
+
+# emit_hint: 再走査の案内を 1 行だけ出す。案内は検出の結果（終了コード）を変えない。
+# 案内の組み立てはサブシェルで行い、その stderr は捨てる（bash 自身の診断・ジョブの通知にパスや行番号が出得るため。SECR-23）。
+# サブシェルでは ERR トラップ・EXIT トラップ（一時領域の削除）・errexit を外す。組み立てに失敗したら何も出さない。
+emit_hint() {
+  local hint=""
+  # コマンド置換の shell 自身で stderr を捨て、トラップと errexit を外す（内側のサブシェルだけに掛けると、この shell の診断が漏れる）。
+  hint="$(
+    exec 2> /dev/null
+    trap - ERR EXIT
+    set +eE
+    rescan_hint
+  )" || hint=""
+  if [ -n "${hint}" ]; then
+    printf '%s\n' "${hint}" >&2
+  fi
+  return 0
+}
+
+# 走査の前の案内の状態（案内の分岐と検出器の HEAD）を記録する。失敗は無視し、検出の結果には関与しない。
+pre_state="$(
+  exec 2> /dev/null
+  trap - ERR EXIT
+  set +eE
+  rescan_hint state
+)" || pre_state=""
+
 # 検出器の終了状態は 0 = 検出なし / 1 = 検出 / 2 = 検査不能。それ以外（起動失敗・シグナル等）も検査不能に畳む。
 rc=0
 # cd の失敗（終了状態 1 になり「検出」と取り違えられる）は、サブシェルの中で検査不能（2）にする。
@@ -150,13 +376,16 @@ rc=0
   trap - ERR
   set +E
   cd "${target}" 2> /dev/null || exit 2
+  # 起動できない検出器（通常のファイルでない・実行できない）は、shell による起動失敗の終了状態の差（1 と取り違え得る）に頼らず、
+  # 起動の前に検査不能（2）にする。起動できる検出器の判定・終了状態は変えない。
+  [ -f "${ROOT_DIR}/scripts/hooks/secret-scan.sh" ] && [ -x "${ROOT_DIR}/scripts/hooks/secret-scan.sh" ] || exit 2
   GIT_INDEX_FILE="${tmp_index}" "${ROOT_DIR}/scripts/hooks/secret-scan.sh" --tracked --summary
 ) > "${out}" 2>&1 || rc=$?
 # 規則 ID は許可した一覧との完全一致だけを通す（任意の文字列・git の診断を公開ログへ通さない）。
 # grep の終了状態は 0 = 一致 / 1 = 該当なし / 2 以上 = エラー。1 だけを「該当なし」として許す。
 filtered="${work_dir}/filtered"
 grep_rc=0
-grep -aE '^secret-scan: (env-file|vendor-token|private-key|jwt|jwk-private|credential-url|assignment): [0-9]+ (line|file)\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) in [0-9]+ file\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) \([0-9]+ tracked file\(s\) checked\)$|^secret-scan: findings in tracked files$' "${out}" > "${filtered}" 2> /dev/null || grep_rc=$?
+grep -aE '^secret-scan: (env-file|vendor-token|private-key|jwt|jwk-private|credential-url|assignment): [0-9]+ (line|file)\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) in [0-9]+ file\(s\)$|^secret-scan: total: [0-9]+ finding\(s\) \([0-9]+ tracked file\(s\) checked\)$|^secret-scan: findings in tracked files$' "${out}" 2> /dev/null > "${filtered}" || grep_rc=$?
 if [ "${grep_rc}" -gt 1 ]; then
   echo "secret-scan-ci: failed to filter the scanner output (grep exit ${grep_rc})" >&2
   exit 2
@@ -183,11 +412,19 @@ case "${rc}" in
     fi
     ;;
   1)
-    echo "secret-scan-ci: findings reported; details are withheld on the public log. Re-run locally: make secret-scan" >&2
+    echo "secret-scan-ci: findings reported; details are withheld on the public log." >&2
+    emit_hint || true
     exit 1
     ;;
   *)
-    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log. Re-run locally: make secret-scan" >&2
+    # 検査不能のときだけ、検出器の固定の診断文を許可リスト（lib.sh。陰性対照と共有）との行全体の完全一致で通す。
+    # 値・パス・git の生の診断は通さない（SECR-23）。失敗は無視する（既に検査不能（2）で終える）。
+    # 許可リストを作れたときだけ照合する（作れなければ何も通さない）。標準エラーは先に抑える（開けない旨の文にパスが出るため。SECR-23）。
+    if secret_scan_fixed_diagnostics 2> /dev/null > "${work_dir}/allowed-diag"; then
+      grep -aFx -f "${work_dir}/allowed-diag" "${out}" >&2 2> /dev/null || true
+    fi
+    echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log." >&2
+    emit_hint || true
     exit 2
     ;;
 esac

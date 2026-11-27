@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-hooks.sh の各 part が共有する最小の準備（TASK-6）。test-hooks-lib.sh と test-hooks-8.sh・test-hooks-9.sh が source する。
+# test-hooks.sh の各 part が共有する最小の準備（TASK-6）。test-hooks-lib.sh と test-hooks-9.sh〜test-hooks-11.sh が source する。
 #
 # 単体では実行しない。使い捨ての作業領域（work_dir）・git の隔離・pass / fail の計数・finish だけを持つ。
 # 秘密情報の検出器の試験の準備（git シム・例示値・検出器の複製・check_scan 等）は test-hooks-lib.sh にあり、
