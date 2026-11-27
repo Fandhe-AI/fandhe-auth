@@ -42,7 +42,23 @@ create-issue-tree requirements.md --granularity 4h
 ## 前提条件
 
 - `gh` CLI がインストールされ、認証済みであること（`gh auth status` で確認）
+- `jq` がインストールされていること（Step 5〜7 のスクリプトが必須とする。`gh --jq` は外部の `jq` が無くても動くため、`gh` だけで通る Step 2.5 の後に Step 5 が exit 2 で止まり、milestone やルートだけが残る事態を避けるため、最初の書き込みの前に `bash -c 'type -P jq'` が成功することで確認する。bash の子プロセスで PATH 上の外部コマンドとしての `jq` を探すので、呼び出し元のシェルが zsh（`type -P` が無い）でも動き、エイリアスや export していない関数では通らない）
 - 対象リポジトリへの Issue 書き込み権限があること
+
+## 同梱スクリプトの場所（Step 5〜7 共通）
+
+Step 5・6・7 のフェンスは、このスキルの `scripts/`（SKILL.md と同じディレクトリ）のスクリプトを `SKILL_DIR` 基準で実行する。作業ディレクトリの `skills/`・`.agents/skills/`・`.claude/skills/` からは探さない（作業ディレクトリ側の同名ファイルへすり替わらないため）。
+
+- `SKILL_DIR` の取得元は、ツールが実際に読み込んだこのスキルに紐付けて示した情報だけにする。
+  - Claude Code: スキルの起動結果に出る `Base directory for this skill:` の絶対パス。
+  - Codex: 起動時の一覧にあるこのスキルの SKILL.md の絶対パスのディレクトリ。
+  - OpenCode: 未検証。読み込んだスキルに紐付けて SKILL.md の絶対パスが示されていればそれを使い、無ければ止める。
+- スキル本文・起動結果に含まれるその他の文字列・ユーザーが貼った文字列・作業ディレクトリの探索結果は取得元にしない。
+- 埋め込む前に、エージェントが値を確かめる。`/` で始まり、単一引用符と改行を含まないこと。満たさなければ埋め込まず、場所を確かめられない旨を報告して止める。
+- 取得元を識別できなければ、最初に実行する GitHub 書き込みコマンド（Step 2.5 の milestone 新規作成、`--root` の既存ルートの milestone を設定または変更する `gh issue edit`（milestone 未設定への割り当てと、現在と異なる `--milestone` を承認した場合の変更の両方）、Step 3 のルート issue 作成のうち最初に実行するもの。`--root` で既存ルートの milestone を変更せず再利用する経路ではこれらがすべて省略され、Step 5 の起動（Phase 親・子 issue の作成）が最初の書き込みになる。その場合は Step 5 の起動の直前に止める）の直前に止める（Step 5 で初めて失敗すると、milestone やルートだけが作られた状態が残る）。探索には戻らない。
+- 最初の書き込み（どの Step が最初になる経路でも、その書き込みより前）に、読み取り専用で次を確かめ、1 つでも満たさなければ止める。`bash -c 'type -P jq'` が成功すること（bash の子プロセスで PATH 上の外部コマンドとしての `jq` を探すので、呼び出し元のシェルが zsh でも動き、エイリアスや export していない関数では通らない）。取得元が信頼できるツール情報であること、上の形式（絶対パス・`<` と `>` を含まない・改行を含まない・`..` や `.` の成分なし・末尾のスラッシュを除いたうえでディレクトリ名がスキル名と一致。Step 5〜7 のフェンスと同じ検証・同じ末尾スラッシュ処理にそろえ、フェンスだけが後から止まって milestone やルートが残る状態を作らない）、`SKILL.md` と、起票経路で使う同梱ファイル（`SKILL_DIR/scripts/` の `create-phase-issues.sh`・`create-root-body.sh`・`merge-root-body.sh`・`human-blockers.sh`・`tree-lib.sh`・`declared-deps-filter.jq` の 6 つ）が、Step 5〜7 のフェンスと同じ `-f` 判定で通常ファイルであり、`-r` で読み取れること（存在だけでなく、同名ディレクトリでないこと。`tree-lib.sh` は Step 6 の `create-root-body.sh`・`merge-root-body.sh` が、`tree-lib.sh` と `declared-deps-filter.jq` は Step 7 の `human-blockers.sh` が読む）。あわせて、この 6 つと `SKILL_DIR/scripts/` 自体が `-L` で symlink でないことも確かめ、symlink なら止める（`scripts/` 内のファイル単位・`scripts/` 自体の symlink は書き込み前に止める）。`SKILL_DIR` 自体には `-L` を当てず、スキルディレクトリ全体が symlink である配置は引き続き受け付ける（配布の形で使われるため。実体まで辿る検証はしない）。
+- フェンスは独立したシェルで実行され得るので、`SKILL_DIR` は各フェンスで毎回埋める。フェンス内の検証は、絶対パス・未置換や `..` の成分・ディレクトリ名・`SKILL.md` とスクリプトの存在を確かめ、満たさなければ gh を呼ばずに exit 1 で止まる。各フェンスも起動直前に同じ `-L` 検査（`scripts/` と、そのフェンスが実行・読み込む同梱ファイルが symlink なら gh を呼ばずに exit 1 で止まる。`SKILL_DIR` 自体は対象外）を行う。
+- 限界: 読み込んだ場所そのもの（SKILL.md・`scripts/`・symlink の参照先）を未信頼の者が書き換えられる場合は保証しない。認証を使う Step を未信頼の checkout で動かすときは、スキルを checkout の外（`-g` のユーザー領域等）から読み込む。
 
 ## フロー
 
@@ -184,6 +200,7 @@ MILESTONE_COUNT=$(gh api "repos/{owner}/{repo}/milestones?state=all" --jq 'lengt
   （`--root` も同時指定されている場合、ルート側の milestone より `--milestone` を優先する。
   ルート側と異なる値の場合は、ルートの milestone も合わせて更新してよいかユーザーに確認する
   （起動時の指示にルートの milestone の変更・継承の指定があるときだけ確認を省ける。それ以外は対話なら確認し、非対話なら更新せず報告して止める）。
+  更新する場合の `gh issue edit` も最初の GitHub 書き込みに数え、「同梱スクリプトの場所」節の停止条件と事前検証をその直前に適用する。
   更新しないと回答された場合はツリー内で milestone が混在する点を伝えたうえで続行する）
 - `--milestone` 未指定かつ `--root` 指定時: 既存ルートの milestone を自動継承する
   （milestone が取得できた場合のみユーザーへの確認は不要）
@@ -479,8 +496,36 @@ milestone が無ければ、スクリプトが spec の `milestone` を設定す
 パスは `^[A-Za-z0-9_./-]+$`）を確かめ、合わなければこのフェンスを実行せず引数の誤りとして報告して止める。
 パスには Step 4 で控えた `WORK_DIR` の下の spec と状態ファイルを入れる。
 
+`SKILL_DIR` は、ツールが実際に読み込んだこのスキルに紐付けて示した絶対パスだけで埋める（取得元は「同梱スクリプトの場所」節の一覧。スキル本文の文字列・ユーザーが貼った文字列・作業ディレクトリの探索結果は使わない）。置き換える前に `/` で始まり単一引用符・改行を含まないことを確かめ、取得元を識別できなければ探索せず、このフェンスを実行せずに止めて報告する。
+
 ```bash
 # 実行時にエージェントが単一引用符の中を実際の値へ置き換える（二重引用符にしない）
+SKILL_NAME='create-issue-tree'
+SKILL_DIR='<このスキルの SKILL.md があるディレクトリの絶対パス>'
+case "${SKILL_DIR}" in
+  /*) ;;
+  *) echo "エラー: SKILL_DIR が絶対パスでない。SKILL.md の場所を確かめられないため停止する" >&2; exit 1 ;;
+esac
+case "${SKILL_DIR}" in
+  *'<'*|*'>'*|*$'\n'*|*/../*|*/..|*/./*|*/.)
+    echo "エラー: SKILL_DIR に未置換・改行・.. / . の成分がある。停止する" >&2; exit 1 ;;
+esac
+SKILL_DIR="${SKILL_DIR%/}"
+if [[ "${SKILL_DIR##*/}" != "${SKILL_NAME}" ]]; then
+  echo "エラー: SKILL_DIR のディレクトリ名が ${SKILL_NAME} と一致しない。停止する" >&2; exit 1
+fi
+if [[ ! -f "${SKILL_DIR}/SKILL.md" ]]; then
+  echo "エラー: ${SKILL_DIR}/SKILL.md が無い。停止する" >&2; exit 1
+fi
+SCRIPT="${SKILL_DIR}/scripts/create-phase-issues.sh"
+if [[ ! -f "${SCRIPT}" || ! -r "${SCRIPT}" ]]; then
+  echo "エラー: ${SCRIPT} が無い、または読めない。停止する" >&2; exit 1
+fi
+for p in "${SKILL_DIR}/scripts" "${SCRIPT}"; do
+  if [[ -L "${p}" ]]; then
+    echo "エラー: ${p} が symlink。ファイル単位の symlink は扱わないため停止する" >&2; exit 1
+  fi
+done
 ROOT_NUMBER='<ルート issue 番号>'
 PHASE='<Phase 番号 N>'
 SPEC_FILE='<Step 4 で書いた spec のパス（WORK_DIR/phase-N.spec.json）>'
@@ -495,22 +540,6 @@ for P in "${SPEC_FILE}" "${STATE_FILE}"; do
   [[ "${P}" =~ ^[A-Za-z0-9_./-]+$ ]] || { echo "エラー: パスは英数字と _./- だけにする: ${P}" >&2; exit 1; }
 done
 
-CREATE_PHASE_ISSUES=""
-for CANDIDATE in \
-  "skills/create-issue-tree/scripts/create-phase-issues.sh" \
-  ".agents/skills/create-issue-tree/scripts/create-phase-issues.sh" \
-  ".claude/skills/create-issue-tree/scripts/create-phase-issues.sh"; do
-  # 存在確認は -f のみ（vendoring で実行ビットが落ちても bash 経由で起動できる）
-  if [[ -f "${CANDIDATE}" ]]; then
-    CREATE_PHASE_ISSUES="${CANDIDATE}"
-    break
-  fi
-done
-if [[ -z "${CREATE_PHASE_ISSUES}" ]]; then
-  echo "エラー: create-phase-issues.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
-  exit 1
-fi
-
 ARGS=(--root "${ROOT_NUMBER}" --phase "${PHASE}" --spec "${SPEC_FILE}" --state "${STATE_FILE}")
 if [[ -n "${PHASE_NUMBER_ARG}" ]]; then
   ARGS+=(--phase-number "${PHASE_NUMBER_ARG}")
@@ -518,7 +547,7 @@ fi
 
 # echo を最終コマンドにしない。非ゼロ終了はそのままフェンスの終了ステータスにする
 rc=0
-bash "${CREATE_PHASE_ISSUES}" "${ARGS[@]}" || rc=$?
+bash "${SCRIPT}" "${ARGS[@]}" || rc=$?
 if (( rc != 0 )); then
   echo "exit=${rc}" >&2
   exit "${rc}"
@@ -530,7 +559,7 @@ fi
 | exit | 意味 | GitHub への書き込み |
 |------|------|-------------------|
 | 0 | 全件を起票・紐付けし、Phase 親がルートに紐付いた | あり |
-| 1 | 引数・spec・状態ファイルの不正（不正の一覧を stderr に出す。状態ファイルがシンボリックリンク・グループと他者の権限を外せない場合を含む）、ルートが open な issue でない（closed・PR）、状態ファイルが spec・引数と食い違う、状態ファイルのロックが既にある、状態ファイルのリポジトリが今回の対象リポジトリと違う、`PHASE_NUMBER_ARG` がルート直下の open な issue でない、状態ファイルの Phase 親が閉じられた・ルートから外された、Phase 親が無いのに spec に `phase` が無い、状態ファイルの番号が別の要素・ルートと重なる、状態ファイルの番号の issue が実物と合わない（題名が spec と違う・closed・PR・別リポジトリ）、`milestone` が open な milestone に無い、`depends_on_issues` の番号が PR・別リポジトリの issue（`repository_url` の無い応答も 1）・ルート・番号の決まっている Phase 親（既存の親を使う・新設した親で再開する）・sub-issue の作成済みの親 child（再開で未作成の sub-issue に書いた場合。implement-issue-tree は祖先への依存を無視するので、前提に書いても完了条件として効かない） | なし |
+| 1 | このフェンスが `SKILL_DIR` を確かめられない（gh を呼ばない）、引数・spec・状態ファイルの不正（不正の一覧を stderr に出す。状態ファイルがシンボリックリンク・グループと他者の権限を外せない場合を含む）、ルートが open な issue でない（closed・PR）、状態ファイルが spec・引数と食い違う、状態ファイルのロックが既にある、状態ファイルのリポジトリが今回の対象リポジトリと違う、`PHASE_NUMBER_ARG` がルート直下の open な issue でない、状態ファイルの Phase 親が閉じられた・ルートから外された、Phase 親が無いのに spec に `phase` が無い、状態ファイルの番号が別の要素・ルートと重なる、状態ファイルの番号の issue が実物と合わない（題名が spec と違う・closed・PR・別リポジトリ）、`milestone` が open な milestone に無い、`depends_on_issues` の番号が PR・別リポジトリの issue（`repository_url` の無い応答も 1）・ルート・番号の決まっている Phase 親（既存の親を使う・新設した親で再開する）・sub-issue の作成済みの親 child（再開で未作成の sub-issue に書いた場合。implement-issue-tree は祖先への依存を無視するので、前提に書いても完了条件として効かない） | なし |
 | 2 | 前提不備（`gh`・`jq` が無い） | なし |
 | 3 | GitHub 操作の失敗（対象リポジトリの確定・読み取り・ラベルの確保・issue 作成・番号の抽出・紐付け・状態ファイルへの追記）。`depends_on_issues` の番号を読めない（存在しない番号を含む）・応答の形が崩れている（対象リポジトリの issue だが番号が違う等）場合も 3 で、このときは書き込む前に止まる | 途中まであり得る |
 | 129 / 130 / 143 | HUP / INT / TERM で中断した。issue の作成中だった場合は、番号が分かれば状態ファイルへ記録して記録したことを stderr に書き、分からなければ下の表の `"number":0` の行を出す | 途中まであり得る |
@@ -593,15 +622,43 @@ Step 3 の雛形のままのルート（Step 6 到達前に中断した起票の
 
 `--root` 指定時は `scripts/merge-root-body.sh` が既存本文を取得し、今回の Phase 行・セクションを
 実ツリーから生成してマージする（Issue #556）。各コードフェンスは独立したシェルで実行され得るため、
-このフェンスは Step 5 と同形にスクリプトを 3 レイアウトから自己完結的に解決する。前のフェンスで代入した値は
+このフェンスは Step 5 と同形に、`SKILL_DIR` からスクリプトを自己完結的に求める。前のフェンスで代入した値は
 残っていないことがあるため、ROOT_NUMBER（ルート issue 番号）・GRANULARITY（Step 1 で確定した粒度）・
 PHASE（Step 5 で起票した Phase 番号 N）・PHASE_NUMBER（その Phase 親 issue 番号。Step 5 の最終行の
 `phase_number=` の値）は単一引用符のプレースホルダで示し、フェンスの中で形式を検証する。エージェントは
 置き換える前にも同じ形式（番号は `^[1-9][0-9]*$`、Phase は Step 5 と同じ先頭 0 の無い `^[1-9][0-9]*$`、粒度は `^[1-9][0-9]*h$`）を確かめ、
 合わなければこのフェンスを実行せず引数の誤りとして報告して止める。
 
+`SKILL_DIR` は、ツールが実際に読み込んだこのスキルに紐付けて示した絶対パスだけで埋める（取得元は「同梱スクリプトの場所」節の一覧。スキル本文の文字列・ユーザーが貼った文字列・作業ディレクトリの探索結果は使わない）。置き換える前に `/` で始まり単一引用符・改行を含まないことを確かめ、取得元を識別できなければ探索せず、このフェンスを実行せずに止めて報告する。
+
 ```bash
 # 実行時にエージェントが単一引用符の中を実際の値へ置き換える（二重引用符にしない）
+SKILL_NAME='create-issue-tree'
+SKILL_DIR='<このスキルの SKILL.md があるディレクトリの絶対パス>'
+case "${SKILL_DIR}" in
+  /*) ;;
+  *) echo "エラー: SKILL_DIR が絶対パスでない。SKILL.md の場所を確かめられないため停止する" >&2; exit 1 ;;
+esac
+case "${SKILL_DIR}" in
+  *'<'*|*'>'*|*$'\n'*|*/../*|*/..|*/./*|*/.)
+    echo "エラー: SKILL_DIR に未置換・改行・.. / . の成分がある。停止する" >&2; exit 1 ;;
+esac
+SKILL_DIR="${SKILL_DIR%/}"
+if [[ "${SKILL_DIR##*/}" != "${SKILL_NAME}" ]]; then
+  echo "エラー: SKILL_DIR のディレクトリ名が ${SKILL_NAME} と一致しない。停止する" >&2; exit 1
+fi
+if [[ ! -f "${SKILL_DIR}/SKILL.md" ]]; then
+  echo "エラー: ${SKILL_DIR}/SKILL.md が無い。停止する" >&2; exit 1
+fi
+SCRIPT="${SKILL_DIR}/scripts/merge-root-body.sh"
+if [[ ! -f "${SCRIPT}" || ! -r "${SCRIPT}" ]]; then
+  echo "エラー: ${SCRIPT} が無い、または読めない。停止する" >&2; exit 1
+fi
+for p in "${SKILL_DIR}/scripts" "${SCRIPT}" "${SKILL_DIR}/scripts/tree-lib.sh"; do
+  if [[ -L "${p}" ]]; then
+    echo "エラー: ${p} が symlink。ファイル単位の symlink は扱わないため停止する" >&2; exit 1
+  fi
+done
 ROOT_NUMBER='<ルート issue 番号>'
 GRANULARITY='<Step 1 で確定した粒度（例: 2h）>'
 PHASE='<Step 5 で起票した Phase 番号 N>'
@@ -614,25 +671,9 @@ PHASE_NUMBER='<Step 5 の最終行 phase_number= の値>'
 : "${ROOT_NUMBER:?ROOT_NUMBER 未設定}" "${GRANULARITY:?GRANULARITY 未設定}" \
   "${PHASE:?PHASE 未設定}" "${PHASE_NUMBER:?PHASE_NUMBER 未設定}"
 
-MERGE_ROOT_BODY=""
-for CANDIDATE in \
-  "skills/create-issue-tree/scripts/merge-root-body.sh" \
-  ".agents/skills/create-issue-tree/scripts/merge-root-body.sh" \
-  ".claude/skills/create-issue-tree/scripts/merge-root-body.sh"; do
-  # 存在確認は -f のみ（vendoring で実行ビットが落ちても bash 経由で起動できる）
-  if [[ -f "${CANDIDATE}" ]]; then
-    MERGE_ROOT_BODY="${CANDIDATE}"
-    break
-  fi
-done
-if [[ -z "${MERGE_ROOT_BODY}" ]]; then
-  echo "エラー: merge-root-body.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
-  exit 1
-fi
-
 # echo を最終コマンドにしない。非ゼロ終了はそのままフェンスの終了ステータスにする
 rc=0
-bash "${MERGE_ROOT_BODY}" --root "${ROOT_NUMBER}" --granularity "${GRANULARITY}" \
+bash "${SCRIPT}" --root "${ROOT_NUMBER}" --granularity "${GRANULARITY}" \
   --phase "${PHASE}" --phase-number "${PHASE_NUMBER}" || rc=$?
 if (( rc != 0 )); then
   echo "exit=${rc}" >&2
@@ -645,7 +686,7 @@ fi
 | exit | 意味 | 本文の更新 |
 |------|------|-----------|
 | 0 | 既存本文へ今回の Phase 分をマージし `gh issue edit` が成功 | あり |
-| 1 | 引数不正（`--root`・`--phase-number` は正整数、`--phase` は数字、`--granularity` は `^[1-9][0-9]*h$`）、既存本文・Phase 親・sub_issues・子孫の取得失敗、追記位置なし・Phase 行を出力不可、プレースホルダー残り・検査失敗、一時ファイル作成失敗 | なし |
+| 1 | このフェンスが `SKILL_DIR` を確かめられない（gh を呼ばない）、引数不正（`--root`・`--phase-number` は正整数、`--phase` は数字、`--granularity` は `^[1-9][0-9]*h$`）、既存本文・Phase 親・sub_issues・子孫の取得失敗、追記位置なし・Phase 行を出力不可、プレースホルダー残り・検査失敗、一時ファイル作成失敗 | なし |
 | 2 | 前提不備（`tree-lib.sh` を読み込めない、`gh`・`jq` が無い） | なし |
 | その他 | `gh issue edit` 自身の終了コード | 不明（実状態を確認する） |
 
@@ -661,8 +702,36 @@ GRANULARITY で書き直す / update-issue-tree の管理マーカー区間が�
 同じ形式で、ROOT_NUMBER と GRANULARITY を単一引用符のプレースホルダで示し、フェンスの中で形式を検証する
 （置き換える前にエージェントも同じ形式を確かめる）。
 
+`SKILL_DIR` は、ツールが実際に読み込んだこのスキルに紐付けて示した絶対パスだけで埋める（取得元は「同梱スクリプトの場所」節の一覧。スキル本文の文字列・ユーザーが貼った文字列・作業ディレクトリの探索結果は使わない）。置き換える前に `/` で始まり単一引用符・改行を含まないことを確かめ、取得元を識別できなければ探索せず、このフェンスを実行せずに止めて報告する。
+
 ```bash
 # 実行時にエージェントが単一引用符の中を実際の値へ置き換える（二重引用符にしない）
+SKILL_NAME='create-issue-tree'
+SKILL_DIR='<このスキルの SKILL.md があるディレクトリの絶対パス>'
+case "${SKILL_DIR}" in
+  /*) ;;
+  *) echo "エラー: SKILL_DIR が絶対パスでない。SKILL.md の場所を確かめられないため停止する" >&2; exit 1 ;;
+esac
+case "${SKILL_DIR}" in
+  *'<'*|*'>'*|*$'\n'*|*/../*|*/..|*/./*|*/.)
+    echo "エラー: SKILL_DIR に未置換・改行・.. / . の成分がある。停止する" >&2; exit 1 ;;
+esac
+SKILL_DIR="${SKILL_DIR%/}"
+if [[ "${SKILL_DIR##*/}" != "${SKILL_NAME}" ]]; then
+  echo "エラー: SKILL_DIR のディレクトリ名が ${SKILL_NAME} と一致しない。停止する" >&2; exit 1
+fi
+if [[ ! -f "${SKILL_DIR}/SKILL.md" ]]; then
+  echo "エラー: ${SKILL_DIR}/SKILL.md が無い。停止する" >&2; exit 1
+fi
+SCRIPT="${SKILL_DIR}/scripts/create-root-body.sh"
+if [[ ! -f "${SCRIPT}" || ! -r "${SCRIPT}" ]]; then
+  echo "エラー: ${SCRIPT} が無い、または読めない。停止する" >&2; exit 1
+fi
+for p in "${SKILL_DIR}/scripts" "${SCRIPT}" "${SKILL_DIR}/scripts/tree-lib.sh"; do
+  if [[ -L "${p}" ]]; then
+    echo "エラー: ${p} が symlink。ファイル単位の symlink は扱わないため停止する" >&2; exit 1
+  fi
+done
 ROOT_NUMBER='<ルート issue 番号>'
 GRANULARITY='<Step 1 で確定した粒度（例: 2h）>'
 
@@ -670,25 +739,9 @@ GRANULARITY='<Step 1 で確定した粒度（例: 2h）>'
 [[ "${GRANULARITY}" =~ ^[1-9][0-9]*h$ ]] || { echo "エラー: GRANULARITY は正整数+h にする（例: 2h）" >&2; exit 1; }
 : "${ROOT_NUMBER:?ROOT_NUMBER 未設定}" "${GRANULARITY:?GRANULARITY 未設定}"
 
-CREATE_ROOT_BODY=""
-for CANDIDATE in \
-  "skills/create-issue-tree/scripts/create-root-body.sh" \
-  ".agents/skills/create-issue-tree/scripts/create-root-body.sh" \
-  ".claude/skills/create-issue-tree/scripts/create-root-body.sh"; do
-  # 存在確認は -f のみ（vendoring で実行ビットが落ちても bash 経由で起動できる）
-  if [[ -f "${CANDIDATE}" ]]; then
-    CREATE_ROOT_BODY="${CANDIDATE}"
-    break
-  fi
-done
-if [[ -z "${CREATE_ROOT_BODY}" ]]; then
-  echo "エラー: create-root-body.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
-  exit 1
-fi
-
 # echo を最終コマンドにしない。非ゼロ終了はそのままフェンスの終了ステータスにする
 rc=0
-bash "${CREATE_ROOT_BODY}" --root "${ROOT_NUMBER}" --granularity "${GRANULARITY}" || rc=$?
+bash "${SCRIPT}" --root "${ROOT_NUMBER}" --granularity "${GRANULARITY}" || rc=$?
 if (( rc != 0 )); then
   echo "exit=${rc}" >&2
   exit "${rc}"
@@ -700,7 +753,7 @@ fi
 | exit | 意味 | 本文の更新 |
 |------|------|-----------|
 | 0 | 本文を生成し `gh issue edit` が成功 | あり |
-| 1 | 引数不正（`--root` は正整数・`--granularity` は `^[1-9][0-9]*h$`）、sub_issues 取得失敗、Phase 親 0 件、Phase 番号決定不可、子孫取得失敗、プレースホルダー残り・検査失敗、Phase 行数不一致、一時ファイル作成失敗 | なし |
+| 1 | このフェンスが `SKILL_DIR` を確かめられない（gh を呼ばない）、引数不正（`--root` は正整数・`--granularity` は `^[1-9][0-9]*h$`）、sub_issues 取得失敗、Phase 親 0 件、Phase 番号決定不可、子孫取得失敗、プレースホルダー残り・検査失敗、Phase 行数不一致、一時ファイル作成失敗 | なし |
 | 2 | 前提不備（`tree-lib.sh` を読み込めない、`gh`・`jq` が無い） | なし |
 | その他 | `gh issue edit` 自身の終了コード | 不明（実状態を確認する） |
 
@@ -717,18 +770,49 @@ fi
 ツリー全体を数える。値は Step 5 と同じく単一引用符のプレースホルダで示し、エージェントは置き換える前にも同じ形式
 （`^[A-Za-z0-9_./-]+$`）を確かめ、合わなければこのフェンスを実行せず引数の誤りとして報告して止める。
 
+`SKILL_DIR` は、ツールが実際に読み込んだこのスキルに紐付けて示した絶対パスだけで埋める（取得元は「同梱スクリプトの場所」節の一覧。スキル本文の文字列・ユーザーが貼った文字列・作業ディレクトリの探索結果は使わない）。置き換える前に `/` で始まり単一引用符・改行を含まないことを確かめ、取得元を識別できなければ探索せず、このフェンスを実行せずに止めて報告する。
+
 ```bash
 # 実行時にエージェントが単一引用符の中を実際の値へ置き換える（二重引用符にしない）。GitHub へは書き込まない
+SKILL_NAME='create-issue-tree'
+SKILL_DIR='<このスキルの SKILL.md があるディレクトリの絶対パス>'
+case "${SKILL_DIR}" in
+  /*) ;;
+  *) echo "エラー: SKILL_DIR が絶対パスでない。SKILL.md の場所を確かめられないため停止する" >&2; exit 1 ;;
+esac
+case "${SKILL_DIR}" in
+  *'<'*|*'>'*|*$'\n'*|*/../*|*/..|*/./*|*/.)
+    echo "エラー: SKILL_DIR に未置換・改行・.. / . の成分がある。停止する" >&2; exit 1 ;;
+esac
+SKILL_DIR="${SKILL_DIR%/}"
+if [[ "${SKILL_DIR##*/}" != "${SKILL_NAME}" ]]; then
+  echo "エラー: SKILL_DIR のディレクトリ名が ${SKILL_NAME} と一致しない。停止する" >&2; exit 1
+fi
+if [[ ! -f "${SKILL_DIR}/SKILL.md" ]]; then
+  echo "エラー: ${SKILL_DIR}/SKILL.md が無い。停止する" >&2; exit 1
+fi
+SCRIPT="${SKILL_DIR}/scripts/human-blockers.sh"
+if [[ ! -f "${SCRIPT}" || ! -r "${SCRIPT}" ]]; then
+  echo "エラー: ${SCRIPT} が無い、または読めない。停止する" >&2; exit 1
+fi
+for p in "${SKILL_DIR}/scripts" "${SCRIPT}" "${SKILL_DIR}/scripts/tree-lib.sh" "${SKILL_DIR}/scripts/declared-deps-filter.jq"; do
+  if [[ -L "${p}" ]]; then
+    echo "エラー: ${p} が symlink。ファイル単位の symlink は扱わないため停止する" >&2; exit 1
+  fi
+done
 STATE_FILE='<Step 5 に渡した状態ファイルのパス（どの Phase のものでもよい）>'
 
-# jq はこのフェンス自身も使う。無ければスクリプトの前提不備と同じ exit 2 にする（状態ファイルの不正の exit 1 と分ける）
-command -v jq >/dev/null 2>&1 || { echo "エラー: jq が見つからない" >&2; exit 2; }
+# jq はこのフェンス自身も使う。外部コマンドとしての jq の絶対パスを JQ に取り、以降は "${JQ}" で呼ぶ（同名のシェル関数・エイリアスに差し替えられない。
+# zsh は type -P が無いので whence -p を使う）。取れなければスクリプトの前提不備と同じ exit 2 にする（状態ファイルの不正の exit 1 と分ける）
+JQ=""
+if [[ -n "${ZSH_VERSION:-}" ]]; then JQ="$(whence -p jq 2>/dev/null)" || JQ=""; else JQ="$(type -P jq 2>/dev/null)" || JQ=""; fi
+[[ "${JQ}" == /* && -x "${JQ}" ]] || { echo "エラー: jq が見つからない" >&2; exit 2; }
 [[ "${STATE_FILE}" =~ ^[A-Za-z0-9_./-]+$ && -f "${STATE_FILE}" ]] \
   || { echo "エラー: パスは英数字と _./- だけの既存のファイルにする: ${STATE_FILE}" >&2; exit 1; }
 # 対象リポジトリとルートは状態ファイルの 1 行目から読む（Step 5 と同じリポジトリ・ルートを数える）。状態ファイルは
 # 入力リダイレクトで渡す（位置引数だと、ハイフンで始まるパスを jq がオプションとして読む）
-REPO=$(jq -rs '.[0].repo // empty' <"${STATE_FILE}") || { echo "エラー: 状態ファイルを読めない" >&2; exit 1; }
-ROOT=$(jq -rs '.[0].root // empty' <"${STATE_FILE}") || { echo "エラー: 状態ファイルを読めない" >&2; exit 1; }
+REPO=$("${JQ}" -rs '.[0].repo // empty' <"${STATE_FILE}") || { echo "エラー: 状態ファイルを読めない" >&2; exit 1; }
+ROOT=$("${JQ}" -rs '.[0].root // empty' <"${STATE_FILE}") || { echo "エラー: 状態ファイルを読めない" >&2; exit 1; }
 # 空の値も exit 1 にする（`:?` の失敗はシェルを 1 以外で終えるため、サブシェルで受けて 1 にする）
 ( : "${REPO:?状態ファイルに repo が無い}" "${ROOT:?状態ファイルに root が無い}" ) || exit 1
 # host は名前と任意のポート（GHES の host:port。Step 5 のスクリプトと同じ形）
@@ -736,26 +820,10 @@ ROOT=$(jq -rs '.[0].root // empty' <"${STATE_FILE}") || { echo "エラー: 状�
   || { echo "エラー: 状態ファイルの対象リポジトリが不正: ${REPO}" >&2; exit 1; }
 [[ "${ROOT}" =~ ^[1-9][0-9]*$ ]] || { echo "エラー: 状態ファイルのルートの番号が不正" >&2; exit 1; }
 
-HUMAN_BLOCKERS=""
-for CANDIDATE in \
-  "skills/create-issue-tree/scripts/human-blockers.sh" \
-  ".agents/skills/create-issue-tree/scripts/human-blockers.sh" \
-  ".claude/skills/create-issue-tree/scripts/human-blockers.sh"; do
-  # 存在確認は -f のみ（vendoring で実行ビットが落ちても bash 経由で起動できる）
-  if [[ -f "${CANDIDATE}" ]]; then
-    HUMAN_BLOCKERS="${CANDIDATE}"
-    break
-  fi
-done
-if [[ -z "${HUMAN_BLOCKERS}" ]]; then
-  echo "エラー: human-blockers.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
-  exit 1
-fi
-
 # echo を最終コマンドにしない。非ゼロ終了はそのままフェンスの終了ステータスにする。終了コードの変数を status にしない
 # （zsh では読み取り専用で、代入するとシェルごと終わる）。BASH_ENV（非対話の bash が起動時に読み込むファイル）は外して起動する
 rc=0
-env -u BASH_ENV bash "${HUMAN_BLOCKERS}" --root "${ROOT}" --repo "${REPO}" || rc=$?
+env -u BASH_ENV bash "${SCRIPT}" --root "${ROOT}" --repo "${REPO}" || rc=$?
 if (( rc != 0 )); then
   echo "exit=${rc}" >&2
   exit "${rc}"
@@ -778,24 +846,28 @@ fi
 | exit | 意味 | レポートの人の作業の節 |
 |------|------|----------------------|
 | 0 | 数えた | `humans=` が 1 以上なら表、0 なら「人手ラベル付きの open issue は 0 件」（着手の可否と件数は書かない） |
-| 1 | 状態ファイル・引数の不正、`human-blockers.sh` が見つからない | 「未計測（状態ファイルを読めない等の理由）」 |
+| 1 | 状態ファイル・引数の不正、`SKILL_DIR` を確かめられない（未置換・相対パス・`..`/`.` の成分・ディレクトリ名の不一致・`SKILL.md` かスクリプトが無い） | 「未計測（状態ファイルを読めない等の理由）」 |
 | 2 | 前提不備（`jq` が無い〔このフェンスが先に確かめる〕、`gh` が無い、スクリプトの symlink を実体まで辿れない、`tree-lib.sh` を読み込めない・`list_subs` か `CELL` を定義していない、同梱の `scripts/declared-deps-filter.jq` が無い・読めない・空・壊れている〔`gh` を呼ぶ前に試しの入力で確かめる〕） | 「未計測（理由）」 |
 | 3 | GitHub の読み取りか jq の失敗（ルート・ツリー・issue・ツリー外の前提の取得、依存の抽出、`repository_url` が無い・文字列でない・API の URL の形式でない sub-issue、ツリー外の前提の応答で state が open でも closed でもない、ツリー外の前提が PR（issue の番号を書く）、`issues/<N>`（ルート・ツリー内の issue・ツリー外の前提）の応答が対象リポジトリの issue と確かめられない〔`repository_url` が無い・形式が違う・別リポジトリ（移管された issue・改名や移管でリダイレクトされたルート）、番号が違う、ルート・ツリー内の issue が PR、応答が 1 件のオブジェクトでない〕、番号・state・題名・ラベル〔配列で、各要素の `name` が文字列〕の型が違う sub-issue、本文〔`body`〕が無い・文字列でも null でもない issue。欠落を空の値で埋めて数えない。失敗した issue を依存なしとして数え続けない） | 「未計測（取得に失敗した）」。原因を直してフェンスを再実行してよい。ツリー外の前提が読めない（削除・番号違いなど）ときは、直す先はその前提を書いた人手 issue の本文の `## 前提`（implement-issue-tree は読めない前提を open として待つが、このスクリプトは止める） |
 
+<!-- human-queue-count:start -->
 0 以外の終了を「人手ラベル付きの open issue は 0 件」として書かない（人手 issue があるかどうか分からないため）。
 `humans=0` が示すのは、ツリーの open issue に人手ラベル（`owner:human` か、ツリーに既存の `owner:joint`）付きのものが無いことだけである。
 ほかの issue が未完了の前提を待っていれば、今すぐ着手できる issue が 0 件のこともある。着手の可否と件数は、`humans=0` のときも
 implement-issue-tree の `dryRun: true` の結果で確かめる。
 
 **依存する後続 issue 数**（`advances`）は、その人手 issue へ直接・間接に依存する open issue（推移的な後続）の重複なしの数である。
+<!-- human-queue-count:end -->
 依存は、このスキルに同梱した `scripts/declared-deps-filter.jq` で、各 open issue の本文から読む（中身は同じ版の implement-issue-tree の
 `scripts/declared-deps.sh --print-filter` の出力の写しで、依存の読み方は同じ版の implement-issue-tree と同じ。スキルを個別に更新すると、
 導入済みの implement-issue-tree と版がずれて読み方が違い得る。スクリプトはほかのスキルの
 スクリプトを探すことも実行することもしないので、create-issue-tree だけを導入した配置でも数える）。読むのは、依存の見出し節（`## 前提`・`## 依存`・`## Depends on` 等）の
-行頭の `#N` と、本文の `Depends on #N`・`blocked by #N` である（見出し節の中でも「関連」「参考」等を含む行の `#N` は依存にしない）。
+行頭の `#N` と、本文の `Depends on #N`・`blocked by #N` である。見出し節の行頭の `#N` は、「関連」「参考」等を含む行では依存にしない。
+`Depends on #N`・`blocked by #N` は、行に「関連」「参考」等があっても依存として数える（`not`・`no longer`・`never`・`n't` が直前〔間の英単語は 1 語まで〕にある否定形は数えない）。
 フィルタには兄弟のタスク ID の表を渡さないので、タスク ID や「前の工程」で書いた依存は数えない（このスキルが起票する本文は
 これらの表現を拒否する）。依存の辺は open でツリー内の issue どうしだけで、closed の issue とツリー外の issue（別リポジトリの
 issue・ルートの子孫でない issue）は辺にせず、経由もしない（ツリーは closed の issue の下も辿る）。
+<!-- human-queue-reach:start -->
 ツリー外の前提（`waiting_outside`）は人手 issue 自身の待ちを前提の列に出すためだけに読み、後続 issue 数には効かない。
 この数は依存で到達できる後続の数で、人手 issue を close した直後に着手できるようになる数ではない。人手 issue → A → B なら、
 close した直後も B は A の完了を待つ。A に別の未完了の前提があれば、着手できるようになる issue が 0 件でもこの数は 2 になる。
@@ -803,6 +875,7 @@ close した直後も B は A の完了を待つ。A に別の未完了の前提
 後続がもっと多いことがある。今すぐ着手できる件数は、implement-issue-tree の `dryRun: true` の結果で確かめる。
 人手 issue を close すると、それを前提に持つ後続のうち、ほかの前提も済んだものが着手できる状態になる。実行中の
 `implement-issue-tree` のランが close を検知すれば着手し、ランが終わっていれば次の実行で着手する。
+<!-- human-queue-reach:end -->
 
 ```
 ## create-issue-tree 完了レポート

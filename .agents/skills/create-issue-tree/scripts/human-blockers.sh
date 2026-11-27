@@ -2,6 +2,11 @@
 # human-blockers.sh — ツリーの open な人手 issue ごとに、依存する後続 issue の数と未完了の前提を数える（読み取り専用）
 #
 # 呼び出し元: skills/create-issue-tree/SKILL.md Step 7（完了レポートの人の作業の表）。
+# 写し: update-issue-tree の scripts/ に、このファイル・tree-lib.sh・declared-deps-filter.jq と同じ内容の写しがあり、
+#       update-issue-tree の SKILL.md Step 9（報告の人手の待ち行列）が実行する。正本は create-issue-tree の scripts/ の 3 ファイルで、
+#       どれかを変えたら写しを手で直さず、上流のリポジトリ根で次を実行して写し直す（一致は上流の
+#       dev/update-issue-tree/tests/human-queue.test.mjs が確かめる）:
+#         for f in human-blockers.sh tree-lib.sh declared-deps-filter.jq; do cp "skills/create-issue-tree/scripts/${f}" skills/update-issue-tree/scripts/; done
 # 役割: 数え方は以前、SKILL.md の文章の手順としてエージェントが gh と jq を組み立てて数えていた。依存の読み方が
 #       implement-issue-tree とずれる余地と、取得の失敗を「依存なし」と取り違える余地があったため、スクリプトへ移した。
 #
@@ -92,6 +97,7 @@
 #   dev/create-issue-tree/tests/human-blockers.test.mjs の一致テストが落ちる。そのときは手で書き写さず、上流のリポジトリ根で次を実行して
 #   作り直す（--print-filter は gh を呼ばない）:
 #     bash skills/implement-issue-tree/scripts/declared-deps.sh --print-filter > skills/create-issue-tree/scripts/declared-deps-filter.jq
+#   作り直したら、冒頭の「写し」の cp で update-issue-tree の scripts/ へも写す。
 #
 # 自衛: gh api の GET だけ。書き込みはせず、ファイルも作らない（一時ファイルも使わない）。issue の題名・本文は非信頼データで、
 #       題名は CELL で変換してから出し、本文は出さない。集計のデータは標準入力で jq へ渡し、件数で伸びる値（ツリー外の前提を

@@ -42,6 +42,11 @@ if [[ ! -f "${REASSIGN_SCRIPT}" ]]; then
   echo "エラー: ${REASSIGN_SCRIPT} が存在しない（reassign-lib.sh と対のスクリプトが欠落している）" >&2
   return 1
 fi
+if [[ ! -r "${REASSIGN_SCRIPT}" ]]; then
+  # 後続で bash が読むため、読み取り不可は計画ループへ入る前にここで止める
+  echo "エラー: ${REASSIGN_SCRIPT} を読めない（reassign-lib.sh と対のスクリプトの権限不備）" >&2
+  return 1
+fi
 if [[ ! -x "${REASSIGN_SCRIPT}" ]]; then
   echo "警告: ${REASSIGN_SCRIPT} に実行権限がない（vendoring で実行ビットが失われた可能性）。bash 経由で実行する" >&2
 fi

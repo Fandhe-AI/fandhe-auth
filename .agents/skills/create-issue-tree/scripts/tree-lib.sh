@@ -3,6 +3,8 @@
 #
 # 呼び出し元: create-root-body.sh（Step 6 新規作成経路）と merge-root-body.sh（Step 6 --root 経路）、
 #           human-blockers.sh（Step 7 の人手 issue の数え方。list_subs と CELL だけを使う）。
+# 写し: update-issue-tree の scripts/ に同じ内容の写しがある（そちらの human-blockers.sh が読む）。このファイルを変えたら、
+#       human-blockers.sh の冒頭コメントの「写し」の cp で写し直す（一致は上流の dev/update-issue-tree/tests/human-queue.test.mjs が確かめる）。
 # 役割: sub_issues API のページング取得・open 子孫の再帰集計・issue タイトルの表セル無害化・
 #       プレースホルダー検査の正規表現を 1 箇所に定義し、2 つのスクリプトで本文生成ロジックを
 #       重複させない（Issue #555・#556）。
