@@ -100,6 +100,8 @@ job_state() {
 # 確認と送信の間の窓は bash では閉じられないが、回収済みの pid を無条件に狙う経路は無い。TERM の後には何も送らない。
 # 所有を確かめられない（unknown）ときは、無関係のプロセスを止めないよう何も送らず、診断を出して 1 を返す。
 # 呼び出し側は、1 のとき wait へ進まない（停止していない子を無期限に待たない）。
+# 送信に失敗したら、子が終わっていること（none）を job_state で確かめ直す。まだ生きている・確かめられないときは固定の診断を出して 1 を返し、
+# 呼び出し側は wait へ進まない（fail-closed。最終の終了コードは 2）。
 stop_job() {
   job_state "$1"
   case "${job_state_result}" in
@@ -110,16 +112,29 @@ stop_job() {
       ;;
     *) return 0 ;;
   esac
-  kill -CONT "$1" 2> /dev/null || true
+  signal_job CONT "$1" || return 1
   job_state "$1"
   case "${job_state_result}" in
-    owned) kill "$1" 2> /dev/null || true ;;
+    owned) signal_job TERM "$1" || return 1 ;;
     unknown)
       echo "shellcheck-staged: cannot confirm ownership of child ${1}; no signal sent and not waiting" >&2
       return 1
       ;;
   esac
   return 0
+}
+# signal_job <信号> <pid>: 信号を送る。送信に失敗したときは job_state で状態を確かめ直し、終了した（none）なら成功とする。
+# まだ生きている・確かめられないなら、待たずに済むよう固定の診断を出して 1 を返す。
+signal_job() {
+  if kill -"$1" "$2" 2> /dev/null; then
+    return 0
+  fi
+  job_state "$2"
+  if [ "${job_state_result}" = none ]; then
+    return 0
+  fi
+  echo "shellcheck-staged: cannot stop child ${2}; not waiting" >&2
+  return 1
 }
 # shellcheck disable=SC2329 # trap から呼ばれる
 on_signal() {

@@ -303,6 +303,18 @@ for arg in "$@"; do
       echo "$$" >| "${SC_PIDFILE}"
       exec sleep 30
       ;;
+    *sigtrap*)
+      # 受けた CONT・TERM を SC_SIGLOG へ記録する（sleep を exec しないので、信号を受けても生き続け、記録できる）。眠りは 60 秒で自分から終わる。
+      echo "$$" >| "${SC_PIDFILE}"
+      trap 'echo CONT >> "${SC_SIGLOG}"' CONT
+      trap 'echo TERM >> "${SC_SIGLOG}"; exit 0' TERM
+      sc_i=0
+      while [ "${sc_i}" -lt 600 ]; do
+        sleep 0.1
+        sc_i=$((sc_i + 1))
+      done
+      exit 0
+      ;;
     *err*)
       echo "${arg}: could not be read"
       rc=2
@@ -801,34 +813,35 @@ sc_js_check none "a pid not in the table" "[1]+ 9999 Running                    
 sc_js_check unknown "an empty state word" "[1]+ 4242"
 sc_js_check unknown "a failing jobs" "FAIL"
 
-# ジョブ表を取れない（所有を確かめられない）中断では、信号を送らず、診断を出し、wait せずに 2 で終わる。
-# `jobs` を失敗させる関数を BASH_ENV で差し込む。wait へ進めば偽物の眠り（30 秒）が終わるまで戻らないため、10 秒未満で終わることで wait の省略を確かめる。
-sc_unk_env="${work_dir}/sc-unknown-env.sh"
-printf '%s\n' 'jobs() { return 1; }' > "${sc_unk_env}"
-sc_pidfile="${work_dir}/sc.pid"
-rm -f "${sc_pidfile}"
-sc_reset
-BASH_ENV="${sc_unk_env}" SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh a.sh > "${work_dir}/out" 2>&1 &
-sc_script_pid=$!
-sc_waited=0
-while [ ! -s "${sc_pidfile}" ] && [ "${sc_waited}" -lt 100 ]; do
-  sleep 0.1
-  sc_waited=$((sc_waited + 1))
-done
-sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
-sc_waited=0
-while [ -n "${sc_fake_pid}" ] && ! sc_is_fake_sleep "${sc_fake_pid}" && [ "${sc_waited}" -lt 50 ]; do
-  sleep 0.1
-  sc_waited=$((sc_waited + 1))
-done
-sc_fake_start=""
-if [ -n "${sc_fake_pid}" ]; then
-  sc_fake_start="$(ps -p "${sc_fake_pid}" -o lstart= 2> /dev/null || true)"
-fi
-if [ -z "${sc_fake_start}" ] || ! sc_is_fake_sleep "${sc_fake_pid}"; then
-  sc_reap "${sc_script_pid}" || true
-  fail "shellcheck-staged: a TERM with an unreadable job table sends no signal and does not wait" "setup failed: the fake shellcheck did not become sleep${sc_kj_note}" "output: $(cat "${work_dir}/out")"
-else
+# 信号を送れない・所有を確かめられない中断では、信号を送らず（または送れず）、固定の診断を出し、wait せずに 2 で終わる。
+# BASH_ENV で差し込む関数で `jobs` か `kill` を失敗させる。偽の shellcheck は CONT・TERM を受けても生き続け、受けた信号を SC_SIGLOG へ記録する
+# （sleep のままでは CONT を誤って送っても生きているため、合格してしまう）。wait へ進めば偽物の眠りが終わるまで戻らないため、10 秒未満で終わることで wait の省略を確かめる。
+# sc_unk_check <名前> <差し込む関数の定義> <診断の断片>
+sc_unk_check() {
+  sc_unk_env="${work_dir}/sc-unknown-env.sh"
+  printf '%s\n' "$2" > "${sc_unk_env}"
+  sc_pidfile="${work_dir}/sc.pid"
+  sc_siglog="${work_dir}/sc.siglog"
+  rm -f "${sc_pidfile}" "${sc_siglog}"
+  : > "${sc_siglog}"
+  sc_reset
+  BASH_ENV="${sc_unk_env}" SC_SIGLOG="${sc_siglog}" SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" sigtrap.sh a.sh > "${work_dir}/out" 2>&1 &
+  sc_script_pid=$!
+  sc_waited=0
+  while [ ! -s "${sc_pidfile}" ] && [ "${sc_waited}" -lt 100 ]; do
+    sleep 0.1
+    sc_waited=$((sc_waited + 1))
+  done
+  sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
+  sc_fake_start=""
+  if [ -n "${sc_fake_pid}" ]; then
+    sc_fake_start="$(ps -p "${sc_fake_pid}" -o lstart= 2> /dev/null || true)"
+  fi
+  if [ -z "${sc_fake_start}" ]; then
+    sc_reap "${sc_script_pid}" || true
+    fail "shellcheck-staged: ${1}" "setup failed: the fake shellcheck did not start${sc_kj_note}" "output: $(cat "${work_dir}/out")"
+    return 0
+  fi
   sc_t0="${SECONDS}"
   sc_kj_note=""
   sc_kill_job TERM "${sc_script_pid}" || true
@@ -850,14 +863,101 @@ else
   if kill -0 "${sc_fake_pid}" 2> /dev/null; then
     sc_unk_alive=1
   fi
-  # 送られなかったので偽物は生きている。孤児の後始末は開始時刻と同一性を確かめて行う（眠りは 30 秒で終わる）
-  sc_orphan_signal TERM "${sc_fake_pid}" "${sc_fake_start}" || true
-  sc_unk_out="$(cat "${work_dir}/out")"
-  if [ "${sc_rc}" -eq 2 ] && [ "${sc_unk_alive}" -eq 1 ] && [ "${sc_unk_secs}" -lt 10 ] && [[ "${sc_unk_out}" == *"cannot confirm ownership of child"* ]]; then
-    pass "shellcheck-staged: a TERM with an unreadable job table sends no signal and does not wait"
-  else
-    fail "shellcheck-staged: a TERM with an unreadable job table sends no signal and does not wait" "exit ${sc_rc}, fake still running: ${sc_unk_alive}, seconds: ${sc_unk_secs}${sc_kj_note}" "output: ${sc_unk_out}"
+  # 偽物の trap は sleep の終わりまで遅れて走るため、少し待ってから記録を読む（誤って送られた信号を取りこぼさない）
+  sleep 0.4
+  sc_unk_sigs="$(cat "${sc_siglog}" 2> /dev/null || true)"
+  # 後始末: 偽物は止まらず生き続けるので、起動時の開始時刻が一致するときだけ TERM を送る（pid の再利用で別のプロセスへ送らない）
+  if [ "$(ps -p "${sc_fake_pid}" -o lstart= 2> /dev/null || true)" = "${sc_fake_start}" ]; then
+    kill -TERM "${sc_fake_pid}" 2> /dev/null || true
+    # 偽物の trap の記録が次の確認へ混ざらないよう、終わるのを待つ
+    sc_waited=0
+    while kill -0 "${sc_fake_pid}" 2> /dev/null && [ "${sc_waited}" -lt 50 ]; do
+      sleep 0.1
+      sc_waited=$((sc_waited + 1))
+    done
   fi
+  sc_unk_out="$(cat "${work_dir}/out")"
+  if [ "${sc_rc}" -eq 2 ] && [ "${sc_unk_alive}" -eq 1 ] && [ "${sc_unk_secs}" -lt 10 ] && [ -z "${sc_unk_sigs}" ] && [[ "${sc_unk_out}" == *"$3"* ]]; then
+    pass "shellcheck-staged: ${1}"
+  else
+    fail "shellcheck-staged: ${1}" "exit ${sc_rc}, fake still running: ${sc_unk_alive}, seconds: ${sc_unk_secs}, signals received by the fake: ${sc_unk_sigs:-none}${sc_kj_note}" "output: ${sc_unk_out}"
+  fi
+}
+sc_unk_check "a TERM with an unreadable job table sends no signal and does not wait" 'jobs() { return 1; }' "cannot confirm ownership of child"
+sc_unk_check "a TERM whose signals cannot be sent to a live child does not wait" 'kill() { return 1; }' "cannot stop child"
+
+# 起動の直後から pid を記録するまでの間に届いた中断は、保留の旗で扱う（孫の shellcheck を残さず、2 で終わる）。
+# 偽の mktemp が 1 番目のバッチの出力先を FIFO にする。バッチの子は、出力先を開く（読み手が来るまで止まる）ところで、まだ shellcheck も pid の記録も無い。
+# そこへ TERM を送り、読み手を付けて進めると、shellcheck の起動・pid の記録・trap の差し替えの後に保留の旗を見て止める。旗を外すと、眠りの終わりまで待ち、10 秒を超える。
+sc_fifo_dir="${work_dir}/sc-fifo-shim"
+mkdir -p "${sc_fifo_dir}"
+cat > "${sc_fifo_dir}/mktemp" <<'EOF'
+#!/bin/sh
+d="$("${SC_REAL_MKTEMP}" "$@")" || exit 1
+mkfifo "${d}/0.out" || exit 1
+printf '%s\n' "${d}"
+EOF
+chmod +x "${sc_fifo_dir}/mktemp"
+sc_pidfile="${work_dir}/sc.pid"
+rm -f "${sc_pidfile}"
+sc_reset
+SC_REAL_MKTEMP="${sc_real_mktemp}" TMPDIR="${work_dir}" SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_fifo_dir}:${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh > "${work_dir}/out" 2>&1 &
+sc_script_pid=$!
+# バッチの子（スクリプトの直接の子）が現れ、出力先の FIFO で止まるのを待つ。pidfile が無いこと（shellcheck が未起動）も確かめる。
+sc_batch_pid=""
+sc_waited=0
+while [ -z "${sc_batch_pid}" ] && [ "${sc_waited}" -lt 100 ]; do
+  sc_batch_pid="$(ps -A -o pid= -o ppid= 2> /dev/null | awk -v p="${sc_script_pid}" '$2 == p {print $1; exit}')"
+  [ -n "${sc_batch_pid}" ] || sleep 0.1
+  sc_waited=$((sc_waited + 1))
+done
+sleep 0.5
+sc_t0="${SECONDS}"
+sc_kj_note=""
+sc_early_err=""
+if [ -z "${sc_batch_pid}" ]; then
+  sc_early_err="the batch child did not appear"
+elif [ -s "${sc_pidfile}" ]; then
+  sc_early_err="the fake shellcheck had already started"
+else
+  kill -TERM "${sc_batch_pid}" 2> /dev/null || sc_early_err="the TERM could not be sent to the batch child"
+fi
+# 読み手を付けて出力先を開かせる（バッチの子が先に終わっていても、読み手は後で止める）
+sc_fifo_file="$(find "${work_dir}" -maxdepth 2 -path '*/shellcheck-staged.*/0.out' -type p 2> /dev/null | head -n 1 || true)"
+cat "${sc_fifo_file:-/dev/null}" > /dev/null 2>&1 &
+sc_reader_pid=$!
+sc_waited=0
+while kill -0 "${sc_script_pid}" 2> /dev/null && [ "${sc_waited}" -lt 200 ]; do
+  sleep 0.1
+  sc_waited=$((sc_waited + 1))
+done
+if kill -0 "${sc_script_pid}" 2> /dev/null; then
+  sc_reap "${sc_script_pid}" || true
+  sc_rc=124
+elif wait "${sc_script_pid}"; then
+  sc_rc=0
+else
+  sc_rc=$?
+fi
+sc_pend_secs=$((SECONDS - sc_t0))
+kill "${sc_reader_pid}" 2> /dev/null || true
+wait "${sc_reader_pid}" 2> /dev/null || true
+sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
+sc_pend_alive=0
+if [ -n "${sc_fake_pid}" ]; then
+  sc_waited=0
+  while kill -0 "${sc_fake_pid}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
+    sleep 0.1
+    sc_waited=$((sc_waited + 1))
+  done
+  if kill -0 "${sc_fake_pid}" 2> /dev/null; then
+    sc_pend_alive=1
+  fi
+fi
+if [ -z "${sc_early_err}" ] && [ "${sc_rc}" -eq 2 ] && [ "${sc_pend_alive}" -eq 0 ] && [ "${sc_pend_secs}" -lt 10 ]; then
+  pass "shellcheck-staged: a TERM before the batch records its shellcheck pid exits 2 and leaves no process"
+else
+  fail "shellcheck-staged: a TERM before the batch records its shellcheck pid exits 2 and leaves no process" "${sc_early_err:-exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_pend_alive}, seconds: ${sc_pend_secs}}${sc_kj_note}" "output: $(cat "${work_dir}/out")"
 fi
 
 # PATH に shellcheck が無いときは、未検査で成功にせず 2 で止まる
