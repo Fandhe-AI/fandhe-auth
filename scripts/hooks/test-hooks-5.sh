@@ -337,6 +337,54 @@ for swap_to in idx-b idx-c; do
 done
 
 
+# ---- scripts/secret-scan-ci.sh: 検査不能のとき、固定の診断文だけを公開ログへ通す（SECR-23・#6036）
+# (a) 実物の検出器: 走査対象（別の checkout）の skills-lock.json が不正なら、原因の固定診断が出て終了状態は 2。
+new_repo; stage skills-lock.json "not json"; git commit -q -m "chore: add"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${CI_ENTRY}" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] \
+  && grep -qxF 'secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting' "${work_dir}/out" \
+  && grep -qF 'scan could not be completed (exit 2)' "${work_dir}/out"; then
+  pass "secret-scan-ci: an unreadable skills-lock.json on the target surfaces the fixed diagnostic (exit 2)"
+else
+  fail "secret-scan-ci: an unreadable skills-lock.json on the target surfaces the fixed diagnostic (exit 2)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# (b)(c) 試験用の検出器: 許可リストの行だけが出て、許可外・近似・空白付きの行は出ない。終了状態 1 では診断を通さない。
+ci_root="${work_dir}/ci-root"
+mkdir -p "${ci_root}/scripts/hooks"
+cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${ci_root}/scripts/"
+allowed_line='secret-scan: cannot read HEAD; aborting'
+cat > "${ci_root}/scripts/hooks/secret-scan.sh" <<EOF
+#!/usr/bin/env bash
+echo '${allowed_line}'
+echo 'secret-scan: canary-sentinel-path/x; aborting'
+echo '${allowed_line} extra'
+echo 'x ${allowed_line}'
+echo ' ${allowed_line}'
+exit "\${SCAN_STUB_RC:-2}"
+EOF
+chmod +x "${ci_root}/scripts/hooks/secret-scan.sh"
+new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${ci_root}/scripts/secret-scan-ci.sh" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] \
+  && [ "$(grep -cxF "${allowed_line}" "${work_dir}/out")" -eq 1 ] \
+  && ! grep -qF 'canary-sentinel-path' "${work_dir}/out" \
+  && ! grep -qF "${allowed_line} extra" "${work_dir}/out" \
+  && ! grep -qF "x ${allowed_line}" "${work_dir}/out" \
+  && ! grep -qxF " ${allowed_line}" "${work_dir}/out"; then
+  pass "secret-scan-ci: only lines exactly matching the allowlist reach the log on exit 2"
+else
+  fail "secret-scan-ci: only lines exactly matching the allowlist reach the log on exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+rc=0
+SCAN_STUB_RC=1 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${ci_root}/scripts/secret-scan-ci.sh" "${repo}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && ! grep -qF "${allowed_line}" "${work_dir}/out"; then
+  pass "secret-scan-ci: diagnostics are not passed through on exit 1"
+else
+  fail "secret-scan-ci: diagnostics are not passed through on exit 1" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 # ---- 除外の一覧の大きさと引数の長さ（#6053）
 # 登録名ごとの exclude を並べると、有効な一覧（64 KiB 以内）でも引数が macOS の上限を超えて git を起動できなくなる。
 # 実際の上限は CI の macOS で踏み、ここでは shim の MAX_GIT_ARG_BYTES で模す。
