@@ -1,6 +1,6 @@
 # passkey の E2E ハーネス: 構成の下書き
 
-`TASK-11`（passkey の E2E ハーネス。MS-1）の構成の下書き。1/6（#101）で範囲と枠を置き、4/6（#104）で登録の後の認証と失敗の場合を足した。
+`TASK-11`（passkey の E2E ハーネス。MS-1）の構成の下書き。1/6（#101）で範囲と枠を置き、4/6（#104）で登録の後の認証と失敗の場合を足し、6/6（#106）で使い方と実機の確認との境目を足した。
 仕様は spec の `TASK-11` で引く（本文は写さない）。この文書は下書きで、crate の名前・置き場は仮称、人が確定する。
 
 ## 目的と範囲
@@ -112,7 +112,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 `fandhe_auth_e2e_harness::record::E2eRunRecord`。1 つのブラウザのセッション（`E2eHarness::start` 1 回、つまり E2E の試験の関数 1 つ）で
 行った登録・認証の結果を、1 行 1 項目の `key: value`（UTF-8・LF）で出す。試験は `tests/support/passkey.rs` の `RecordSink` を使い、
-終了時（panic の巻き戻りを含む）に本文を標準出力へ出し、`CARGO_TARGET_TMPDIR/e2e-records/`（`target/` の下）へ
+終了時（panic の巻き戻りを含む）に本文を標準出力へ出し、`CARGO_TARGET_TMPDIR/e2e-records/`（Cargo の既定の設定なら `target/` の下。`CARGO_TARGET_DIR` を変えた場合は保存先もビルド時の `CARGO_TARGET_TMPDIR` に従って変わる）へ
 `e2e-run-<browser>-<unix秒>-<pid>-<通し番号>.txt` として新規に書く（既存のファイルは上書きしない）。
 
 | キー | 内容 |
@@ -144,6 +144,144 @@ PKEY の振る舞いを満たしたとは主張しない。
   起動ごとに空の専用の出力先を使い、他の起動と共有しない。
 - 偽のドライバを使う単体の試験は記録をファイルに書かない（E2E の実行回数に数えない）。
 - 日時はファイル名の秒で代え、source の revision・ドライバの版は入れていない（未決）。
+
+## 使い方（6/6）
+
+形式・名前・節立ては仮置きで、人が確認する。正本の見本は `crates/e2e-harness/tests/chrome_registration.rs`・`crates/e2e-harness/tests/chrome_authentication.rs`
+（Firefox は `crates/e2e-harness/tests/firefox_registration.rs`・`crates/e2e-harness/tests/firefox_authentication.rs`）で、ここには手順の骨格だけを書く（値の詳細は見本を見る。ずれを防ぐため）。
+
+### 前提
+
+- unix（Linux・macOS 等）に限る。非 unix では対象の試験が 0 件になり、入口のスクリプトが失敗にする。
+- Chrome は chromedriver と Chrome、Firefox は geckodriver と Firefox（仮想 authenticator の WebDriver のエンドポイントを使える組み合わせ。
+  版の値はここに写さず、参照先を分ける）。
+  - Firefox: 動作の記録のある組み合わせは `scripts/e2e-firefox.sh` と Makefile の `e2e-firefox` の説明を見る（スクリプトが書く範囲は、記録のある組み合わせと、それより古い版・pref が足りない版は未確認という点。記録は spec の `03-poc/` の PoC の記録（〔仮想〕）で、この repo の `make e2e-firefox` ではまだ実行していない）。
+  - Chrome: 同じ文書の「起動・停止の契約（2/6）」にある ChromeDriver を含む確認環境を見る。書かれている確認は chromedriver と Chrome が同じプロセスグループに入ること（特定の環境・版で `ps` により確認。他は未確認）で、仮想 authenticator の動作の確認ではない。
+- ドライバが無ければ黙って飛ばさず失敗する（`DPOL-30`〜`32`）。環境の有無で自動に飛ばす分岐は作らない。
+
+### 試験の置き場
+
+実ブラウザと実 WebDriver を起動する E2E の試験は `crates/e2e-harness/tests/*.rs` に置き、`#[ignore]` を付けて `cfg(unix)` に限る。`#[ignore]` を付けるのはこの E2E に限り、偽のドライバを使う試験は `make test` で流すため `#[ignore]` を付けない。共通の流れと記録は
+`crates/e2e-harness/tests/support/passkey.rs`（`register`・`authentication_run_result`・`RecordSink`。crate の公開 API ではない）と `crates/e2e-harness/tests/support/`（試験用 origin の `TestOrigin`）にある。
+ハーネスは試験専用で、どの crate からも依存しない（`LIB-2`・`LIB-4`）。他の crate からの辺を足すときは、許可表（`scripts/check-crate-deps.sh`）の人の確認が要る。
+
+### 組み立ての手順（見本の流れと対応）
+
+1. `TestOrigin::start()` で試験用 origin を起こす。
+2. `ChromeDriverComponent::new(ChromeDriverConfig::new("chromedriver"))`（Firefox は `GeckoDriverComponent`・`GeckoDriverConfig`）を作り、`Box` に入れる前に `handle()` を取る。
+3. `E2eHarness::start(E2eConfig::new(PasskeyOperation::.., Browser::..).with(Box::new(driver)))` で起動する。
+    起動順・逆順の停止・`Drop` の停止は「起動と停止の契約」の節を見る。
+4. `RecordSink::new(&handle, Browser::.., PasskeyOperation::..)` で記録を開く。
+5. 登録は `support::passkey::register`（仮想 authenticator を `VirtualAuthenticatorOptions` で足し、`register_once` を呼び、戻り値は `(AuthenticatorId, CredentialRef)`）。
+    ヘルパーは内部で `registration_run_result` により分類した登録の結果を `sink.record(..)` に足すので、呼び出し側は登録を記録しない（二重に数えない）。
+    検査の担当を分ける。ヘルパーを使うときは、登録の成否と登録の `check_ok` の検査をヘルパーが内部で行い、呼び出し側へ返るのは `(AuthenticatorId, CredentialRef)` だけで `check_ok` は返らない。
+    呼び出し側が登録の `check_ok` を再検査する必要はなく、できない。ヘルパーが担わない検査（認証の成否・`check_ok`、`evidence()` の確認）だけを呼び出し側が行う。
+    ヘルパーは登録結果の `counts_as_real_device()`・`counts_as_safari()` がともに `false` であることも内部で検査する（`ACPT-7`・`ACPT-8`）。戻り値から登録結果の `evidence()` は取れないので、
+    直接呼び出した操作（認証など）の証跡の確認は呼び出し側が行う。
+    `registration_run_result`・`authentication_run_result` を直接使うときは、得た `(run, check_ok)` を呼び出し側が検査する。成否と `check_ok` の判定の条件は、下の「成否と `check_ok` の判定条件」の節に 1 か所にまとめてあり、手順 5・6 はそこを参照する。
+    登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` の戻り値を `(run, check_ok)` に分け、`run` を `sink.record(PasskeyOperation::Registration, run).expect("record")` で一度だけ記録する。
+    `RecordSink::record` は件数の上限を超えると `Err` を返すので、`sink.record(..).expect("record")` のように成功を確かめる。
+    エラーを無視すると、記録が欠けたまま `finish()` で完了にできてしまう。登録・認証のどちらの直接の記録も同じ。
+    記録のあと、成否と `check_ok` を「成否と `check_ok` の判定条件」の節の条件で、呼び出し側が検査する（`check_ok` は、直接使った登録では `registration_run_result` が返した値、認証では `authentication_run_result` が返した値。操作ごとに、その操作の関数が返した値を使う）。
+    ヘルパーを使わないときは、`register_once` の前の準備も自分で行う（見本は `support::passkey::register`、`crates/e2e-harness/tests/support/passkey.rs`）。
+    準備は 3 つ。(1) `add_virtual_authenticator(&VirtualAuthenticatorOptions)` で仮想 authenticator を足す、(2) `navigate(&origin.origin())` で試験用 origin へ移動する、
+    (3) `set_script_timeout(..)` でスクリプトのタイムアウトを command timeout より短く設定する（時間切れを script timeout として観測するため）。
+    認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)` を呼び、`authentication_run_result(&handle, &aid, &result)` で
+    後続の検査（credential がちょうど 1 件・RP ID が `localhost` と完全一致）を反映した `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Authentication, run).expect("record")` で一度だけ記録し、成功を確かめる。
+    `authenticate_once` の結果をそのまま記録しない（検査を反映できない）。options の値は PoC の値（`QP-1`）で要件の値ではない。
+6. 登録をヘルパーで行った場合、登録の検査はヘルパーが済ませている。どちらの場合も、呼び出し側は、直接使った操作（認証、またはヘルパーを使わない登録）それぞれについて、「成否と `check_ok` の判定条件」の節の条件で成否と `check_ok` を検査し、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる（登録も認証も直接使うときは、両方を検査する）。`!check_ok` を拒否の根拠にしない。
+7. `running.stop()` で停止し、その成功を確かめてから `sink.finish()` で記録を出し、`finish()` の戻り値も確かめる。停止に失敗した実行を完了扱いで記録しない。
+
+### 成否と `check_ok` の判定条件
+
+成否は `run` ではなく元の `result` から決める。`run` を記録した後に `result.expect(..)` で `outcome` を取り出して判定する。
+実装（`crates/e2e-harness/tests/support/passkey.rs`）と照らして確かめた条件は次のとおり。
+
+| 操作 | 期待 | 成否（`outcome`） | `check_ok` |
+| --- | --- | --- | --- |
+| 登録 | 成功 | `outcome.succeeded()` | `assert!(check_ok, ..)` で真を確かめる |
+| 登録 | 拒否 | `!outcome.succeeded()` に加えて、`error_name()` が期待したブラウザの拒否の名前（対象の WebAuthn のエラー名）と一致 | 置かない。`registration_run_result` は期待どおりの拒否でも `false` を返すので、`!check_ok` は拒否の根拠にならない |
+| 認証 | 成功 | `outcome.succeeded()` | `assert!(check_ok, ..)` で真を確かめる |
+| 認証 | 拒否 | 登録の拒否と同じ（`!outcome.succeeded()` と `error_name()` の照合） | `assert!(check_ok, ..)` で真を確かめる（後続の検査の結果で、認証の成否と無関係） |
+
+- `registration_run_result` は、登録が成功しなかったとき（`Err` を含む）は credential を見ずに `(run, false)` を返し、成功したときだけ credential の件数と RP ID を見て真偽を決める。
+  偽になる条件は「登録が成功しなかった」「credential の取得に失敗した」「件数が 1 でない・RP ID が `localhost` でない」で、
+  登録が予期せず成功して件数と RP ID が合えば、拒否を期待する試験でも真になる。そのため登録の `check_ok` は拒否の判定に使えない。
+- `authentication_run_result` は操作の成否によらず credential を検査する。`check_ok` が真でも、認証が成功したり別の理由で拒否されたりし得るので、
+  拒否を期待する認証でも成否は `outcome` で確かめる。
+- `expect(..)` を通っても `error_name()` には `HarnessTimeout`（ハーネス自身の期限切れ）・`HarnessScript`（ハーネスのスクリプトの例外）・`OriginMismatch`（呼び出し前の origin 確認）が入り得る。
+  これらはブラウザの拒否ではないので拒否の根拠にしない（操作結果の初期の分類では、それぞれ `harness_timeout`・`check_failed`・`preflight_failed` になり、`rejected` に数えない。「実行の記録の形式（5/6）」の節）。
+  `!outcome.succeeded()` だけで拒否と見なさない。
+- `authentication_run_result` は後続の検査で分類を上書きする。credential の取得に失敗すると `harness_error`、件数や RP ID が合わないと `check_failed` になり、
+  記録の最終の分類に初期の分類が残るのは後続の検査が通ったときだけである。
+- 証跡（`evidence()`）の検査は、成功を期待する場合も拒否を期待する場合も同じに行う。`evidence()` は `AuthenticatorKind::WebDriverVirtual` から導く固定の値で、
+  操作の成否・拒否の名前に依らない。拒否で終わった操作も `Ok(outcome)`（`outcome.succeeded()` が偽）として `outcome` を持つので、拒否の場合も 2 項目を検査できる（`ACPT-7`・`ACPT-8`）。
+  拒否を期待する認証の例は次のとおり（成否の照合の直後に置く）。
+
+  ```rust
+  let outcome = result.expect("authenticate");
+  assert!(!outcome.succeeded());
+  assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
+  assert!(check_ok, "credential check failed");
+  assert!(!outcome.evidence().counts_as_real_device());
+  assert!(!outcome.evidence().counts_as_safari());
+  ```
+
+- 見本の拒否のケース（`crates/e2e-harness/tests/chrome_authentication.rs`・`crates/e2e-harness/tests/firefox_authentication.rs` の UV 失敗の試験）には、今は対照の認証にも拒否された認証にもこの検査が無い。
+  見本を写すときは上の 2 行を足す。見本の側の欠けの追跡先は #6142。
+
+
+失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
+
+### 実行の方法
+
+- `make test`（`cargo test --workspace --locked`）: workspace 全体の試験を流す。ドライバ不要で、この crate では実ブラウザ・実ドライバを要さない試験だけが流れ（例えば、偽のドライバを使う試験、`crates/e2e-harness/tests/` の `scope.rs`・`test_origin.rs`・`lifecycle.rs`・`webdriver_client.rs`・`run_record.rs`〔記録形式・保存処理〕、`crates/e2e-harness/src/record.rs` 内の単体試験。一覧は `tests/` の実際の構成に従う）（`#[ignore]` のブラウザ E2E は対象外）、ブラウザ E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
+- `make e2e-chrome`（`scripts/e2e-chrome.sh`）・`make e2e-firefox`（`scripts/e2e-firefox.sh`）: `#[ignore]` の登録・認証の試験を target ごとに流す。
+  引数を拒否するのは各スクリプトの `reject_args`（`scripts/lib.sh`）で、スクリプトを直接実行して位置引数を渡すと usage を出して終了コード 2 で止まる。
+  Makefile のレシピは `make` に渡した引数をスクリプトへ転送しないので、登録・認証の対象やテストのオプションを入口（`make e2e-chrome`・`make e2e-firefox`）から引数で指定することはできない。環境変数は cargo・試験・ドライバに引き継がれる（出力先を分けるための `CARGO_TARGET_DIR` は下の「記録の読み方」の用途）。検査や実行の対象を変える目的では環境変数を使わない。それ以外の環境変数を既定から変えた実行を E2E の記録に数えてよいかは、この文書では定めておらず（記録は環境変数の値を持たない）、数える前に人に確かめる。
+  target ごとに 1 件以上通らなければ失敗する。
+  流す target は各スクリプトが固定で指定している（`scripts/e2e-chrome.sh` は `chrome_registration`・`chrome_authentication`、`scripts/e2e-firefox.sh` は `firefox_registration`・`firefox_authentication`。`scripts/lib.sh` の `run_e2e` が target ごとに `cargo test --test <target> -- --ignored` を流す）。
+  そのため `tests/` に新しいファイルを作っても、スクリプトの target の一覧に足さない限り `make e2e-*` はその試験を流さず、成功し得る。
+  試験を足す方法は 2 つある。どちらの場合も、対象の `make e2e-*` の出力に、足した試験の名前とその結果（`ok`）が出ていることを確かめる。
+  (1) 既存の target のファイルに `#[test]` と `#[ignore]` を付けた関数を足す。スクリプトの変更は要らない。ただし target ごとの「1 件以上通る」検査は既存の試験が通るだけで満たされ、足した関数が流れたことは示さない。
+  (2) 新しいファイルを使うときは、同じ変更でスクリプトの `run_e2e` の target の一覧にそのファイル名（拡張子なし）を足し、`make e2e-chrome`・`make e2e-firefox` で新しい target が実際に流れて通ることを確かめる。
+  確かめる場所は、`run_e2e` が付ける `--show-output` の出力のうち、`successes:` の一覧の名前（`test result:` の件数だけでは、足した関数が含まれたかは分からない）。
+  試験の名前と `ok` は同じ行に並ばないことがある。記録の出力が libtest の取り込みを通らず、名前の行の後ろに割り込むためである（`passkey.rs` の `emit` のコメントが根拠）。照合は完全な名前（モジュールのパスを含む）で行い、部分一致で済ませない。
+  なお、実際の出力の形はこの文書の作成時に流して確かめておらず、`scripts/lib.sh` の `run_e2e` と上のコメントからの読みである。
+  CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
+
+### 記録の読み方
+
+形式は「実行の記録の形式（5/6）」の節を見る。出力は標準出力と `CARGO_TARGET_TMPDIR/e2e-records/`（`RecordSink` の出力先。`target/` の下になるのは Cargo の既定の設定の場合だけで、固定の `target/e2e-records/` ではない。`CARGO_TARGET_DIR` を変えた場合はビルド時の `CARGO_TARGET_TMPDIR` に従う）。
+出力先は起動をまたいで追記されるので、集計はその起動の標準出力だけを正とするか、起動ごとに空の専用の出力先を使う。
+出力先は `env!("CARGO_TARGET_TMPDIR")` でビルド時に取り込まれるため、実行時に環境変数を設定しても変わらない。
+起動ごとに分けるには、`make e2e-chrome`・`make e2e-firefox` を呼ぶときに `CARGO_TARGET_DIR` を起動ごとに異なる空のディレクトリへ設定する
+（例: `dir=$(mktemp -d) && CARGO_TARGET_DIR="$dir" make e2e-chrome`。`mktemp` が失敗したときは make を起動しない。cargo が環境変数を引き継ぐ。ビルドはその出力先で一からやり直しになる）。
+
+### 守ること
+
+- URL・ポート・セッション ID・authenticator ID・credential ID・署名・パスを記録・誤り・ログに出さない（`SECR-11`・`SECR-23`）。試験で値を出す行を足さない。
+- 検証を外す意味の起動 flag・pref・feature を足さない（`DPOL-30`〜`32`）。Firefox で足りない場合も推測で足さず、人に確かめる。
+- 通信はループバックのドライバと試験用 origin だけにする。RP ID の完全一致の検査を外さない（A10）。
+- 期待と違う結果は期待を緩めず、記録して人に確かめる（`AUDB-6` の趣旨）。
+- 記録は実行の事実で、合否の判定でも spec の「確定」でもない（`ACPT-7`）。
+
+### この段で使えないもの
+
+- RelyingParty の実体（サーバー側の登録・認証応答の検証）: `TASK-716` の完了待ち。このため `PKEY` の振る舞いを満たしたとは主張しない。
+- 画面の E2E（Hub の `ASCR`）、適合性試験の実行環境（Hub の `ARUN-20`）、Safari（`Browser` に変種が無い）。
+
+## 実機の確認との境目（6/6）
+
+- このハーネスが扱うのは Chrome・Firefox の WebDriver の仮想 authenticator（`AuthenticatorKind::WebDriverVirtual`・`Evidence::Virtual`）だけで、結果は〔仮想〕。
+- Safari と実機の authenticator（同期 passkey・セキュリティキーを含む）での確認は**別のタスク**で、このハーネスの範囲外。
+  `TASK-784`（`CG2-2`）と、旧構成の手順を受ける `TASK-75`〜`TASK-78` で扱う。手順・機材・記録票の中身はここに写さず、spec を ID で引く。
+- 仮想の合格を実機・Safari の合格に数えない（`ACPT-7`・`ACPT-8`）。記録の `counts_as_real_device`・`counts_as_safari` は型から導く常に `false` で、外から上書きできない。
+  このハーネスの記録を、実機のタスクの記録票の結果の欄に入れる材料にしない。
+- 実機の確認の実施と結果の判定・記録は人が行う。〔仮想〕の合格で〔実機〕〔人の操作〕の項目を確定にしない（`ACPT-7`）。
+- この repo の状況: Chrome（Chromium 157）の合格は 4/6（#104）の時点のハーネスでの実績で、登録・認証・失敗の場合を実行して通った〔仮想〕。
+  元の記録は「未決・人の確認待ち」の節の 4/6 の項を見る。5/6（#105）で足した実行の記録の保存・停止後の `finish()` を含む版での Chrome の実行は、この文書と repo の記録から確かめられず未確認。
+  Firefox は作業環境に geckodriver・Firefox が無く未実行（未検証）。どちらも実機・Safari の結果ではない。
 
 ## 試験用ページと origin の置き場（人が決める）
 
@@ -216,7 +354,7 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
 | 3/6（#103） | Firefox の結線と識別子の規則（`LGUI-35` → `ASCR-65`） |
 | 4/6（#104） | 登録の後の認証を両ブラウザで通す。失敗する場合の試験。暫定の結果行。3/6 のレビューの持ち越し（`browserName` の照合など） |
 | 5/6（#105） | 実行の記録の形式（ブラウザの版の主番号・authenticator の種類・回数・仮想の印）。暫定の結果行を置き換え |
-| 6/6（#106） | 使い方の文書と、実機の確認は別タスクである旨 |
+| 6/6（#106） | 使い方の文書と、実機の確認は別タスクである旨（本段。「使い方（6/6）」「実機の確認との境目（6/6）」の節） |
 
 ## 未決・人の確認待ち
 
@@ -241,6 +379,8 @@ chromedriver が無ければ失敗する。Chrome の起動 flag は `--headless
   4/6 の「転記しない」方針を改めた範囲を含む）。回数の単位を 1 セッションとし合算は読み手が行うこと。上限 10,000 件の値。
   日時・source の revision・ドライバの版を入れていないこと（it-harness への辺、または `DPOL-32` の読みが要る）。`Drop` で巻き戻る間に記録を書く作り。
   Firefox での実行と記録（geckodriver と Firefox のある環境での `make e2e-firefox`）は人の作業
+- 6/6 の追加（すべて仮置き。人が確認する）: 使い方の節立て・「実機の確認との境目」の節の置き方、見本を既存の `tests/chrome_*.rs`・`tests/firefox_*.rs` とし専用のサンプルの試験を足さなかったこと
+- 6/6 の未達: Firefox での `make e2e-firefox` の実行と記録は人の作業のまま。RelyingParty の実体は `TASK-716` 待ちで、`TASK-11` はそれまで未達の部分を持つ
 - Chrome の起動 flag は `--headless=new` だけ（`DPOL-30` の走査語に掛かる flag は足していない）
 - it-harness・最小の組込み先への辺（足す段で許可表を人に確かめる）
 

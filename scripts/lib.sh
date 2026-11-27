@@ -100,3 +100,32 @@ run_e2e() {
     fi
   done
 }
+
+# 公開ログへ通してよい検出器（scripts/hooks/secret-scan.sh）の固定の診断文（SECR-23）。
+# 陰性対照（secret-scan-canary.sh）と CI 入口（secret-scan-ci.sh）が共有し、行全体の完全一致（grep -aFx）でだけ使う。
+# 値・パス・ファイル名・動的な部分を含む文は足さない。足すときは検出器の文言と同時に直し、試験の照合を通す（#6036）。
+secret_scan_fixed_diagnostics() {
+  printf '%s\n' \
+    'secret-scan: HEAD changed during the scan; aborting' \
+    'secret-scan: the index changed during the scan; aborting' \
+    'secret-scan: cannot snapshot the index; aborting' \
+    'secret-scan: cannot enter the repository root; aborting' \
+    'secret-scan: cannot read HEAD; aborting' \
+    'secret-scan: cannot read the committed skills-lock.json; aborting' \
+    'secret-scan: cannot read the staged skills-lock.json; aborting' \
+    'secret-scan: cannot resolve the detector location; aborting' \
+    'secret-scan: cannot resolve the repository root; aborting' \
+    'secret-scan: failed to list files; aborting' \
+    'secret-scan: failed to list tracked files; aborting' \
+    'secret-scan: failed to normalize diff; aborting' \
+    'secret-scan: failed to read diff; aborting' \
+    'secret-scan: failed to resolve the empty tree; aborting' \
+    'secret-scan: internal error; aborting' \
+    'secret-scan: mktemp failed; aborting' \
+    'secret-scan: not inside a git work tree; aborting' \
+    'secret-scan: self-test failed (regex engine / locale mismatch?); aborting' \
+    'secret-scan: reading skills-lock.json timed out; aborting' \
+    'secret-scan: skills-lock.json is too large; aborting' \
+    'secret-scan: skills-lock.json is unreadable or has an unexpected shape; aborting' \
+    'secret-scan: tracked files exist but none were selected for scanning; aborting'
+}
