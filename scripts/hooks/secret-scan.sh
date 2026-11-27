@@ -357,12 +357,12 @@ index_absent_confirmed() {
 #   (1) 診断の受け皿を照会の前に消せて、照会の後も消せる（リダイレクトの open が失敗すると bash は stat を起動せず 1 を返し、
 #       前回の ENOENT の診断が残ったまま読まれる fail-open になるため。読む診断は必ず今回の照会のもの）
 #   (2) 終了コードが 1（起動の失敗は 126・127。bash 自身が「…: No such file or directory」を出し得るため区別する）
-#   (3) 診断の全体が 64 KiB 以下で、stat 自身の接頭辞 "stat: " で始まり、strerror の文言 ": No such file or directory" と
+#   (3) 診断の全体が 64 KiB 以下で NUL を含まず、stat 自身の接頭辞 "stat: " で始まり、strerror の文言 ": No such file or directory" と
 #       改行 1 つで終わる（LC_ALL=C 固定）。診断の途中にはパスが入り得る（BSD〔macOS〕の stat・busybox の stat は、パスの改行を
 #       そのまま出して複数行になる）が、末尾は strerror が占めるため、パスの内容では変えられない（パスに改行が入っても成り立つ。
 #       以前の「末尾の文言で判定する」設計と同じ理由）。途中の行は問わず、先頭と末尾だけを見る。末尾の改行は必須（途中で切れた診断は 1）。
 #       GNU・uutils・BSD〔macOS〕は終了コード 1 と接頭辞 "stat: " と読んでいる（BSD は macOS の CI の bash 3.2 でも通っているが、実機の確認ではない）。
-# 診断は 1 行ずつ bash の read で読む（コマンド置換は使わない。末尾の改行を落とすため。外部コマンドは head・cmp だけで、どちらも確認済みの一覧にある）。
+# 診断は 1 行ずつ bash の read で読む（コマンド置換は使わない。末尾の改行を落とすため。外部コマンドは head・cmp・tr だけで、いずれも確認済みの一覧にある）。
 # 差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
 path_enoent_confirmed() {
   local line="" first="" last="" n=0 rc=0 p="$1" errfile="${tmp_dir}/stat-err" capfile="${tmp_dir}/stat-err-cap"
@@ -377,8 +377,12 @@ path_enoent_confirmed() {
   rm -f -- "${errfile}" "${capfile}" || return 1
   LC_ALL=C stat -- "${p}" > /dev/null 2> "${errfile}" || rc=$?
   # 大きさの上限: 先頭の 64 KiB と全体が同じでなければ、上限を超えている。
-  head -c 65536 "${errfile}" > "${capfile}" || return 1
-  cmp -s "${errfile}" "${capfile}" || return 1
+  head -c 65536 -- "${errfile}" > "${capfile}" || return 1
+  cmp -s -- "${errfile}" "${capfile}" || return 1
+  # NUL を含む診断は 1。bash 4.3 以降の read は入力の NUL を読み飛ばすため、行の解析の前にバイトで確かめる
+  # （NUL を除いた複写と元が同じでなければ NUL が有る。置換・パイプは使わず、親のシェルの || で受ける。bash 3.2 の ERR トラップの扱いを避ける）。
+  tr -d '\000' < "${errfile}" > "${capfile}" || return 1
+  cmp -s -- "${errfile}" "${capfile}" || return 1
   # 全体を 1 行ずつ読む。最後の行が改行で終わっていなければ（read が非 0 で、残りが有る）、途中で切れた診断として 1。
   while :; do
     if IFS= read -r line; then

@@ -598,7 +598,7 @@ fi
 # T17: stat の起動の失敗（診断が ENOENT で終わっても、終了コードが 126・127）・接頭辞 "stat: " の無い診断・末尾が ENOENT でない診断・改行で終わらない診断・空の診断・上限を超える診断（終了コード 1）は「不在」と確かめられたとは言えず 2（path_enoent_confirmed。#6047）
 # 起動の失敗は、不在の index を空として 0 を返す経路になり得る（fail-open）。直しを外すと 0 を返し、この試験が落ちる。
 t17_i=0
-for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-second-line unterminated unterminated-tail enoent-not-at-end empty oversize; do
+for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-second-line unterminated unterminated-tail enoent-not-at-end nul empty oversize; do
   t17_i=$((t17_i + 1))
   new_repo; stage src/app.txt "hello"
   stat17_dir="${work_dir}/stat17-shim-${t17_i}"
@@ -618,11 +618,11 @@ for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-secon
       printf '#!/bin/sh\necho "x: No such file or directory" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
     multi-line)
-      # 終了コード 1・1 行目は ENOENT の形だが、末尾の行が ENOENT でない複数行（先頭と末尾の両方を見る）
+      # 終了コード 1・最初の行は ENOENT の形だが、末尾の行が ENOENT でない複数行（先頭と末尾の両方を見る）
       printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\necho "extra" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
     empty-second-line)
-      # 1 行目は ENOENT の形で、2 行目が空行（空の 2 行目も「2 行目が有る」と数える）
+      # 最初の行は ENOENT の形で、末尾の行が空行（末尾が ENOENT でない）
       printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\necho "" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
     unterminated-tail)
@@ -632,6 +632,10 @@ for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-secon
     enoent-not-at-end)
       # 末尾の行に ENOENT の文言を含むが、末尾ではない
       printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory (extra)" >&2\nexit 1\n' > "${stat17_dir}/stat"
+      ;;
+    nul)
+      # ENOENT の形の行の後ろに NUL が残る（bash 4.3 以降の read は NUL を読み飛ばすため、バイトで確かめないと通る）
+      printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\nprintf "\\000" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
     empty)
       # 終了コード 1 だが診断が空
@@ -650,6 +654,7 @@ for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line empty-secon
     multi-line) t17_msg="a multi-line stat diagnostic not ending with ENOENT" ;;
     unterminated-tail) t17_msg="a stat diagnostic whose last line is unterminated" ;;
     enoent-not-at-end) t17_msg="a stat diagnostic with the ENOENT text not at the end" ;;
+    nul) t17_msg="a stat diagnostic containing NUL" ;;
     empty) t17_msg="an empty stat diagnostic" ;;
     oversize) t17_msg="an oversize stat diagnostic" ;;
     empty-second-line) t17_msg="a stat diagnostic with a trailing empty line" ;;
@@ -686,7 +691,7 @@ if [ ! -e "${T18_N}" ]; then
   : > "${T18_N}"
   for f in "${T18_TMP}"/secret-scan.*/stat-err; do
     chmod 444 "${f}"
-    if [ ! -w "${f}" ]; then
+    if [ -e "${f}" ] && [ ! -w "${f}" ]; then
       : > "${T18_RO}"
     fi
   done
@@ -700,7 +705,11 @@ EOF18
   rc=0
   GIT_INDEX_FILE="${work_dir}/t18-absent-index" TMPDIR="${t18_tmp}" T18_TMP="${t18_tmp}" T18_N="${work_dir}/t18-n" T18_RO="${work_dir}/t18-ro" T18_SECOND="${work_dir}/t18-second" \
     PATH="${stat18_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
-  if [ ! -e "${work_dir}/t18-ro" ]; then
+  if [ ! -e "${work_dir}/t18-n" ]; then
+    # shim が一度も起動されていない（前提が崩れた）。skip にせず失敗にする
+    fail "secret-scan: a stale ENOENT diagnostic is not read when the diagnostic file cannot be opened (2)" "the stat shim was never started" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  elif [ ! -e "${work_dir}/t18-ro" ]; then
+    # 起動はしたが、受け皿を読み取り専用にできなかった（権限を強制しない環境）。何も確かめていないため、合格とは数えず理由付きで skip する
     echo "ok - secret-scan: stale diagnostic test skipped (the diagnostic file could not be made read-only; nothing was checked)"
   elif [ -e "${work_dir}/t18-second" ] && [ "${rc}" -eq 2 ] \
     && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
@@ -749,7 +758,7 @@ done
 
 # T19b: パスに ": No such file or directory" と改行を含めても、実際の誤りが別なら偽装できず 2（末尾は strerror が占める）
 new_repo; stage src/app.txt "hello"
-t19_spoof=$'t19-spoof\nx: No such file or directory'
+t19_spoof=$'t19-spoof\nx: No such file or directory\n'
 mkdir -p "${work_dir}/${t19_spoof}"
 stat19s_dir="${work_dir}/stat19-shim-spoof"
 mkdir -p "${stat19s_dir}"
@@ -763,5 +772,58 @@ if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; abort
 else
   fail "secret-scan: a path faking the ENOENT text does not confirm an absent index when the real error differs (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
+
+# T20: 診断の大きさの境界（ちょうど 64 KiB は 0、1 バイト超過は 2）。接頭辞 "stat: " と末尾 ": No such file or directory\n"（28 バイト）の間を詰めて合わせる
+new_repo; stage src/app.txt "hello"
+for t20_total in 65536 65537; do
+  stat20_dir="${work_dir}/stat20-shim-${t20_total}"
+  mkdir -p "${stat20_dir}"
+  # shellcheck disable=SC2016 # shim の本文。展開させず、shim の実行時に評価させる（意図）
+  printf '#!/bin/sh\nprintf "stat: " >&2\nhead -c %s /dev/zero | tr "\\000" a >&2\nprintf ": No such file or directory\\n" >&2\nexit 1\n' "$((t20_total - 6 - 28))" > "${stat20_dir}/stat"
+  chmod +x "${stat20_dir}/stat"
+  rc=0
+  GIT_INDEX_FILE="${work_dir}/t20-absent-index" PATH="${stat20_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${t20_total}" -eq 65536 ]; then t20_want=0; else t20_want=2; fi
+  if [ "${rc}" -eq "${t20_want}" ]; then
+    pass "secret-scan: a stat diagnostic of ${t20_total} bytes gives ${t20_want} (limit boundary)"
+  else
+    fail "secret-scan: a stat diagnostic of ${t20_total} bytes gives ${t20_want} (limit boundary)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+done
+
+# T21: 診断の読み取りに使う head・cmp・tr が失敗したら、不在と確かめず 2（失敗を無視して通さない）
+# head は本物の結果を作ってから失敗を返す（失敗を無視すると、複写が一致して 0 になる）。cmp は診断の受け皿の読み取りのとき、tr は NUL の除去（-d）のときだけ失敗させる。
+real_head21="$(command -v head)"; real_cmp21="$(command -v cmp)"; real_tr21="$(command -v tr)"
+export real_head21 real_cmp21 real_tr21
+for t21_cmd in head cmp tr; do
+  new_repo; stage src/app.txt "hello"
+  shim21_dir="${work_dir}/shim21-${t21_cmd}"
+  mkdir -p "${shim21_dir}"
+  cat > "${shim21_dir}/${t21_cmd}" <<'EOF21'
+#!/bin/sh
+case "$*" in
+  *stat-err*|*"-d "*)
+    case "$(basename "$0")" in
+      head) "${real_head21}" "$@"; exit 1 ;;
+      cmp) "${real_cmp21}" "$@"; exit 2 ;;
+      tr) "${real_tr21}" "$@"; exit 1 ;;
+    esac
+    ;;
+esac
+case "$(basename "$0")" in
+  head) exec "${real_head21}" "$@" ;;
+  cmp) exec "${real_cmp21}" "$@" ;;
+  tr) exec "${real_tr21}" "$@" ;;
+esac
+EOF21
+  chmod +x "${shim21_dir}/${t21_cmd}"
+  rc=0
+  GIT_INDEX_FILE="${work_dir}/t21-absent-index" PATH="${shim21_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+    pass "secret-scan: a failing ${t21_cmd} while reading the stat diagnostic does not confirm an absent index (2)"
+  else
+    fail "secret-scan: a failing ${t21_cmd} while reading the stat diagnostic does not confirm an absent index (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+done
 
 finish "part 8"
