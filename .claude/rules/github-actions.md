@@ -279,12 +279,18 @@ GitHub Actions のキャッシュ（`actions/cache`・`actions/setup-node` の `
 追加・変更するときの方針。効かないキャッシュは復元時間と容量を浪費し、他のキャッシュを追い出すため、
 「入れれば速くなる」とは考えない。
 
-### 現状（2026-10-11 時点）
+### 現状（2026-11-27 時点）
 
-- 本リポジトリは GitHub Actions のキャッシュを使っていない（キャッシュ 0 件・0 バイト）。
-  `ci.yml` のツールは `env` に宣言した版を SHA256 で検証して毎回導入する方式で、所要時間は数十秒
-  （Rust のジョブの toolchain だけは例外で、rustup で毎回導入する。チェックリストの 9）
-- 言語固有のジョブを足してキャッシュを入れる場合は、本節に従う
+- Rust の 3 ジョブ（`build-test`・`lint`・`it-db-ci`）に cargo の依存と `target/` のキャッシュを入れた（TASK-6 8/10・#55）。
+  方式は公式の `actions/cache/restore` と `actions/cache/save` の分離（v6.1.0。SHA 固定）で、第三者の action は使わない。
+  保存は `main` への push だけ（PR は復元のみ）。キャッシュはジョブごとに分ける
+- キー: `cargo-<ジョブ名>-v1-<OS>-<rustc -vV のハッシュ>-<ルートの Cargo.lock のハッシュ>`。restore-keys は同じジョブ・同じ toolchain の版までで、
+  toolchain の版が変われば cold にする。版セグメントを上げる条件は `ci.yml` の `build-test` 直前のコメントに書く
+- パス: cargo の registry（index・cache）・cargo の取得元 DB・`target/`。`target/tmp`（試験の一時ファイル・記録）は保存から外す
+- 入れる前の計測（手元の cold ビルド）: `Compiling` は build で 33 件・test の build で 32 件、`target/` は約 780 MB、registry の index と cache は約 370 MB。
+  1 件約 1.2 GB 以下 × 3 ジョブ × 1 OS で 10 GB に収まる見積もり。手元は速く CI の runner の秒数とは別で、導入後の hit の効果は未検証（main への merge 後に測る。効果が無ければ撤去を人が判定する）
+- 入れていないもの: toolchain（毎回の導入は約 10 秒）・Docker のイメージ・依存の検査の advisory DB（TASK-680・TASK-681 の結線のときに考える）。
+  ほかのツールは `env` に宣言した版を SHA256 で検証して毎回導入する方式（チェックリストの 9）
 
 ### 前提: 容量と課金
 
