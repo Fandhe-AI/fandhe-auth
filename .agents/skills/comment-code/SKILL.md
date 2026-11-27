@@ -191,7 +191,7 @@ function getUser(userId: string): User | null { ... }
 
 ### 次のアクション
 - コミットする場合: create-commit スキルを使用
-- CLAUDE.md / AGENTS.md（あるもの）を更新する場合: update-docs スキルを使用
+- CLAUDE.md / AGENTS.md（あるもの）を更新する場合: update-docs スキルを使用（update-docs が SKILL.md の場所を確かめられずに止まった場合は、指示ファイルの更新を未完了として報告する）
 ```
 
 コミットは `create-commit` スキルへ委譲する（このスキル自身はコミットを行わない）。

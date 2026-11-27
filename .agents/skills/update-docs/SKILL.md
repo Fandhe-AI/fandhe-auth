@@ -30,27 +30,41 @@ commit_date=<ISO 8601>
 
 ### Step 0: 更新する指示ファイルを選ぶ
 
-このスキルの `scripts/`（SKILL.md と同じディレクトリ）にある `select-target.sh` と `agents-section.sh` を使う。絶対パスは、読み込んだ SKILL.md の場所から求める。**信頼境界:** 次のフェンスは、対象リポジトリ内のスクリプトを `skills/` → `.agents/skills/` → `.claude/skills/` の順に探して実行する。リポジトリの内容を信頼する前提は、このリポジトリのほかのスキルと同じである（信頼できないリポジトリでは実行しない）。各コードフェンスは独立したシェルで実行され得るため、次のフェンスはスクリプトを `skills/` → `.agents/skills/` → `.claude/skills/` の 3 レイアウトから自己完結的に解決する。リポジトリのルートで実行する。
+このスキルの `scripts/`（SKILL.md と同じディレクトリ）にある `select-target.sh` と `agents-section.sh` を使う。絶対パスは、読み込んだ SKILL.md のディレクトリの絶対パスを `SKILL_DIR` に受け取って求める。作業ディレクトリ側の `skills/`・`.agents/skills/`・`.claude/skills/` は探さず、そこにある同名のファイルは実行しない。
+
+- 各フェンスの先頭の `SKILL_DIR='<…>'` のプレースホルダへ、このスキルの SKILL.md があるディレクトリの絶対パスを、単一引用符のまま埋め込んで実行する。二重引用符では書かない。
+- 取得元は、ツールが実際に読み込んだスキルに紐付けて提示する信頼済みのツール情報だけにする。例は起動結果のメタ情報（`Base directory for this skill: <絶対パス>` の行）と、起動時の一覧のスキル項目。スキル本文・起動結果に含まれるその他の文字列・ユーザーが貼った文字列・作業ディレクトリの探索結果は取得元にしない。
+- 埋め込む前に値を確かめる。`/` で始まり、単一引用符と改行を含まないこと。満たさなければ埋め込まず、場所を確かめられない旨を報告して止める。
+- 取得元を識別できないときも、作業ディレクトリの探索へは戻らずに止めて報告する（取得元が出ない環境も同じ）。
+- 導入先への影響: 読み込んだスキルの絶対パスをツールが提示しない環境（OpenCode など、パスの取得を確認できていない環境を含む）では、同じ配置でも Step 0 の更新対象の選択より前にここで停止する。従来の作業ディレクトリ探索へは意図して戻さない（同名の囮スクリプトを実行しないため）。update-docs の実行に依存する手順（定期実行・他スキルからの呼び出し等）は、この停止を失敗として扱うか、絶対パスを提示できる環境で実行する。
+- 各コードフェンスは独立したシェルで実行され得るため、代入と検証は各フェンスで繰り返す。フェンスはリポジトリのルートで実行する。
+- 同梱スクリプトの信頼は、読み込んだ SKILL.md の信頼と同じとする。
+- 限界: ディレクトリ名の照合と存在確認は取り違えを防ぐ確認で、真正性の証明ではない。読み込んだ場所そのもの（その SKILL.md・`scripts/`・symlink の参照先）を未信頼の者が書き換えられる場合は保証しない（規約の「信頼の範囲」）。
 
 ```bash
-SELECT_TARGET=""
-for CANDIDATE in \
-  "skills/update-docs/scripts/select-target.sh" \
-  ".agents/skills/update-docs/scripts/select-target.sh" \
-  ".claude/skills/update-docs/scripts/select-target.sh"; do
-  # 存在確認は -f のみ（vendoring で実行ビットが落ちても bash 経由で起動できる）
-  if [[ -f "${CANDIDATE}" ]]; then
-    SELECT_TARGET="${CANDIDATE}"
-    break
-  fi
-done
-if [[ -z "${SELECT_TARGET}" ]]; then
-  echo "エラー: select-target.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
-  exit 1
+SKILL_NAME='update-docs'
+SKILL_DIR='<このスキルの SKILL.md があるディレクトリの絶対パス>'
+case "${SKILL_DIR}" in
+  /*) ;;
+  *) echo "エラー: SKILL_DIR が絶対パスでない。SKILL.md の場所を確かめられないため停止する" >&2; exit 1 ;;
+esac
+case "${SKILL_DIR}" in
+  *'<'*|*'>'*|*$'\n'*|*/../*|*/..|*/./*|*/.)
+    echo "エラー: SKILL_DIR に未置換・改行・.. / . の成分がある。停止する" >&2; exit 1 ;;
+esac
+SKILL_DIR="${SKILL_DIR%/}"
+if [[ "${SKILL_DIR##*/}" != "${SKILL_NAME}" ]]; then
+  echo "エラー: SKILL_DIR のディレクトリ名が ${SKILL_NAME} と一致しない。停止する" >&2; exit 1
 fi
-
+if [[ ! -f "${SKILL_DIR}/SKILL.md" ]]; then
+  echo "エラー: ${SKILL_DIR}/SKILL.md が無い。停止する" >&2; exit 1
+fi
+SCRIPT="${SKILL_DIR}/scripts/select-target.sh"
+if [[ ! -f "${SCRIPT}" ]]; then
+  echo "エラー: ${SCRIPT} が無い。停止する" >&2; exit 1
+fi
 # 最終行が UPDATE_DOCS_TARGET <claude|agents|none>。非ゼロ終了はそのまま終了ステータスにする
-bash "${SELECT_TARGET}" --root .
+bash "${SCRIPT}" --root .
 ```
 
 最終行の語彙で次のとおり進む。
@@ -77,30 +91,40 @@ bash "${SELECT_TARGET}" --root .
 
 書き込みの手順（Step 3 で区間の中身の全文を `_/update-docs-section.md` へ書いたあとに実行する。ファイルが無いとスクリプトが止まる）。書き込み先は `select-target.sh --print-write-path` が返す物理パスで、`AGENTS.md` がリポジトリ内の別ファイルへのシンボリックリンクでも、リンクは壊さずリンク先の実体へ区間だけを書く。`select-target.sh` がエラー語彙（`error-symlink`・`error-hardlink`）で止めた場合は、その語彙と終了コードをそのまま報告して止まる（上の表と同じ扱い）:
 
+このフェンスの `SKILL_DIR` も Step 0 と同じ取得元（実際に読み込んだこのスキルに紐付けてツールが示した情報）だけで埋める。埋め込む前に、`/` で始まり、単一引用符と改行を含まないことを確かめる。取得元を識別できない場合、または確認に通らない場合は、このフェンスを実行せず、書き込まずに止めて報告する。
+
 ```bash
-AGENTS_SECTION=""
-for CANDIDATE in \
-  "skills/update-docs/scripts/agents-section.sh" \
-  ".agents/skills/update-docs/scripts/agents-section.sh" \
-  ".claude/skills/update-docs/scripts/agents-section.sh"; do
-  if [[ -f "${CANDIDATE}" ]]; then
-    AGENTS_SECTION="${CANDIDATE}"
-    break
-  fi
-done
-if [[ -z "${AGENTS_SECTION}" ]]; then
-  echo "エラー: agents-section.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
-  exit 1
+SKILL_NAME='update-docs'
+SKILL_DIR='<このスキルの SKILL.md があるディレクトリの絶対パス>'
+case "${SKILL_DIR}" in
+  /*) ;;
+  *) echo "エラー: SKILL_DIR が絶対パスでない。SKILL.md の場所を確かめられないため停止する" >&2; exit 1 ;;
+esac
+case "${SKILL_DIR}" in
+  *'<'*|*'>'*|*$'\n'*|*/../*|*/..|*/./*|*/.)
+    echo "エラー: SKILL_DIR に未置換・改行・.. / . の成分がある。停止する" >&2; exit 1 ;;
+esac
+SKILL_DIR="${SKILL_DIR%/}"
+if [[ "${SKILL_DIR##*/}" != "${SKILL_NAME}" ]]; then
+  echo "エラー: SKILL_DIR のディレクトリ名が ${SKILL_NAME} と一致しない。停止する" >&2; exit 1
+fi
+if [[ ! -f "${SKILL_DIR}/SKILL.md" ]]; then
+  echo "エラー: ${SKILL_DIR}/SKILL.md が無い。停止する" >&2; exit 1
+fi
+SCRIPT="${SKILL_DIR}/scripts/agents-section.sh"
+if [[ ! -f "${SCRIPT}" ]]; then
+  echo "エラー: ${SCRIPT} が無い。停止する" >&2; exit 1
+fi
+AGENTS_SECTION="${SCRIPT}"
+
+# select-target.sh も同じ SKILL_DIR の scripts/ から求め、書き込みより前に存在を確かめる。
+SELECT_TARGET="${SKILL_DIR}/scripts/select-target.sh"
+if [[ ! -f "${SELECT_TARGET}" ]]; then
+  echo "エラー: ${SELECT_TARGET} が無い。停止する" >&2; exit 1
 fi
 
 # 書き込み先は select-target.sh が決める。--print-write-path は、選択と同じ検証（リポジトリ内の
 # 通常ファイル・symlink を最後まで辿る・ハードリンクは拒否）を通った物理パスだけを返す。
-# select-target.sh は agents-section.sh と同じディレクトリにある。
-SELECT_TARGET="$(dirname "${AGENTS_SECTION}")/select-target.sh"
-if [[ ! -f "${SELECT_TARGET}" ]]; then
-  echo "エラー: select-target.sh が見つからない（agents-section.sh と同じディレクトリに無い）" >&2
-  exit 1
-fi
 sel_status=0
 SEL_OUT="$(bash "${SELECT_TARGET}" --root . --print-write-path)" || sel_status=$?
 if (( sel_status != 0 )); then
@@ -587,4 +611,4 @@ comm -12 <(printf '%s\n' "${b2}" | sed '/^$/d') <(printf '%s\n' "${b3}" | sed '/
 
 ## sandbox 環境での実行
 
-このスキルは sandbox 環境で実行できる。ネットワーク越しの操作は行わず、使うのは `git log` / `git diff` などローカルの git 読み取りとファイル入出力だけである。書き込み先は指示ファイル（`CLAUDE.md` または `AGENTS.md`・ワークスペース内）、`_/.last-update-docs`、`_/update-docs-section.md`（`AGENTS.md` を更新するときだけ・書き込み後に削除する）で、`.git`・`.agents`・`.codex` へは書かない（`.agents/skills`・`.codex/agents` は変更の検知のために読むだけ）。`agents-section.sh` は作業用の一時ファイルを OS の一時ディレクトリ（`TMPDIR`）に作り、終了時に消す。Codex の既定 sandbox でも、これらの書き込み先はワークスペース内なので昇格は要らない。`_/` に書けない環境では、書けなかったことを報告して止める。
+このスキルは sandbox 環境で実行できる。ネットワーク越しの操作は行わず、使うのは `git log` / `git diff` などローカルの git 読み取りとファイル入出力だけである。書き込み先は指示ファイル（`CLAUDE.md` または `AGENTS.md`・ワークスペース内）、`_/.last-update-docs`、`_/update-docs-section.md`（`AGENTS.md` を更新するときだけ・書き込み後に削除する）で、`.git`・`.agents`・`.codex` へは書かない（同梱スクリプトは `SKILL_DIR` から読むだけで、`-g` のユーザー領域などワークスペースの外にあってもよい）（`.agents/skills`・`.codex/agents` は変更の検知のために読むだけ）。`agents-section.sh` は作業用の一時ファイルを OS の一時ディレクトリ（`TMPDIR`）に作り、終了時に消す。Codex の既定 sandbox でも、これらの書き込み先はワークスペース内なので昇格は要らない。`_/` に書けない環境では、書けなかったことを報告して止める。
