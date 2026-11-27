@@ -313,7 +313,7 @@ judgment:
 - 本計測で対象が `Excluded` を返したら `InvalidOutcome`（除外は生成器だけが付ける）。
 - 停止の規則: 誤りの記録と停止は枠の取得と同じロックで 1 つの代入として確定する（#5984）。記録の後に新しく取得できる枠は 0 件（保証は枠の取得だけ）。記録より前に取得済みの枠の試行は止めない。記録時点で未完了の試行は各ワーカー最大 1 件（設定の並行数が上限）。対象の閉包の panic はワーカー内の `catch_unwind` が捕捉してその場で記録する。join で初めて記録されるのは、ワーカー内で捕捉されずにスレッドを終了させた panic（対象の閉包の外）だけで、検出・記録までに他のワーカーが新しく取得して進める件数の累計は上限を保証しない。立てたワーカーを join してから最初の誤りを返す。panic の中身・`io::Error` の文言は載せない。
 - 不変条件: 実測の最大同時実行数 <= 設定の並行数（2/10 の 4 の候補を閉ループで採る）、`executed == trials_planned`、`excluded == warmup`（違えば `CountMismatch`）。
-- ハーネスの上で動くこと: 試験（dev）だけ `it-harness`・`hub-stub` に依存する（`tests/on_it_harness.rs`。Docker・ネットワークなし）。許可表の行は人の確認待ち。
+- ハーネスの上で動くこと: 試験（dev）だけ `it-harness`・`hub-stub`・`secret`・`ring` に依存する（`tests/on_it_harness.rs`。Docker・ネットワークなし）。許可表の行は人の確認待ち。
 - 記録の出力（`fandhe-auth-load-record/1`）を担当する段は未決のまま持ち越す。
 
 ## 負荷の対象の呼び出し（6/10）
@@ -517,7 +517,7 @@ judgment:
 - 区分の追加分（試験の条件・測定値・未決・他所有者の値）
 - 閉ループか開ループか（5/10）: 閉ループ（固定数のワーカー）を仮置きで採った。開ループは作っていない。人が確認する
 - 5/10 の仮置き: 並行数の上限 1024、暖機の段と本計測の段を分けること、本計測での `Excluded` の拒否、停止の順序（記録より前に枠を取り終えた試行は走り切る。#5984）、API の名前（`generate`・`run_closed_loop`・`LoadConfig`・`LoadRun`・`LoadError`）
-- 許可表の行: `fandhe-auth-load-harness` → `fandhe-auth-it-harness`・`fandhe-auth-hub-stub` の試験（dev）の辺（5/10）
+- 許可表の行: `fandhe-auth-load-harness` → `fandhe-auth-it-harness`・`fandhe-auth-hub-stub`・`fandhe-auth-secret` の試験（dev）の辺（5/10）
 - 記録への偽の行の差し込みへの対策（下の「結果の記録の形式」の 6 で扱った。内容は人が確認する）
 - 結果の記録の形式の型と出力の実装の置き場。3/10（#114）で別の crate `crates/load-harness`（仮称）に計測の部品を置いた。
   `it-harness` の crate doc が `TASK-12` を別のハーネスとしているため、`it-harness` の module にはしない。crate の追加・名前・許可表の行は人が決める

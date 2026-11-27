@@ -270,14 +270,15 @@ fn trial_registry(cfg: &HubStubConfig, key_secrets: &[SecretString]) -> Vec<Vec<
 }
 
 /// 秘密のバイト列は共有の秘密値の型 `SecretString`（16 進の文字列）で持ち、試験内に型を新設しない（SECR-15・SECR-31）。
-/// 生のバイト列へ戻すのは `secret_raw` だけで、`trial_registry` が登録簿を作る時点で呼ぶ（`expose` を明示的に呼ぶ。SECR-10・SECR-16・SECR-29〜33）。
-/// ただし戻した登録簿（生のバイト列。鍵の秘密値を含む）は `run_small_trial` の戻り値として試験の間じゅう持つ。
+/// 生のバイト列へ戻すのは `secret_raw` だけで、呼ぶのは登録簿を作る `trial_registry`・`canary_registry_and_config` と、
+/// 登録簿の中身を確かめる `registries_include_signing_key_secret` の 3 箇所（`expose` を明示的に呼ぶ。SECR-10・SECR-16・SECR-29〜33）。
+/// ただし戻した登録簿（生のバイト列。鍵の秘密値を含む）は、主試験では `run_small_trial` の戻り値として、canary でも試験の間じゅう持つ。
 /// 型の保護が及ぶのは登録簿を作る前までで、以降は試験の関数の中に留め、ログ・誤り・記録に渡さない。
 fn secret_hex(bytes: &[u8]) -> SecretString {
     SecretString::new(hex(bytes, false))
 }
 
-/// `secret_hex` の逆。`trial_registry` だけが呼ぶ。戻り値は登録簿の要素として試験の間じゅう生のバイト列のまま残るため、ログ・誤り・記録に渡さない。
+/// `secret_hex` の逆。呼ぶのは上の 3 箇所だけ。戻り値は登録簿の要素として試験の間じゅう生のバイト列のまま残るため、ログ・誤り・記録に渡さない。
 fn secret_raw(s: &SecretString) -> Vec<u8> {
     let h = s.expose().as_bytes();
     assert!(h.len().is_multiple_of(2), "malformed secret encoding");
