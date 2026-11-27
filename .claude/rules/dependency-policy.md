@@ -36,6 +36,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 ## 暗号
 
 - 暗号・署名・乱数・パスワードハッシュ・WebAuthn の検証は保守されている既存 crate に任せ、自前の実装 0 件（DPOL-4・DPOL-47）。
+- 自前の実装 0 件は `scripts/check-crypto-primitives.sh`（`make crypto-scan`）で発見的に走査する（LIB-21・TASK-715 3/4）。合否は本番メンバーだけで、試験専用 crate は参考の警告にとどめ、含めるかは人が決める。規則は人のレビューの代わりにならない。
 - JWT の署名・検証は `aws-lc-rs` か `ring`（DPOL-10・DPOL-11）。
 - `jsonwebtoken` は `aws_lc_rs` feature だけ。`rust_crypto` は `rsa` を引くので有効にしない（DPOL-17）。
 
