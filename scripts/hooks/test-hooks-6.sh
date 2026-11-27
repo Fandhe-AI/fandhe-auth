@@ -258,7 +258,7 @@ det_root="${work_dir}/det-root"
 mkdir -p "${det_root}/scripts/hooks"
 cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${det_root}/scripts/"
 cp "${SECRET_SCAN}" "${det_root}/scripts/hooks/secret-scan.sh"
-if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${det_root}/skills-lock.json"; else printf '{}\n' > "${det_root}/skills-lock.json"; fi
+if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${det_root}/skills-lock.json"; else printf '%s\n' '{"version":2,"skills":{"x":{}}}' > "${det_root}/skills-lock.json"; fi
 git -C "${det_root}" -c init.defaultBranch=main init -q
 git -C "${det_root}" add -A
 git -C "${det_root}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m "chore: detector copy"
@@ -367,7 +367,7 @@ same_root="${work_dir}/same-root"
 mkdir -p "${same_root}/scripts/hooks"
 cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${same_root}/scripts/"
 cp "${SECRET_SCAN}" "${same_root}/scripts/hooks/secret-scan.sh"
-if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${same_root}/skills-lock.json"; else printf '{}\n' > "${same_root}/skills-lock.json"; fi
+if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${same_root}/skills-lock.json"; else printf '%s\n' '{"version":2,"skills":{"x":{}}}' > "${same_root}/skills-lock.json"; fi
 printf 'x = %s\n' "${token}" > "${same_root}/leaked.txt"
 git -C "${same_root}" -c init.defaultBranch=main init -q
 git -C "${same_root}" add -A
@@ -396,7 +396,7 @@ mk_hint_root() {
   mkdir -p "${r}/scripts/hooks"
   cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${r}/scripts/"
   cp "${SECRET_SCAN}" "${r}/scripts/hooks/secret-scan.sh"
-  if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${r}/skills-lock.json"; else printf '{}\n' > "${r}/skills-lock.json"; fi
+  if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${r}/skills-lock.json"; else printf '%s\n' '{"version":2,"skills":{"x":{}}}' > "${r}/skills-lock.json"; fi
   git -C "${r}" -c init.defaultBranch=main init -q
 }
 hint_commit() {
@@ -412,6 +412,8 @@ assert_hint_rc() {
     [ "${rc}" -eq "${c}" ] || continue
     if grep -qF -- "use the detector and exclusion list exactly as this run used them" "${work_dir}/out" \
       && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+      && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
+      && ! grep -qF -- "${work_dir}" "${work_dir}/out" \
       && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
       pass "${name}"
       return 0
@@ -446,6 +448,16 @@ if [ "$(git -C "${r6}" ls-tree HEAD scripts/hooks/secret-scan.sh | cut -c1-6)" !
   fail "secret-scan-ci: setup for the exec-bit hint" "committed mode is not 100644"
 fi
 assert_hint_rc "secret-scan-ci: a detector exec bit different from the commit does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "1"
+# コミットは 100755、作業ツリーは実行不可: 検出器は起動できず検査不能（2）で、案内は作業ツリーの版へ倒れる
+r6="${work_dir}/hint-mode-x"
+mk_hint_root "${r6}"
+chmod +x "${r6}/scripts/hooks/secret-scan.sh"
+hint_commit "${r6}"
+if [ "$(git -C "${r6}" ls-tree HEAD scripts/hooks/secret-scan.sh | cut -c1-6)" != "100755" ]; then
+  fail "secret-scan-ci: setup for the non-executable detector hint" "committed mode is not 100755"
+fi
+chmod -x "${r6}/scripts/hooks/secret-scan.sh"
+assert_hint_rc "secret-scan-ci: a non-executable detector committed as 100755 does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "2"
 # コミット側の skills-lock.json が通常のファイルでない（120000）
 r6="${work_dir}/hint-lock-link"
 mk_hint_root "${r6}"
@@ -453,8 +465,12 @@ rm -f "${r6}/skills-lock.json"
 ln -s elsewhere.json "${r6}/skills-lock.json"
 hint_commit "${r6}"
 rm -f "${r6}/skills-lock.json"
-printf '{}\n' > "${r6}/skills-lock.json"
-assert_hint_rc "secret-scan-ci: a committed symlink skills-lock.json does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "1 2"
+# 作業ツリーの内容を、リンク先の文字列と同じバイト列（改行なし）にする: blob の id と一致するため、mode の判定を外すと一致してしまう
+printf '%s' 'elsewhere.json' > "${r6}/skills-lock.json"
+if [ "$(git -C "${r6}" rev-parse HEAD:skills-lock.json)" != "$(git -C "${r6}" hash-object --no-filters -- "${r6}/skills-lock.json")" ]; then
+  fail "secret-scan-ci: setup for the committed-symlink hint" "worktree bytes differ from the committed link target"
+fi
+assert_hint_rc "secret-scan-ci: a committed symlink skills-lock.json does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "2"
 # 検出器がコミットに無い（未追跡）: 一覧と違い、無いことを一致とみなさない
 r6="${work_dir}/hint-detector-untracked"
 mk_hint_root "${r6}"

@@ -29,7 +29,7 @@ unset _src _src_dir
 source "${DIR}/lib.sh"
 
 # 外部コマンドは起動前に確かめる。欠けていれば検査不能（2）で止める（makefile.md の契約。fail-closed）。
-for _c in git mktemp grep rm; do
+for _c in git mktemp grep rm head sleep; do
   require_cmd "${_c}" || exit 2
 done
 unset _c
@@ -164,12 +164,13 @@ bounded_copy() {
   rm -f -- "${dst}.timeout" 2> /dev/null || true
   head -c "${limit}" 2> /dev/null < "${src}" > "${dst}" &
   pid=$!
+  # 監視は、最初に TERM の trap を張ってから sleep を起こす（trap より前に TERM が届いても sleep はまだ無く、残らない）。
+  # trap は jobs -p で起動済みの子をすべて終わらせる（sleep の PID を変数へ入れる前に届いても残らない）。
   (
-    trap - ERR
+    trap - ERR EXIT
+    trap 'kill $(jobs -p) > /dev/null 2>&1 || true; exit 0' TERM
     sleep 5 &
-    sp=$!
-    trap 'kill "${sp}" > /dev/null 2>&1 || true; wait "${sp}" > /dev/null 2>&1 || true; exit 0' TERM
-    wait "${sp}" || true
+    wait $! || true
     : > "${dst}.timeout" 2> /dev/null || true
     kill "${pid}" > /dev/null 2>&1 || true
   ) > /dev/null 2>&1 < /dev/null &
@@ -266,12 +267,28 @@ rescan_hint() {
     tail_text="run <trusted checkout>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE"
     no_run_text="do not run make or any script from the scanned commit"
   else
-    detector_src="use the detector and exclusion list exactly as this run used them: the working-tree copies of scripts/hooks/secret-scan.sh and skills-lock.json in the repository of this entry differ from, or cannot be compared with, the commit (${trusted_sha}), so that commit does not reproduce them; keep copies of both files from that working tree (do not rely on the commit or the main tip)"
+    detector_src="use the detector and exclusion list exactly as this run used them: the working-tree copies of scripts/hooks/secret-scan.sh and skills-lock.json differ from, or cannot be compared with, the commit (${trusted_sha}), so that commit does not reproduce them; the exclusion list is read from the detector's real root, i.e. two directories above the directory the detector resolves to after following symbolic links (which can differ from the entry's own root); keep copies of both files as this run read them (do not rely on the commit or the main tip)"
     tail_text="run <detector copy>/scripts/hooks/secret-scan.sh --tracked (without --summary) with the same GIT_INDEX_FILE, with skills-lock.json beside it as in the original layout"
     no_run_text="do not run make or any script from the scanned commit"
   fi
   private_text="Run this rescan only in a private local terminal: without --summary it prints file names and raw git diagnostics, which can contain secret values (SECR-23); never run it in a public CI job and never paste or upload its output to a public log, PR or issue."
-  echo "secret-scan-ci: to see file names and diagnostics, ${detector_src}; then, with the scanned repository as the working directory and every existing GIT_* variable unset for both commands below, as this entry does (e.g. env -u GIT_DIR -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_NAMESPACE; list others with env | grep ^GIT_), build a dedicated index from the scanned commit (${head_sha}) with GIT_NO_REPLACE_OBJECTS=1 GIT_INDEX_FILE=<new file> git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree ${head_sha}, and ${tail_text}; ${no_run_text}. ${private_text}" >&2
+  echo "secret-scan-ci: to see file names and diagnostics, ${detector_src}; then, with the scanned repository as the working directory and every existing GIT_* variable unset for both commands below, as this entry does (e.g. env -u GIT_DIR -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_NAMESPACE; list others with env | grep ^GIT_), build a dedicated index from the scanned commit (${head_sha}) with GIT_NO_REPLACE_OBJECTS=1 GIT_INDEX_FILE=<new file> git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree ${head_sha}, and ${tail_text}; ${no_run_text}. ${private_text}"
+}
+
+# emit_hint: 再走査の案内を 1 行だけ出す。案内は検出の結果（終了コード）を変えない。
+# 案内の組み立てはサブシェルで行い、その stderr は捨てる（bash 自身の診断・ジョブの通知にパスや行番号が出得るため。SECR-23）。
+# サブシェルでは ERR トラップ・EXIT トラップ（一時領域の削除）・errexit を外す。組み立てに失敗したら何も出さない。
+emit_hint() {
+  local hint=""
+  hint="$( (
+    trap - ERR EXIT
+    set +eE
+    rescan_hint
+  ) 2> /dev/null)" || hint=""
+  if [ -n "${hint}" ]; then
+    printf '%s\n' "${hint}" >&2
+  fi
+  return 0
 }
 
 # 検出器の終了状態は 0 = 検出なし / 1 = 検出 / 2 = 検査不能。それ以外（起動失敗・シグナル等）も検査不能に畳む。
@@ -317,8 +334,7 @@ case "${rc}" in
     ;;
   1)
     echo "secret-scan-ci: findings reported; details are withheld on the public log." >&2
-    # 案内は検出の結果（終了コード）を変えない: ERR トラップと errexit を外したサブシェルで流し、失敗は無視する。
-    (trap - ERR; set +eE; rescan_hint) || true
+    emit_hint || true
     exit 1
     ;;
   *)
@@ -327,7 +343,7 @@ case "${rc}" in
     secret_scan_fixed_diagnostics > "${work_dir}/allowed-diag" 2> /dev/null || true
     grep -aFx -f "${work_dir}/allowed-diag" "${out}" >&2 2> /dev/null || true
     echo "secret-scan-ci: scan could not be completed (exit ${rc}); details are withheld on the public log." >&2
-    (trap - ERR; set +eE; rescan_hint) || true
+    emit_hint || true
     exit 2
     ;;
 esac
