@@ -49,7 +49,11 @@ fn dpol14_from_rsa_der_with_pkcs8_der_fails_to_sign() {
     let (_kp, der) = pkcs8_rsa_key();
     let key = EncodingKey::from_rsa_der(&der);
     let result = encode(&Header::new(Algorithm::RS256), &claims(), &key);
-    let err = result.expect_err("pkcs8 der must fail to sign");
+    // SECR-23: `expect_err` は成功値（署名済みトークン）を panic に出すため使わない。
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("pkcs8 der was accepted for signing"),
+    };
     assert!(
         matches!(err.kind(), ErrorKind::Signing(_)),
         "failure must be a signing error"
