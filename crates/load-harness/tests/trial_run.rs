@@ -1,7 +1,7 @@
 //! TASK-12 9/10: 小さな試し実行。it-harness の上で Hub の stub に対して段階付きの負荷を最後まで流し、
 //! 記録のファイルが出ること・どの値も要件の値として記録されないことを確かめる。
 //!
-//! Docker・ネットワークなし（`make test` で必ず流れる。`#[ignore]` を付けない）。値は試験の中だけの仮の値
+//! Docker・ネットワークなし（主試験は `make test` で必ず流れる。本文を出す専用の試験だけ `#[ignore]` で、`make load-trial` が選ぶ）。値は試験の中だけの仮の値
 //! （A-2026-10-28-1・A-2026-10-28-14）。時間の値は判定しない。stub の合格を実物の合格に数えない
 //! （A-2026-10-28-9・ACPT-7）。出たファイルは追跡ツリーの外（`CARGO_TARGET_TMPDIR`）に置く。
 
@@ -20,6 +20,9 @@ use fandhe_auth_load_harness::{
     TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
 };
 
+/// 照合済みの本文を挟む固定の行。`scripts/load-trial.sh` の同名の文字列と一致させる。
+const PRINT_BEGIN: &str = "-----BEGIN LOAD RECORD BODY-----";
+const PRINT_END: &str = "-----END LOAD RECORD BODY-----";
 const T0: u64 = 1_000;
 const HOST_MARK: &str = "load-canary-host.example.test";
 const CLIENT_MARK: &str = "load-canary-client.test";
@@ -58,9 +61,13 @@ const META: [&str; 6] = [
     "judgment:",
 ];
 
-#[test]
-fn small_trial_run_writes_record_without_requirement_values() {
-    let hub = HubStubComponent::new(hub_config());
+/// 主試験の本体。記録を書いて検査し、停止と後片付けまで済ませてから、記録の本文と照合の登録簿を返す。
+/// 主試験と、本文を出す専用の試験（`print_checked_load_record_body`）が同じ試行を使い回す。
+fn run_small_trial() -> (String, Vec<Vec<u8>>) {
+    // 照合の登録簿は、stub へ実際に渡す設定そのもの（同じインスタンス）から、渡す前に作る。
+    let cfg = hub_config();
+    let registry = stdout_registry(&cfg);
+    let hub = HubStubComponent::new(cfg);
     let handle = hub.handle();
     let running = Harness::start(HarnessConfig::new().with(Box::new(hub))).unwrap();
     let key = AssertionSigningKey::generate("kid-load-trial.test").unwrap();
@@ -130,7 +137,11 @@ fn small_trial_run_writes_record_without_requirement_values() {
     let record = LoadRecord::new(&evidence, recorded_at, vec![target]).unwrap();
     let path = record.write_new(&dir).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(text, record.to_string());
+    // 失敗診断に記録の本文を出さないため、本文を含む比較は固定の文言にする（SECR-23）。
+    assert!(
+        text == record.to_string(),
+        "written record differs from Display"
+    );
 
     let name = path.file_name().unwrap().to_str().unwrap();
     let pid = std::process::id();
@@ -138,11 +149,17 @@ fn small_trial_run_writes_record_without_requirement_values() {
     assert!(it_path.parent() == path.parent() && it_path.exists());
 
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines[0], "format: fandhe-auth-load-record/1");
-    assert_eq!(lines[1], format!("run_record_file: {it_name}"));
-    assert_eq!(
-        lines[2],
-        format!("run_started_at: {}", it_record_started_line(&it_record))
+    assert!(
+        lines[0] == "format: fandhe-auth-load-record/1",
+        "format line differs"
+    );
+    assert!(
+        lines[1] == format!("run_record_file: {it_name}"),
+        "run_record_file line differs"
+    );
+    assert!(
+        lines[2] == format!("run_started_at: {}", it_record_started_line(&it_record)),
+        "run_started_at line differs"
     );
     let count = |p: &str| lines.iter().filter(|l| l.starts_with(p)).count();
     assert_eq!(count("stage:"), 2);
@@ -171,9 +188,12 @@ fn small_trial_run_writes_record_without_requirement_values() {
         if META.iter().any(|m| l.starts_with(m)) {
             continue;
         }
-        assert!(l.contains(" class=") && l.contains(" refs="), "{l}");
+        assert!(
+            l.contains(" class=") && l.contains(" refs="),
+            "a record line lacks class= or refs="
+        );
     }
-    assert_eq!(*lines.last().unwrap(), "judgment:");
+    assert!(*lines.last().unwrap() == "judgment:", "last line differs");
     assert!(text.ends_with('\n'));
 
     // 設定の目印・出力先のパスが出ない。
@@ -186,13 +206,67 @@ fn small_trial_run_writes_record_without_requirement_values() {
 
     // 上書きしない: 同じ記録をもう一度書くと別名の新しいファイルになる。
     let path2 = record.write_new(&dir).unwrap();
-    assert_ne!(path, path2);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    assert!(path != path2, "write_new reused the same file name");
+    assert!(
+        std::fs::read_to_string(&path).unwrap() == text,
+        "re-written record differs"
+    );
 
     running.stop().unwrap();
     std::fs::remove_file(&path).unwrap();
     std::fs::remove_file(&path2).unwrap();
     std::fs::remove_file(&it_path).unwrap();
+
+    (text, registry)
+}
+
+#[test]
+fn small_trial_run_writes_record_without_requirement_values() {
+    let (text, registry) = run_small_trial();
+    // 出す本文そのものを秘密値の各表現の照合（`printable_body`）に通せることを、本文を出さずに確かめる（SECR-23）。
+    // 本文を出すかどうかは環境変数・設定に依らない。出す入口は下の `#[ignore]` の試験だけ。
+    assert!(
+        printable_body(&text, &registry).is_ok(),
+        "the load record body failed the registered-value check"
+    );
+}
+
+/// 照合を通した記録の本文を標準出力へ出す専用の試験。`#[ignore]` のため `make test` では走らず、
+/// `make load-trial`（`scripts/load-trial.sh`）が `--ignored --exact` で明示的に選んだときだけ出す。
+/// 環境変数では切り替えない（DPOL-32。親の環境から本文の出力が有効にならない）。
+#[test]
+#[ignore = "prints the checked record body; run via make load-trial"]
+fn print_checked_load_record_body() {
+    let (text, registry) = run_small_trial();
+    // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 4 欄に入れた値の全文）の
+    // 生・base64・base64url・16 進の各形と JWT の形で走査する。一致したら本文を出さず失敗させる。
+    let body = printable_body(&text, &registry).unwrap();
+    // `scripts/load-trial.sh` が照合済みの本文を見分けるための固定の開始行・終了行（ちょうど 1 区画だけ出す）。
+    println!("{PRINT_BEGIN}\n{body}{PRINT_END}");
+}
+
+/// 標準出力へ出す本文の走査用の登録簿: 主試験が stub の設定の 4 欄へ入れた値の全文。
+/// 渡す設定の文字列の欄 4 つ（`client_id`・`public_host`・`jwks_uri`・`logout_receiver_uri`）をすべて入れる。
+fn stdout_registry(cfg: &HubStubConfig) -> Vec<Vec<u8>> {
+    vec![
+        cfg.client_id.get().clone().into_bytes(),
+        cfg.public_host.get().clone().into_bytes(),
+        cfg.jwks_uri.get().clone().into_bytes(),
+        cfg.logout_receiver_uri.get().clone().into_bytes(),
+    ]
+}
+
+/// 本文に登録簿の値（生・base64・base64url・16 進）か JWT の形が 1 件でもあれば `Err`（本文は返さず、件数だけ）。
+fn printable_body<'a>(text: &'a str, registry: &[Vec<u8>]) -> Result<&'a str, String> {
+    let n = count_matches(registry, text.as_bytes());
+    let j = count_jwt_like(text.as_bytes());
+    if n == 0 && j == 0 {
+        Ok(text)
+    } else {
+        Err(format!(
+            "refusing to print the load record: {n} registered-value match(es), {j} JWT-like word(s)"
+        ))
+    }
 }
 
 /// it-harness の記録の `started_at` の RFC 3339 表記（`UtcTimestamp` の `Display`）。
@@ -204,7 +278,7 @@ fn it_record_started_line(r: &fandhe_auth_it_harness::RunRecord) -> String {
 //
 // AAUD-30・AAUD-31 の方法（登録簿の各値を生・base64・base64url・16 進の形で出力に掛け、一致の件数を数える）を
 // ハーネスの出力に当てはめたもので、AAUD-30・AAUD-31 を満たしたものではない（実環境の走査は Hub〔`AOPS-73`〕）。
-// 対象は「stub の設定の 3 欄から負荷の記録へ値が流れないこと」の回帰の検出と、it-run の記録（設定の入る口
+// 対象は「stub の設定の 4 欄から負荷の記録へ値が流れないこと」の回帰の検出と、it-run の記録（設定の入る口
 // `with_hub_stub_record` を通して書いたもの）に登録簿の値が現れないことの確認まで。it-run の記録に入るのは
 // 欄名（`&'static str`）と印（`ValueMark`）だけで、設定の値が届く経路は無い。そのため it-run の記録側の
 // 陽性対照は置かない（設定から値が届く経路が無い）。照合そのものの検出力は負荷の記録側の陽性対照で見る。
@@ -421,27 +495,30 @@ fn write_record_for(cfg: HubStubConfig) -> Written {
     out
 }
 
-/// 登録簿と、その値を呼び出し元の入力（接続の設定の 3 欄）へ入れた構成。
-/// 登録簿は、乱数の 3 値（設定には 16 進で入る）と、3 欄に入れた文字列そのものの全文 3 件の計 6 件。
+/// 登録簿と、その値を呼び出し元の入力（接続の設定の 4 欄）へ入れた構成。
+/// 登録簿は、乱数の 4 値（設定には 16 進で入る）と、4 欄に入れた文字列そのものの全文 4 件の計 8 件。
 fn canary_registry_and_config() -> (Vec<Vec<u8>>, HubStubConfig) {
-    let raw: Vec<Vec<u8>> = (0..3).map(|_| random_value()).collect();
+    let raw: Vec<Vec<u8>> = (0..4).map(|_| random_value()).collect();
     let client_id = hex(&raw[0], false);
     let public_host = format!("{}.example.test", hex(&raw[1], false));
     let jwks_uri = format!("https://{}/jwks", hex(&raw[2], false));
+    let logout_receiver_uri = format!("https://{}/logout", hex(&raw[3], false));
     let mut registry = raw;
     registry.extend([
         client_id.clone().into_bytes(),
         public_host.clone().into_bytes(),
         jwks_uri.clone().into_bytes(),
+        logout_receiver_uri.clone().into_bytes(),
     ]);
     let mut cfg = hub_config();
     cfg.client_id = StubValue::test(client_id);
     cfg.public_host = StubValue::test(public_host);
     cfg.jwks_uri = StubValue::test(jwks_uri);
+    cfg.logout_receiver_uri = StubValue::test(logout_receiver_uri);
     (registry, cfg)
 }
 
-/// AAUD-30・SECR-23（方法を当てはめたもの）: stub の設定の 3 欄に入れた登録簿の値（乱数の値と欄の全文）が、
+/// AAUD-30・SECR-23（方法を当てはめたもの）: stub の設定の 4 欄に入れた登録簿の値（乱数の値と欄の全文）が、
 /// 負荷の記録と、設定の口（`with_hub_stub_record`）を通した it-run の記録の全文に、生・base64・base64url・16 進のどの形でも現れない（一致の件数が 0）。
 /// JWT の形の語も 0 件。
 #[test]
@@ -451,7 +528,12 @@ fn written_records_have_no_registered_secret_in_any_form() {
     assert!(!w.load.is_empty() && !w.it_run.is_empty());
     // 設定の口（`with_hub_stub_record`）を通った行が it-run の記録に実際に書き出されている（欄名と印だけ）。
     let it_text = String::from_utf8(w.it_run.clone()).unwrap();
-    for field in ["client_id", "public_host", "jwks_uri"] {
+    for field in [
+        "client_id",
+        "public_host",
+        "jwks_uri",
+        "logout_receiver_uri",
+    ] {
         assert!(
             it_text
                 .lines()
@@ -559,4 +641,40 @@ fn registry_hex_strings_outside_vocabulary_are_rejected_as_names() {
         );
     }
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// 標準出力用の登録簿はログアウトの受信 URI を含み、その符号化した形（base64・base64url・16 進）を含む本文を拒否する。
+/// 登録簿から外れていると、平文の目印（`HOST_MARK`）の無い符号化の表現が照合から漏れる（SECR-23）。
+#[test]
+fn stdout_registry_covers_logout_receiver_uri_in_encoded_forms() {
+    let cfg = hub_config();
+    let registry = stdout_registry(&cfg);
+    assert_eq!(registry.len(), 4);
+    let uri = cfg.logout_receiver_uri.get().clone().into_bytes();
+    assert!(registry.contains(&uri));
+    for f in forms(&uri) {
+        let text = format!("note: {}\n", String::from_utf8(f).unwrap());
+        assert!(printable_body(&text, &registry).is_err());
+        assert!(printable_body(&text, &[]).is_ok());
+    }
+}
+
+/// 出力の走査（`printable_body`）は、登録簿の値の各形・JWT の形が混ざった本文を出さず、通常の本文は通す。
+#[test]
+fn printable_body_refuses_registered_forms_and_jwt() {
+    let registry = vec![random_value()];
+    assert!(printable_body("format: x\njudgment:\n", &registry).is_ok());
+    // 生のバイト列は UTF-8 とは限らないため、文字列にできる形（先頭以外）で確かめる。
+    for f in forms(&registry[0]).into_iter().skip(1) {
+        let text = format!("note: {}\n", String::from_utf8(f).unwrap());
+        assert!(printable_body(&text, &registry).is_err());
+    }
+    let jwt = format!(
+        "note: eyJ{}.eyJ{}.{}\n",
+        "a".repeat(20),
+        "b".repeat(20),
+        "c".repeat(20)
+    );
+    let err = printable_body(&jwt, &registry).unwrap_err();
+    assert!(!err.contains("eyJ"));
 }
