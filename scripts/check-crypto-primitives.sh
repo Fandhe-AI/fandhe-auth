@@ -13,7 +13,7 @@
 #   C1: 既知の暗号定数（SHA-1/2・MD5 の IV と K[0]、ChaCha/Salsa の sigma、黄金比の定数、Poly1305 の clamp、Keccak の RC、P-256 の素数の断片、AES の S-box の先頭）。
 #       判定の前に `_` を除き、大小文字を区別しない。
 #   C2: インラインアセンブリ・アーキテクチャ固有の命令（asm!・global_asm!・naked_asm!・#[naked]・core::arch・std::arch）
-#   C3: Rust 以外のネイティブのソース（*.c *.h *.cc *.cpp *.s *.S *.asm）が crate の中にあること
+#   C3: Rust 以外のネイティブのソース（*.c *.h *.cc *.cpp *.cxx *.hh *.hpp *.hxx *.inc *.cu *.m *.mm *.s *.S *.asm）が crate の中にあること
 #   C4: 暗号の trait の自前の実装（RngCore・CryptoRng・BlockCipher・StreamCipher・Digest・Mac 等への impl ... for）
 #   C5: 同じファイルに rotate_left/rotate_right と wrapping_add/sub/mul が併存すること（ハッシュ・ストリーム暗号のラウンドの典型）
 # 参考（警告のみ。合否に入れない）:
@@ -88,7 +88,7 @@ scan_names() {
 # scan_native <出力先> <path>: C3。ファイル名の拡張子で判定する。
 scan_native() {
   case "$2" in
-    *.c | *.h | *.cc | *.cpp | *.s | *.S | *.asm) printf 'C3\t%s:1\n' "$2" >>"$1" ;;
+    *.c | *.h | *.cc | *.cpp | *.cxx | *.hh | *.hpp | *.hxx | *.inc | *.cu | *.m | *.mm | *.s | *.S | *.asm) printf 'C3\t%s:1\n' "$2" >>"$1" ;;
   esac
 }
 
