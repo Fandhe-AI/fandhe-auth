@@ -39,7 +39,7 @@
 #   だけを除外にする（PR が登録を削除した名前は走査される。対象の index に一覧が無ければ除外は 0 件）。
 #   PR が自分の変更で一覧に名前を足して検査を免れる経路を作らないため（CI は保護された main の検出器を使う。
 #   #51・#6000）。パスの形（*.lock・.claude/skills/・未登録の .agents/skills/ の下）では除外しない。
-#   名前は `[a-z0-9-]` の規則に合うものだけを通す。除外は pathspec に載せず、ファイル名の一覧と全体の diff を 1 回ずつ読み、
+#   名前は `[a-z0-9-]` の規則に合うものだけを通す。除外は pathspec に載せず、ファイル名の一覧と全体の diff を読み（diff は一時ファイルに書かずパイプで流す。#6143）、
 #   登録名の下の区画を落とす（引数の長さも git の起動回数も登録名・ファイルの数に依らない。#6053。登録を外した名前があるときは、
 #   その名前の数だけ追加の差分の引数と起動 1 回が増える。#6054）。
 #   検出器の skills-lock.json が無いときの挙動は 3 つ: (1) 別の checkout なら除外なしで全部走査する。(2) 同じ checkout なら
@@ -1293,7 +1293,7 @@ fi
 
 # 本文の走査の除外（#6053）。登録名ごとに exclude を並べると、引数の長さが登録名の数に比例し、一覧の上限（64 KiB）の内側でも
 # macOS の引数の上限（256 KiB）を超えて git を起動できなくなる。そこで pathspec では外さず、git の呼び出しは
-# 「ファイル名の一覧」と「全体の diff」の 2 回に固定する。除外は、一覧の n 番目のファイルと diff の n 番目の区画
+# 「ファイル名の一覧」「全体の diff（NUL の数え・除去版。NUL があるときは置換版）」に固定する（#6143 で diff はパイプで流す）。除外は、一覧の n 番目のファイルと diff の n 番目の区画
 # （`diff --git` の行で始まる）が対応することを使い、登録名の下の区画を diff から落とす（引数の長さも起動の回数も登録名・ファイルの数に依らない。
 # 登録を外した名前があるときだけ、その名前の数だけ追加の差分の引数が増え、git の起動が 1 回増える）。
 # 登録名の集合は、名前ごとの変数 SKSET_<名前の '-' を '_' に直したもの> で持ち、所属の確認はパスごとの一覧検索にせず
@@ -1441,10 +1441,8 @@ git_diff_header() {
 }
 
 # 2. 追加行のみを走査する（削除行を対象にすると漏洩済み値の除去コミットを妨げる）
-if ! scan_diff -U0 --diff-filter=ACMR -- . > "${tmp_dir}/diff"; then
-  echo "secret-scan: failed to read diff; aborting" >&4
-  exit 2
-fi
+# 主の本文の差分は一時ファイルへ全量で書かず、後段（NUL の数え・除去版・置換版）へ git から直接パイプで流す（#6143）。
+# 登録名の下の本文（--tracked では大きい）が除外の前に一時領域へ溜まるのを避ける。
 body_skip_filter=0
 if [ "${skill_count}" -gt 0 ] || [ "${dropped_count}" -gt 0 ]; then
   # 登録名の下のファイルの印（区画ごとに 1 行。1 = 外す）。外すのは `.agents/skills/<登録名>/` の下だけで、
@@ -1520,17 +1518,37 @@ fi
 # tr が途中で失敗しても出力が短くなるだけで、差あり（1）として両方の版を走査する側に倒れる（NUL の見落としにはならない）。
 # cmp は最初の差で読むのをやめるため、tr は SIGPIPE（141）で終わる。bash 3.2 は子（プロセス置換）の中でも ERR の trap を走らせ、
 # fd 4 へ "internal error" を余分に出すため、子の中で ERR の trap を外す（終了コードには影響しない。bash 3.2 の実機で確認）。
+# 主の差分の NUL は、除外の前の全区画をパイプで数えて確定する（本文は残さず、数だけを書く。除外する区画にしか NUL が無くても置換版も走査するが、
+# 走査が増えるだけで漏れる側には倒れない）。git の下流は EOF まで読む tr と wc だけにする（途中で読むのをやめる段を置くと
+# git が SIGPIPE で落ち、pipefail で誤って 2 になる）。取得の失敗は 2。
+if ! scan_diff -U0 --diff-filter=ACMR -- . | tr -cd '\000' | wc -c > "${tmp_dir}/nul-count"; then
+  echo "secret-scan: failed to read diff; aborting" >&4
+  exit 2
+fi
+nul_count=""
+IFS= read -r nul_count < "${tmp_dir}/nul-count" || true
+nul_count="${nul_count//[[:space:]]/}"
+case "${nul_count}" in
+  '' | *[!0-9]*)
+    echo "secret-scan: failed to read diff; aborting" >&4
+    exit 2
+    ;;
+esac
+# 外れた名前の本文（diff.dropped。走査する本文だけで、ファイルのまま 1 回書く）の NUL は cmp で確かめる。
+# cmp は差があると 1 を返す。パイプの末尾に置くと ERR の trap（set -E で子に継がれる）が子の中で exit 2 にしてしまい、
+# 「NUL あり」が検査不能と取り違えられるため、cmp は親のシェルの `||` の左で流す。
+# cmp は最初の差で読むのをやめるため、tr は SIGPIPE（141）で終わる。bash 3.2 は子（プロセス置換）の中でも ERR の trap を走らせ、
+# fd 4 へ "internal error" を余分に出すため、子の中で ERR の trap を外す（終了コードには影響しない。bash 3.2 の実機で確認）。
+# tr が途中で失敗しても出力が短くなるだけで、差あり（1）として両方の版を走査する側に倒れる（NUL の見落としにはならない）。
+# 0 = NUL なし・1 = あり・それ以外は後段で検査不能（2）。
 cmp_rc=0
-for nul_src in diff diff.dropped; do
-  one_rc=0
-  cmp -s <(trap - ERR; tr -d '\000' < "${tmp_dir}/${nul_src}") "${tmp_dir}/${nul_src}" || one_rc=$?
-  if [ "${one_rc}" -gt "${cmp_rc}" ]; then
-    cmp_rc="${one_rc}"
-  fi
-done
+cmp -s <(trap - ERR; tr -d '\000' < "${tmp_dir}/diff.dropped") "${tmp_dir}/diff.dropped" || cmp_rc=$?
+if [ "${nul_count}" -gt 0 ] && [ "${cmp_rc}" -eq 0 ]; then
+  cmp_rc=1
+fi
 
-# 登録名の下の区画を落とす（#6053）。除外は正規化の流れの中（パイプ）で行い、除外対象の本文は生の diff と同じ一時領域にだけ、正規化が終わるまでの短い間置く
-# （除外した本文の複製を正規化の出力には残さない）。
+# 登録名の下の区画を落とす（#6053）。除外は正規化の流れの中（パイプ）で行い、除外対象の本文は一時ファイルに書かず、git からパイプの中だけで流す（#6143）。
+# 出力先の一時ファイルは、パイプ全体（pipefail）の成功を `if !` で確かめるまで読まない。
 # 区画の数が一覧のファイル数と違えば（git の出力と一覧の対応が崩れている）検査不能（2）にする。
 # 落とす区画のヘッダは、一覧の n 番目のパスから git_diff_header で組んだ期待するヘッダとバイト単位で一致するときだけ落とす
 # （不変条件。落とす向きに崩さない）。
@@ -1560,15 +1578,26 @@ filter_sections() {
   fi
 }
 # 主の差分は除外を通し、外れた名前の本文（diff.dropped）はそのまま後ろへ足す。
-if ! { tr -d '\000' < "${tmp_dir}/diff" | filter_sections && tr -d '\000' < "${tmp_dir}/diff.dropped"; } > "${tmp_dir}/diff.del"; then
+# git の下流は、どの段も EOF まで読む（tr・awk・cat）。区画の数の照合の失敗（exit 3）も git の失敗もパイプ全体の失敗として 2 になる。
+if ! { scan_diff -U0 --diff-filter=ACMR -- . | tr -d '\000' | filter_sections && tr -d '\000' < "${tmp_dir}/diff.dropped"; } > "${tmp_dir}/diff.del"; then
   echo "secret-scan: failed to normalize diff; aborting" >&4
   exit 2
 fi
-if ! { tr '\000' ' ' < "${tmp_dir}/diff" | filter_sections && tr '\000' ' ' < "${tmp_dir}/diff.dropped"; } > "${tmp_dir}/diff.sp"; then
-  echo "secret-scan: failed to normalize diff; aborting" >&4
-  exit 2
+# 置換版は NUL があるときだけ作る（普段は git を 1 回減らし、一時領域も使わない）。
+if [ "${cmp_rc}" -eq 1 ]; then
+  if ! { scan_diff -U0 --diff-filter=ACMR -- . | tr '\000' ' ' | filter_sections && tr '\000' ' ' < "${tmp_dir}/diff.dropped"; } > "${tmp_dir}/diff.sp"; then
+    echo "secret-scan: failed to normalize diff; aborting" >&4
+    exit 2
+  fi
+  # 2 本は別々の git の実行から作る。tr は改行を変えないため、同じ入力なら行数は同じ。違えば行番号で重複を除く対応が崩れるため 2 にする。
+  del_lines="$(wc -l < "${tmp_dir}/diff.del")" || del_lines=x
+  sp_lines="$(wc -l < "${tmp_dir}/diff.sp")" || sp_lines=y
+  if [ "${del_lines//[[:space:]]/}" != "${sp_lines//[[:space:]]/}" ]; then
+    echo "secret-scan: failed to normalize diff; aborting" >&4
+    exit 2
+  fi
 fi
-rm -f -- "${tmp_dir}/diff" "${tmp_dir}/diff.dropped"
+rm -f -- "${tmp_dir}/diff.dropped" "${tmp_dir}/nul-count"
 
 # scan_pass <file>: `+++ b/<path>` のファイルヘッダは `diff --git` から最初の `@@` までの間でだけ解釈する。
 # hunk 内の追加行の本文が `++ b/...`・`++...` で始まると diff 上は `+++...` になるため、

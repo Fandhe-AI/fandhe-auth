@@ -137,6 +137,10 @@ PKEY の振る舞いを満たしたとは主張しない。
 - 記録は実行の事実の出力で、合否の判定でも spec の「確定」でもない。結果は〔仮想〕で、実機・Safari の結果は別タスク（`TASK-784`・`TASK-75`〜`78`）である。
 - 呼び出しの前後のハーネスのスクリプトの例外（応答の `JSON.parse` 等）は WebAuthn の拒否ではなく、固定名 `HarnessScript` で受けて `check_failed` に数える（`rejected` に入れない）。
   登録後の credential の取得は 1 回で、取得の誤りは `harness_error:<種類>`、取得後の条件の不一致だけを `check_failed` に数える。
+- 分類は操作の関数が上書きする（`tests/support/passkey.rs`）。`registration_run_result` は、登録が成功しなかったとき（`Err` を含む）は credential を見ずに `(run, false)` を返し、
+  成功したときだけ credential の件数と RP ID を見て、取得の誤りは `harness_error`、条件の不一致は `check_failed` に上書きする。
+  `authentication_run_result` は操作の成否によらず credential を検査し、取得の誤りは `harness_error`、件数や RP ID の不一致は `check_failed` に上書きする。
+  最終の分類に初期の分類が残るのは、後続の検査が通ったときだけである。
 - ファイルの公開は、同じ出力先の一時ファイルへ書いて `fs::hard_link` で最終名へ公開する（既存の最終ファイルは上書きしない・不完全なファイルを最終名で見せない）。
   このため出力先はハードリンクに対応するファイルシステムである必要があり、非対応なら `WriteFailed` を返す。
 - 出力先 `e2e-records/` は起動をまたいで追記され、過去の起動や並行する起動のファイルが残る。ファイル名の unix 秒は秒単位で、
@@ -172,66 +176,47 @@ PKEY の振る舞いを満たしたとは主張しない。
 3. `E2eHarness::start(E2eConfig::new(PasskeyOperation::.., Browser::..).with(Box::new(driver)))` で起動する。
     起動順・逆順の停止・`Drop` の停止は「起動と停止の契約」の節を見る。
 4. `RecordSink::new(&handle, Browser::.., PasskeyOperation::..)` で記録を開く。
-5. 登録は `support::passkey::register`（仮想 authenticator を `VirtualAuthenticatorOptions` で足し、`register_once` を呼び、戻り値は `(AuthenticatorId, CredentialRef)`）。
-    ヘルパーは内部で `registration_run_result` により分類した登録の結果を `sink.record(..)` に足すので、呼び出し側は登録を記録しない（二重に数えない）。
-    検査の担当を分ける。ヘルパーを使うときは、登録の成否と登録の `check_ok` の検査をヘルパーが内部で行い、呼び出し側へ返るのは `(AuthenticatorId, CredentialRef)` だけで `check_ok` は返らない。
-    呼び出し側が登録の `check_ok` を再検査する必要はなく、できない。ヘルパーが担わない検査（認証の成否・`check_ok`、`evidence()` の確認）だけを呼び出し側が行う。
-    ヘルパーは登録結果の `counts_as_real_device()`・`counts_as_safari()` がともに `false` であることも内部で検査する（`ACPT-7`・`ACPT-8`）。戻り値から登録結果の `evidence()` は取れないので、
-    直接呼び出した操作（認証など）の証跡の確認は呼び出し側が行う。
-    `registration_run_result`・`authentication_run_result` を直接使うときは、得た `(run, check_ok)` を呼び出し側が検査する。成否と `check_ok` の判定の条件は、下の「成否と `check_ok` の判定条件」の節に 1 か所にまとめてあり、手順 5・6 はそこを参照する。
-    登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` の戻り値を `(run, check_ok)` に分け、`run` を `sink.record(PasskeyOperation::Registration, run).expect("record")` で一度だけ記録する。
-    `RecordSink::record` は件数の上限を超えると `Err` を返すので、`sink.record(..).expect("record")` のように成功を確かめる。
-    エラーを無視すると、記録が欠けたまま `finish()` で完了にできてしまう。登録・認証のどちらの直接の記録も同じ。
-    記録のあと、成否と `check_ok` を「成否と `check_ok` の判定条件」の節の条件で、呼び出し側が検査する（`check_ok` は、直接使った登録では `registration_run_result` が返した値、認証では `authentication_run_result` が返した値。操作ごとに、その操作の関数が返した値を使う）。
-    ヘルパーを使わないときは、`register_once` の前の準備も自分で行う（見本は `support::passkey::register`、`crates/e2e-harness/tests/support/passkey.rs`）。
-    準備は 3 つ。(1) `add_virtual_authenticator(&VirtualAuthenticatorOptions)` で仮想 authenticator を足す、(2) `navigate(&origin.origin())` で試験用 origin へ移動する、
-    (3) `set_script_timeout(..)` でスクリプトのタイムアウトを command timeout より短く設定する（時間切れを script timeout として観測するため）。
-    認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)` を呼び、`authentication_run_result(&handle, &aid, &result)` で
-    後続の検査（credential がちょうど 1 件・RP ID が `localhost` と完全一致）を反映した `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Authentication, run).expect("record")` で一度だけ記録し、成功を確かめる。
-    `authenticate_once` の結果をそのまま記録しない（検査を反映できない）。options の値は PoC の値（`QP-1`）で要件の値ではない。
-6. 登録をヘルパーで行った場合、登録の検査はヘルパーが済ませている。どちらの場合も、呼び出し側は、直接使った操作（認証、またはヘルパーを使わない登録）それぞれについて、「成否と `check_ok` の判定条件」の節の条件で成否と `check_ok` を検査し、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる（登録も認証も直接使うときは、両方を検査する）。`!check_ok` を拒否の根拠にしない。
+5. 登録と認証を呼び、記録する。検査の条件は手順 6 にまとめてあり、ここには書かない。
+    - 登録は `support::passkey::register` を使う。仮想 authenticator を `VirtualAuthenticatorOptions` で足し、`register_once` を呼び、内部で `registration_run_result` により分類した結果を `sink.record(..)` に足す。
+      戻り値は `(AuthenticatorId, CredentialRef)` だけで `check_ok` は返らない。呼び出し側は登録を記録しない（二重に数えない）。
+    - ヘルパーを使わない登録は、`register_once` の前の準備も自分で行う（見本は `support::passkey::register`、`crates/e2e-harness/tests/support/passkey.rs`）。
+      準備は 3 つ。(1) `add_virtual_authenticator(&VirtualAuthenticatorOptions)` で仮想 authenticator を足す、(2) `navigate(&origin.origin())` で試験用 origin へ移動する、
+      (3) `set_script_timeout(..)` でスクリプトのタイムアウトを command timeout より短く設定する（時間切れを script timeout として観測するため）。
+      そのあと `register_once` を呼び、`registration_run_result` で `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Registration, run).expect("record")` で一度だけ記録する。
+    - 認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)` を呼び、`authentication_run_result(&handle, &aid, &result)` で
+      後続の検査（credential がちょうど 1 件・RP ID が `localhost` と完全一致）を反映した `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Authentication, run).expect("record")` で一度だけ記録する。
+      `authenticate_once` の結果をそのまま記録しない（検査を反映できない）。
+    - `RecordSink::record` は件数の上限を超えると `Err` を返すので、どの記録も `.expect("record")` で成功を確かめる。無視すると、記録が欠けたまま `finish()` で完了にできてしまう。
+    - `check_ok` の出所は操作ごとに、その操作の関数が返した値（登録は `registration_run_result`、認証は `authentication_run_result`）。
+    - options の値は PoC の値（`QP-1`）で要件の値ではない。
+6. 操作ごとの合格条件を検査する。成否は `run` ではなく、記録の後に元の `result` へ `expect(..)` をして得た `outcome` から決める。
+    直接使った操作それぞれに、下の該当する項を当てる（登録と認証の両方を直接使うときは両方）。
+    登録をヘルパーで行った場合、登録の項はヘルパーが済ませている（成否・`evidence()` の 2 項目・`check_ok` を内部で検査する。`ACPT-7`・`ACPT-8`）。
+    戻り値から登録結果の `evidence()` は取れないので、再検査はできない。
+    - 登録の成功: `outcome.succeeded()`、`assert!(check_ok, ..)`、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false`。
+    - 登録の拒否: `!outcome.succeeded()` に加えて、`error_name()` が期待したブラウザの拒否の名前（対象の WebAuthn のエラー名）と一致し、`evidence()` の 2 項目が `false`。
+      `check_ok` の検査は置かない。`registration_run_result` は、登録が成功しなかったとき（拒否）に `false` を返す一方、登録が予期せず成功して件数と RP ID が合えば拒否を期待する試験でも真になるので、`!check_ok` は拒否の根拠にならない。
+    - 認証の成功: `outcome.succeeded()`、`assert!(check_ok, ..)`、`evidence()` の 2 項目が `false`。
+    - 認証の拒否: `!outcome.succeeded()` と `error_name()` の一致、`assert!(check_ok, ..)`（後続の検査の結果で、認証の成否と無関係）、`evidence()` の 2 項目が `false`。
+      `authentication_run_result` は操作の成否によらず credential を検査するので、`check_ok` が真でも認証が成功したり別の理由で拒否されたりし得る。成否は `outcome` で確かめる。
+    - 共通の注意:
+        - `error_name()` には `HarnessTimeout`・`HarnessScript`・`OriginMismatch` が入り得る。これらはブラウザの拒否ではないので、`!outcome.succeeded()` だけで拒否と見なさない。
+          それぞれの記録の分類は「実行の記録の形式（5/6）」の節を見る。
+        - `!check_ok` を拒否の根拠にしない。
+        - `evidence()` は `AuthenticatorKind::WebDriverVirtual` から導く固定の値で、操作の成否・拒否の名前に依らない。拒否で終わった操作も `Ok(outcome)` を持つので、拒否の場合も 2 項目を検査できる（`ACPT-7`・`ACPT-8`）。
+    - 拒否を期待する認証の例（成否の照合の直後に置く）:
+
+      ```rust
+      let outcome = result.expect("authenticate");
+      assert!(!outcome.succeeded());
+      assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
+      assert!(check_ok, "credential check failed");
+      assert!(!outcome.evidence().counts_as_real_device());
+      assert!(!outcome.evidence().counts_as_safari());
+      ```
+
+    - 失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
 7. `running.stop()` で停止し、その成功を確かめてから `sink.finish()` で記録を出し、`finish()` の戻り値も確かめる。停止に失敗した実行を完了扱いで記録しない。
-
-### 成否と `check_ok` の判定条件
-
-成否は `run` ではなく元の `result` から決める。`run` を記録した後に `result.expect(..)` で `outcome` を取り出して判定する。
-実装（`crates/e2e-harness/tests/support/passkey.rs`）と照らして確かめた条件は次のとおり。
-
-| 操作 | 期待 | 成否（`outcome`） | `check_ok` |
-| --- | --- | --- | --- |
-| 登録 | 成功 | `outcome.succeeded()` | `assert!(check_ok, ..)` で真を確かめる |
-| 登録 | 拒否 | `!outcome.succeeded()` に加えて、`error_name()` が期待したブラウザの拒否の名前（対象の WebAuthn のエラー名）と一致 | 置かない。`registration_run_result` は期待どおりの拒否でも `false` を返すので、`!check_ok` は拒否の根拠にならない |
-| 認証 | 成功 | `outcome.succeeded()` | `assert!(check_ok, ..)` で真を確かめる |
-| 認証 | 拒否 | 登録の拒否と同じ（`!outcome.succeeded()` と `error_name()` の照合） | `assert!(check_ok, ..)` で真を確かめる（後続の検査の結果で、認証の成否と無関係） |
-
-- `registration_run_result` は、登録が成功しなかったとき（`Err` を含む）は credential を見ずに `(run, false)` を返し、成功したときだけ credential の件数と RP ID を見て真偽を決める。
-  偽になる条件は「登録が成功しなかった」「credential の取得に失敗した」「件数が 1 でない・RP ID が `localhost` でない」で、
-  登録が予期せず成功して件数と RP ID が合えば、拒否を期待する試験でも真になる。そのため登録の `check_ok` は拒否の判定に使えない。
-- `authentication_run_result` は操作の成否によらず credential を検査する。`check_ok` が真でも、認証が成功したり別の理由で拒否されたりし得るので、
-  拒否を期待する認証でも成否は `outcome` で確かめる。
-- `expect(..)` を通っても `error_name()` には `HarnessTimeout`（ハーネス自身の期限切れ）・`HarnessScript`（ハーネスのスクリプトの例外）・`OriginMismatch`（呼び出し前の origin 確認）が入り得る。
-  これらはブラウザの拒否ではないので拒否の根拠にしない（操作結果の初期の分類では、それぞれ `harness_timeout`・`check_failed`・`preflight_failed` になり、`rejected` に数えない。「実行の記録の形式（5/6）」の節）。
-  `!outcome.succeeded()` だけで拒否と見なさない。
-- `authentication_run_result` は後続の検査で分類を上書きする。credential の取得に失敗すると `harness_error`、件数や RP ID が合わないと `check_failed` になり、
-  記録の最終の分類に初期の分類が残るのは後続の検査が通ったときだけである。
-- 証跡（`evidence()`）の検査は、成功を期待する場合も拒否を期待する場合も同じに行う。`evidence()` は `AuthenticatorKind::WebDriverVirtual` から導く固定の値で、
-  操作の成否・拒否の名前に依らない。拒否で終わった操作も `Ok(outcome)`（`outcome.succeeded()` が偽）として `outcome` を持つので、拒否の場合も 2 項目を検査できる（`ACPT-7`・`ACPT-8`）。
-  拒否を期待する認証の例は次のとおり（成否の照合の直後に置く）。
-
-  ```rust
-  let outcome = result.expect("authenticate");
-  assert!(!outcome.succeeded());
-  assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
-  assert!(check_ok, "credential check failed");
-  assert!(!outcome.evidence().counts_as_real_device());
-  assert!(!outcome.evidence().counts_as_safari());
-  ```
-
-- 見本の拒否のケース（`crates/e2e-harness/tests/chrome_authentication.rs`・`crates/e2e-harness/tests/firefox_authentication.rs` の UV 失敗の試験）には、今は対照の認証にも拒否された認証にもこの検査が無い。
-  見本を写すときは上の 2 行を足す。見本の側の欠けの追跡先は #6142。
-
-
-失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
 
 ### 実行の方法
 

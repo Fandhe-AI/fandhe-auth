@@ -149,6 +149,27 @@ if [ -n "${MAX_GIT_ARG_BYTES:-}" ]; then
     exit 126
   fi
 fi
+# TMP_MARKER: git の呼び出しの直前に、検出器の一時ディレクトリ（TMP_MARKER_DIR/secret-scan.*）のファイルに目印があれば TMP_MARKER_LOG へ 1 行足す
+# （登録名の下の本文が除外の前に一時領域へ書かれないことの確認用。#6143）
+if [ -n "${TMP_MARKER:-}" ]; then
+  if grep -rlF -- "${TMP_MARKER}" "${TMP_MARKER_DIR}"/secret-scan.* > /dev/null 2>&1; then
+    echo seen >> "${TMP_MARKER_LOG}"
+  fi
+fi
+# FAIL_GIT_NTH_ARG を含む呼び出しの FAIL_GIT_NTH 番目だけを失敗させる（数えは FAIL_GIT_NTH_COUNTER に 1 行ずつ追記。#6143）
+if [ -n "${FAIL_GIT_NTH_ARG:-}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "${FAIL_GIT_NTH_ARG}" ]; then
+      echo x >> "${FAIL_GIT_NTH_COUNTER}"
+      nth_now="$(wc -l < "${FAIL_GIT_NTH_COUNTER}" | tr -d ' ')"
+      if [ "${nth_now}" = "${FAIL_GIT_NTH}" ]; then
+        echo "git shim: forced failure on call ${nth_now}" >&2
+        exit 128
+      fi
+      break
+    fi
+  done
+fi
 for arg in "$@"; do
   if [ "${arg}" = "${FAIL_GIT_ARG:-}" ]; then
     echo "git shim: forced failure on ${arg}" >&2
