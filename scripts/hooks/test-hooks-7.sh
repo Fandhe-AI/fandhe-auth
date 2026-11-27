@@ -465,4 +465,107 @@ git add skills-lock.json
 SCAN_BIN="${det_ok}" check_scan "dropped skill: another checkout scans the dropped body when only skills-lock.json is staged" 1 .agents/skills/vendored-a/SKILL.md
 expect_out "dropped skill: another checkout counts the dropped name once, sibling stays excluded" "secret-scan: total: 1 finding(s) in 1 file(s)"
 
+# ---------------------------------------------------------------- check-audit-config: cargo-audit が読む設定の検査（DPOL-34・TASK-679）
+# 承認していない audit.toml が cargo-audit の読む場所に在れば 1、検査できなければ 2 で止まる（偽の cargo-audit を PATH の先頭に置く。
+# 実物の cargo-audit と advisory DB は使わない）。HOME・CARGO_HOME は fixture 内に向け、開発者の実際の ~/.cargo を読ませない。
+AUDIT_CFG_SH="${HOOKS_DIR}/../check-audit-config.sh"
+audit_ver="$(sed -n 's/^VERIFIED_CARGO_AUDIT_VERSION="\(.*\)"$/\1/p' "${AUDIT_CFG_SH}")"
+ci_audit_ver="$(sed -n 's/^  CARGO_AUDIT_VERSION: "\(.*\)"$/\1/p' "${HOOKS_DIR}/../../.github/workflows/ci.yml")"
+if [ -n "${audit_ver}" ] && [ "${audit_ver}" = "${ci_audit_ver}" ]; then
+  pass "audit-config: measured version matches ci.yml CARGO_AUDIT_VERSION"
+else
+  fail "audit-config: measured version matches ci.yml CARGO_AUDIT_VERSION" "script: ${audit_ver}, ci.yml: ${ci_audit_ver}"
+fi
+
+audit_fx_seq=0
+# audit_fx: 使い捨ての git repo を作り、cwd をそこへ移す。偽の cargo-audit は AUDIT_FAKE_VER の版を名乗る（中身は固定）。
+audit_fx() {
+  audit_fx_seq=$((audit_fx_seq + 1))
+  audit_root="${work_dir}/audit-fx-${audit_fx_seq}"
+  mkdir -p "${audit_root}/scripts" "${audit_root}/crates/trial-deps/fuzz" "${audit_root}/home" "${audit_root}/bin"
+  cp "${AUDIT_CFG_SH}" "${HOOKS_DIR}/../lib.sh" "${audit_root}/scripts/"
+  cat > "${audit_root}/bin/cargo-audit" <<'FAKE'
+#!/bin/sh
+echo "cargo-audit-audit ${AUDIT_FAKE_VER}"
+FAKE
+  chmod +x "${audit_root}/bin/cargo-audit"
+  (cd "${audit_root}" && git -c init.defaultBranch=main init -q && git add -A && git commit -q -m "chore: fixture")
+  cd "${audit_root}"
+}
+# audit_case <名前> <期待の終了コード> [env NAME=VALUE...]: fixture で検査を流す（HOME は fixture 内、CARGO_HOME は未設定が既定）
+audit_case() {
+  local name="$1" want="$2" rc=0
+  shift 2
+  env -u CARGO_HOME AUDIT_FAKE_VER="${audit_ver}" PATH="${audit_root}/bin:${PATH}" HOME="${audit_root}/home" ${@+"$@"} \
+    "${HOOK_BASH}" scripts/check-audit-config.sh > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq "${want}" ]; then
+    pass "audit-config: ${name}"
+  else
+    fail "audit-config: ${name}" "exit ${rc} (expected ${want})" "output: $(cat "${work_dir}/out")"
+  fi
+}
+audit_has() {
+  if grep -qF -- "$2" "${work_dir}/out"; then pass "audit-config: $1"; else fail "audit-config: $1" "missing: $2" "output: $(cat "${work_dir}/out")"; fi
+}
+audit_lacks() {
+  if grep -qF -- "$2" "${work_dir}/out"; then fail "audit-config: $1" "unexpected: $2"; else pass "audit-config: $1"; fi
+}
+audit_ignore_toml='[advisories]
+ignore = ["RUSTSEC-2099-0001"]'
+
+audit_fx
+audit_case "OK: nothing present exits 0" 0
+audit_has "record: approved config is none" "audit-config: approved config: none"
+audit_has "record: root location is absent" "audit-config: <root>/.cargo/audit.toml: absent"
+audit_has "record: fuzz location is absent" "audit-config: <root>/crates/trial-deps/fuzz/.cargo/audit.toml: absent"
+audit_has "record: CARGO_HOME location is absent" "audit-config: CARGO_HOME/audit.toml (CARGO_HOME from HOME): absent"
+audit_has "record: result ok" "audit-config: result: ok"
+
+audit_fx; printf '%s\n' "${audit_ignore_toml}" > audit.toml
+audit_case "OK: audit.toml outside .cargo is not read by cargo-audit" 0
+
+audit_fx; mkdir .cargo; printf '%s\n' "${audit_ignore_toml}" > .cargo/audit.toml
+audit_case "NG: root .cargo/audit.toml with ignore" 1
+audit_has "record: root location is present" "audit-config: <root>/.cargo/audit.toml: present (not approved)"
+audit_has "record: result violation" "audit-config: result: violation"
+audit_lacks "record: file content is not printed" "RUSTSEC-2099-0001"
+
+audit_fx; mkdir crates/trial-deps/fuzz/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/trial-deps/fuzz/.cargo/audit.toml
+audit_case "NG: fuzz .cargo/audit.toml" 1
+
+audit_fx; mkdir "${audit_root}/ch"; printf '%s\n' "${audit_ignore_toml}" > "${audit_root}/ch/audit.toml"
+audit_case "NG: CARGO_HOME/audit.toml" 1 CARGO_HOME="${audit_root}/ch"
+audit_has "record: CARGO_HOME from env" "(CARGO_HOME from env): present (not approved)"
+audit_lacks "record: no absolute path" "${audit_root}"
+
+audit_fx; mkdir "${audit_root}/home/.cargo"; printf '%s\n' "${audit_ignore_toml}" > "${audit_root}/home/.cargo/audit.toml"
+audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME unset" 1
+audit_case "NG: HOME/.cargo/audit.toml with CARGO_HOME empty" 1 CARGO_HOME=
+
+audit_fx; mkdir .cargo; ln -s "${audit_root}/missing-target" .cargo/audit.toml
+audit_case "NG: dangling symlink .cargo/audit.toml" 1
+
+audit_fx; mkdir -p .cargo/audit.toml
+audit_case "NG: directory .cargo/audit.toml" 1
+
+audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml; git add -A; git commit -q -m "chore: nested"
+audit_case "NG: committed nested .cargo/audit.toml" 1
+audit_has "record: nested count" "(tracked or untracked): 1"
+
+audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml
+audit_case "NG: untracked nested .cargo/audit.toml" 1
+
+audit_fx
+audit_case "error: relative CARGO_HOME exits 2" 2 CARGO_HOME=relative/dir
+audit_case "error: HOME and CARGO_HOME both unset exits 2" 2 HOME=
+audit_case "error: different cargo-audit version exits 2" 2 AUDIT_FAKE_VER=0.0.1
+rc=0
+env -u CARGO_HOME AUDIT_FAKE_VER="${audit_ver}" PATH="${audit_root}/bin:${PATH}" HOME="${audit_root}/home" \
+  "${HOOK_BASH}" scripts/check-audit-config.sh --skip > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ]; then pass "audit-config: error: argument is rejected"; else fail "audit-config: error: argument is rejected" "exit ${rc}"; fi
+printf '#!/bin/sh\nexit 3\n' > "${audit_root}/bin/cargo-audit"
+audit_case "error: failing cargo-audit exits 2" 2
+printf '#!/bin/sh\nexit 0\n' > "${audit_root}/bin/cargo-audit"
+audit_case "error: silent cargo-audit exits 2" 2
+
 finish "part 7"

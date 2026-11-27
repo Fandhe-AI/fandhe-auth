@@ -26,7 +26,8 @@ cat <<'EOF'
   lint        scripts/lint.sh                rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向き + vendored 検査
   crate-deps  scripts/check-crate-deps.sh    crate 間の依存の向きの検査（許可表との照合）
   no-vendored scripts/check-openssl-vendored.sh openssl-sys の vendored の検査（合否は本番メンバーの normal・build 依存で、既定 feature と PROD_FEATURES で明示した feature だけ。全 feature の走査は参考（警告）。静的リンクを強いる設定の検出を含む。検査のみ）
-  pg-check    scripts/dev-pg-check.sh        開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
+  audit-cfg   scripts/check-audit-config.sh cargo-audit が読む設定が無いこと（承認済みは無し）の検査（cargo-audit 0.22.2 の読み込み先。検査のみ）
+  pg-check    scripts/dev-pg-check.sh       開発・検証用 PostgreSQL の起動の確かめ（起動中が対象。起動・停止はしない。CI 外）
   it-db       scripts/it-db.sh               ハーネスの DB 結合試験（Docker 必須・#[ignore] の試験を流す。CI 外）
   it-db-ci    scripts/it-db-ci.sh            CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験だけを流す。0 件は失敗）
   e2e-chrome  scripts/e2e-chrome.sh          ハーネスの Chrome の E2E（chromedriver 必須・#[ignore] の試験を流す。CI 外）

@@ -21,7 +21,7 @@ tools:
 | 区分 | 内容 |
 |------|------|
 | ✅ 読む | `Cargo.toml`・`Cargo.lock`・`crates/*/Cargo.toml` |
-| ✅ 実行 | `cargo deny fetch`・`cargo audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ）・`cargo deny --locked check <検査> --disable-fetch`・`cargo audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`git diff --exit-code Cargo.lock`・`cargo deny --version`・`cargo audit --version` |
+| ✅ 実行 | `cargo deny fetch`・`cargo audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ）・`cargo deny --locked check <検査> --disable-fetch`・`cargo audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`scripts/check-audit-config.sh`（cargo-audit の前に流す検査。何も変更しない）・`git diff --exit-code Cargo.lock`・`cargo deny --version`・`cargo audit --version` |
 | ❌ 禁止 | `cargo update`・`cargo add` / `remove`・`cargo install`・ファイルの編集・例外の追加・`cargo deny` / `cargo tree` を `--locked` なしで流すこと・`cargo tree` に `--all-features` を付けること |
 
 ## 遵守する規約
@@ -74,6 +74,12 @@ cargo deny --locked check licenses --disable-fetch
 
 ```bash
 cargo deny --locked check sources --disable-fetch
+```
+
+先に cargo-audit が読む設定が無いことを確かめる（承認済みは無し。DPOL-34）。出力の記録行は報告の「実行の条件」に写す。非 0（違反の 1・検査不能の 2）なら cargo-audit を流さず、cargo-audit の行を「実行失敗」と書く。
+
+```bash
+scripts/check-audit-config.sh
 ```
 
 ```bash

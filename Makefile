@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps no-vendored pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps no-vendored audit-cfg pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -61,6 +61,10 @@ crate-deps: ## crate 間の依存の向きの検査（許可表との照合）�
 # no-vendored は暫定の名前（人が確定する）。DPOL-13・TASK-667。lint からも呼ばれる。
 no-vendored: ## openssl-sys の vendored の検査（合否は本番メンバーの normal・build 依存で、既定 feature と PROD_FEATURES で明示した feature だけ。全 feature の走査は参考（警告）。静的リンクを強いる設定の検出を含む。検査のみ）。直接: scripts/check-openssl-vendored.sh
 	@scripts/check-openssl-vendored.sh
+
+# audit-cfg は暫定の名前（人が確定する）。DPOL-34・TASK-679。cargo-audit を起動する前に必ず呼ぶ検査で、cargo-audit 自体は流さない。
+audit-cfg: ## cargo-audit が読む設定が無いこと（承認済みは無し）の検査（cargo-audit 0.22.2 の読み込み先。検査のみ）。直接: scripts/check-audit-config.sh
+	@scripts/check-audit-config.sh
 
 # pg-check は暫定の名前（人が確定する）。起動・停止の make ターゲットは置かない
 # （make の子プロセスは生成したパスワードを呼び出し元のシェルへ export できず、保存へ流れるため。SECR-6）。
