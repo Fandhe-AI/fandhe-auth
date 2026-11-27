@@ -385,6 +385,73 @@ else
   fail "secret-scan-ci: diagnostics are not passed through on exit 1" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# (d) 陰性対照（scripts/secret-scan-canary.sh）: 許可リストのファイルを作れない（検出器が同じ名前のディレクトリを作る）と、
+# 開けない旨の文（パスを含む）を公開ログへ出さず、検出器の行も通さない（SECR-23。CI 入口の (c) と同じ形の確認）。
+canary_root="${work_dir}/canary-root"
+mkdir -p "${canary_root}/scripts/hooks"
+cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${canary_root}/scripts/"
+cat > "${canary_root}/scripts/hooks/secret-scan.sh" <<EOF
+#!/usr/bin/env bash
+mkdir -p "\${TMPDIR}/allowed-diag"
+echo '${allowed_line}'
+exit 2
+EOF
+chmod +x "${canary_root}/scripts/hooks/secret-scan.sh"
+git -c init.defaultBranch=main init -q "${canary_root}"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${canary_root}/scripts/secret-scan-canary.sh" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF 'scan-canary: scanner could not complete (exit 2)' "${work_dir}/out" \
+  && ! grep -qF 'allowed-diag' "${work_dir}/out" && ! grep -qiF 'Is a directory' "${work_dir}/out" \
+  && ! grep -qF "${allowed_line}" "${work_dir}/out"; then
+  pass "scan-canary: an unopenable allowlist file leaks no shell diagnostic and passes no detector line (exit 2)"
+else
+  fail "scan-canary: an unopenable allowlist file leaks no shell diagnostic and passes no detector line (exit 2)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# ---- 許可リスト（lib.sh の secret_scan_fixed_diagnostics）と検出器の固定の診断文の整合（#6145・#6036）
+# 検出器が出す固定の文（"secret-scan: …; aborting" の形で、変数の展開 $ を含まないリテラル）がすべて許可リストにあり、
+# 許可リストの各行が検出器の中にリテラルとして残っていること。動的な文（${what}・cmp exit・rc=・required command not found）は対象外。
+# shellcheck source=../lib.sh
+source "${HOOKS_DIR}/../lib.sh"
+diag_allowed="${work_dir}/diag-allowed.txt"
+diag_literals="${work_dir}/diag-literals.txt"
+# check_diag_sync <検出器のパス>: 0 = 整合 / 1 = 食い違い / 2 = 抜き出しの失敗
+check_diag_sync() {
+  local det="$1" g_rc=0 line
+  secret_scan_fixed_diagnostics > "${diag_allowed}" || return 2
+  LC_ALL=C grep -ao '"secret-scan: [^$"]*; aborting"' "${det}" > "${diag_literals}" || g_rc=$?
+  [ "${g_rc}" -le 1 ] || return 2
+  [ -s "${diag_literals}" ] || return 2
+  # 検出器のリテラルはすべて許可リストにある
+  while IFS= read -r line; do
+    line="${line#\"}"
+    line="${line%\"}"
+    grep -qxF -- "${line}" "${diag_allowed}" || return 1
+  done < "${diag_literals}"
+  # 許可リストの各行は検出器の中にリテラルとして現れる（古い行の残りを検出する）
+  while IFS= read -r line; do
+    LC_ALL=C grep -aqF -- "\"${line}\"" "${det}" || return 1
+  done < "${diag_allowed}"
+  return 0
+}
+rc=0
+check_diag_sync "${SECRET_SCAN}" || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  pass "secret-scan: the fixed diagnostics of the detector and the CI allowlist agree"
+else
+  fail "secret-scan: the fixed diagnostics of the detector and the CI allowlist agree" "check exit ${rc}"
+fi
+# 陰性対照: 許可リストに無い固定の文を足した複製は、照合に失敗する
+diag_stub="${work_dir}/diag-stub.sh"
+{ cat "${SECRET_SCAN}"; printf '%s\n' 'echo "secret-scan: an unlisted fixed diagnostic; aborting" >&4'; } > "${diag_stub}"
+rc=0
+check_diag_sync "${diag_stub}" || rc=$?
+if [ "${rc}" -eq 1 ]; then
+  pass "secret-scan: an unlisted fixed diagnostic in the detector is caught by the allowlist check"
+else
+  fail "secret-scan: an unlisted fixed diagnostic in the detector is caught by the allowlist check" "check exit ${rc}"
+fi
+
 # ---- 除外の一覧の大きさと引数の長さ（#6053）
 # 登録名ごとの exclude を並べると、有効な一覧（64 KiB 以内）でも引数が macOS の上限を超えて git を起動できなくなる。
 # 実際の上限は CI の macOS で踏み、ここでは shim の MAX_GIT_ARG_BYTES で模す。

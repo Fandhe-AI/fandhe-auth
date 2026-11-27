@@ -155,8 +155,13 @@ case "${scanner_bash}" in
   */*) ;;
   *) die "bash did not resolve to a path" ;;
 esac
+# 受け皿（out）を作れないときは、パス付きの bash の診断を出さず検査不能（2）にする（SECR-23。作れないまま進むと、
+# 検出器が動かずに状態 1 になり「検出」と取り違える）。bash のリダイレクトの診断は { } の外側で捨てる。
+if ! { : > "${work_dir}/out"; } 2> /dev/null; then
+  die "cannot record the scanner output"
+fi
 rc=0
-"${scanner_bash}" "${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1 || rc=$?
+{ "${scanner_bash}" "${detector_dir}/scripts/hooks/secret-scan.sh" --tracked --summary > "${work_dir}/out" 2>&1; } 2> /dev/null || rc=$?
 
 fail() {
   echo "scan-canary: FAILED: $1" >&2

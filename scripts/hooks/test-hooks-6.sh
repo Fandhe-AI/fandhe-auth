@@ -267,10 +267,12 @@ make_ci_target "${ci_src}" "${ci_target}"
 rc=0
 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_root}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
 if [ "${rc}" -eq 1 ] && grep -qxF -- "secret-scan: total: 1 finding(s) in 1 file(s)" "${work_dir}/out" \
-  && grep -qF -- "check out the trusted detector and exclusion list at the commit this job used (${det_sha})" "${work_dir}/out" \
+  && grep -qF -- "this entry cannot prove which version the scan read" "${work_dir}/out" \
+  && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+  && ! grep -qF -- "${det_sha}" "${work_dir}/out" \
   && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
   && grep -qF -- "never paste or upload its output to a public log, PR or issue" "${work_dir}/out" \
-  && grep -qF -- "not the main tip" "${work_dir}/out" \
+  && grep -qF -- "do not rely on the main tip" "${work_dir}/out" \
   && grep -qF -- "GIT_NO_REPLACE_OBJECTS=1 GIT_INDEX_FILE=<new file> git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree ${head_want}" "${work_dir}/out" \
   && grep -qF -- "every existing GIT_* variable unset for both commands below" "${work_dir}/out" \
   && grep -qF -- "env -u GIT_DIR -u GIT_OBJECT_DIRECTORY" "${work_dir}/out" \
@@ -288,6 +290,7 @@ rc=0
 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${det_root}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
 if [ "${rc}" -eq 1 ] && grep -qF -- "use the detector and exclusion list exactly as this run used them" "${work_dir}/out" \
   && grep -qF -- "does not reproduce them" "${work_dir}/out" \
+  && ! grep -qF -- "cannot prove which version the scan read" "${work_dir}/out" \
   && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
   && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
   && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
@@ -422,6 +425,21 @@ assert_hint_rc() {
   done
   fail "${name}" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 }
+# assert_not_started <名前> <入口> <固定の文>: 起動前の検査不能（2）。固定の文だけを出し、再走査の案内・パス・値は出さない（#6145・SECR-23）。
+assert_not_started() {
+  local name="$1" entry="$2" msg="$3"
+  rc=0
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${entry}" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ] && grep -qxF -- "secret-scan-ci: ${msg}" "${work_dir}/out" \
+    && ! grep -qF -- "to see file names" "${work_dir}/out" \
+    && ! grep -qF -- "private local terminal" "${work_dir}/out" \
+    && ! grep -qF -- "${work_dir}" "${work_dir}/out" \
+    && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
+    pass "${name}"
+  else
+    fail "${name}" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+}
 # 末尾がシンボリックリンクの検出器（コミットも 120000）
 r6="${work_dir}/hint-link-tail"
 mk_hint_root "${r6}"
@@ -458,7 +476,13 @@ if [ "$(git -C "${r6}" ls-tree HEAD scripts/hooks/secret-scan.sh | cut -c1-6)" !
   fail "secret-scan-ci: setup for the non-executable detector hint" "committed mode is not 100755"
 fi
 chmod -x "${r6}/scripts/hooks/secret-scan.sh"
-assert_hint_rc "secret-scan-ci: a non-executable detector committed as 100755 does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "2"
+assert_not_started "secret-scan-ci: a non-executable detector committed as 100755 stops before the scan without a rescan hint" "${r6}/scripts/secret-scan-ci.sh" "the detector is not an executable regular file; the scan was not started"
+# 検出器がディレクトリ: 同じく起動前の検査不能で、案内は出さない
+r6="${work_dir}/hint-detector-dir"
+mk_hint_root "${r6}"
+rm -f "${r6}/scripts/hooks/secret-scan.sh"
+mkdir "${r6}/scripts/hooks/secret-scan.sh"
+assert_not_started "secret-scan-ci: a detector that is a directory stops before the scan without a rescan hint" "${r6}/scripts/secret-scan-ci.sh" "the detector is not an executable regular file; the scan was not started"
 # コミット側の skills-lock.json が通常のファイルでない（120000）
 r6="${work_dir}/hint-lock-link"
 mk_hint_root "${r6}"
@@ -482,14 +506,24 @@ if [ "${rc}" -eq 1 ] && grep -qF -- "started through a symbolic link" "${work_di
 else
   fail "secret-scan-ci: a detector started through a symlink describes where its exclusion list is read from" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
-# 検出器の所在を求められない（自己参照のリンク）: 再現に要るファイルを特定できないと案内する。検出器は起動できず検査不能（2）
-r6="${work_dir}/hint-unresolved"
+# 検出器が自己参照のリンク: 起動できないので、起動前の検査不能（2）で案内は出さない
+r6="${work_dir}/hint-selflink"
 mk_hint_root "${r6}"
 rm -f "${r6}/scripts/hooks/secret-scan.sh"
 ln -s secret-scan.sh "${r6}/scripts/hooks/secret-scan.sh"
+assert_not_started "secret-scan-ci: a self-referencing detector link stops before the scan without a rescan hint" "${r6}/scripts/secret-scan-ci.sh" "the detector is not an executable regular file; the scan was not started"
+# 検出器の所在を求められない（起動はできるが、入口が readlink で所在を解決できない）: 再現に要るファイルを特定できないと案内する
+r6="${work_dir}/hint-unresolved"
+mk_hint_root "${r6}"
+mv "${r6}/scripts/hooks/secret-scan.sh" "${r6}/scripts/hooks/real-scan.sh"
+ln -s real-scan.sh "${r6}/scripts/hooks/secret-scan.sh"
+shim6="${work_dir}/hint-unresolved-shim"
+mkdir -p "${shim6}"
+printf '#!/bin/sh\nexit 1\n' > "${shim6}/readlink"
+chmod +x "${shim6}/readlink"
 rc=0
-LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 2 ] && grep -qF -- "the files this run needed cannot be identified" "${work_dir}/out" \
+PATH="${shim6}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -ne 0 ] && grep -qF -- "the files this run needed cannot be identified" "${work_dir}/out" \
   && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
   && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
   && ! grep -qF -- "${work_dir}" "${work_dir}/out"; then
@@ -497,6 +531,7 @@ if [ "${rc}" -eq 2 ] && grep -qF -- "the files this run needed cannot be identif
 else
   fail "secret-scan-ci: an unresolvable detector location reports that the needed files cannot be identified" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
+# 陰性対照: 実際に起動して 2 を返した検出器（一覧の上限超過）では、案内が今までどおり出る（下の hint-lock-big）
 # 走査の間に検出器の repo の HEAD が切り替わる: 走査の後の sha を、走査に使った版として案内しない（終了コードは検出器のまま 1）
 r6="${work_dir}/hint-switch"
 mk_hint_root "${r6}"
@@ -544,7 +579,7 @@ pwd() {
 EOF
 rc=0
 BASH_ENV="${hint_stderr_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 1 ] && grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+if [ "${rc}" -eq 1 ] && grep -qF -- "cannot prove which version the scan read" "${work_dir}/out" \
   && ! grep -qF -- "HINT-STDERR-MARK" "${work_dir}/out"; then
   pass "secret-scan-ci: stderr written while building the rescan hint does not reach the public log"
 else
@@ -552,7 +587,8 @@ else
 fi
 
 # 入口と検出器の実体のルートが違い、検出器の実体が走査対象の checkout の中にある: 検出器は同じ checkout の規則を使うので、
-# 案内も同じ checkout の案内にする（入口との一致はコミットとの照合の条件としてだけ使う）
+# 案内も同じ checkout の案内にする（入口との一致はコミットとの照合の条件としてだけ使う）。入口のルートは対象と違うので、
+# 冒頭は「この入口の checkout」とは言わない（L3）。実体は対象の ./scripts/hooks/secret-scan.sh と同じなので、その案内のまま
 r6="${work_dir}/hint-entry-elsewhere"
 mk_hint_root "${r6}"
 printf 'x = %s\n' "${token}" > "${r6}/leaked.txt"
@@ -562,7 +598,9 @@ mkdir -p "${entry6}"
 ln -s "${r6}/scripts" "${entry6}/scripts"
 rc=0
 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${entry6}/scripts/secret-scan-ci.sh" "${r6}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 1 ] && grep -qF -- "this run scanned this entry's own checkout" "${work_dir}/out" \
+if [ "${rc}" -eq 1 ] && grep -qF -- "this run scanned the checkout that contains the detector's real file" "${work_dir}/out" \
+  && ! grep -qF -- "this entry's own checkout" "${work_dir}/out" \
+  && grep -qF -- "run ./scripts/hooks/secret-scan.sh --tracked (without --summary and without a target argument)" "${work_dir}/out" \
   && grep -qF -- "and HEAD is still $(git -C "${r6}" rev-parse HEAD)" "${work_dir}/out" \
   && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
   && ! grep -qF -- "${work_dir}" "${work_dir}/out" \
@@ -570,6 +608,73 @@ if [ "${rc}" -eq 1 ] && grep -qF -- "this run scanned this entry's own checkout"
   pass "secret-scan-ci: a detector whose real root is the scanned checkout gets the same-checkout hint even via another entry root"
 else
   fail "secret-scan-ci: a detector whose real root is the scanned checkout gets the same-checkout hint even via another entry root" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# 同じ checkout だが、起動した実体は対象の ./scripts/hooks/secret-scan.sh と別のファイル（入口の検出器が、対象の中の別名の実体へのリンク）:
+# 対象の ./scripts/hooks/secret-scan.sh を勧めず、同じ入口を通して流すよう案内する（#6145）
+r6="${work_dir}/hint-alt-real"
+mk_hint_root "${r6}"
+mkdir -p "${r6}/alt/hooks"
+cp "${r6}/scripts/hooks/secret-scan.sh" "${r6}/alt/hooks/real.sh"
+printf 'x = %s\n' "${token}" > "${r6}/leaked.txt"
+hint_commit "${r6}"
+entry6="${work_dir}/hint-alt-real-entry"
+mkdir -p "${entry6}/scripts/hooks"
+cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${entry6}/scripts/"
+ln -s "${r6}/alt/hooks/real.sh" "${entry6}/scripts/hooks/secret-scan.sh"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${entry6}/scripts/secret-scan-ci.sh" "${r6}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qF -- "run the same entry this run started" "${work_dir}/out" \
+  && grep -qF -- "so that file is not the one that ran" "${work_dir}/out" \
+  && ! grep -qF -- "run ./scripts/hooks/secret-scan.sh --tracked" "${work_dir}/out" \
+  && grep -qF -- "and HEAD is still $(git -C "${r6}" rev-parse HEAD)" "${work_dir}/out" \
+  && ! grep -qF -- "${work_dir}" "${work_dir}/out" \
+  && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
+  pass "secret-scan-ci: a same-checkout run whose detector file differs from the target's own does not point at that file"
+else
+  fail "secret-scan-ci: a same-checkout run whose detector file differs from the target's own does not point at that file" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# filtered を開けない（検出器が同じ名前のディレクトリを作る）: 固定の文で 2。パス・bash の診断を出さず、「該当なし」と取り違えない
+r6="${work_dir}/hint-filtered-blocked"
+mk_hint_root "${r6}"
+cat > "${r6}/scripts/hooks/secret-scan.sh" <<'EOF'
+#!/usr/bin/env bash
+# 入口が一時領域（TMPDIR）に作る filtered の名前をふさぐ
+rm -f "${TMPDIR}/filtered"
+mkdir -p "${TMPDIR}/filtered"
+exit 1
+EOF
+chmod +x "${r6}/scripts/hooks/secret-scan.sh"
+hint_commit "${r6}"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF -- "secret-scan-ci: cannot record the filtered scanner output; aborting" "${work_dir}/out" \
+  && ! grep -qF -- "filtered:" "${work_dir}/out" && ! grep -qiF -- "Is a directory" "${work_dir}/out" \
+  && ! grep -qF -- "${work_dir}" "${work_dir}/out" && ! grep -qF -- "internal error" "${work_dir}/out"; then
+  pass "secret-scan-ci: an unopenable filtered file ends with a fixed message and exit 2"
+else
+  fail "secret-scan-ci: an unopenable filtered file ends with a fixed message and exit 2" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# out を開けない（一時領域の作成の直後に out を同名のディレクトリにする）: 検出（1）と取り違えず、固定の文で 2
+r6="${work_dir}/hint-out-blocked"
+mk_hint_root "${r6}"
+hint_commit "${r6}"
+out_env="${work_dir}/out-blocked-env.sh"
+cat > "${out_env}" <<'EOF'
+mktemp() {
+  local d
+  d="$(command mktemp "$@")" || return
+  case "$1" in -d) mkdir "${d}/out" ;; esac
+  printf '%s\n' "${d}"
+}
+EOF
+rc=0
+BASH_ENV="${out_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF -- "secret-scan-ci: cannot record the scanner output; aborting" "${work_dir}/out" \
+  && ! grep -qiF -- "Is a directory" "${work_dir}/out" && ! grep -qF -- "${work_dir}" "${work_dir}/out" \
+  && ! grep -qF -- "findings reported" "${work_dir}/out"; then
+  pass "secret-scan-ci: an unopenable output file is not mistaken for a finding (exit 2, fixed message)"
+else
+  fail "secret-scan-ci: an unopenable output file is not mistaken for a finding (exit 2, fixed message)" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 # 許可リストのファイルを開けない（検出器が同じ名前のディレクトリを作る）: 開けない旨の文（パスを含む）を公開ログへ出さない（SECR-23）
 r6="${work_dir}/hint-allowed-diag"
@@ -607,7 +712,9 @@ hint_commit "${r6}"
 r6_sha="$(git -C "${r6}" rev-parse HEAD)"
 rc=0
 LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 1 ] && grep -qF -- "check out the trusted detector and exclusion list at the commit this job used (${r6_sha})" "${work_dir}/out"; then
+if [ "${rc}" -eq 1 ] && grep -qF -- "cannot prove which version the scan read" "${work_dir}/out" \
+  && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+  && ! grep -qF -- "${r6_sha}" "${work_dir}/out"; then
   pass "secret-scan-ci: a skills-lock.json absent from both the commit and the working tree still matches"
 else
   fail "secret-scan-ci: a skills-lock.json absent from both the commit and the working tree still matches" "exit ${rc}" "output: $(cat "${work_dir}/out")"
