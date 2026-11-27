@@ -1,7 +1,7 @@
 //! TASK-12 9/10: 小さな試し実行。it-harness の上で Hub の stub に対して段階付きの負荷を最後まで流し、
 //! 記録のファイルが出ること・どの値も要件の値として記録されないことを確かめる。
 //!
-//! Docker・ネットワークなし（`make test` で必ず流れる。`#[ignore]` を付けない）。値は試験の中だけの仮の値
+//! Docker・ネットワークなし（主試験は `make test` で必ず流れる。本文を出す専用の試験だけ `#[ignore]` で、`make load-trial` が選ぶ）。値は試験の中だけの仮の値
 //! （A-2026-10-28-1・A-2026-10-28-14）。時間の値は判定しない。stub の合格を実物の合格に数えない
 //! （A-2026-10-28-9・ACPT-7）。出たファイルは追跡ツリーの外（`CARGO_TARGET_TMPDIR`）に置く。
 
@@ -61,8 +61,9 @@ const META: [&str; 6] = [
     "judgment:",
 ];
 
-#[test]
-fn small_trial_run_writes_record_without_requirement_values() {
+/// 主試験の本体。記録を書いて検査し、停止と後片付けまで済ませてから、記録の本文と照合の登録簿を返す。
+/// 主試験と、本文を出す専用の試験（`print_checked_load_record_body`）が同じ試行を使い回す。
+fn run_small_trial() -> (String, Vec<Vec<u8>>) {
     // 照合の登録簿は、stub へ実際に渡す設定そのもの（同じインスタンス）から、渡す前に作る。
     let cfg = hub_config();
     let registry = stdout_registry(&cfg);
@@ -216,16 +217,32 @@ fn small_trial_run_writes_record_without_requirement_values() {
     std::fs::remove_file(&path2).unwrap();
     std::fs::remove_file(&it_path).unwrap();
 
-    // 10/10: 上の検査（設定の目印 2 種・出力先のパスが無い）を通し、さらに出す本文そのものを秘密値の各表現の照合（`printable_body`）に通し、停止と後片付けが成功した後に、
-    // `make load-trial`（`FANDHE_AUTH_LOAD_TRIAL_PRINT=1`・--show-output）で明示的に選んだときだけ本文を出す。
-    // 通常の `make test` では出さない（失敗時に本文が CI ログへ残らない。SECR-23）。
-    if std::env::var_os("FANDHE_AUTH_LOAD_TRIAL_PRINT").is_some_and(|v| v == "1") {
-        // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 4 欄に入れた値の全文）の
-        // 生・base64・base64url・16 進の各形と JWT の形で走査する。一致したら本文を出さず失敗させる。
-        let body = printable_body(&text, &registry).unwrap();
-        // `scripts/load-trial.sh` が照合済みの本文を見分けるための固定の開始行・終了行（ちょうど 1 区画だけ出す）。
-        println!("{PRINT_BEGIN}\n{body}{PRINT_END}");
-    }
+    (text, registry)
+}
+
+#[test]
+fn small_trial_run_writes_record_without_requirement_values() {
+    let (text, registry) = run_small_trial();
+    // 出す本文そのものを秘密値の各表現の照合（`printable_body`）に通せることを、本文を出さずに確かめる（SECR-23）。
+    // 本文を出すかどうかは環境変数・設定に依らない。出す入口は下の `#[ignore]` の試験だけ。
+    assert!(
+        printable_body(&text, &registry).is_ok(),
+        "the load record body failed the registered-value check"
+    );
+}
+
+/// 照合を通した記録の本文を標準出力へ出す専用の試験。`#[ignore]` のため `make test` では走らず、
+/// `make load-trial`（`scripts/load-trial.sh`）が `--ignored --exact` で明示的に選んだときだけ出す。
+/// 環境変数では切り替えない（DPOL-32。親の環境から本文の出力が有効にならない）。
+#[test]
+#[ignore = "prints the checked record body; run via make load-trial"]
+fn print_checked_load_record_body() {
+    let (text, registry) = run_small_trial();
+    // SECR-23・AAUD-30: 標準出力へ渡す本文そのものを、登録簿（設定の 4 欄に入れた値の全文）の
+    // 生・base64・base64url・16 進の各形と JWT の形で走査する。一致したら本文を出さず失敗させる。
+    let body = printable_body(&text, &registry).unwrap();
+    // `scripts/load-trial.sh` が照合済みの本文を見分けるための固定の開始行・終了行（ちょうど 1 区画だけ出す）。
+    println!("{PRINT_BEGIN}\n{body}{PRINT_END}");
 }
 
 /// 標準出力へ出す本文の走査用の登録簿: 主試験が stub の設定の 4 欄へ入れた値の全文。
