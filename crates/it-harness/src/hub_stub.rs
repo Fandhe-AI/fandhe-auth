@@ -21,7 +21,10 @@ use fandhe_auth_hub_stub::feed::ChangeFeedFetcher;
 use fandhe_auth_hub_stub::heartbeat::HeartbeatReceiver;
 use fandhe_auth_hub_stub::jwks::{AuthJwksFetcher, HubJwksEndpoint};
 
+use fandhe_auth_hub_stub::fault::Wait;
+
 use crate::component::{Component, ComponentKind};
+use crate::fault::HubStubFaultInjector;
 use crate::harness::{HarnessError, HarnessErrorKind};
 
 /// 起動中の Hub の stub の模擬一式。設定だけで組める 4 つを持つ。
@@ -64,11 +67,39 @@ pub struct HubStubHandle(Arc<Mutex<Option<HubStubSession>>>);
 impl HubStubHandle {
     /// 起動中だけ `Some(f の戻り値)`。起動前・停止後・lock の毒化は `None`。
     ///
-    /// `f` の実行中はセッションの lock を握る。`f` の中で `HubStubFaultInjector` の受け口を呼ぶと、遅れの `Wait` も
+    /// `f` の実行中はセッションの lock を握る。`f` の中で `HubStubFaultInjector` の受け口を直接呼ぶと、遅れの `Wait` も
     /// lock を握ったまま走る。`Wait` の中で同じハンドル（`with`・`is_running` 等）を触ると自己待ちで止まるので、触らない。
-    /// 遅れを lock の外で実行する構造にはしていない（遅れの実行は hub-stub の注入器の内側で、`f` の戻りより前に起きる）。
+    /// 遅れを lock の外で走らせたいときは [`Self::with_injector`] を使う。
     pub fn with<R>(&self, f: impl FnOnce(&mut HubStubSession) -> R) -> Option<R> {
         self.0.lock().ok()?.as_mut().map(f)
+    }
+
+    /// 注入器の受け口を呼ぶ操作を、遅れの `Wait` を lock の外で走らせて実行する（TASK-13 の 7/8）。
+    /// `f` の中の受け口が溜めた遅れは、lock を放した後・戻り値を返す前に注入器の `Wait` へ流す。
+    /// 起動前・停止後・lock の毒化は `None`（`f` を呼ばないので遅れは溜まらない）。
+    pub fn with_injector<W: Wait, R>(
+        &self,
+        injector: &mut HubStubFaultInjector<W>,
+        f: impl FnOnce(&mut HubStubSession, &mut HubStubFaultInjector<W>) -> R,
+    ) -> Option<R> {
+        /// `f` が panic しても流すのを後にする状態を戻す。
+        struct Restore<'a, W: Wait>(&'a mut HubStubFaultInjector<W>);
+        impl<W: Wait> Drop for Restore<'_, W> {
+            fn drop(&mut self) {
+                self.0.set_deferred(false);
+            }
+        }
+        let guard = Restore(injector);
+        guard.0.set_deferred(true);
+        let result = {
+            let mut g = self.0.lock().ok()?;
+            let session = g.as_mut()?;
+            f(session, &mut *guard.0)
+        };
+        // lock は放した。ここで遅れを流す。
+        guard.0.set_deferred(false);
+        guard.0.flush_delays();
+        Some(result)
     }
 
     /// 起動中か。

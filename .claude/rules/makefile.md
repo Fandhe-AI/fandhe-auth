@@ -56,7 +56,7 @@ description: >
 | `doctor` | `scripts/doctor.sh` | 読み取りのみ。何も導入・更新・修復しない。必須ツール欠落時は非 0 |
 | `setup` | `scripts/setup.sh` | 冪等（再実行しても安全）。`lefthook install` と `.env` 雛形の配置のみで、既存の `.env` は上書きしない。ツール本体は導入しない |
 | `check` | `scripts/check.sh` | ソースを変更しない（自動修正しない）。editorconfig-checker + shellcheck。CI の `check` ジョブと同一 |
-| `test-hooks` | `scripts/hooks/test-hooks.sh`（入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-lib.sh`） | 一時 git リポジトリで検証し作業ツリーを変更しない。依存は bash + git のみ。CI の `test-hooks` ジョブと同一 |
+| `test-hooks` | `scripts/hooks/test-hooks.sh`（入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-lib.sh`） | 一時 git リポジトリで検証し作業ツリーを変更しない。依存は bash + git が基本で、part 12（lib-deps）だけ cargo が要る（無ければローカルは TAP の `# SKIP`、CI では失敗。作業場所は repo の `target/` の下）。CI の `test-hooks` ジョブと同一 |
 | `secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 検査のみ。追跡ファイル全体の秘密情報の混入を規則表で検査し、規則 ID ごとの件数・合計・ファイル名だけを出す（値は出さない）。0 件で 0・検出で 1・検査不能で 2。CI の `secret scan (tracked files)` ジョブは `scripts/secret-scan-ci.sh` 経由で本検出器を呼ぶ（#51。TASK-6）。名前は暫定 |
 | `scan-canary` | `scripts/secret-scan-canary.sh` | 検査のみ。元の index・作業ツリー・object store を変えない。実行時に組み立てたダミーを足した一時 index で、検出器が 1 を返し、`--summary` の出力が許可した集計行の集合と完全に一致し（余計な行があれば失敗）、ダミーの値が出力に無ければ 0。検出能力の異常は 1、検出器が検査不能（2 等）・準備や読み取りの失敗は 2。元のリポジトリの hooks は起動しない。CI の `secret scan (tracked files)` ジョブは `scripts/secret-scan-ci.sh` 経由で本検出器を呼ぶ（#51。TASK-6）。名前は暫定 |
 | `build` | `cargo build --workspace --locked`（直書き） | ソースを変更しない。`--locked` で `Cargo.lock` の外を解決しない。`--all-features` は付けない（DPOL-31）。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
@@ -64,6 +64,7 @@ description: >
 | `fmt` | `cargo fmt --all`（直書き） | rustfmt を適用する（ソースを書き換える唯一の make ターゲット） |
 | `lint` | `scripts/lint.sh` | 検査のみ。`cargo fmt --check`・clippy `-D warnings`・`crate-deps`・`no-vendored`。CI の `lint` ジョブと同一（TASK-6） |
 | `crate-deps` | `scripts/check-crate-deps.sh` | 検査のみ。crate 間の依存の向きを許可表と照合する。表に無い member・辺は失敗（fail-closed） |
+| `lib-deps` | `scripts/check-lib-deps.sh` | 検査のみ。本体の crate の通常の依存に禁止の crate が 0 件かを `cargo tree` と陰性対照で確かめる（LIB-2・TASK-714）。終了コードは 0 合格・1 違反・2 検査不能（直接実行のとき）。名前は暫定 |
 | `no-vendored` | `scripts/check-openssl-vendored.sh` | 検査のみ。`openssl-sys` の `vendored` が依存解決に 0 件かを陰性対照つきで確かめる（DPOL-13・TASK-667）。終了コードの 1（違反）・2（検査不能）の区別はスクリプトの直接実行に適用される（make 経由ではレシピが 1 で終了しても make 自体は 2 を返す）。名前は暫定 |
 | `crypto-scan` | `scripts/check-crypto-primitives.sh` | 検査のみ。暗号の基本処理の自作を発見的に走査する（LIB-21・DPOL-4・DPOL-47・TASK-715 3/4）。合否は本番メンバーの規則 C1〜C5、試験専用メンバーと N1・N2 は参考の警告。陽性・陰性対照の自己試験つき。終了コードの 1（違反）・2（検査不能）の区別は直接実行に適用される。名前は暫定 |
 | `pg-check` | `scripts/dev-pg-check.sh` | 起動中の開発・検証用 PostgreSQL の起動の確かめ。起動・停止はしない。CI へは載せない（TASK-6）。名前は暫定。手順の正は `dev/postgres/README.md` |

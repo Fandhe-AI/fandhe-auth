@@ -1330,7 +1330,7 @@ done
 #   --no-renames: リネームを削除 + 追加として扱い、移動先の全行を走査する（除外パスからの移動も含む）
 #   core.quotePath=false: 非 ASCII のパスをヘッダで 8 進に引用させない（引用すると一覧の生のパスとヘッダが食い違い、
 #     登録名の下の区画を落とせない。設定が true でも false でも同じ形にする。制御文字・二重引用符・バックスラッシュは
-#     設定に依らず引用され、その区画は突き合わせで落とさず走査する）
+#     設定に依らず引用されるため、一覧のパスを git と同じ規則で引用した形（git_diff_header）とヘッダ全体を突き合わせる）
 #   --src-prefix / --dst-prefix: diff.noprefix・diff.mnemonicPrefix でヘッダが `+++ b/` 以外になる
 # --tracked では空の tree と index の差分を取る。追跡ファイルの全行が追加行になるため、
 # 名前の検査・除外パス・解析ループ・規則の判定を staged モードと共用できる（解析の二重実装を作らない）。
@@ -1400,12 +1400,53 @@ if [ "${mode}" = tracked ] && [ "${checked_files}" -eq 0 ]; then
   fi
 fi
 
+# git_diff_header <path>: --no-renames の差分の区画のヘッダ（`diff --git a/<P> b/<P>`）を git と同じ規則で組み、diff_header へ入れる。
+# 制御文字（0x01〜0x1F）・DEL・二重引用符・バックスラッシュを含むパスは、core.quotePath=false でも git が C 風に引用し、
+# 接頭辞ごと `"a/<esc>" "b/<esc>"` の形になる（0x80 以上は生のまま。bash 3.2 で動くよう printf -v と case だけで組み、
+# 外部コマンドを起こさない。LC_ALL=C のため ${#s}・${s:i:1} はバイト単位）。
+# 用途は「一覧の n 番目と同じファイルの区画か」の照合だけで、登録名の判定には使わない（判定は生の -z のパスで行う）。
+# 引用は単射のため、一致した区画は同じパスのものに限られる。
+git_diff_header() {
+  local p="$1" out="" c o i n
+  case "${p}" in
+    *[[:cntrl:]\"\\]*)
+      n=${#p}
+      i=0
+      while [ "${i}" -lt "${n}" ]; do
+        c="${p:i:1}"
+        i=$((i + 1))
+        case "${c}" in
+          $'\a') out="${out}\\a" ;;
+          $'\b') out="${out}\\b" ;;
+          $'\t') out="${out}\\t" ;;
+          $'\n') out="${out}\\n" ;;
+          $'\v') out="${out}\\v" ;;
+          $'\f') out="${out}\\f" ;;
+          $'\r') out="${out}\\r" ;;
+          '"') out="${out}\\\"" ;;
+          \\) out="${out}\\\\" ;;
+          [[:cntrl:]])
+            printf -v o '\\%03o' "'${c}"
+            out="${out}${o}"
+            ;;
+          *) out="${out}${c}" ;;
+        esac
+      done
+      diff_header="diff --git \"a/${out}\" \"b/${out}\""
+      ;;
+    *)
+      diff_header="diff --git a/${p} b/${p}"
+      ;;
+  esac
+}
+
 # 2. 追加行のみを走査する（削除行を対象にすると漏洩済み値の除去コミットを妨げる）
 # 主の本文の差分は一時ファイルへ全量で書かず、後段（NUL の数え・除去版・置換版）へ git から直接パイプで流す（#6143）。
 # 登録名の下の本文（--tracked では大きい）が除外の前に一時領域へ溜まるのを避ける。
 body_skip_filter=0
 if [ "${skill_count}" -gt 0 ] || [ "${dropped_count}" -gt 0 ]; then
   # 登録名の下のファイルの印（区画ごとに 1 行。1 = 外す）。外すのは `.agents/skills/<登録名>/` の下だけで、
+  # 引用されるパス（制御文字・二重引用符・バックスラッシュ）も引用形のヘッダの一致で外す。
   # 判定に迷う形（`.agents/skills/` で始まらない・直下のファイル・規則に合わない区画・未登録・前方一致の別名）は走査する。
   if ! scan_diff --name-only -z --diff-filter=ACMR -- . > "${tmp_dir}/names"; then
     echo "secret-scan: failed to list files; aborting" >&4
@@ -1430,12 +1471,11 @@ if [ "${skill_count}" -gt 0 ] || [ "${dropped_count}" -gt 0 ]; then
         esac
         ;;
     esac
-    # 外す区画は印に実際のパスを付ける（`1<パス>`）。diff 側の区画のヘッダと突き合わせる（改行を含むパスは外さず走査する）。
-    if [ "${skip}" -eq 1 ] && [[ "${path}" == *$'\n'* ]]; then
-      skip=0
-    fi
+    # 外す区画は印に、一覧のパスから組んだ「期待するヘッダ全体」を付ける（`1<ヘッダ>`）。diff 側の区画のヘッダとバイト単位で
+    # 突き合わせる。引用されるパス（改行を含むものも）は git と同じ規則で引用した形になり、1 行に収まる。
     if [ "${skip}" -eq 1 ]; then
-      printf '1%s\n' "${path}"
+      git_diff_header "${path}"
+      printf '1%s\n' "${diff_header}"
     else
       printf '0\n'
     fi
@@ -1510,9 +1550,13 @@ fi
 # 登録名の下の区画を落とす（#6053）。除外は正規化の流れの中（パイプ）で行い、除外対象の本文は一時ファイルに書かず、git からパイプの中だけで流す（#6143）。
 # 出力先の一時ファイルは、パイプ全体（pipefail）の成功を `if !` で確かめるまで読まない。
 # 区画の数が一覧のファイル数と違えば（git の出力と一覧の対応が崩れている）検査不能（2）にする。
-# 落とす区画のヘッダ（`diff --git a/<パス> b/<パス>`。--no-renames のため同じパス）が一覧の n 番目のパスと一致しない区画
-# （git が引用・エスケープするタブ・二重引用符・バックスラッシュ・制御文字のパス、diff.orderFile 等の順序の変更）は、
-# 対応が取れないため落とさず走査する（走査する側に倒す。2 にはしない）。
+# 落とす区画のヘッダは、一覧の n 番目のパスから git_diff_header で組んだ期待するヘッダとバイト単位で一致するときだけ落とす
+# （不変条件。落とす向きに崩さない）。
+#   1. 登録名の判定は生の -z のパスの区画だけで行う。引用形は判定に使わない。
+#   2. 引用されるヘッダは必ず `diff --git "a/` で始まり、引用されないヘッダは決してそう始まらない（`"` で始まるパスは必ず引用される）。
+#      引用は単射のため、期待するヘッダと一致する別のパスの区画は無い。
+#   3. 一致しない区画（diff.orderFile 等の順序の変更・git の規則の食い違い）は落とさず走査する（2 にはしない）。
+#      将来の git と規則が食い違っても、誤検知の側に倒れ、見逃しにはならない。
 filter_sections() {
   if [ "${body_skip_filter}" -eq 1 ]; then
     # ファイル名は `-v` で渡さない（値のバックスラッシュがエスケープとして解釈され、TMPDIR にバックスラッシュがあると
@@ -1523,7 +1567,7 @@ filter_sections() {
       /^diff --git / {
         sec++
         drop = (substr(flag[sec], 1, 1) == "1")
-        if (drop && $0 != "diff --git a/" substr(flag[sec], 2) " b/" substr(flag[sec], 2)) drop = 0
+        if (drop && $0 != substr(flag[sec], 2)) drop = 0
         if ($0 in dh) drop = 1
       }
       !drop { print }

@@ -139,6 +139,7 @@ hub-stub の実装をそのまま使い、作り直さない。
 
 - 入口: `new(wait, &timeline)`（1 つの実行に結ぶ）・`finish`（注入器を消費し、記録と呼び出しの記録を組で返す。別の実行の記録は `RunMismatch`）・`apply`・`release`・`present`・`receive_logout`・`receive_heartbeat`・`serve_jwks`・`call_log`・`active_count`。
   受け口は呼び出しごとに借りる（`HubStubSession` に足さない）。種類は `hub_stub_delay`・`hub_stub_refusal`。
+  受け口は 7/8 から `bind_receiver` で実行に結んだ `RunBound<..>` を渡す（下の「基準線の実行（7/8）」）。
 - 「TASK-7 の設定の仕組み」は `HubFaultConfig`・`FaultRule`・`CallWindow` と `set_faults` と読む。`HubStubConfig` には欄を足さない。
 - 開始は `CallWindow { first: 1, last: None }`（以降すべて）の規則を入れた設定の差し替え、解除はその規則を除いた設定の差し替え。
 - 同じ口の遅れと拒否（各最大 1 件）は 1 つの規則に合成する。hub-stub は最初に当たった 1 件だけを使うため、分けると片方が落ちる。
@@ -148,13 +149,46 @@ hub-stub の実装をそのまま使い、作り直さない。
 - 注入器は実行をまたいで使わない。基準線・次の実行には新しい注入器を作る（有効な規則と呼び出しの記録を持ち越さない。fail-closed）。
 - 解除は開始と同じ種類・値でだけ受ける。二重の開始は `AlreadyActive`、無い解除は `NotActive`。
 - `MalformedBody` は JWKS の口だけ。`FaultKind::validate` が他の口を拒否する（1/8 の挙動を狭めた）。
-- 遅れは `Wait` のフックへ渡すだけ。眠る実装は出さない。
+- 遅れは `Wait` のフックへ渡すだけ。眠る実装は出さない。7/8 から、遅れは内側の呼び出しが戻った直後に溜め場から流す。
+  `HubStubHandle::with` の中で受け口を直接呼べば今までどおりロックの中で走る。ロックの外で走らせるには `HubStubHandle::with_injector` を使う。
 - hub-stub の呼び出しの記録（`at` は試験の論理時刻）は `FaultRecord` に入れず、`call_log()` で読む。対応は順序だけ。`finish` が記録と呼び出しの記録を組で返すので、終了後にも照合できる。事象行に `log_pos` を足したため、記録の形式の版を `/2` に上げた。
 - 対象外の口: `AuthPort`・`ChangeFeedPort`・`AuthJwksPort`（hub-stub の設計で対象外）。
 - 誤りと `Debug` に token・値を載せない（SECR-11・SECR-23〜27）。stub の合格を実物の合格に数えない（A-2026-10-28-9・ACPT-7）。
 - 根拠: TASK-13・AVLB-18・AVLB-22・RVPG-28・OCL-36・Hub AUTHC-21。Host への結線は `TODO(TASK-716)`。
 - 記録の例: `injection: 1 applied hub_stub_refusal target=hub_stub at=... offset_ms=... port=jwks refusal=status_503 log_pos=0`。
 - 試験: `cargo test -p fandhe-auth-it-harness --test fault_hub_stub`（`make test` に含む）。
+
+## 基準線の実行（7/8）
+
+`crates/it-harness/src/fault/pair.rs` の `FaultPair`・`PairedRecords`・`PairError`（仮称）と、`FaultTimeline::inject`（`record.rs`）。
+同じシナリオの本体を、モードで分岐させずに基準線・注入ありの順で 2 回流し、`run_mode` の違う 2 つの記録を組で返す（spec の PoC-11 の
+`F0-BASELINE` と同じ読み。形式の版は `/2` のまま）。
+
+- `FaultTimeline::inject(steps, op)`: 注入の段（種類と相）を宣言して操作を通す入口。
+  - 注入あり: `op` を呼び、積まれた事象が `steps` と同じ数・順・(種類, 相) かを確かめて段を残す。食い違えば `Mismatch`（fail-closed）。
+    記録の後で `op` が失敗しても事実なので段に数え `Op` で返す。何も積まずに失敗したときは段を残さず `Op`。
+  - 基準線: `op` を呼ばない。`steps` に注入ありの記録と同じ検査（パラメータ・一回きりの事象の解除・`Applied` の無い解除）を掛け、段だけを残す。
+    事象は積まない（`EventsInBaseline` の規則は変えない）。空の `steps` は `InvalidParam`。
+  - 段の並びは `FaultRecord::injection_points()` で読める。記録の形式（`Display`）には出さない。
+- `FaultPair::run(body)`: 基準線を先に流し（注入の後の状態を持ち越さない）、注入ありを後に流す。本体は実行ごとにタイムラインを受け、
+  確定した記録を返す。注入器は本体の中で実行ごとに作る。返った記録が渡した実行のものでなければ `RunMismatch`、両方の段の並びが
+  一致しなければ `ShapeMismatch`（両方の記録を返す）。注入ありで 0 件なら本体の確定が `NoInjectionInFaultRun` を返す。
+- `PairedRecords::write_new(dir)`: 2 つを別のファイルへ書く。ファイル名にモードを入れた（`it-fault-<baseline|fault>-<started>-<pid>-<n>.txt`）。
+- 受け口の実行への結び付け（5/8 への指摘の対応）: `HubStubFaultInjector::bind_receiver`（所有）・`bind_receiver_mut`（借用。
+  セッションの口 `&mut session.jwks` を所有権を取らずに結ぶ）で作った `RunBound` だけが、その注入器の受け口へ渡せる。
+  別の実行の注入器の受け口は、内側へ委ねる前に `RunMismatch`（内側のログに入れず、`used` も立てない）。結んだ受け口から
+  `&mut` を取り出して結び直す口は出さない（`get_mut`・`DerefMut` はなく、封印した trait のメソッドは外の crate が作れない印を要る。
+  総称の境界から取り出す試みは `BoundReceiver` の `compile_fail` の doctest で確かめる）。`Deref` で内側の共有参照のメソッドは使える。
+  ハーネスで起動した stub へは、`handle.with_injector(&mut inj, |s, inj| { let mut b = inj.bind_receiver_mut(&mut s.jwks); inj.serve_jwks(&tl, &mut b, now) })`
+  の形でセッションの口へ直接注入できる（借用はクロージャの中で使い、外へ返さない。公開した鍵・キャッシュは引き継がれる）。
+  借用の形は同じ口を実行をまたいで結べ、状態を持ち越す。守られるのは結んだ注入器との一致（`RunMismatch`）だけで、持ち越しは防がない。
+  実行ごとに新しい受け口を作る形（`bind_receiver`）も残す。
+- `HubStubHandle::with_injector(&mut inj, |session, inj| ..)`: 遅れの `Wait` をセッションのロックを放した後・戻る前に流す。
+- 試験: `cargo test -p fandhe-auth-it-harness --test fault_baseline`（`make test` に含む。Docker なし）。上流の試験用サーバーは
+  `tests/support/upstream.rs` へ移し、各接続に書き込みの打ち切りを置いた（`drop` の join に期限を持たせる）。
+- 試験の範囲の注記: `recorded_offsets_are_not_after_call_return` が確かめるのは「記録の `offset_ms` が呼び出しの復帰時刻を超えない」ことまで。
+  `Applied` を記録した時点の状態（記録の後に状態を変える順序）は観測していない（未実施）。
+- 扱わない（8/8 の担当）: 使い方の文書・make ターゲット、`FaultFinishFailure` の `Error` 実装、遮断の境界・排出の条件の文書の書き直し。
 
 ## 時計のずれ（6/8）
 
@@ -186,6 +220,7 @@ hub-stub の実装をそのまま使い、作り直さない。
 
 `RunRecord`（`fandhe-auth-it-run-record/1`）とは別のファイル。`run_started_at` で結ぶ。UTF-8・LF・1 行 1 項目の `key: value`。
 注入した実行（`run_mode: fault`）と基準線（`run_mode: baseline`）で同じキーを出す。基準線は `injection_count: 0`・`unreleased_count: 0`。
+`FaultPair`（7/8）は 2 つを `it-fault-baseline-...`・`it-fault-fault-...` の別のファイルへ書く。
 
 ```
 format: fandhe-auth-it-fault-record/2
@@ -219,6 +254,9 @@ note: ...
 - console stub の注入（TASK-8）を TASK-13 の一覧に入れるか（spec の列挙には無い）
 - Hub の stub の注入（5/8）: 窓を「以降すべて」に限ったこと・同じ口の遅れと拒否の合成・`validate` を狭めたこと（`MalformedBody` は JWKS だけ）・
   眠る `Wait` を出さないこと（出すなら上限の決定が要る）・stub の呼び出しの記録そのものを記録の形式に入れないこと（入れるなら版を上げる。事象行の `log_pos` は `/2` で足した）・型名と文言
+- 基準線の実行（7/8）: `inject`・`FaultPair`・`PairedRecords`・`RunBound`・`with_injector` の名前と形・注入の段を記録の行に出さないこと
+  （出すなら形式の版上げ）・ファイル名にモードを入れたこと・基準線を先に流す順序・`bind_receiver_mut`（借用の結び付け）の名前と形
+  （セッションの口へ直接注入する。実行ごとに作る受け口の形も残した）・借用の形で同じ口を実行をまたいで結べ状態を持ち越すことを許すか・上流の書き込みの打ち切り 1 秒（試験用の仮の値）・`Applied` の順序の観測が未実施であること
 - 記録のファイルを秘密値の走査の対象に入れること（`secret-values.md`）。本段は canary の試験で代える。出力先は追跡ツリーの外（`target/`）
 - DB の遮断の形を「直ちに閉じる」にしたこと。「受けて黙る（blackhole）」を入れるか（2/8）
 - 遅延を応答の向きの塊ごとに足す形（2/8）

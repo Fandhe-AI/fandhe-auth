@@ -298,3 +298,10 @@
 ## 4/4 検査に載せて記録する（#5170）
 
 未記入。
+
+## 追記（2026-11-27）: trial-deps の dev への導入
+
+上の記録の「`aws-lc-rs`・`jsonwebtoken` は lock に無い」（48・95・181・189・223 行付近）は、記録した時点の事実で書き換えない。
+その後 #6164 で `crates/trial-deps` の dev 依存として `jsonwebtoken` 12.0.0・`aws-lc-rs` 1.19.0・`pem` が `Cargo.lock` に入った（`DPOL-14` の試験用）。
+これは試験専用（dev）として受け入れたもので、本体の crate の選定ではない（利用者の決定。署名の実装の選びと `jsonwebtoken` の採否は上の記録のとおり未定）。
+`rsa` は引き続き lock に入らない（`cargo tree --locked -i rsa` が 0 件）。

@@ -40,7 +40,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `Cargo.toml`・`Cargo.lock`・`crates/` | Cargo の workspace（virtual workspace）と段階 1 の crate 雛形（`crates/<名前>`、crate 名は `fandhe-auth-<名前>`）。members は明示列挙する（後述の「ビルド」） |
 | `Makefile` | `scripts/` を呼ぶだけの薄い入口（`make help` で一覧） |
 | `rustfmt.toml` | rustfmt の設定（edition のみ。値は 2024。`D-2026-11-20-12`） |
-| `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check` / `lint` / `check-crate-deps` / `check-openssl-vendored` / `check-crypto-primitives` / `dev-pg-check` / `it-db` / `it-db-ci` / `e2e-chrome`）。Make なしでも直接実行できる |
+| `scripts/` | 処理の実体（`help` / `doctor` / `setup` / `check` / `lint` / `check-crate-deps` / `check-lib-deps` / `check-openssl-vendored` / `check-crypto-primitives` / `dev-pg-check` / `it-db` / `it-db-ci` / `e2e-chrome`）。Make なしでも直接実行できる |
 | `scripts/hooks/` | lefthook から呼ばれる Git hooks の実体 |
 | `dev/postgres/` | 開発・検証用 PostgreSQL の Docker 構成（`TASK-5`）。契約テストを流す参照実装向けで、本番では Docker を必須にしない。手順は [dev/postgres/README.md](./dev/postgres/README.md) |
 | `lefthook.yml` | Git hooks 定義（pre-commit / commit-msg） |
@@ -113,7 +113,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 - `console-stub`（console の検証用 stub。`TASK-8`）: 試験専用で、扱いは `hub-stub` と同じです。
 - `it-harness`（結合試験のハーネスの枠。`TASK-10`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/integration.md` です。
 - `e2e-harness`（passkey の E2E のハーネスの枠。`TASK-11`）: 試験専用で、扱いは `hub-stub` と同じです。構成は `docs/harness/e2e.md` です。
-- `load-harness`（計測・負荷のハーネスの計測・集計・負荷の生成・対象の呼び出し・段階を変える実行・記録の出力の部品。`TASK-12`）: 試験専用で、どの crate からも依存されません。試験（dev）だけ `it-harness`・`hub-stub` に依存します。構成は `docs/harness/load.md` です。
+- `load-harness`（計測・負荷のハーネスの計測・集計・負荷の生成・対象の呼び出し・段階を変える実行・記録の出力の部品。`TASK-12`）: 試験専用で、どの crate からも依存されません。試験（dev）だけ `it-harness`・`hub-stub`・`secret`・`ring` に依存します。構成は `docs/harness/load.md` です。
 
 手順は次の順です。直接実行する場合のコマンドも併記します。
 
@@ -146,7 +146,8 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make check` | `scripts/check.sh` | editorconfig-checker + shellcheck（ソースは変更しない） |
 | `make fmt` | `cargo fmt --all` | rustfmt で整形を適用する（ソースを書き換える） |
 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査 + vendored の検査（CI の `lint` ジョブと同じ契約） |
-| `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-714・TASK-663 で拡張予定） |
+| `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-663 で拡張予定。外部の禁止 crate は `make lib-deps`） |
+| `make lib-deps` | `scripts/check-lib-deps.sh` | 本体の crate（core・secret・db-tests・client）の通常の依存（normal・build。既定 feature + `PROD_FEATURES`）に、禁止の crate（Plugin・Hub・SDK・HTTP サーバー・DB ドライバー・非同期ランタイム）が 0 件かを `cargo tree` で検査する（LIB-2・TASK-714）。禁止の表は〔提案〕・暫定。全 feature の走査は参考の警告。表が空・対象が無い・`cargo tree` の失敗は検査不能（2）。陰性対照つき。`make lint` への結線は #5164。名前は暫定 |
 | `make no-vendored` | `scripts/check-openssl-vendored.sh` | `openssl-sys` の `vendored` feature が 0 件かを `cargo tree -e features` で検査する。合否は試験専用メンバーを除いた本番対象メンバーの normal・build 依存に限る。feature は既定 + 環境変数 `PROD_FEATURES`（`<crate>/<feature>` のカンマ区切り。無ければ空）で、全 feature と試験専用メンバーを含む走査は参考の警告、dev 依存は対象外。メンバーが本番・試験専用のどちらの表にも無ければ検査不能（2）。静的リンクを強いる設定（環境変数と repo の `.cargo/config*` の `[env]` の `OPENSSL_STATIC`・`<TARGET>_OPENSSL_STATIC`・`PKG_CONFIG_ALL_STATIC`・`<TARGET>_PKG_CONFIG_ALL_STATIC`。上流が実際に読むのは、openssl-sys 0.9.117 が `OPENSSL_STATIC` と大文字・`_` 化した `<TARGET>_OPENSSL_STATIC`、pkg-config 0.3.34 が接頭辞なしの `OPENSSL_STATIC` と `PKG_CONFIG_ALL_STATIC`。`<TARGET>_PKG_CONFIG_ALL_STATIC`・ハイフン入りの名前・接尾辞の `OPENSSL_STATIC_<target>`・`PKG_CONFIG_ALL_STATIC_<target>` は上流が読まないが、安全側に多めに数える。上流の版を上げたら確かめ直す）が 1 件でもあれば違反（R4）で、本番の木の `openssl-sys` の件数と版の記録の宛先（Hub `AOPS-2`）を参考として出す。違反（1）と検査不能（2）を終了コードで分けられるのはスクリプトを直接実行したときだけで、`make` 経由では GNU Make が中のコマンドの 1 も 2 に変える（陰性対照つき。DPOL-13・TASK-667。名前は暫定） |
 | `make it-db` | `scripts/it-db.sh` | ハーネスの DB 結合試験（Docker 必須・`#[ignore]` の試験を流す。CI では流さない。名前は暫定） |
 | `make it-db-ci` | `scripts/it-db-ci.sh` | CI の DB ジョブの入口（Docker・Docker Compose・openssl 必須・枠の試験 `db_job_frame` だけを流す。0 件は失敗。名前は暫定） |
@@ -156,7 +157,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make pg-check` | `scripts/dev-pg-check.sh` | 開発・検証用 PostgreSQL の起動の確かめ（起動中のインスタンスが対象。起動・停止はしない。CI では流さない。名前は暫定） |
 | `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。`.env` 系の名前の検査は全パスに掛かり、本文の走査の除外は、検出器の repo の `skills-lock.json` に登録された `.agents/skills/<名前>/` だけで、本文の走査にだけ効く〔`*.lock`・`.claude/skills/` は除外しない。#6000。登録名のディレクトリの下は既存ファイルへの追記・新規ファイル・リネームによる移動も走査されない残る限界で、TASK-6・#6000 で追跡し人のレビューで確かめる〕。ローカルの走査（検出器と走査対象が同じ checkout）では、HEAD にコミット済みの一覧・作業ツリーの一覧・index の一覧のすべてに登録された名前（共通部分）だけを除外し、一部にしか無い名前は走査する。CI では保護された main の検出器の一覧の名前だけを使い、PR の head の一覧から名前を足さない（head の index の一覧は検証し、不正なら 2。除外は検出器の一覧と head の index の一覧の共通部分だけで、PR が登録を削除した名前は走査する）。index は走査の最初に固定し、走査中に変われば 2。`secret scan (tracked files)` ジョブが `scripts/secret-scan-ci.sh` 経由で呼ぶ〔#51〕。名前は暫定） |
 | `make scan-canary` | `scripts/secret-scan-canary.sh` | `make secret-scan` の陰性対照（ダミーで検出器が 1 を返し、`--summary` の集計行が期待と完全に一致し、ダミー値が出力に無いことを確かめる。何も変更しない。名前は暫定） |
-| `make test-hooks` | `scripts/hooks/test-hooks.sh`（入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-core.sh`・`test-hooks-lib.sh`・`test-hooks-sc-lib.sh`） | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git のみ） |
+| `make test-hooks` | `scripts/hooks/test-hooks.sh`（入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-core.sh`・`test-hooks-lib.sh`・`test-hooks-sc-lib.sh`） | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git が基本。part 12〔lib-deps〕だけ cargo が要り、無ければローカルは TAP の `# SKIP`、CI では失敗。作業場所は repo の `target/` の下） |
 | `make crypto-scan` | `scripts/check-crypto-primitives.sh` | 暗号の基本処理を自前で実装した箇所を発見的に走査する（`LIB-21`・`DPOL-4`・`DPOL-47`・`TASK-715` 3/4）。対象は `crates/` の追跡ファイルと未追跡の無視されていないファイル。合否は本番メンバー（core・secret・db-tests・client・plugin-oidc・backend）の C1〜C5（暗号定数・インラインアセンブリ・ネイティブのソース・暗号 trait の自前実装・rotate と wrapping の併存）で、試験専用メンバーと N1・N2 は参考の警告。分類が表に無いメンバーは検査不能（2）。限界は記録 `docs/records/task-715-crypto-deps.md` を参照。名前は暫定 |
 
 ## 開発・検証用 DB
