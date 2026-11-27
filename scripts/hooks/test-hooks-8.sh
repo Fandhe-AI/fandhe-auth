@@ -272,6 +272,21 @@ if ! command -v python3 > /dev/null 2>&1 || ! python3 -I -c 'import socket' > /d
     echo "ok - secret-scan: /dev/tcp-like index path test skipped (python3 not found)"
   fi
 fi
+# 陽性対照は bash の /dev/tcp のリダイレクト（ビルド時に有効化される機能）で接続する。無効な bash はパスをファイルとして開こうとして
+# "No such file or directory" で失敗する（有効なら閉じたポートで "Connection refused"）。この違いで機能の有無を明示的に判定する。
+if [ "${t10_prereq}" = "ok" ]; then
+  t10_tcp_probe="$( ( exec 3<> /dev/tcp/127.0.0.1/1 ) 2>&1 || true)"
+  case "${t10_tcp_probe}" in
+    *"No such file or directory"*)
+      t10_prereq="missing"
+      if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+        fail "secret-scan: a valid /dev/tcp-like index path is never opened (bash /dev/tcp support is required in CI)" "missing prerequisite: bash /dev/tcp redirection" ""
+      else
+        echo "ok - secret-scan: /dev/tcp-like index path test skipped (this bash was built without /dev/tcp redirection)"
+      fi
+      ;;
+  esac
+fi
 if [ "${t10_prereq}" = "ok" ]; then
 new_repo; stage src/app.txt "hello"
 t10_listen="${work_dir}/t10-listen.py"
@@ -682,7 +697,7 @@ if [ "$(id -u)" -ne 0 ]; then
   new_repo; stage src/app.txt "hello"
   stat18_dir="${work_dir}/stat18-shim"
   t18_tmp="${work_dir}/t18-tmp"
-  rm -rf "${stat18_dir}" "${t18_tmp}" "${work_dir}/t18-n" "${work_dir}/t18-ro" "${work_dir}/t18-second"
+  rm -rf "${stat18_dir}" "${t18_tmp}" "${work_dir}/t18-n" "${work_dir}/t18-ro" "${work_dir}/t18-second" "${work_dir}/t18-found" "${work_dir}/t18-chmod"
   mkdir -p "${stat18_dir}" "${t18_tmp}"
   cat > "${stat18_dir}/stat" <<'EOF18'
 #!/bin/sh
@@ -690,9 +705,15 @@ if [ "$(id -u)" -ne 0 ]; then
 if [ ! -e "${T18_N}" ]; then
   : > "${T18_N}"
   for f in "${T18_TMP}"/secret-scan.*/stat-err; do
-    chmod 444 "${f}"
-    if [ -e "${f}" ] && [ ! -w "${f}" ]; then
-      : > "${T18_RO}"
+    # 3 つを別々に記録する: ファイルを特定できたこと（glob の一致）・chmod の成功・読み取り専用になったこと
+    if [ -e "${f}" ]; then
+      : > "${T18_FOUND}"
+      if chmod 444 "${f}"; then
+        : > "${T18_CHMOD}"
+      fi
+      if [ ! -w "${f}" ]; then
+        : > "${T18_RO}"
+      fi
     fi
   done
   exec "${REAL_STAT}" "$@"
@@ -703,14 +724,20 @@ exit 1
 EOF18
   chmod +x "${stat18_dir}/stat"
   rc=0
-  GIT_INDEX_FILE="${work_dir}/t18-absent-index" TMPDIR="${t18_tmp}" T18_TMP="${t18_tmp}" T18_N="${work_dir}/t18-n" T18_RO="${work_dir}/t18-ro" T18_SECOND="${work_dir}/t18-second" \
+  GIT_INDEX_FILE="${work_dir}/t18-absent-index" TMPDIR="${t18_tmp}" T18_TMP="${t18_tmp}" T18_N="${work_dir}/t18-n" T18_RO="${work_dir}/t18-ro" T18_FOUND="${work_dir}/t18-found" T18_CHMOD="${work_dir}/t18-chmod" T18_SECOND="${work_dir}/t18-second" \
     PATH="${stat18_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
   if [ ! -e "${work_dir}/t18-n" ]; then
     # shim が一度も起動されていない（前提が崩れた）。skip にせず失敗にする
     fail "secret-scan: a stale ENOENT diagnostic is not read when the diagnostic file cannot be opened (2)" "the stat shim was never started" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  elif [ ! -e "${work_dir}/t18-found" ]; then
+    # 受け皿のファイルを特定できていない（glob の不一致等）。環境の都合ではないため skip にせず失敗にする
+    fail "secret-scan: a stale ENOENT diagnostic is not read when the diagnostic file cannot be opened (2)" "the diagnostic file was not found by the shim" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  elif [ ! -e "${work_dir}/t18-chmod" ]; then
+    # chmod が失敗した。環境が権限を強制しないこととは別で、準備の失敗のため失敗にする
+    fail "secret-scan: a stale ENOENT diagnostic is not read when the diagnostic file cannot be opened (2)" "chmod on the diagnostic file failed" "got ${rc}" "output: $(cat "${work_dir}/out")"
   elif [ ! -e "${work_dir}/t18-ro" ]; then
-    # 起動はしたが、受け皿を読み取り専用にできなかった（権限を強制しない環境）。何も確かめていないため、合格とは数えず理由付きで skip する
-    echo "ok - secret-scan: stale diagnostic test skipped (the diagnostic file could not be made read-only; nothing was checked)"
+    # ファイルを特定でき chmod も成功したが、書き込み権限が残る（権限を強制しない環境）。何も確かめていないため、合格とは数えず理由付きで skip する
+    echo "ok - secret-scan: stale diagnostic test skipped (write permission remained after a successful chmod; nothing was checked)"
   elif [ -e "${work_dir}/t18-second" ] && [ "${rc}" -eq 2 ] \
     && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
     pass "secret-scan: a stale ENOENT diagnostic is not read when the diagnostic file cannot be opened (2)"
@@ -771,6 +798,24 @@ if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; abort
   pass "secret-scan: a path faking the ENOENT text does not confirm an absent index when the real error differs (2)"
 else
   fail "secret-scan: a path faking the ENOENT text does not confirm an absent index when the real error differs (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T19c: パス自身が ": No such file or directory" と改行の並びを含み、診断がその直後で途中で切れる stat（BSD 形でパスを出した後に別の誤りの文言が続かず終わる）は、
+# 完結した ENOENT と区別できないため 2（path_enoent_confirmed が確定しない。T19 の普通の改行入りパスは 0 のまま）
+new_repo; stage src/app.txt "hello"
+t19c_dir=$'t19c\nx: No such file or directory\n'
+mkdir -p "${work_dir}/${t19c_dir}"
+stat19c_dir="${work_dir}/stat19-shim-cut"
+mkdir -p "${stat19c_dir}"
+# shellcheck disable=SC2016 # shim の本文。展開させず、shim の実行時に評価させる（意図）
+printf '#!/bin/sh\nfor last in "$@"; do :; done\nprintf "stat: %%s" "${last%%/absent-index}" >&2\nexit 1\n' > "${stat19c_dir}/stat"
+chmod +x "${stat19c_dir}/stat"
+rc=0
+GIT_INDEX_FILE="${work_dir}/${t19c_dir}/absent-index" PATH="${stat19c_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a path containing the ENOENT text and a newline is not confirmed absent when the diagnostic is cut there (2)"
+else
+  fail "secret-scan: a path containing the ENOENT text and a newline is not confirmed absent when the diagnostic is cut there (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 # T20: 診断の大きさの境界（ちょうど 64 KiB は 0、1 バイト超過は 2）。接頭辞 "stat: " と末尾 ": No such file or directory\n"（28 バイト）の間を詰めて合わせる

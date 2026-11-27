@@ -359,13 +359,20 @@ index_absent_confirmed() {
 #   (2) 終了コードが 1（起動の失敗は 126・127。bash 自身が「…: No such file or directory」を出し得るため区別する）
 #   (3) 診断の全体が 64 KiB 以下で NUL を含まず、stat 自身の接頭辞 "stat: " で始まり、strerror の文言 ": No such file or directory" と
 #       改行 1 つで終わる（LC_ALL=C 固定）。診断の途中にはパスが入り得る（BSD〔macOS〕の stat・busybox の stat は、パスの改行を
-#       そのまま出して複数行になる）が、末尾は strerror が占めるため、パスの内容では変えられない（パスに改行が入っても成り立つ。
-#       以前の「末尾の文言で判定する」設計と同じ理由）。途中の行は問わず、先頭と末尾だけを見る。末尾の改行は必須（途中で切れた診断は 1）。
+#       そのまま出して複数行になる）が、末尾は strerror が占める。途中の行は問わず、先頭と末尾だけを見る。末尾の改行は必須。
+#       ただし、照会するパス自身が ": No such file or directory" と改行の並びを含むときは、診断がその並びの直後で途中で切れても
+#       完結した診断と区別できないため、1（確定しない。診断が改行で終わることだけでは完結の証明にならない）。
+#       この並びを含まない改行入りのパスは、上のとおり確定できる。
 #       GNU・uutils・BSD〔macOS〕は終了コード 1 と接頭辞 "stat: " と読んでいる（BSD は macOS の CI の bash 3.2 でも通っているが、実機の確認ではない）。
 # 診断は 1 行ずつ bash の read で読む（コマンド置換は使わない。末尾の改行を落とすため。外部コマンドは head・cmp・tr だけで、いずれも確認済みの一覧にある）。
 # 差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
 path_enoent_confirmed() {
   local line="" first="" last="" n=0 rc=0 p="$1" errfile="${tmp_dir}/stat-err" capfile="${tmp_dir}/stat-err-cap"
+  # パス自身が ": No such file or directory" と改行の並びを含むなら確定しない（診断の末尾がパスの中身と見分けられないため）。
+  # 置換を使わず case で見る（bash 3.2 の ERR トラップの扱いを避ける）。
+  case "${p}" in
+    *": No such file or directory"$'\n'*) return 1 ;;
+  esac
   # 先頭が "/" でない相対パスには "./" を付ける。GNU stat は "--" の後でも単独の "-" を標準入力として扱い、
   # 未作成の代替 index "-" を誤って「ある」と読むため（#6047）。
   case "${p}" in
