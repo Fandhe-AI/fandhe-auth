@@ -28,6 +28,7 @@
 # TASK-4 (6/6)・#35: crates/trial-deps は依存の試し実装の試験専用 crate。段階 1 のリリースのメンバーではない
 # （LIB-14）。名前・置き場は仮称で、人が確定する。採った道具と試験の形を本番の TASK（500・511・513・514・518・116・117）が引き取ったら消す
 # （513: 派生 Debug の入れ物の試験と乱数の probe、500: 陽性対照、511: SECR-11 の property test と fuzz）。
+# TASK-667 (3/4): DPOL-14 の試験を dev 依存（jsonwebtoken・aws-lc-rs・pem）で置く。本番の採否の決定ではない。
 # crates/trial-deps/fuzz は別 workspace（nightly）で、ここには含めない（exclude）。
 [workspace]
 resolver = "3" # 暫定。人が確定する。
