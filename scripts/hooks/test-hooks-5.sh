@@ -600,4 +600,77 @@ stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
 SCAN_BIN="${small_bin}" check_scan "a quoted header under a registered name is scanned, not an error" 1
 expect_out "the quoted-header path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
 
+# ---- 主の差分はパイプで流す（#6143）
+# 除外する区画の本文を、除外の前に一時ファイルへ全量で書かない（--tracked の一時領域の最大を増やさない）。
+mk_val="marker-$$-${RANDOM}"
+tmp_obs="${work_dir}/obs-tmp"
+mkdir -p "${tmp_obs}"
+marker_log="${work_dir}/marker.log"
+marker_repo() {
+  new_repo; stage_lock
+  stage .agents/skills/vendored-a/x.md "note = ${mk_val}"
+  stage src/app.txt "harmless = 1"
+  [ -z "${1:-}" ] || stage .agents/skills/unreg/y.md "note = ${mk_val}"
+}
+marker_run() {
+  rm -f -- "${marker_log}"
+  TMPDIR="${tmp_obs}" TMP_MARKER="${mk_val}" TMP_MARKER_DIR="${tmp_obs}" TMP_MARKER_LOG="${marker_log}" \
+    PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "$1" 0
+}
+marker_repo
+marker_run "excluded body is not written to a temp file (staged)"
+if [ ! -s "${marker_log}" ]; then pass "secret-scan: no temp file holds the excluded body (staged)"; else fail "secret-scan: no temp file holds the excluded body (staged)" "marker observed"; fi
+marker_repo unreg
+marker_run "unregistered body (control, staged)"
+if [ -s "${marker_log}" ]; then pass "secret-scan: the observation sees a scanned body (control)"; else fail "secret-scan: the observation sees a scanned body (control)" "marker not observed"; fi
+marker_repo
+git commit -q -m "test: marker"
+SCAN_ARG=--tracked
+marker_run "excluded body is not written to a temp file (--tracked)"
+if [ ! -s "${marker_log}" ]; then pass "secret-scan: no temp file holds the excluded body (--tracked)"; else fail "secret-scan: no temp file holds the excluded body (--tracked)" "marker observed"; fi
+SCAN_ARG=
+
+# 各パイプの git の失敗は 2（1 = NUL の数え・2 = 除去版・3 = 置換版。置換版は NUL があるときだけ呼ぶ）
+nth_counter="${work_dir}/nth.count"
+nth_run() {
+  rm -f -- "${nth_counter}"
+  FAIL_GIT_NTH_ARG=-U0 FAIL_GIT_NTH="$2" FAIL_GIT_NTH_COUNTER="${nth_counter}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${nth_bin:-${small_bin}}" check_scan "$1" 2
+  if [[ "${last_out}" == *"internal error"* ]]; then fail "secret-scan: $1 prints no internal error" "output: ${last_out}"; else pass "secret-scan: $1 prints no internal error"; fi
+}
+marker_repo
+nth_run "a failing NUL count is not scannable (exit 2)" 1
+expect_out "a failing NUL count reports a diff read failure" "secret-scan: failed to read diff; aborting"
+nth_run "a failing normalization (filtered) is not scannable (exit 2)" 2
+expect_out "a failing normalization reports its own message" "secret-scan: failed to normalize diff; aborting"
+make_detector nofilter
+nofilter_bin="${det_bin}"
+new_repo; stage src/app.txt "harmless = 1"
+nth_bin="${nofilter_bin}"
+nth_run "a failing normalization (no filter) is not scannable (exit 2)" 2
+nth_bin=""
+expect_out "a failing unfiltered normalization reports its own message" "secret-scan: failed to normalize diff; aborting"
+new_repo; stage src/nul.dat "x"
+printf 'a\000b\n' > src/nul.dat
+git add src/nul.dat
+nth_run "a failing space-replaced pass is not scannable (exit 2)" 3
+expect_out "a failing space-replaced pass reports its own message" "secret-scan: failed to normalize diff; aborting"
+
+# NUL が無ければ置換版の git を呼ばない（回数が 1 だけ違う）
+new_repo; stage src/app.txt "harmless = 1"
+rm -f -- "${count_log}"
+COUNT_GIT_LOG="${count_log}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "plain diff (counting git diff calls)" 0
+count_plain="$(wc -l < "${count_log}" | tr -d ' ')"
+git add src/nul.dat 2>/dev/null || true
+printf 'a\000b\n' > src/nul.dat
+git add src/nul.dat
+rm -f -- "${count_log}"
+COUNT_GIT_LOG="${count_log}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "NUL diff (counting git diff calls)" 0
+count_nul="$(wc -l < "${count_log}" | tr -d ' ')"
+rm -f -- "${count_log}"
+if [ "$((count_nul - count_plain))" -eq 1 ]; then
+  pass "secret-scan: the space-replaced pass runs only when a NUL exists (${count_plain} -> ${count_nul})"
+else
+  fail "secret-scan: the space-replaced pass runs only when a NUL exists" "plain ${count_plain}, nul ${count_nul}"
+fi
+
 finish "part 5"
