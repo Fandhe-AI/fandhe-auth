@@ -1141,25 +1141,34 @@ sc_hold_case() {
 sc_hold_case "shellcheck-staged: a TERM before the batch starts its shellcheck exits 2 and leaves no process" "sc_pending=1" 1
 sc_hold_case "shellcheck-staged: a TERM after the batch records its shellcheck pid and before it swaps its trap exits 2 and leaves no process" batch_stop 0
 
-# 親（本体の本流）の保留の旗 pending_signal: バッチを起動する前の `trap 'pending_signal=1'` の直後で止め、親へ TERM を送る。
-# 親は旗だけを立てて待ちを続け、go の後でバッチを起動すると、起動のループの中の確認（と、ループの後の確認）が旗を見て on_signal へ進み、起動済みのバッチを止めて 2 で終わる。
-# 旗の確認を消す変異では、親は信号を無視して偽物の眠り（30 秒）の終わりまで待ち、2 で終わらず 10 秒を超える。
-# 止め所はバッチの起動より前なので、「起動してから pid を記録するまでの窓」そのものは同期できない（bash で窓の内側に止め所が作れない）。この場合が見るのは、旗が立った後のバッチの回収である。
-# 確かめる範囲: TERM を送る前に、親が待ちに入っていて、バッチも偽物も未起動であること。TERM の後も親が生きていること。2 で終わること、10 秒未満であること、偽物が残らないこと。
+# 親（本体の本流）の保留の旗 pending_signal。親が旗を見る箇所は 2 つある: 起動のループの中（バッチを 1 つ起動するたび）と、ループの後（2 回目の `trap on_signal` の後）。
+# 片方が消えても、もう片方が代わりに旗を見て 2 で終わるため、場合を分けて 1 つずつ確かめる:
+#   A. 起動の前（`trap 'pending_signal=1'` の直後。1 バッチ）で止める: 2 つの確認のどちらも使われうる。両方を消す変異で落ちる。
+#   B. 起動の前で止め、2 バッチ（2 ファイル）にする: ループの中の確認が働けば、親が回収するのは起動済みの 1 バッチだけ（親が信号を送った子の pid は 1 つ）。
+#      ループの中の確認だけを消すと、2 バッチとも起動され、ループの後の確認が 2 つとも止める（宛先が 2 つ）ため落ちる。
+#   C. ループの後（2 回目の `trap on_signal` を張る前。バッチは全部起動済み）で止める: ループの後の確認だけが旗を見る。ループの後の確認だけを消すと落ちる。
+# 止め所はバッチの起動の前か後で、「起動してから pid を記録するまでの窓」そのものは同期できない（bash で窓の内側に止め所が作れない）。
+# 確かめる範囲:
+#   - TERM を送る前に、親が待ちに入っていること（A・B はバッチも偽物も未起動）。TERM の後も親が生きていること。
+#   - 親が子へ送った信号（差し込んだ kill の記録のうち、送った時点の親が親自身の行）が、1 つの pid への -CONT -TERM であること。
+#     記録が無い場合（バッチの子が先に終わった）は、本体が信号を送らずに済む正常な経路だが、この試験では子が眠り続けるため起きない。起きたら失敗にする（記録なしを成功にしない）。
+#   - 2 で終わること、10 秒未満であること、親が信号を送った子（バッチの子）と偽物が残らないこと。
+# sc_parent_hold_case <試験名> <止める trap の第 1 引数> <その何回目の呼び出しで止めるか> <1=trap を張った後で止める / 0=張る前で止める> <1=起動前の確認をする> <引数のファイル名...>
 sc_parent_hold_case() {
-  local sc_hold_name="$1"
+  local sc_hold_name="$1" sc_hold_arg="$2" sc_hold_nth="$3" sc_hold_first="$4" sc_hold_prestart="$5"
+  shift 5
   sc_pidfile="${work_dir}/sc.pid"
   sc_klog="${work_dir}/sc.klog"
   sc_hold_env="${work_dir}/sc-hold-env.sh"
   sc_hold_held="${work_dir}/sc.held"
   sc_hold_go="${work_dir}/sc.go"
   # shellcheck disable=SC2016 # BASH_ENV のファイルへ、展開せずにそのまま書く
-  sc_write_kill_env "${sc_hold_env}" 'trap() { if [ "${1:-}" = "pending_signal=1" ]; then builtin trap "$@"; : > "${SC_HELD}"; _sc_hw=0; while [ ! -e "${SC_GO}" ] && [ "${_sc_hw}" -lt 150 ]; do sleep 0.1; _sc_hw=$((_sc_hw + 1)); done; return 0; fi; builtin trap "$@"; }' ""
+  sc_write_kill_env "${sc_hold_env}" 'trap() { if [ "${1:-}" = "${SC_HOLD_ARG}" ]; then _sc_hn=$((${_sc_hn:-0} + 1)); if [ "${_sc_hn}" = "${SC_HOLD_NTH}" ]; then [ "${SC_HOLD_INSTALL_FIRST}" != 1 ] || builtin trap "$@"; : > "${SC_HELD}"; _sc_hw=0; while [ ! -e "${SC_GO}" ] && [ "${_sc_hw}" -lt 150 ]; do sleep 0.1; _sc_hw=$((_sc_hw + 1)); done; [ "${SC_HOLD_INSTALL_FIRST}" = 1 ] || builtin trap "$@"; return 0; fi; fi; builtin trap "$@"; }' ""
   rm -f "${sc_pidfile}" "${sc_klog}" "${sc_hold_held}" "${sc_hold_go}"
   : > "${sc_klog}"
   : > "${work_dir}/out"
   sc_reset
-  BASH_ENV="${sc_hold_env}" SC_HELD="${sc_hold_held}" SC_GO="${sc_hold_go}" SC_KLOG="${sc_klog}" TMPDIR="${work_dir}" SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" hang.sh > "${work_dir}/out" 2>&1 &
+  BASH_ENV="${sc_hold_env}" SC_HOLD_ARG="${sc_hold_arg}" SC_HOLD_NTH="${sc_hold_nth}" SC_HOLD_INSTALL_FIRST="${sc_hold_first}" SC_HELD="${sc_hold_held}" SC_GO="${sc_hold_go}" SC_KLOG="${sc_klog}" TMPDIR="${work_dir}" SC_PIDFILE="${sc_pidfile}" SC_JOBS=8 SC_LOG="${sc_log}" PATH="${sc_shim_dir}:${PATH}" "${HOOK_BASH}" "${SC_STAGED}" "$@" > "${work_dir}/out" 2>&1 &
   sc_script_pid=$!
   sc_early_err=""
   sc_t0="${SECONDS}"
@@ -1170,10 +1179,10 @@ sc_parent_hold_case() {
     sc_waited=$((sc_waited + 1))
   done
   if [ ! -e "${sc_hold_held}" ]; then
-    sc_early_err="the parent never reached the point after its early trap"
-  elif [ -n "$(sc_same_args_children "${sc_script_pid}" || true)" ] || [ -s "${sc_pidfile}" ]; then
+    sc_early_err="the parent never reached the point where it was to be held"
+  elif [ "${sc_hold_prestart}" = 1 ] && { [ -n "$(sc_same_args_children "${sc_script_pid}" || true)" ] || [ -s "${sc_pidfile}" ]; }; then
     sc_early_err="a batch or the fake shellcheck had already started"
-  elif ! kill -TERM "${sc_script_pid}" 2> /dev/null; then
+  elif ! sc_kill_job TERM "${sc_script_pid}"; then
     sc_early_err="the TERM could not be sent to the parent"
   else
     sleep 0.3
@@ -1207,25 +1216,43 @@ sc_parent_hold_case() {
   if [ -z "${sc_fake_pid}" ]; then
     sc_fake_pid="$(cat "${sc_pidfile}" 2> /dev/null || true)"
   fi
+  # 親が子へ送った信号: 記録の 3 列目（送った時点の宛先の親）が親自身（sc_script_pid）の行だけを取り出す
+  sc_klog_read "${sc_klog}"
+  sc_pp_sigs="$(awk -v p="${sc_script_pid}" '$3 == p { printf "%s%s", (n++ ? " " : ""), $1 }' "${sc_klog}" 2> /dev/null || true)"
+  sc_pp_pids="$(awk -v p="${sc_script_pid}" '$3 == p { printf "%s%s", (n++ ? " " : ""), $2 }' "${sc_klog}" 2> /dev/null || true)"
+  sc_pp_ok=0
+  sc_pp_target=""
+  case "${sc_pp_pids}" in
+    [0-9]*" "[0-9]*)
+      if [ "${sc_pp_sigs}" = "-CONT -TERM" ] && [ "${sc_pp_pids%% *}" = "${sc_pp_pids#* }" ]; then
+        sc_pp_ok=1
+        sc_pp_target="${sc_pp_pids%% *}"
+      fi
+      ;;
+  esac
   sc_pend_alive=0
-  if [ -n "${sc_fake_pid}" ]; then
+  for sc_pend_p in ${sc_pp_target} ${sc_fake_pid}; do
     sc_waited=0
-    while kill -0 "${sc_fake_pid}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
+    while kill -0 "${sc_pend_p}" 2> /dev/null && [ "${sc_waited}" -lt 30 ]; do
       sleep 0.1
       sc_waited=$((sc_waited + 1))
     done
-    if kill -0 "${sc_fake_pid}" 2> /dev/null; then
+    if kill -0 "${sc_pend_p}" 2> /dev/null; then
       sc_pend_alive=1
-      sc_orphan_signal TERM "${sc_fake_pid}" "${sc_fake_start}" || true
+      if [ "${sc_pend_p}" = "${sc_fake_pid}" ]; then
+        sc_orphan_signal TERM "${sc_fake_pid}" "${sc_fake_start}" || true
+      fi
     fi
-  fi
-  if [ -z "${sc_early_err}" ] && [ "${sc_rc}" -eq 2 ] && [ "${sc_pend_alive}" -eq 0 ] && [ "${sc_pend_secs}" -lt 10 ]; then
+  done
+  if [ -z "${sc_early_err}" ] && [ "${sc_pp_ok}" -eq 1 ] && [ "${sc_rc}" -eq 2 ] && [ "${sc_pend_alive}" -eq 0 ] && [ "${sc_pend_secs}" -lt 10 ]; then
     pass "${sc_hold_name}"
   else
-    fail "${sc_hold_name}" "${sc_early_err:+setup failed: ${sc_early_err}; }exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_pend_alive}, seconds: ${sc_pend_secs}" "output: $(cat "${work_dir}/out" 2> /dev/null || true)"
+    fail "${sc_hold_name}" "${sc_early_err:+setup failed: ${sc_early_err}; }exit ${sc_rc}, fake pid: ${sc_fake_pid:-none}, still running: ${sc_pend_alive}, seconds: ${sc_pend_secs}, signals the parent sent: ${sc_pp_sigs:-none} to pids [${sc_pp_pids:-none}] (expected: -CONT -TERM to one pid)" "output: $(cat "${work_dir}/out" 2> /dev/null || true)"
   fi
 }
-sc_parent_hold_case "shellcheck-staged: a TERM to the parent before it starts the batches stops the batches and exits 2"
+sc_parent_hold_case "shellcheck-staged: a TERM to the parent before it starts the batches stops the batches and exits 2" "pending_signal=1" 1 1 1 hang.sh
+sc_parent_hold_case "shellcheck-staged: a TERM to the parent before it starts two batches stops only the batch started so far (the check inside the launch loop)" "pending_signal=1" 1 1 1 hang.sh hang2.sh
+sc_parent_hold_case "shellcheck-staged: a TERM to the parent after it launched every batch stops them and exits 2 (the check after the launch loop)" "on_signal" 2 0 0 hang.sh
 
 # CONT が成功した直後に子が終わった（ジョブ表から消えた）場合は、TERM を送らない（pid が再利用されうるため。CONT と TERM の間の job_state）。
 # 差し込む jobs が、kill の記録に -CONT が現れた後は空の表を返す。本物の子は生きているため、記録に -TERM が現れないことを確かめた後、試験が偽物を止めて本体の wait を解く。
@@ -1290,6 +1317,9 @@ jobs() { if grep -q "^-CONT" "${SC_KLOG}" 2> /dev/null; then return 0; fi; built
     sc_rc=$?
   fi
   sc_pend_secs=$((SECONDS - sc_t0))
+  # 本体が終わった後の最終の記録も読み直す（待っている間に TERM が遅れて送られていないこと）
+  sc_klog_read "${sc_klog}"
+  sc_pend_sent="${sc_kr_sigs}"
   sc_pend_alive=0
   if [ -n "${sc_fake_pid}" ] && kill -0 "${sc_fake_pid}" 2> /dev/null; then
     sc_pend_alive=1
