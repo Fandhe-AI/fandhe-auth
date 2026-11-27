@@ -161,7 +161,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 ### 試験の置き場
 
-ドライバを使う試験は `crates/e2e-harness/tests/*.rs` に置き、`#[ignore]` を付けて `cfg(unix)` に限る。共通の流れと記録は
+実ブラウザと実 WebDriver を起動する E2E の試験は `crates/e2e-harness/tests/*.rs` に置き、`#[ignore]` を付けて `cfg(unix)` に限る。`#[ignore]` を付けるのはこの E2E に限り、偽のドライバを使う試験は `make test` で流れるので `#[ignore]` を付けない。共通の流れと記録は
 `tests/support/passkey.rs`（`register`・`authentication_run_result`・`RecordSink`。crate の公開 API ではない）と `tests/support/`（試験用 origin の `TestOrigin`）にある。
 ハーネスは試験専用で、どの crate からも依存しない（`LIB-2`・`LIB-4`）。他の crate からの辺を足すときは、許可表（`scripts/check-crate-deps.sh`）の人の確認が要る。
 
@@ -190,7 +190,7 @@ PKEY の振る舞いを満たしたとは主張しない。
     認証は `authenticate_once(&handle, &origin.origin(), "localhost", &cred)` を呼び、`authentication_run_result(&handle, &aid, &result)` で
     後続の検査（credential がちょうど 1 件・RP ID が `localhost` と完全一致）を反映した `(run, check_ok)` を得て、`run` を `sink.record(PasskeyOperation::Authentication, run).expect("record")` で一度だけ記録し、成功を確かめる。
     `authenticate_once` の結果をそのまま記録しない（検査を反映できない）。options の値は PoC の値（`QP-1`）で要件の値ではない。
-6. 登録をヘルパーで行った場合、登録の検査はヘルパーが済ませている。呼び出し側は、認証（または直接使った登録）の成否（`run` ではなく元の `result` の `outcome`。拒否を期待する場合は `error_name()` を対象の WebAuthn のエラー名と照合し、`HarnessTimeout`・`HarnessScript`・`OriginMismatch` は拒否の根拠から外す）と `check_ok`（認証は常に、直接使った登録は成功を期待するときだけ `assert!(check_ok, ..)`。登録の拒否を期待する試験では置かない）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
+6. 登録をヘルパーで行った場合、登録の検査はヘルパーが済ませている。呼び出し側は、直接使った操作それぞれについて（登録も認証も直接使うときは両方の `check_ok` を検査する）、成否（`run` ではなく元の `result` の `outcome`。拒否を期待する場合は `error_name()` を対象の WebAuthn のエラー名と照合し、`HarnessTimeout`・`HarnessScript`・`OriginMismatch` は拒否の根拠から外す）と `check_ok`（認証は常に、直接使った登録は成功を期待するときだけ `assert!(check_ok, ..)`。登録の拒否を期待する試験では置かない）と、`evidence().counts_as_real_device()`・`counts_as_safari()` が `false` であることを確かめる。
 7. `running.stop()` で停止し、その成功を確かめてから `sink.finish()` で記録を出し、`finish()` の戻り値も確かめる。停止に失敗した実行を完了扱いで記録しない。
 
 失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
@@ -200,8 +200,13 @@ PKEY の振る舞いを満たしたとは主張しない。
 - `make test`（`cargo test --workspace --locked`）: workspace 全体の試験を流す。ドライバ不要で、この crate では実ブラウザ・実ドライバを要さない試験だけが流れ（例えば、偽のドライバを使う試験、`crates/e2e-harness/tests/` の `scope.rs`・`test_origin.rs`・`lifecycle.rs`・`webdriver_client.rs`・`run_record.rs`〔記録形式・保存処理〕、`crates/e2e-harness/src/record.rs` 内の単体試験。一覧は `tests/` の実際の構成に従う）（`#[ignore]` のブラウザ E2E は対象外）、ブラウザ E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
 - `make e2e-chrome`（`scripts/e2e-chrome.sh`）・`make e2e-firefox`（`scripts/e2e-firefox.sh`）: `#[ignore]` の登録・認証の試験を target ごとに流す。
   引数を拒否するのは各スクリプトの `reject_args`（`scripts/lib.sh`）で、スクリプトを直接実行して位置引数を渡すと usage を出して終了コード 2 で止まる。
-  Makefile のレシピは `make` に渡した引数をスクリプトへ転送しないので、登録・認証の対象やテストのオプションを入口（`make e2e-chrome`・`make e2e-firefox`）から引数で指定することはできない（環境変数は cargo に引き継がれる）。
-  target ごとに 1 件以上通らなければ失敗する。CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
+  Makefile のレシピは `make` に渡した引数をスクリプトへ転送しないので、登録・認証の対象やテストのオプションを入口（`make e2e-chrome`・`make e2e-firefox`）から引数で指定することはできない。環境変数は cargo・試験・ドライバに引き継がれる（出力先を分けるための `CARGO_TARGET_DIR` は下の「記録の読み方」の用途）。検査や実行の対象を変える目的では環境変数を使わない。それ以外の環境変数を既定から変えた実行を E2E の記録に数えてよいかは、この文書では定めておらず（記録は環境変数の値を持たない）、数える前に人に確かめる。
+  target ごとに 1 件以上通らなければ失敗する。
+  流す target は各スクリプトが固定で指定している（`scripts/e2e-chrome.sh` は `chrome_registration`・`chrome_authentication`、`scripts/e2e-firefox.sh` は `firefox_registration`・`firefox_authentication`。`scripts/lib.sh` の `run_e2e` が target ごとに `cargo test --test <target> -- --ignored` を流す）。
+  そのため `tests/` に新しいファイルを作っても、スクリプトの target の一覧に足さない限り `make e2e-*` はその試験を流さず、成功し得る。
+  試験を足す方法は 2 つある。(1) 既存の target のファイルに `#[test]` と `#[ignore]` を付けた関数を足す。スクリプトの変更は要らず、その target で 1 件以上通る検査もそのまま働く。
+  (2) 新しいファイルを使うときは、同じ変更でスクリプトの `run_e2e` の target の一覧にそのファイル名（拡張子なし）を足し、`make e2e-chrome`・`make e2e-firefox` で新しい target が実際に流れて通ることを確かめる。
+  CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
 
 ### 記録の読み方
 
