@@ -3,7 +3,7 @@
 # 呼び出し元: `make load-trial`。CI では流さない（同じ試験 trial_run は `make test` に入っている）。
 # 負荷の記録は成功時に消えるため、--show-output で記録の本文を標準出力に出す（試験が設定の目印 2 種と出力先のパスの無いことを確かめ、出す本文そのものを秘密値の各表現の照合に通した本文だけ。一致があれば本文を出さず失敗する）。
 # 本文の公開は、この入口が環境変数 FANDHE_AUTH_LOAD_TRIAL_PRINT=1 を試験へ渡したときだけ（通常の `make test` では出ない。SECR-23）。
-# 本文は試験が照合後に固定の開始行・終了行で挟んで出す。この入口は、集計行が合格 1 件（無視 0 件）かつ区画がちょうど 1 件で、開始行が終了行より前にあり、区画が空でなく記録の形式の行を含むときだけ区画の中身を出す（満たさなければ固定の文言で 1。本文は出さない）。
+# 子の標準エラーは一時ファイルへ集めて出さない（SECR-23）。本文は試験が照合後に固定の開始行・終了行で挟んで出す。この入口は、集計行が合格 1 件（無視 0 件）かつ区画がちょうど 1 件で、開始行が終了行より前にあり、区画が空でなく記録の形式の行を含むときだけ区画の中身を出す（満たさなければ固定の文言で 1。本文は出さない）。
 # 終了コード: 0 = 主試験 1 件が流れて合格、1 = 失敗または主試験の合格が 1 件（無視 0 件）でない、2 = 誤用（引数）。
 # stub の結果を実物の結果に数えない（A-2026-10-28-9・ACPT-7）。この入口自身は環境変数・設定ファイルを読まない（DPOL-32）。
 set -euo pipefail
@@ -23,14 +23,18 @@ cd "${ROOT_DIR}"
 # `--list` は #[ignore] の試験も列挙するため、件数の確認には使わない
 main_test="small_trial_run_writes_record_without_requirement_values"
 rc=0
+# 標準エラーも捕捉する。コマンド置換が捕まえるのは標準出力だけで、試験・依存が標準エラーへ直接書いた診断は libtest の捕捉を通らずに端末へ出る（SECR-23）。
+# 子の標準エラーは作業用の一時ファイルへ集め、成功・失敗のどちらでも中身を出さずに消す（本文を出してよい条件は FANDHE_AUTH_LOAD_TRIAL_PRINT=1 と照合を通した区画だけで、標準エラーはその条件を満たさない）
+err_file="$(mktemp)"
+trap 'rm -f "${err_file}"' EXIT
 # RUST_TEST_NOCAPTURE が有効だと試験の標準出力・標準エラーが捕捉されず、照合を通っていない出力が直接流れる。
 # 継承を外して libtest の捕捉（--show-output の対象は標準出力だけでなく標準エラーも含む）を保つ（SECR-23）
-out="$(env -u RUST_TEST_NOCAPTURE FANDHE_AUTH_LOAD_TRIAL_PRINT=1 cargo test -p fandhe-auth-load-harness --test trial_run --locked -- --exact "${main_test}" --show-output)" || rc=$?
+out="$(env -u RUST_TEST_NOCAPTURE FANDHE_AUTH_LOAD_TRIAL_PRINT=1 cargo test -p fandhe-auth-load-harness --test trial_run --locked -- --exact "${main_test}" --show-output 2>"${err_file}")" || rc=$?
 # 試験の失敗は契約どおり 1 に揃える（cargo の 101 等を伝播しない）。
-# 失敗時は捕捉した出力（libtest の診断・記録の本文を含みうる）を再掲しない。照合を通っていない本文を出さない（fail-closed。SECR-23）。
-# コンパイルの診断などは cargo が標準エラーへ直接出す
+# 失敗時は捕捉した標準出力・標準エラー（libtest の診断・コンパイルの診断・記録の本文を含みうる）を再掲しない。照合を通っていない本文を出さない（fail-closed。SECR-23）。
+# 診断が要るときは `cargo test -p fandhe-auth-load-harness --test trial_run` を直接流す
 if [ "${rc}" -ne 0 ]; then
-  echo "error: load trial test failed (the captured test output is not printed; run the test directly to inspect)" >&2
+  echo "error: load trial test failed (the captured output is not printed; run the test directly to inspect)" >&2
   exit 1
 fi
 if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' <<<"${out}"; then
