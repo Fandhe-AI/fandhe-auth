@@ -117,9 +117,12 @@ impl Upstream {
 
 /// 上流への接続の直前に置く停止点（試験の注入用。ORST-17）。
 /// 試験が「接続中で止まる」状態を同期で作るための同期点だけを持つ。宛先の決定と実際の接続は転送器が行い、
-/// 転送器 1 つにつき 1 つ使う（複数の転送器へ複製して共有しない。共有すると、停止の時刻と停止フラグを同じロックの下で
-/// 公開した保証が成り立たない〔`note_stop` が公開するのは渡された 1 つのフラグだけ〕。`stopped_at` は転送器ごとの停止の時刻で、
-/// 再利用した場合は転送器へ渡した時刻より前の記録を無視して `Expired` と分類する）。
+/// 転送器 1 つにつき 1 つ使う（複数の転送器へ複製して同時に共有しない。共有すると、停止の時刻と停止フラグを同じロックの下で
+/// 公開した保証が成り立たない〔`note_stop` が公開するのは渡された 1 つのフラグだけ〕）。
+/// 使用中（生きている転送器に束縛済み）の停止点は別の転送器に渡せず、起動は `StartFailed` になる（fail-closed。
+/// 1 つ目の観測を 2 つ目の起動が消さず、試験が対象の転送器を取り違えて合格しない。ORST-17・AUDB-6）。
+/// 転送器の `stop()`・`Drop` の後は同じ停止点を再び渡せる。`stopped_at` は転送器ごとの停止の時刻で、
+/// 順に再利用した場合は転送器へ渡した時刻より前の記録を無視して `Expired` と分類する。
 ///
 /// この値は接続先も接続の結果も決めない（ループバック・指定ポートの制約を外さない）。
 /// 待ちは解放・転送器の停止・上限（[`UpstreamStall::MAX_HOLD`]）のどれかで必ず解ける（`stop()`・`Drop` を固めない）。
@@ -161,6 +164,34 @@ struct StallState {
     /// 今の転送器へ渡してから、`Expired` で離れた保持の回数（通り抜けは数えない）。
     /// 先の期限切れを後の保持の `Released`・`Stopped` で上書きさせないための印（ORST-17・AUDB-6）。
     expired: u64,
+    /// いま転送器に束縛されている（ORST-17・AUDB-6）。`rebind` が同じロックの下で確認して立て、
+    /// [`StallBinding`] の破棄で下ろす。使用中の再割り当てを拒否し、1 つ目の観測を保つ。
+    bound: bool,
+}
+
+/// 停止点と転送器の束縛（`DbFaultProxy` が持つ）。破棄で束縛だけを下ろし、観測
+/// （到達・離れた理由・停止の時刻）は消さない（停止後も試験が理由を読める）。
+#[must_use]
+struct StallBinding {
+    stall: UpstreamStall,
+}
+
+impl fmt::Debug for StallBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StallBinding").finish_non_exhaustive()
+    }
+}
+
+impl Drop for StallBinding {
+    fn drop(&mut self) {
+        // ロックは 1 回だけ取る。`Drop` でパニックしない（毒化は無視する）。
+        self.stall
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bound = false;
+    }
 }
 
 /// 停止点を離れた理由。
@@ -254,22 +285,26 @@ impl UpstreamStall {
         self.inner.cv.notify_all();
     }
 
-    /// 転送器に渡す時に呼ぶ。解放済みなら `false`（渡せない）。そうでなければ、前の使用の到達・離れた理由・期限切れの印を戻し、
-    /// 今回の到達だけを `wait_entered` が待てるようにして `true` を返す。
-    fn rebind(&self) -> bool {
+    /// 転送器に渡す時に呼ぶ。解放済み、または使用中（別の転送器に束縛済み）なら `None`（渡せない。
+    /// このとき状態は一切変えない）。そうでなければ、前の使用の到達・離れた理由・期限切れの印を戻し、今回の到達だけを
+    /// `wait_entered` が待てるようにして束縛を返す（ORST-17・AUDB-6）。確認と設定は同じロックの下で行う。
+    fn rebind(&self) -> Option<StallBinding> {
         let mut g = self
             .inner
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if g.released {
-            return false;
+        if g.released || g.bound {
+            return None;
         }
         g.entered = 0;
         g.last_exit = None;
         g.expired = 0;
         g.bound_at = Some(Instant::now());
-        true
+        g.bound = true;
+        Some(StallBinding {
+            stall: self.clone(),
+        })
     }
 
     /// 転送器の停止を通知する。停止の時刻の記録と停止フラグの公開を同じロックの下で行ってから待ちを起こす。
@@ -481,6 +516,9 @@ pub struct DbFaultProxy {
     /// 遮断を記録するときの種類。`DbBlock` か `ExternalStoreBlock` だけ（4/8 が後者で包む）。
     block_kind: FaultKind,
     delay_active: Option<FaultKind>,
+    /// 停止点の束縛。`Drop` の `shutdown_all` がスレッドを待った後に破棄され、停止点を再び渡せるようにする
+    /// （ORST-17。スレッドが持つ `Arc` の解放の時期に依らないよう、`Shared` ではなくここに置く）。
+    _stall_binding: Option<StallBinding>,
 }
 
 impl fmt::Debug for DbFaultProxy {
@@ -543,9 +581,11 @@ impl DbFaultProxy {
         ) {
             return Err(DbFaultError::StartFailed);
         }
-        if stall.as_ref().is_some_and(|s| !s.rebind()) {
-            return Err(DbFaultError::StartFailed);
-        }
+        // 使用中・解放済みの停止点は渡せない（fail-closed）。以降の `?` で戻ると束縛は破棄で下りる。
+        let stall_binding = match &stall {
+            Some(s) => Some(s.rebind().ok_or(DbFaultError::StartFailed)?),
+            None => None,
+        };
         let listener =
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|_| DbFaultError::StartFailed)?;
         listener
@@ -575,6 +615,7 @@ impl DbFaultProxy {
             block_active: false,
             block_kind,
             delay_active: None,
+            _stall_binding: stall_binding,
         })
     }
 
@@ -1687,7 +1728,7 @@ mod tests {
         let stall = UpstreamStall::new();
         stall.note_stop(&AtomicBool::new(false));
         thread::sleep(Duration::from_millis(5));
-        assert!(stall.rebind());
+        let _b = stall.rebind().expect("bind");
         thread::sleep(Duration::from_millis(5));
         let stop = AtomicBool::new(false);
         stall.note_stop(&stop);
@@ -1701,8 +1742,9 @@ mod tests {
     #[test]
     fn stop_of_old_proxy_after_rebind_does_not_stop_new_hold() {
         let stall = UpstreamStall::new();
-        assert!(stall.rebind());
-        assert!(stall.rebind());
+        // 使用中は再び渡せないので、1 つ目の束縛（古い転送器）を破棄してから渡し直す。
+        drop(stall.rebind().expect("first bind"));
+        let _b = stall.rebind().expect("second bind");
         stall.note_stop(&AtomicBool::new(false));
         stall.hold_for(&AtomicBool::new(false), Duration::from_millis(60));
         assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
@@ -1713,7 +1755,7 @@ mod tests {
     #[test]
     fn pass_through_after_release_keeps_earlier_expired() {
         let stall = UpstreamStall::new();
-        assert!(stall.rebind());
+        let _b = stall.rebind().expect("bind");
         stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
         assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
         stall.release();
@@ -1729,7 +1771,7 @@ mod tests {
         let stall = UpstreamStall::new();
         stall.note_stop(&AtomicBool::new(false));
         thread::sleep(Duration::from_millis(5));
-        assert!(stall.rebind());
+        let _b = stall.rebind().expect("bind");
         thread::sleep(Duration::from_millis(5));
         stall.hold(&AtomicBool::new(true));
         assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
@@ -1780,7 +1822,7 @@ mod tests {
         stall.hold(&AtomicBool::new(true));
         assert!(stall.wait_entered(Duration::from_millis(1)));
         assert!(stall.exit_reason().is_some());
-        assert!(stall.rebind());
+        let _b = stall.rebind().expect("bind");
         assert!(
             !stall.wait_entered(Duration::from_millis(30)),
             "stale entry"
@@ -1820,7 +1862,7 @@ mod tests {
     #[test]
     fn later_release_does_not_overwrite_earlier_expired() {
         let stall = UpstreamStall::new();
-        assert!(stall.rebind());
+        let _b = stall.rebind().expect("bind");
         stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
         assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
         let s2 = stall.clone();
@@ -1837,7 +1879,7 @@ mod tests {
     #[test]
     fn later_stop_does_not_overwrite_earlier_expired() {
         let stall = UpstreamStall::new();
-        assert!(stall.rebind());
+        let _b = stall.rebind().expect("bind");
         stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
         let stop = Arc::new(AtomicBool::new(false));
         let (s2, stop2) = (stall.clone(), Arc::clone(&stop));
@@ -1854,10 +1896,12 @@ mod tests {
     #[test]
     fn rebind_clears_expired_mark() {
         let stall = UpstreamStall::new();
-        assert!(stall.rebind());
+        let first = stall.rebind().expect("first bind");
         stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
         assert_eq!(stall.expired_count(), 1);
-        assert!(stall.rebind());
+        // 使用中の再割り当ては拒否される。前の転送器の停止後に渡し直す。
+        drop(first);
+        let _second = stall.rebind().expect("second bind");
         assert_eq!(stall.exit_reason(), None);
         assert_eq!(stall.expired_count(), 0);
         stall.release();
@@ -1871,7 +1915,7 @@ mod tests {
     fn released_stall_is_rejected_at_start() {
         let stall = UpstreamStall::new();
         stall.release();
-        assert!(!stall.rebind());
+        assert!(stall.rebind().is_none());
         assert!(matches!(
             DbFaultProxy::start_to_port_with_stall_as(
                 echo_upstream(),
@@ -1883,5 +1927,114 @@ mod tests {
         // 解放も到達も記録されないまま（待たずに `Released` が出ない）。
         assert_eq!(stall.exit_reason(), None);
         assert!(!stall.wait_entered(Duration::from_millis(20)));
+    }
+
+    /// 使用中の停止点は再び渡せず、拒否は 1 つ目の観測を変えない。束縛を下ろせば渡せる（ORST-17・AUDB-6）。
+    #[test]
+    fn rebind_rejects_stall_in_use_and_keeps_observation() {
+        let stall = UpstreamStall::new();
+        let b = stall.rebind().expect("first bind");
+        stall.hold(&AtomicBool::new(true));
+        assert!(stall.wait_entered(Duration::from_millis(1)));
+        let exit = stall.exit_reason();
+        assert!(exit.is_some());
+        let bound_at = stall.inner.state.lock().unwrap().bound_at;
+        assert!(stall.rebind().is_none(), "in use");
+        assert!(stall.wait_entered(Duration::from_millis(1)), "kept");
+        assert_eq!(stall.exit_reason(), exit);
+        assert_eq!(stall.inner.state.lock().unwrap().bound_at, bound_at);
+        drop(b);
+        assert!(
+            stall.rebind().is_some(),
+            "free after the binding is dropped"
+        );
+    }
+
+    /// 同時の `rebind` は高々 1 つだけ通る（確認と設定は同じロック。確率的な試験）。
+    #[test]
+    fn concurrent_rebind_admits_at_most_one() {
+        for _ in 0..50 {
+            let stall = UpstreamStall::new();
+            let hs: Vec<_> = (0..4)
+                .map(|_| {
+                    let s = stall.clone();
+                    thread::spawn(move || s.rebind())
+                })
+                .collect();
+            let bound: Vec<_> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+            assert_eq!(bound.iter().filter(|b| b.is_some()).count(), 1);
+        }
+    }
+
+    /// 使用中の停止点で 2 つ目を起動すると `StartFailed`。1 つ目の観測は消えず、2 つ目に混ざらない
+    /// （ORST-17・AUDB-6）。
+    #[test]
+    fn stall_in_use_is_rejected_at_start_and_keeps_first_observation() {
+        let stall = UpstreamStall::new();
+        let p = DbFaultProxy::start_to_port_with_stall_as(
+            echo_upstream(),
+            FaultKind::DbBlock,
+            stall.clone(),
+        )
+        .expect("first start");
+        let _c = TcpStream::connect((Ipv4Addr::LOCALHOST, p.listen_port())).unwrap();
+        assert!(stall.wait_entered(Duration::from_secs(5)));
+        assert!(matches!(
+            DbFaultProxy::start_to_port_with_stall_as(
+                echo_upstream(),
+                FaultKind::DbBlock,
+                stall.clone()
+            ),
+            Err(DbFaultError::StartFailed)
+        ));
+        assert!(stall.wait_entered(Duration::from_millis(30)), "kept");
+        stall.release();
+        let t = Instant::now();
+        while stall.exit_reason().is_none() && t.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(stall.exit_reason(), Some(StallExit::Released));
+        p.stop();
+    }
+
+    /// 転送器の `stop()`・`Drop` の後は同じ停止点を再び渡せ、前の到達・理由は戻される（ORST-17）。
+    #[test]
+    fn stall_can_be_reused_after_proxy_ends() {
+        let stall = UpstreamStall::new();
+        let p = DbFaultProxy::start_to_port_with_stall_as(
+            echo_upstream(),
+            FaultKind::DbBlock,
+            stall.clone(),
+        )
+        .expect("first start");
+        p.stop();
+        let p2 = DbFaultProxy::start_to_port_with_stall_as(
+            echo_upstream(),
+            FaultKind::DbBlock,
+            stall.clone(),
+        )
+        .expect("reuse after stop");
+        assert!(!stall.wait_entered(Duration::from_millis(30)));
+        assert_eq!(stall.exit_reason(), None);
+        drop(p2);
+        let _p3 = DbFaultProxy::start_to_port_with_stall_as(
+            echo_upstream(),
+            FaultKind::DbBlock,
+            stall.clone(),
+        )
+        .expect("reuse after drop");
+    }
+
+    /// 起動が不正な種類で失敗しても束縛が残らない（ORST-17）。
+    #[test]
+    fn rejected_start_does_not_bind_stall() {
+        let stall = UpstreamStall::new();
+        let r = DbFaultProxy::start_with(
+            Upstream::Port(echo_upstream()),
+            FaultKind::DbDelay { delay_ms: 1 },
+            Some(stall.clone()),
+        );
+        assert!(matches!(r, Err(DbFaultError::StartFailed)));
+        assert!(stall.rebind().is_some());
     }
 }

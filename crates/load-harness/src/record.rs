@@ -13,6 +13,7 @@
 //! （fail-closed。黙って `undecided` に落とさない。DPOL-32）。区分に既定値を置かず、ハーネスの中に測定値を要件の値へ上げる経路を作らない
 //! （要件の値・初期値は、承認一覧の置き場・形・承認の手順が決まるまで常に拒否する。TASK-12・#111。[`ApprovedValues`] の信頼の境界）。
 //! 段階の結果は [`RunSession::run`] の中でだけ作り、実行の文脈に結び付ける（型で塞げない部分は [`RunSession`] の信頼の境界）。
+//! 測定値（`measured`）の行は [`ComparisonValue::measured`] で `RunEvidence` から導いたものだけで、別の実行の記録には載せない（#6049）。
 //! `judgment:` は常に空で、ハーネスは合否を書かない（ACPT-7）。ファイル名は整数だけで作り、既存ファイルを上書きしない。
 //! 誤りは種類だけを持ち、値・パス・`io::Error` の文言を載せない（SECR-11・SECR-23）。`Debug` は中身を出さない。
 //! 他所有者の値は `external` で値なし・出典必須（D-2026-10-15-21）。誤りの文言は英語（D-2026-11-20-13）。
@@ -24,6 +25,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::aggregate::MetricKey;
 use crate::condition::{ComponentState, ConditionComponent, MeasurementConditions};
 use crate::meter::{MeterError, MonotonicClock, StdMonotonicClock};
 use crate::stage::{StageError, StagePlan, StagedRun, run_stages};
@@ -53,8 +55,9 @@ const MAX_WORD_BYTES: usize = 64;
 /// 現在の語彙は `p99_target` だけで、これは `AUDP-29` により `undecided`（値なし）の区分にだけ使える（`NAME_CLASS_RULES`）。
 /// そのため公開の口から作れる比べる値の行は `p99_target` の `undecided` だけで、`external`・`test_condition`・`measured` の行は
 /// 公開の口からは作れない（`ClassNotAllowed`）。これらの区分の名前は、用途が決まったときに人がレビューして語彙へ足す（TASK-12）。
+/// `measured` は名前を足しても `ComparisonValue::new` では作れず、[`ComparisonValue::measured`] で実行の結果から導く（#6049）。
 ///
-/// `ComparisonValue::new` の拒否の順序: `requirement`・`initial` は出典に関係なく最初に `ClassNotAllowed` で拒否する。
+/// `ComparisonValue::new` の拒否の順序: `requirement`・`initial`・`measured` は出典に関係なく最初に `ClassNotAllowed` で拒否する。
 /// それ以外の区分は、出典の件数（`TooManyRefs`）と重複（`InvalidRef`）の検査が名前ごとの区分の検査より先に来るため、
 /// 出典が 9 件以上または重複していれば `ClassNotAllowed` より先にそちらの誤りが返る。
 pub const VALUE_NAMES: [&str; 1] = ["p99_target"];
@@ -80,6 +83,8 @@ pub enum LoadRecordError {
     TooManyRefs,
     TooManyValues,
     DuplicateValue,
+    /// 測定値（`measured`）の行が、この記録の `RunEvidence` と別の実行から導かれたもの（#6049）。
+    MeasuredFromOtherRun,
     ClockOrder,
     Format,
     WriteFailed,
@@ -105,6 +110,9 @@ impl fmt::Display for LoadRecordError {
             Self::TooManyRefs => f.write_str("load record error: too many refs"),
             Self::TooManyValues => f.write_str("load record error: too many values"),
             Self::DuplicateValue => f.write_str("load record error: duplicate value"),
+            Self::MeasuredFromOtherRun => {
+                f.write_str("load record error: measured value from another run")
+            }
             Self::ClockOrder => f.write_str("load record error: recorded_at before run_started_at"),
             Self::Format => f.write_str("load record error: format failed"),
             Self::WriteFailed => f.write_str("load record error: write failed"),
@@ -123,6 +131,8 @@ pub enum InvalidValueReason {
     ValueRequired,
     ValueForbidden,
     ClassNotAllowed,
+    /// 測定値の出どころ（段階・回・指標）が、この実行の結果の範囲に無い（#6049）。
+    SourceNotInRun,
     /// 承認一覧（[`ApprovedValues`]）のどの行とも完全一致しない。現在は `ComparisonValue::new` が出さない
     /// （要件の値・初期値を常に `ClassNotAllowed` で拒否する。照合を戻すときのために残す。TASK-12・#111）。
     NotInApprovedList,
@@ -136,6 +146,7 @@ impl InvalidValueReason {
             Self::ValueRequired => "value_required",
             Self::ValueForbidden => "value_forbidden",
             Self::ClassNotAllowed => "class_not_allowed",
+            Self::SourceNotInRun => "source_not_in_run",
             Self::NotInApprovedList => "not_in_approved_list",
         }
     }
@@ -254,7 +265,7 @@ pub struct ValueName(String);
 impl ValueName {
     /// 記録に出してよい名前だけを作る。語彙の外は誤りにする（自由な名前を出さない。SECR-23）。
     /// 現在の語彙は `p99_target` だけで、`ComparisonValue::new` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する。
-    /// 検査の順序は、`requirement`・`initial` が最初で、それ以外は出典の件数（`TooManyRefs`）と重複（`InvalidRef`）の検査の後
+    /// 検査の順序は、`requirement`・`initial`・`measured` が最初で、それ以外は出典の件数（`TooManyRefs`）と重複（`InvalidRef`）の検査の後
     /// （[`VALUE_NAMES`] の説明）。
     ///
     /// # Errors
@@ -558,11 +569,39 @@ pub struct ComparisonValue {
     value: Option<u64>,
     unit: ValueUnit,
     refs: Vec<RefId>,
+    /// `class=measured` の行だけが持つ、導いた実行の識別子（`RunEvidence::run_id`）。記録には出さない（#6049）。
+    run: Option<u64>,
+}
+
+/// 測定値の出どころ。[`ComparisonValue::measured`] が [`RunEvidence`] の段階の集計から値を取る位置
+/// （段階・段階の中の回・指標。どれも 1 始まりの番号と列挙で、値そのものは持たない。#6049）。
+/// 成功の分布だけを引く（失敗の分布は使わない。`worst_run` と同じ。仮置き。人が確認する）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct MeasuredSource {
+    stage: u64,
+    run: u64,
+    metric: MetricKey,
+}
+
+impl MeasuredSource {
+    /// `stage`・`run` は 1 始まり。範囲は [`ComparisonValue::measured`] が実行の結果に照らして検査する。
+    pub fn new(stage: u64, run: u64, metric: MetricKey) -> Self {
+        Self { stage, run, metric }
+    }
+}
+
+/// SECR-23: 中身を出さない。
+impl fmt::Debug for MeasuredSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MeasuredSource(..)")
+    }
 }
 
 impl ComparisonValue {
     /// 要件の値・初期値は、承認一覧の置き場・形・承認の手順が決まるまで常に [`InvalidValueReason::ClassNotAllowed`] で拒否する
-    /// （fail-closed。`approved` は値を通さず、どの区分の判定にも使わない。ACPT-7・load.md 規則 4）。他の区分は区分の規則だけを見る。
+    /// （fail-closed。`approved` は値を通さず、どの区分の判定にも使わない。ACPT-7・load.md 規則 4）。
+    /// `measured` も常に `ClassNotAllowed` で拒否する。測定値の行は [`ComparisonValue::measured`] が実行の結果から導いたものだけにする
+    /// （任意の整数を測定値として渡す口を作らない。#6049）。他の区分は区分の規則だけを見る。
     ///
     /// # Errors
     /// 区分の規則に反するとき [`LoadRecordError::InvalidValue`]、出典が 9 件以上のとき
@@ -584,7 +623,10 @@ impl ComparisonValue {
             ClassNotAllowed, RefsForbidden, RefsRequired, ValueForbidden, ValueRequired,
         };
         // 何より先に拒否する（出典・数値の検査に値を通さない）。
-        if matches!(class, ValueClass::Requirement | ValueClass::Initial) {
+        if matches!(
+            class,
+            ValueClass::Requirement | ValueClass::Initial | ValueClass::Measured
+        ) {
             return Err(bad(ClassNotAllowed));
         }
         if refs.len() > MAX_REFS {
@@ -601,8 +643,11 @@ impl ComparisonValue {
         }
         match class {
             // 規則 5: PoC のパラメータの数値は比べる値として置かない（区分を受けない）。
-            // 要件の値・初期値は上で拒否済み（ここへは来ない。fail-closed の二重の防御）。
-            ValueClass::Requirement | ValueClass::Initial | ValueClass::PocParameter => {
+            // 要件の値・初期値・測定値は上で拒否済み（ここへは来ない。fail-closed の二重の防御）。
+            ValueClass::Requirement
+            | ValueClass::Initial
+            | ValueClass::Measured
+            | ValueClass::PocParameter => {
                 return Err(bad(ClassNotAllowed));
             }
             ValueClass::Undecided => {
@@ -618,7 +663,7 @@ impl ComparisonValue {
                     return Err(bad(RefsRequired));
                 }
             }
-            ValueClass::TestCondition | ValueClass::Measured => {
+            ValueClass::TestCondition => {
                 if value.is_none() {
                     return Err(bad(ValueRequired));
                 }
@@ -633,6 +678,55 @@ impl ComparisonValue {
             value,
             unit,
             refs,
+            run: None,
+        })
+    }
+
+    /// 測定値（`class=measured`）の行を、`evidence` の段階の集計から導く。測定値の行を作る唯一の口で、
+    /// 値は `source` が指す成功の分布の指標から取る（呼び出し元は整数を渡せない。#6049）。
+    /// 行は `evidence` の実行に結び付き、別の実行の [`RunEvidence`] で [`LoadRecord::new`] すると
+    /// [`LoadRecordError::MeasuredFromOtherRun`] になる。単位は `ns` 固定。名前ごとの区分の規則（AUDP-29）は
+    /// [`ComparisonValue::new`] と同じに掛かる（DPOL-32。黙って別の区分へ落とさない）。
+    ///
+    /// # Errors
+    /// 名前が `measured` を許さないとき `InvalidValue(ClassNotAllowed)`。段階・回が範囲外（0 を含む）のとき
+    /// `InvalidValue(SourceNotInRun)`。指標に値が無いとき（成功の標本が無い）`InvalidValue(ValueRequired)`。
+    pub fn measured(
+        name: ValueName,
+        evidence: &RunEvidence,
+        source: MeasuredSource,
+    ) -> Result<Self, LoadRecordError> {
+        let bad = LoadRecordError::InvalidValue;
+        if let Some((_, allowed)) = NAME_CLASS_RULES.iter().find(|(n, _)| *n == name.0.as_str())
+            && !allowed.contains(&ValueClass::Measured)
+        {
+            return Err(bad(InvalidValueReason::ClassNotAllowed));
+        }
+        let not_in_run = bad(InvalidValueReason::SourceNotInRun);
+        let stage = evidence
+            .staged
+            .stages()
+            .iter()
+            .find(|s| s.stage() == source.stage)
+            .ok_or(not_in_run)?;
+        let idx = usize::try_from(source.run.checked_sub(1).ok_or(not_in_run)?)
+            .map_err(|_| not_in_run)?;
+        let summary = stage.runs().get(idx).ok_or(not_in_run)?;
+        let stats = summary
+            .success_metrics
+            .get(evidence.staged.interval())
+            .ok_or(not_in_run)?;
+        let value = source
+            .metric
+            .pick(stats)
+            .ok_or(bad(InvalidValueReason::ValueRequired))?;
+        Ok(Self {
+            name,
+            class: ValueClass::Measured,
+            value: Some(value),
+            unit: ValueUnit::Ns,
+            refs: Vec::new(),
+            run: Some(evidence.run_id),
         })
     }
 }
@@ -750,7 +844,8 @@ impl RunSession {
     /// `exercised`（閉包 `call` が呼ぶ構成要素。呼ぶ前に申告する）を検査してから、[`run_stages`] で段階を回し、
     /// 結果をこの文脈とまとめた [`RunEvidence`] を返す（申告そのものは記録に残さない）。各回の時計はここで
     /// [`StdMonotonicClock`] を作る（時計は引数で受けない）。文脈の値は消費し、1 つの値で段階を回すのは 1 回だけ
-    /// （同じ実行の記録の名前で別の文脈を作ること・作った [`RunEvidence`] の複製は止めない）。
+    /// （同じ実行の記録の名前で別の文脈を作ること・作った [`RunEvidence`] の複製は止めない。複製は同じ実行として扱われ、
+    /// 測定値の行の結び付き〔[`ComparisonValue::measured`]〕も通る。別の `run` の結果は別の実行になる。#6049）。
     ///
     /// # Errors
     /// `exercised` が空、または測定の条件で起動していない要素を含むとき [`LoadRecordError::InvalidRunEvidence`]
@@ -776,7 +871,9 @@ impl RunSession {
             Ok(Box::new(StdMonotonicClock::new()))
         };
         let staged = run_stages(new_clock, spec, plan, call).map_err(LoadRecordError::Stage)?;
+        static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(0);
         Ok(RunEvidence {
+            run_id: NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed),
             run_record_file: self.run_record_file,
             run_started_at: self.run_started_at,
             conditions: self.conditions,
@@ -793,6 +890,9 @@ pub struct RunEvidence {
     run_started_at: u64,
     conditions: MeasurementConditions,
     staged: StagedRun,
+    /// 実行の識別子（プロセス内の通し番号。[`RunSession::run`] が振る）。測定値の行の結び付けにだけ使い、
+    /// 記録・`Debug`・誤りに出さない。複製は同じ実行の写しとして同じ値を持つ（#6049）。
+    run_id: u64,
 }
 
 impl fmt::Debug for RunEvidence {
@@ -836,6 +936,20 @@ impl fmt::Write for BoundedText {
     }
 }
 
+/// 測定値の行がすべて `evidence` の実行から導かれたものかを見る（#6049。fail-closed）。
+fn check_measured_runs(
+    evidence: &RunEvidence,
+    values: &[ComparisonValue],
+) -> Result<(), LoadRecordError> {
+    if values
+        .iter()
+        .any(|v| v.class == ValueClass::Measured && v.run != Some(evidence.run_id))
+    {
+        return Err(LoadRecordError::MeasuredFromOtherRun);
+    }
+    Ok(())
+}
+
 /// 記録の本文を `limit` バイトまでの書き込み先に組む。超えた時点で打ち切り `Format` を返す。
 /// 本番は [`MAX_RECORD_BYTES`]。上限を引数にしたのは、上限での打ち切りを小さな値で試験するため（本番の入口は `LoadRecord::new` だけ）。
 fn compose(
@@ -844,6 +958,8 @@ fn compose(
     values: &[ComparisonValue],
     limit: usize,
 ) -> Result<LoadRecord, LoadRecordError> {
+    // #6049: 別の実行から導いた測定値の行を書かない（二重の防御。`LoadRecord::new` でも検査する）。
+    check_measured_runs(evidence, values)?;
     let fmt_err = |_| LoadRecordError::Format;
     let mut t = BoundedText::new(limit);
     writeln!(t, "format: {LOAD_RECORD_FORMAT}").map_err(fmt_err)?;
@@ -878,7 +994,8 @@ impl LoadRecord {
     /// 1 MiB を超えた時点で打ち切って `Format` にする（拒否する場合も上限を大きく超える確保をしない）。
     ///
     /// # Errors
-    /// 時刻の順が逆・値の行が多すぎる・名前の重複・整形の失敗のとき。
+    /// 時刻の順が逆・値の行が多すぎる・名前の重複・整形の失敗のとき。別の実行から導いた測定値の行があるとき
+    /// [`LoadRecordError::MeasuredFromOtherRun`]。
     pub fn new(
         evidence: &RunEvidence,
         recorded_at_unix_secs: u64,
@@ -898,6 +1015,7 @@ impl LoadRecord {
         if names.len() != values.len() {
             return Err(LoadRecordError::DuplicateValue);
         }
+        check_measured_runs(evidence, &values)?;
         compose(evidence, recorded_at_unix_secs, &values, MAX_RECORD_BYTES)
     }
 
