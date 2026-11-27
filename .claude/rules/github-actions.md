@@ -292,6 +292,18 @@ GitHub Actions のキャッシュ（`actions/cache`・`actions/setup-node` の `
 - 入れていないもの: toolchain（毎回の導入は約 10 秒）・Docker のイメージ・依存の検査の advisory DB（TASK-680・TASK-681 の結線のときに考える）。
   ほかのツールは `env` に宣言した版を SHA256 で検証して毎回導入する方式（チェックリストの 9）
 
+### 信頼の境界と汚染を疑ったとき（cargo のキャッシュ。この repo の運用）
+
+registry と `target/` をジョブ間で共有する方式は、そのまま受け入れている（利用者の決定。spec に定めは無い）。受け入れる前提は次の 2 点である。
+
+- `main` のスコープでキャッシュに書ける workflow は、すべて信頼の境界になる。`ci.yml` の `main` への push だけでなく、
+  `update-external.yml`（`schedule` で動き、可変タグと外部の道具を使う）も含む。ここで任意のコードが動くと、
+  `restore-keys` の前方一致に合う項目を作れる。復元した `target/` の依存は再ビルドされないため、混入した成果物がそのまま使われる。
+  キャッシュに書ける workflow を足す・発火を変えるときは、この境界に入るかを見る（`scheduled.yml` に `schedule` を足す TASK-681 も同じ）
+- 汚染を疑ったときの手順:
+    1. `main` スコープの `cargo-*-v1-*` のキャッシュを消す（`gh cache list -L 100 --ref refs/heads/main --key cargo- --json id,key` で確かめ、`gh cache delete <id>`）
+    2. `ci.yml` の key と restore-keys の版のセグメント（`v1`）を同時に上げる。上げないと、消す前に作られた項目や、消した後の `main` の push が同じ世代を作り直す
+
 ### 前提: 容量と課金
 
 - リポジトリあたりの上限は 10 GB（Org 設定も 10 GB）。超えると最終アクセスの古い順に追い出され、
