@@ -25,7 +25,8 @@
   - `proptest`: `default-features = false` + `std`
   - `syn`: `default-features = false` + `full`・`parsing`
   - `jsonwebtoken`（dev）: `default-features = false` + `aws_lc_rs`・`use_pem`。`rust_crypto` は有効にしない（`DPOL-17`）。採否の決定ではない
-  - `aws-lc-rs`（dev）: `default-features = false` + `aws-lc-sys`。鍵の実行時の生成だけに使う
+  - `aws-lc-rs`（dev）: 宣言は `default-features = false` + `aws-lc-sys`。ただし `jsonwebtoken` 12.0.0 の `aws_lc_rs` が `aws-lc-rs` を既定の feature のまま引くため、実効は既定の組（`alloc`・`ring-io`・`ring-sig-verify`）に `aws-lc-sys` を加えたもの（`cargo tree --locked -e features -i aws-lc-rs` で確かめた）。鍵の実行時の生成に使う
+  - `jsonwebtoken`・`aws-lc-rs`・`pem` は試験専用（dev）として受け入れたもので、本体の crate の選定ではない（利用者の決定。2026-11-27）
   - `pem`（dev）: `default-features = false`
   - `libfuzzer-sys`: 既定（`fuzz/Cargo.toml` の `0.4.13`。fuzz は別の workspace）
 - 採用 crate の根拠は `D-2026-11-20-8`〜`10`。

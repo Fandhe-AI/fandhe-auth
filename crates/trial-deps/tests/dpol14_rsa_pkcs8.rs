@@ -25,7 +25,8 @@ fn pkcs8_rsa_key() -> (RsaKeyPair, SecretString) {
     (kp, SecretString::new(pem))
 }
 
-/// 署名・読み取りの直前にだけ DER を取り出す（SECR-16。`expose()` はここだけ）。
+/// 署名・読み取りの直前にだけ値を取り出す（SECR-16）。この試験で `expose()` を呼ぶのは、この関数と
+/// `from_rsa_pem` への受け渡し・`decode_header`・署名の分割の各呼び出しだけ。
 fn pkcs8_der(secret_pem: &SecretString) -> Vec<u8> {
     pem::parse(secret_pem.expose())
         .expect("generated pem must parse")
