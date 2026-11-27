@@ -783,39 +783,44 @@ for t19_kind in gnu bsd real; do
   fi
 done
 
-# T19b: パスに ": No such file or directory" と改行を含めても、実際の誤りが別なら偽装できず 2（末尾は strerror が占める）
+# T19b: 実際に照会されるパス（": No such file or directory" と改行の並びを含まない改行入りのパス）で、診断の末尾が ENOENT でない（Permission denied）なら、
+# 診断の途中の行が ENOENT の文言で終わっていても不在と確かめず 2。stat が起動されたこと（起動の印）も確かめる（照会の前に拒否されていないこと）
 new_repo; stage src/app.txt "hello"
-t19_spoof=$'t19-spoof\nx: No such file or directory\n'
+t19_spoof=$'t19-spoof\nx: No such file or directory'
 mkdir -p "${work_dir}/${t19_spoof}"
 stat19s_dir="${work_dir}/stat19-shim-spoof"
+stat19s_mark="${work_dir}/stat19-spoof-called"
 mkdir -p "${stat19s_dir}"
+rm -f "${stat19s_mark}"
 # shellcheck disable=SC2016 # shim の本文。展開させず、shim の実行時に評価させる（意図）
-printf '#!/bin/sh\nfor last in "$@"; do :; done\nprintf "stat: cannot statx %%s: Permission denied\\n" "${last}" >&2\nexit 1\n' > "${stat19s_dir}/stat"
+printf '#!/bin/sh\n: > "%s"\nfor last in "$@"; do :; done\nprintf "stat: cannot statx %%s: Permission denied\\n" "${last}" >&2\nexit 1\n' "${stat19s_mark}" > "${stat19s_dir}/stat"
 chmod +x "${stat19s_dir}/stat"
 rc=0
 GIT_INDEX_FILE="${work_dir}/${t19_spoof}/absent-index" PATH="${stat19s_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
-  pass "secret-scan: a path faking the ENOENT text does not confirm an absent index when the real error differs (2)"
+if [ "${rc}" -eq 2 ] && [ -e "${stat19s_mark}" ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a queried newline path with the ENOENT text in a middle line is not confirmed absent when the diagnostic ends with another error (stat ran) (2)"
 else
-  fail "secret-scan: a path faking the ENOENT text does not confirm an absent index when the real error differs (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fail "secret-scan: a queried newline path with the ENOENT text in a middle line is not confirmed absent when the diagnostic ends with another error (stat ran) (2)" "got ${rc}, stat called: $([ -e "${stat19s_mark}" ] && echo yes || echo no)" "output: $(cat "${work_dir}/out")"
 fi
 
-# T19c: パス自身が ": No such file or directory" と改行の並びを含み、診断がその直後で途中で切れる stat（BSD 形でパスを出した後に別の誤りの文言が続かず終わる）は、
-# 完結した ENOENT と区別できないため 2（path_enoent_confirmed が確定しない。T19 の普通の改行入りパスは 0 のまま）
+# T19c: 照会の前の拒否の試験。パス自身が ": No such file or directory" と改行の並びを含むときは、path_enoent_confirmed が stat を起動する前に 1 を返し、
+# index の確認は 2（診断が並びの直後で切れても完結した ENOENT と区別できないため。T19 の普通の改行入りパスは 0 のまま）。stat が起動されないことも確かめる
 new_repo; stage src/app.txt "hello"
 t19c_dir=$'t19c\nx: No such file or directory\n'
 mkdir -p "${work_dir}/${t19c_dir}"
 stat19c_dir="${work_dir}/stat19-shim-cut"
+stat19c_mark="${work_dir}/stat19c-called"
 mkdir -p "${stat19c_dir}"
+rm -f "${stat19c_mark}"
 # shellcheck disable=SC2016 # shim の本文。展開させず、shim の実行時に評価させる（意図）
-printf '#!/bin/sh\nfor last in "$@"; do :; done\nprintf "stat: %%s" "${last%%/absent-index}" >&2\nexit 1\n' > "${stat19c_dir}/stat"
+printf '#!/bin/sh\n: > "%s"\nfor last in "$@"; do :; done\nprintf "stat: %%s" "${last%%/absent-index}" >&2\nexit 1\n' "${stat19c_mark}" > "${stat19c_dir}/stat"
 chmod +x "${stat19c_dir}/stat"
 rc=0
 GIT_INDEX_FILE="${work_dir}/${t19c_dir}/absent-index" PATH="${stat19c_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
-if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
-  pass "secret-scan: a path containing the ENOENT text and a newline is not confirmed absent when the diagnostic is cut there (2)"
+if [ "${rc}" -eq 2 ] && [ ! -e "${stat19c_mark}" ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a path containing the ENOENT text and a newline is rejected before stat runs (pre-query rejection) (2)"
 else
-  fail "secret-scan: a path containing the ENOENT text and a newline is not confirmed absent when the diagnostic is cut there (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fail "secret-scan: a path containing the ENOENT text and a newline is rejected before stat runs (pre-query rejection) (2)" "got ${rc}, stat called: $([ -e "${stat19c_mark}" ] && echo yes || echo no)" "output: $(cat "${work_dir}/out")"
 fi
 
 # T20: 診断の大きさの境界（ちょうど 64 KiB は 0、1 バイト超過は 2）。接頭辞 "stat: " と末尾 ": No such file or directory\n"（28 バイト）の間を詰めて合わせる
