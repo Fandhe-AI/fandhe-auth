@@ -154,7 +154,9 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 - unix（Linux・macOS 等）に限る。非 unix では対象の試験が 0 件になり、入口のスクリプトが失敗にする。
 - Chrome は chromedriver と Chrome、Firefox は geckodriver と Firefox（仮想 authenticator の WebDriver のエンドポイントを使える組み合わせ。
-  記録のある組み合わせは `scripts/e2e-firefox.sh` と Makefile の説明を見る。版の値はここに写さない）。
+  版の値はここに写さず、参照先を分ける）。
+  - Firefox: 動作の記録のある組み合わせは `scripts/e2e-firefox.sh` と Makefile の `e2e-firefox` の説明を見る（スクリプトが書く範囲は、記録のある組み合わせと、それより古い版・pref が足りない版は未確認という点）。
+  - Chrome: 同じ文書の「起動・停止の契約（2/6）」にある ChromeDriver を含む確認環境を見る。書かれている確認は chromedriver と Chrome が同じプロセスグループに入ること（特定の環境・版で `ps` により確認。他は未確認）で、仮想 authenticator の動作の確認ではない。
 - ドライバが無ければ黙って飛ばさず失敗する（`DPOL-30`〜`32`）。環境の有無で自動に飛ばす分岐は作らない。
 
 ### 試験の置き場
@@ -197,7 +199,9 @@ PKEY の振る舞いを満たしたとは主張しない。
 
 - `make test`（`cargo test --workspace --locked`）: workspace 全体の試験を流す。ドライバ不要で、この crate では実ブラウザ・実ドライバを要さない試験だけが流れ（例えば、偽のドライバを使う試験、`crates/e2e-harness/tests/` の `scope.rs`・`test_origin.rs`・`lifecycle.rs`・`webdriver_client.rs`・`run_record.rs`〔記録形式・保存処理〕、`crates/e2e-harness/src/record.rs` 内の単体試験。一覧は `tests/` の実際の構成に従う）（`#[ignore]` のブラウザ E2E は対象外）、ブラウザ E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
 - `make e2e-chrome`（`scripts/e2e-chrome.sh`）・`make e2e-firefox`（`scripts/e2e-firefox.sh`）: `#[ignore]` の登録・認証の試験を target ごとに流す。
-  引数は受け付けない。target ごとに 1 件以上通らなければ失敗する。CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
+  引数を拒否するのは各スクリプトの `reject_args`（`scripts/lib.sh`）で、スクリプトを直接実行して位置引数を渡すと usage を出して終了コード 2 で止まる。
+  Makefile のレシピは `make` に渡した引数をスクリプトへ転送しないので、登録・認証の対象やテストのオプションを入口（`make e2e-chrome`・`make e2e-firefox`）から指定することはできない。
+  target ごとに 1 件以上通らなければ失敗する。CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
 
 ### 記録の読み方
 
