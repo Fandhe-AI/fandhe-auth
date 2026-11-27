@@ -67,7 +67,7 @@ const META: [&str; 6] = [
 
 /// 主試験の本体。記録を書いて検査し、停止と後片付けまで済ませてから、記録の本文と照合の登録簿を返す。
 /// 主試験と、本文を出す専用の試験（`print_checked_load_record_body`）が同じ試行を使い回す。
-fn run_small_trial() -> (String, Vec<Vec<u8>>) {
+fn run_small_trial() -> (String, Vec<SecretString>) {
     // 照合の登録簿は、stub へ実際に渡す設定そのもの（同じインスタンス）から、渡す前に作る。
     let cfg = hub_config();
     // 署名鍵は試験の側で作り、秘密値（PKCS#8 の全文と `d`）を登録簿に足す（#6050・SECR-23・AAUD-30）。
@@ -262,23 +262,22 @@ fn print_checked_load_record_body() {
 }
 
 /// 主試験の照合の登録簿: 設定の 4 欄と、署名鍵の秘密値（PKCS#8 の全文・`d`）。
-/// 鍵の秘密値はここで生のバイト列へ戻り、登録簿は `run_small_trial` の戻り値として試験の間じゅう持たれる。
-fn trial_registry(cfg: &HubStubConfig, key_secrets: &[SecretString]) -> Vec<Vec<u8>> {
+/// 登録簿の要素は `SecretString`（16 進）のまま持ち、生のバイト列へ戻すのは照合の関数の中だけ（`match_counts`。呼び出しごとに作って捨てる）。
+fn trial_registry(cfg: &HubStubConfig, key_secrets: &[SecretString]) -> Vec<SecretString> {
     let mut registry = stdout_registry(cfg);
-    registry.extend(key_secrets.iter().map(secret_raw));
+    registry.extend(key_secrets.iter().cloned());
     registry
 }
 
 /// 秘密のバイト列は共有の秘密値の型 `SecretString`（16 進の文字列）で持ち、試験内に型を新設しない（SECR-15・SECR-31）。
-/// 生のバイト列へ戻すのは `secret_raw` だけで、呼ぶのは登録簿を作る `trial_registry`・`canary_registry_and_config` と、
-/// 登録簿の中身を確かめる `registries_include_signing_key_secret` の 3 箇所（`expose` を明示的に呼ぶ。SECR-10・SECR-16・SECR-29〜33）。
-/// ただし戻した登録簿（生のバイト列。鍵の秘密値を含む）は、主試験では `run_small_trial` の戻り値として、canary でも試験の間じゅう持つ。
-/// 型の保護が及ぶのは登録簿を作る前までで、以降は試験の関数の中に留め、ログ・誤り・記録に渡さない。
+/// 登録簿（設定の欄の値・乱数の値・署名鍵の秘密値）は全要素を `SecretString` で持ち、試験の間じゅう生の `Vec<u8>` で保持しない（SECR-10・SECR-29・SECR-30・SECR-33）。
+/// 生のバイト列へ戻すのは `secret_raw` だけで、照合（`match_counts`）と、登録簿の中身を確かめる試験の中で、`expose` を明示的に呼んで一時的に作る（SECR-16）。
+/// 戻した値は関数の中に留め、ログ・誤り・記録に渡さない。
 fn secret_hex(bytes: &[u8]) -> SecretString {
     SecretString::new(hex(bytes, false))
 }
 
-/// `secret_hex` の逆。呼ぶのは上の 3 箇所だけ。戻り値は登録簿の要素として試験の間じゅう生のバイト列のまま残るため、ログ・誤り・記録に渡さない。
+/// `secret_hex` の逆。戻り値は呼び出した関数の中の一時の値として使い、保持せず、ログ・誤り・記録に渡さない。
 fn secret_raw(s: &SecretString) -> Vec<u8> {
     let h = s.expose().as_bytes();
     assert!(h.len().is_multiple_of(2), "malformed secret encoding");
@@ -339,7 +338,7 @@ fn signing_key_with_secrets(kid: &str) -> (AssertionSigningKey, Vec<SecretString
 }
 
 /// 書き出したファイルの全文を登録簿の各形と JWT の形で走査し、あれば失敗させる。文言は種類と件数だけ（値・パス・本文を出さない）。
-fn assert_no_leak(what: &str, bytes: &[u8], registry: &[Vec<u8>]) {
+fn assert_no_leak(what: &str, bytes: &[u8], registry: &[SecretString]) {
     let n = count_matches(registry, bytes);
     assert_eq!(n, 0, "registered values found in the {what}: {n} match(es)");
     let j = count_jwt_like(bytes);
@@ -348,17 +347,17 @@ fn assert_no_leak(what: &str, bytes: &[u8], registry: &[Vec<u8>]) {
 
 /// 標準出力へ出す本文の走査用の登録簿: 主試験が stub の設定の 4 欄へ入れた値の全文。
 /// 渡す設定の文字列の欄 4 つ（`client_id`・`public_host`・`jwks_uri`・`logout_receiver_uri`）をすべて入れる。
-fn stdout_registry(cfg: &HubStubConfig) -> Vec<Vec<u8>> {
+fn stdout_registry(cfg: &HubStubConfig) -> Vec<SecretString> {
     vec![
-        cfg.client_id.get().clone().into_bytes(),
-        cfg.public_host.get().clone().into_bytes(),
-        cfg.jwks_uri.get().clone().into_bytes(),
-        cfg.logout_receiver_uri.get().clone().into_bytes(),
+        secret_hex(cfg.client_id.get().as_bytes()),
+        secret_hex(cfg.public_host.get().as_bytes()),
+        secret_hex(cfg.jwks_uri.get().as_bytes()),
+        secret_hex(cfg.logout_receiver_uri.get().as_bytes()),
     ]
 }
 
 /// 本文に登録簿の値（生・base64・base64url・16 進）か JWT の形が 1 件でもあれば `Err`（本文は返さず、件数だけ）。
-fn printable_body<'a>(text: &'a str, registry: &[Vec<u8>]) -> Result<&'a str, String> {
+fn printable_body<'a>(text: &'a str, registry: &[SecretString]) -> Result<&'a str, String> {
     let n = count_matches(registry, text.as_bytes());
     let j = count_jwt_like(text.as_bytes());
     if n == 0 && j == 0 {
@@ -482,18 +481,20 @@ fn encoders_match_rfc4648_vectors() {
 }
 
 /// 登録簿の全値・全形が `haystack` に現れる件数だけを返す（値は返さない）。
-fn count_matches(registry: &[Vec<u8>], haystack: &[u8]) -> usize {
+fn count_matches(registry: &[SecretString], haystack: &[u8]) -> usize {
     match_counts(registry, haystack).iter().flatten().sum()
 }
 
 /// 登録簿の値ごと・形ごとの一致の件数（`[値の番号][形の番号]`。形の順は `forms`）。`count_matches` はこの合計。
 /// 陽性対照は、混ぜた形そのものの件数を見る（合計だけだと、ある形が別の形の部分列として見つかり、
 /// その形の照合が外れても通る。例: パディングありの base64 はパディングなしの形を含む）。
-fn match_counts(registry: &[Vec<u8>], haystack: &[u8]) -> Vec<Vec<usize>> {
+fn match_counts(registry: &[SecretString], haystack: &[u8]) -> Vec<Vec<usize>> {
     registry
         .iter()
-        .map(|v| {
-            forms(v)
+        .map(|s| {
+            // 一時の生のバイト列。この呼び出しの中だけで持つ。
+            let v = secret_raw(s);
+            forms(&v)
                 .iter()
                 .map(|f| {
                     haystack
@@ -600,21 +601,21 @@ fn write_record_for(cfg: HubStubConfig, key: &AssertionSigningKey) -> Written {
 /// 登録簿と、その値を呼び出し元の入力（接続の設定の 4 欄）へ入れた構成。
 /// 登録簿は、乱数の 4 値（設定には 16 進で入る）と、4 欄に入れた文字列そのものの全文 4 件、署名鍵の秘密値 2 件の計 10 件。
 /// 署名鍵は呼び出し元が `write_record_for` へ渡す（登録簿の位置 8・9 が PKCS#8 の全文と `d`）。
-fn canary_registry_and_config() -> (Vec<Vec<u8>>, HubStubConfig, AssertionSigningKey) {
+fn canary_registry_and_config() -> (Vec<SecretString>, HubStubConfig, AssertionSigningKey) {
     let (key, key_secrets) = signing_key_with_secrets("kid-load-trial.test");
     let raw: Vec<Vec<u8>> = (0..4).map(|_| random_value()).collect();
     let client_id = hex(&raw[0], false);
     let public_host = format!("{}.example.test", hex(&raw[1], false));
     let jwks_uri = format!("https://{}/jwks", hex(&raw[2], false));
     let logout_receiver_uri = format!("https://{}/logout", hex(&raw[3], false));
-    let mut registry = raw;
+    let mut registry: Vec<SecretString> = raw.iter().map(|v| secret_hex(v)).collect();
     registry.extend([
-        client_id.clone().into_bytes(),
-        public_host.clone().into_bytes(),
-        jwks_uri.clone().into_bytes(),
-        logout_receiver_uri.clone().into_bytes(),
+        secret_hex(client_id.as_bytes()),
+        secret_hex(public_host.as_bytes()),
+        secret_hex(jwks_uri.as_bytes()),
+        secret_hex(logout_receiver_uri.as_bytes()),
     ]);
-    registry.extend(key_secrets.iter().map(secret_raw));
+    registry.extend(key_secrets.iter().cloned());
     assert_eq!(registry.len(), 10);
     let mut cfg = hub_config();
     cfg.client_id = StubValue::test(client_id);
@@ -662,10 +663,11 @@ fn matcher_detects_every_form_mixed_into_output() {
     assert_eq!(count_matches(&registry, &w.load), 0);
     // 署名鍵の 2 件（PKCS#8 の全文・`d`）も登録簿に入っていて、下の全値・全形の検出に回る。
     assert_eq!(registry.len(), 10);
-    assert_eq!(registry[8].len(), 138);
-    assert_eq!(registry[9].len(), 32);
-    for (vi, v) in registry.iter().enumerate() {
-        for (fi, f) in forms(v).iter().enumerate() {
+    assert_eq!(secret_raw(&registry[8]).len(), 138);
+    assert_eq!(secret_raw(&registry[9]).len(), 32);
+    for (vi, s) in registry.iter().enumerate() {
+        let v = secret_raw(s);
+        for (fi, f) in forms(&v).iter().enumerate() {
             let mut mixed = w.load.clone();
             mixed.extend_from_slice(b"note: ");
             mixed.extend_from_slice(f);
@@ -709,7 +711,11 @@ fn matcher_detects_every_form_mixed_into_output() {
 #[test]
 fn registry_hex_strings_outside_vocabulary_are_rejected_as_names() {
     let (registry, _cfg, _key) = canary_registry_and_config();
-    let candidates: Vec<String> = registry.iter().take(3).map(|raw| hex(raw, false)).collect();
+    let candidates: Vec<String> = registry
+        .iter()
+        .take(3)
+        .map(|s| s.expose().to_owned())
+        .collect();
     for c in &candidates {
         assert_eq!(ValueName::new(c), Err(LoadRecordError::InvalidName));
         assert_eq!(RefId::new(c), Err(LoadRecordError::InvalidRef));
@@ -759,9 +765,14 @@ fn registries_include_signing_key_secret() {
     assert!(pkcs8.len() > d.len() && d.len() == 32);
     let trial = trial_registry(&hub_config(), &secrets);
     assert_eq!(trial.len(), 6);
-    assert!(trial.ends_with(&[pkcs8.clone(), d.clone()]));
+    let tail: Vec<Vec<u8>> = trial[4..].iter().map(secret_raw).collect();
+    assert_eq!(tail, vec![pkcs8.clone(), d.clone()]);
     let (canary, _cfg, _key) = canary_registry_and_config();
-    assert!(canary.len() == 10 && canary[8].len() == 138 && canary[9].len() == 32);
+    assert!(
+        canary.len() == 10
+            && secret_raw(&canary[8]).len() == 138
+            && secret_raw(&canary[9]).len() == 32
+    );
     // 登録簿の `d` は鍵そのものを示す: 公開鍵と対の PKCS#8 の中にだけ現れる。
     assert!(pkcs8.windows(32).any(|w| w == d.as_slice()));
     assert_eq!(key.public_key().len(), 65);
@@ -775,7 +786,7 @@ fn stdout_registry_covers_logout_receiver_uri_in_encoded_forms() {
     let registry = stdout_registry(&cfg);
     assert_eq!(registry.len(), 4);
     let uri = cfg.logout_receiver_uri.get().clone().into_bytes();
-    assert!(registry.contains(&uri));
+    assert!(registry.iter().any(|s| secret_raw(s) == uri));
     for f in forms(&uri) {
         let text = format!("note: {}\n", String::from_utf8(f).unwrap());
         assert!(printable_body(&text, &registry).is_err());
@@ -786,10 +797,11 @@ fn stdout_registry_covers_logout_receiver_uri_in_encoded_forms() {
 /// 出力の走査（`printable_body`）は、登録簿の値の各形・JWT の形が混ざった本文を出さず、通常の本文は通す。
 #[test]
 fn printable_body_refuses_registered_forms_and_jwt() {
-    let registry = vec![random_value()];
+    let value = random_value();
+    let registry = vec![secret_hex(&value)];
     assert!(printable_body("format: x\njudgment:\n", &registry).is_ok());
     // 生のバイト列は UTF-8 とは限らないため、文字列にできる形（先頭以外）で確かめる。
-    for f in forms(&registry[0]).into_iter().skip(1) {
+    for f in forms(&value).into_iter().skip(1) {
         let text = format!("note: {}\n", String::from_utf8(f).unwrap());
         assert!(printable_body(&text, &registry).is_err());
     }

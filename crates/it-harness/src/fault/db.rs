@@ -132,6 +132,8 @@ impl Upstream {
 /// 解放済み（[`UpstreamStall::release`]）の停止点は転送器に渡せず、起動は `StartFailed` になる（fail-closed）。
 /// 古い解放の記録が新しい保持を `Released` と読ませないため、解放済みの値は再利用せず新しく作る。
 /// 解放済みの停止点を通り抜ける接続は、到達にも離れた理由にも数えない（ORST-17）。
+/// 離れた理由は直近の値ではなく、転送器へ渡してから一度でも期限切れがあれば `Expired` と読む
+/// （先の期限切れを、後の保持の `Released`・`Stopped` で隠さない。ORST-17・AUDB-6）。
 #[derive(Clone, Default)]
 pub struct UpstreamStall {
     inner: Arc<StallInner>,
@@ -157,7 +159,11 @@ struct StallState {
     /// 渡した後から `hold` に入るまでの停止は、この転送器の停止として数える（`hold_started` だけでは `Expired` に誤る）。
     bound_at: Option<Instant>,
     /// 直近に停止点を離れた理由。試験が「期限切れで抜けたのを合格にしない」ために見る（ORST-17）。
+    /// `exit_reason` は `expired` が正のとき、この値より `Expired` を優先する。
     last_exit: Option<StallExit>,
+    /// 今の転送器へ渡してから、`Expired` で離れた保持の回数（通り抜けは数えない）。
+    /// 先の期限切れを後の保持の `Released`・`Stopped` で上書きさせないための印（ORST-17・AUDB-6）。
+    expired: u64,
     /// いま転送器に束縛されている（ORST-17・AUDB-6）。`rebind` が同じロックの下で確認して立て、
     /// [`StallBinding`] の破棄で下ろす。使用中の再割り当てを拒否し、1 つ目の観測を保つ。
     bound: bool,
@@ -241,14 +247,28 @@ impl UpstreamStall {
     }
 
     /// 直近に停止点を離れた理由。まだ離れていなければ `None`。
+    /// ただし今の転送器へ渡してから一度でも期限切れがあれば、後の保持の理由にかかわらず `Expired`（ORST-17・AUDB-6）。
     /// 遮断・解除の試験は `Released`（明示の解除まで保持された）、停止の試験は `Stopped` を確かめる。
     /// `Expired` は期限切れで試験の前提が崩れたことを表し、合格にしない。
     pub fn exit_reason(&self) -> Option<StallExit> {
+        let g = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if g.expired > 0 {
+            return Some(StallExit::Expired);
+        }
+        g.last_exit
+    }
+
+    /// 今の転送器へ渡してから、期限切れで離れた保持の回数。
+    pub fn expired_count(&self) -> u64 {
         self.inner
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .last_exit
+            .expired
     }
 
     /// 停止点で待つ接続を先へ進める。以後に入る接続も待たない。
@@ -266,7 +286,7 @@ impl UpstreamStall {
     }
 
     /// 転送器に渡す時に呼ぶ。解放済み、または使用中（別の転送器に束縛済み）なら `None`（渡せない。
-    /// このとき状態は一切変えない）。そうでなければ、前の使用の到達と離れた理由を戻し、今回の到達だけを
+    /// このとき状態は一切変えない）。そうでなければ、前の使用の到達・離れた理由・期限切れの印を戻し、今回の到達だけを
     /// `wait_entered` が待てるようにして束縛を返す（ORST-17・AUDB-6）。確認と設定は同じロックの下で行う。
     fn rebind(&self) -> Option<StallBinding> {
         let mut g = self
@@ -279,6 +299,7 @@ impl UpstreamStall {
         }
         g.entered = 0;
         g.last_exit = None;
+        g.expired = 0;
         g.bound_at = Some(Instant::now());
         g.bound = true;
         Some(StallBinding {
@@ -351,7 +372,11 @@ impl UpstreamStall {
         let stopped_at = g
             .stopped_at
             .filter(|t| *t >= since && stop.load(Ordering::SeqCst));
-        g.last_exit = Some(classify_exit(g.released_at, stopped_at, deadline));
+        let exit = classify_exit(g.released_at, stopped_at, deadline);
+        if exit == StallExit::Expired {
+            g.expired = g.expired.saturating_add(1);
+        }
+        g.last_exit = Some(exit);
     }
 }
 
@@ -1803,6 +1828,86 @@ mod tests {
             "stale entry"
         );
         assert_eq!(stall.exit_reason(), None);
+    }
+
+    /// `entered >= n` になるまで期限付きで待つ。`wait_entered` は `entered == 0` だけを見るため、
+    /// 1 本目の後は即 `true` になり 2 本目の到達を待てない。
+    fn wait_entered_at_least(stall: &UpstreamStall, n: u64) -> bool {
+        let end = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < end {
+            let entered = stall
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entered;
+            if entered >= n {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+
+    fn last_exit_of(stall: &UpstreamStall) -> Option<StallExit> {
+        stall
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last_exit
+    }
+
+    /// 先の期限切れを、解放前に入った後続の保持の `Released` で上書きしない（ORST-17・AUDB-6）。
+    #[test]
+    fn later_release_does_not_overwrite_earlier_expired() {
+        let stall = UpstreamStall::new();
+        let _b = stall.rebind().expect("bind");
+        stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
+        assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
+        let s2 = stall.clone();
+        let h = thread::spawn(move || s2.hold_for(&AtomicBool::new(false), Duration::from_secs(5)));
+        assert!(wait_entered_at_least(&stall, 2));
+        stall.release();
+        h.join().unwrap();
+        assert_eq!(last_exit_of(&stall), Some(StallExit::Released));
+        assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
+        assert_eq!(stall.expired_count(), 1);
+    }
+
+    /// 先の期限切れを、後続の保持の `Stopped` で上書きしない（ORST-17・AUDB-6）。
+    #[test]
+    fn later_stop_does_not_overwrite_earlier_expired() {
+        let stall = UpstreamStall::new();
+        let _b = stall.rebind().expect("bind");
+        stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (s2, stop2) = (stall.clone(), Arc::clone(&stop));
+        let h = thread::spawn(move || s2.hold_for(&stop2, Duration::from_secs(5)));
+        assert!(wait_entered_at_least(&stall, 2));
+        stall.note_stop(&stop);
+        h.join().unwrap();
+        assert_eq!(last_exit_of(&stall), Some(StallExit::Stopped));
+        assert_eq!(stall.exit_reason(), Some(StallExit::Expired));
+        assert_eq!(stall.expired_count(), 1);
+    }
+
+    /// 転送器へ渡すと期限切れの印も戻る。前の転送器の期限切れを今回の判定に持ち込まない（ORST-17）。
+    #[test]
+    fn rebind_clears_expired_mark() {
+        let stall = UpstreamStall::new();
+        let first = stall.rebind().expect("first bind");
+        stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
+        assert_eq!(stall.expired_count(), 1);
+        // 使用中の再割り当ては拒否される。前の転送器の停止後に渡し直す。
+        drop(first);
+        let _second = stall.rebind().expect("second bind");
+        assert_eq!(stall.exit_reason(), None);
+        assert_eq!(stall.expired_count(), 0);
+        stall.release();
+        stall.hold_for(&AtomicBool::new(false), Duration::from_millis(30));
+        // 解放済みは通り抜けで、数えない。
+        assert_eq!(stall.expired_count(), 0);
     }
 
     /// 解放済みの停止点は転送器に渡せない。渡すと古い解放が `Released` と読まれるため（ORST-17・AUDB-6）。
