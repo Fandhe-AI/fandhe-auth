@@ -23,11 +23,12 @@
 # TASK-11 (1/6): crates/e2e-harness は passkey の E2E ハーネスの枠で、試験専用。段階 1 のリリースのメンバーではない
 # （LIB-14・LIB-15）。どの crate からも依存しない。依存は 0。名前・置き場は仮称で、人が確定する。
 # TASK-12 (3/10): crates/load-harness は計測・負荷のハーネスの計測の部品で、試験専用。段階 1 のリリースのメンバー
-# ではない（LIB-14・LIB-15）。どの crate からも依存しない。通常の依存は 0（std だけ）。試験（dev）だけ it-harness・hub-stub に依存する
+# ではない（LIB-14・LIB-15）。どの crate からも依存しない。通常の依存は 0（std だけ）。試験（dev）だけ it-harness・hub-stub・secret・ring に依存する
 # （TASK-12 (5/10)。許可表の行は人の確認待ち）。名前・置き場は仮称で、人が確定する。
 # TASK-4 (6/6)・#35: crates/trial-deps は依存の試し実装の試験専用 crate。段階 1 のリリースのメンバーではない
 # （LIB-14）。名前・置き場は仮称で、人が確定する。採った道具と試験の形を本番の TASK（500・511・513・514・518・116・117）が引き取ったら消す
 # （513: 派生 Debug の入れ物の試験と乱数の probe、500: 陽性対照、511: SECR-11 の property test と fuzz）。
+# TASK-667 (3/4): DPOL-14 の試験を dev 依存（jsonwebtoken・aws-lc-rs・pem）で置く。本番の採否の決定ではない。
 # crates/trial-deps/fuzz は別 workspace（nightly）で、ここには含めない（exclude）。
 [workspace]
 resolver = "3" # 暫定。人が確定する。

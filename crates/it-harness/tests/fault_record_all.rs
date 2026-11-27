@@ -26,13 +26,13 @@ fn all_eight_categories_in_one_record_with_injector() {
         FaultKind::hub_stub_delay(HubStubPort::Jwks, ms(30)).unwrap(),
     )
     .unwrap();
-    let mut lo = LogoutTokenReceiver::new(
+    let mut lo = inj.bind_receiver(LogoutTokenReceiver::new(
         Vec::new(),
         LogoutExpectations {
             issuer: "https://auth.example.test".to_owned(),
             audience: "hub-client.test".to_owned(),
         },
-    );
+    ));
     let _ = inj
         .receive_logout(&tl, &mut lo, "not-a-token", 1_000)
         .unwrap();

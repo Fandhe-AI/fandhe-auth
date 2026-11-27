@@ -13,16 +13,21 @@
   - `TASK-513`: 派生 `Debug` の入れ物の試験（`SECR-13`）と、乱数の probe の本番版
   - `TASK-500`: 陽性対照、つまり検出力の確認（`AAUD-30`・`AAUD-31`）
   - `TASK-511`: `SECR-11` の property test（`prop_debug`）と fuzz
+  - `TASK-667` (3/4): `DPOL-14` の試験（`tests/dpol14_rsa_pkcs8.rs`）。引き取り先は RS256 の署名の実装を置く本番の crate とその TASK で、spec 上の番号は未定（置き場は人が確定する）。実装が PEM の形を使うことの確認は (4/4)・#320
   - `SECR-29` の例外: この crate の試験の型（`prop_debug` の入力の型・`SECR-23` の試験の捕獲の型）は、crate を消すまで `SECR-10`・`SECR-29` の一覧の対象外（`D-2026-11-20-14` の (4)(e)）。
     条件は `.claude/rules/secret-values.md` の例外の箇条に従う: 秘密値の型を包まない。`prop_debug` の `Input` は `Debug` が固定の文字列である間。捕獲の型 5 つは `Debug` を実装しない間。条件を外れた型は一覧に戻す
   - `TASK-518`: `log` crate を経由した記録も本番の `SECR-23` の試験で捕まえる（`D-2026-11-20-14` の (4)(f)。この crate は直さない）
-- 消す条件: 採った道具と試験の形を、本番の TASK（500・511・513・514・518・116・117）が引き取ったら、この crate は消す。
+- 消す条件: 採った道具と試験の形を、本番の TASK（500・511・513・514・518・116・117）と `DPOL-14` の試験の引き取り先が引き取ったら、この crate は消す。
 - feature は、利用者の方針（2026-11-20。安全な最新の安定版・必要最小の feature）で必要最小に絞った。この組は `D-2026-11-20-14` の (4)(b)(c) で決まった（試し実装の時点の組）。
   - `tracing`: `default-features = false` + `std`
   - `metrics`: 既定（`[features]` が無い）
   - `tracing-subscriber`: `default-features = false` + `fmt`（明示）。`fmt` が `registry`・`std` を暗黙に有効にする
   - `proptest`: `default-features = false` + `std`
   - `syn`: `default-features = false` + `full`・`parsing`
+  - `jsonwebtoken`（dev）: `default-features = false` + `aws_lc_rs`・`use_pem`。`rust_crypto` は有効にしない（`DPOL-17`）。採否の決定ではない
+  - `aws-lc-rs`（dev）: 宣言は `default-features = false` + `aws-lc-sys`。ただし `jsonwebtoken` 12.0.0 の `aws_lc_rs` が `aws-lc-rs` を既定の feature のまま引くため、実効は既定の組（`alloc`・`ring-io`・`ring-sig-verify`）に `aws-lc-sys` を加えたもの（`cargo tree --locked -e features -i aws-lc-rs` で確かめた）。鍵の実行時の生成に使う
+  - `jsonwebtoken`・`aws-lc-rs`・`pem` は試験専用（dev）として受け入れたもので、本体の crate の選定ではない（利用者の決定。2026-11-27）
+  - `pem`（dev）: `default-features = false`
   - `libfuzzer-sys`: 既定（`fuzz/Cargo.toml` の `0.4.13`。fuzz は別の workspace）
 - 採用 crate の根拠は `D-2026-11-20-8`〜`10`。
 - ここでの合格は〔仮想〕の確認で、spec の「確定」ではない（`ACPT-7`）。
@@ -35,6 +40,7 @@
 | `metrics` | `tests/metrics_probe.rs` | 自前の最小 `Recorder` を `with_local_recorder` で当て、counter の key・ラベル・増分を受けられる | `SECR-26`・`SECR-27` |
 | `proptest` | `tests/prop_debug.rs` | 任意の `String` から作った `SecretString` の `Debug` が常に固定文字列で、値を含まない。`expose()` が往復する。K8 の形を試すもので、対象の P-n・F-n ではない | `SECR-11`（K8 の形。`ACPT-37` の対象外） |
 | `syn` | `src/scan.rs` の `#[cfg(test)]` | `syn::parse_file` で、秘密値らしい欄名で型が生の `String` の欄を拾う。edition 2024 の構文を読める | `SECR-21` |
+| `jsonwebtoken`（`aws_lc_rs`・`use_pem`）+ `aws-lc-rs` | `tests/dpol14_rsa_pkcs8.rs` | 実行時に生成した RS256 の鍵が PKCS#8 で PKCS#1 の読み手に拒否される（陽性対照）。`from_rsa_der` に PKCS#8 の DER を渡すと `encode` が署名の誤りで失敗する。`from_rsa_pem` に PKCS#8 の PEM を渡すと署名でき、公開鍵で検証できる。〔仮想〕で、確定ではない | `DPOL-14` |
 | `cargo-fuzz` / `libfuzzer-sys` | `fuzz/fuzz_targets/secret_debug.rs` | 任意のバイト列を UTF-8 として読めたら `SecretString` にし、`Debug` が固定で `expose()` が往復する。K8 の形を試すもので、対象の P-n・F-n ではない | `SECR-11`（K8 の形。`ACPT-38` の対象外） |
 
 範囲外: `SECR-23` の本番の試験（`TASK-518`）、`SECR-21` の本番の走査と CI への組み込み（`TASK-514`）、本番の property test と fuzz の継続（`TASK-116`・`TASK-117`）。
