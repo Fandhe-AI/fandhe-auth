@@ -155,7 +155,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 - unix（Linux・macOS 等）に限る。非 unix では対象の試験が 0 件になり、入口のスクリプトが失敗にする。
 - Chrome は chromedriver と Chrome、Firefox は geckodriver と Firefox（仮想 authenticator の WebDriver のエンドポイントを使える組み合わせ。
   版の値はここに写さず、参照先を分ける）。
-  - Firefox: 動作の記録のある組み合わせは `scripts/e2e-firefox.sh` と Makefile の `e2e-firefox` の説明を見る（スクリプトが書く範囲は、記録のある組み合わせと、それより古い版・pref が足りない版は未確認という点）。
+  - Firefox: 動作の記録のある組み合わせは `scripts/e2e-firefox.sh` と Makefile の `e2e-firefox` の説明を見る（スクリプトが書く範囲は、記録のある組み合わせと、それより古い版・pref が足りない版は未確認という点。記録は spec の PoC の記録〔〔仮想〕〕で、この repo の `make e2e-firefox` ではまだ実行していない）。
   - Chrome: 同じ文書の「起動・停止の契約（2/6）」にある ChromeDriver を含む確認環境を見る。書かれている確認は chromedriver と Chrome が同じプロセスグループに入ること（特定の環境・版で `ps` により確認。他は未確認）で、仮想 authenticator の動作の確認ではない。
 - ドライバが無ければ黙って飛ばさず失敗する（`DPOL-30`〜`32`）。環境の有無で自動に飛ばす分岐は作らない。
 
@@ -179,11 +179,11 @@ PKEY の振る舞いを満たしたとは主張しない。
     ヘルパーは登録結果の `counts_as_real_device()`・`counts_as_safari()` がともに `false` であることも内部で検査する（`ACPT-7`・`ACPT-8`）。戻り値から登録結果の `evidence()` は取れないので、
     直接呼び出した操作（認証など）の証跡の確認は呼び出し側が行う。
     `registration_run_result`・`authentication_run_result` を直接使うときは、得た `(run, check_ok)` を呼び出し側が検査する。`run` は操作の結果と後続の検査を合成した記録用の分類で、`check_ok` の意味は登録と認証で違う。登録の `check_ok` は、登録が成功し、かつ後続の検査（credential の件数・RP ID）にも通ったときだけ真になる。認証の `check_ok` は、操作の成否にかかわらず、後続の検査だけの結果を表す。
-    操作の成否は `run` ではなく元の `result` から決める。`run` を記録した後に `result.expect(..)` で `outcome` を取り出し、成功を期待するなら `outcome.succeeded()`、拒否を期待するなら `!outcome.succeeded()` に加えて、`outcome.error_name()` が対象の WebAuthn のエラー名（期待したブラウザの拒否の名前）であることを照合する。`expect(..)` を通っても `error_name()` には `HarnessTimeout`（ハーネス自身の期限切れ）・`HarnessScript`（ハーネスのスクリプトの例外）・`OriginMismatch`（呼び出し前の origin 確認）が入り得て、これらはブラウザの拒否ではないので拒否の根拠にしない（記録の `run` ではそれぞれ `harness_timeout`・`check_failed`・`preflight_failed` に分類され、`rejected` に数えない。「実行の記録の形式（5/6）」の節）。`!outcome.succeeded()` だけで拒否と見なさない。`check_ok` はそれとは別に確かめる。違いの詳細は次のとおり。`registration_run_result` は、登録が成功しなかったとき（`Err` を含む）は credential を見ずに `(run, false)` を返し、成功したときだけ credential の件数と RP ID を見て真偽を決める。偽になる条件は「登録が成功しなかった」「credential の取得に失敗した」「件数が 1 でない・RP ID が `localhost` でない」で、登録が予期せず成功して件数と RP ID が合えば拒否を期待する試験でも真になる。そのため `check_ok` は拒否の判定に使えず、登録の拒否を期待する試験は `!outcome.succeeded()` と `error_name()` で確かめ、`assert!(check_ok, ..)` を拒否の根拠に置かない。登録の成功を期待するときは `assert!(check_ok, ..)` で確かめる。`authentication_run_result` は操作の成否によらず credential を検査するので、拒否を期待する認証でも `assert!(check_ok, ..)` で確かめる（`check_ok` が真でも、認証が成功したり別の理由で拒否されたりし得る）。
+    操作の成否は `run` ではなく元の `result` から決める。`run` を記録した後に `result.expect(..)` で `outcome` を取り出し、成功を期待するなら `outcome.succeeded()`、拒否を期待するなら `!outcome.succeeded()` に加えて、`outcome.error_name()` が対象の WebAuthn のエラー名（期待したブラウザの拒否の名前）であることを照合する。`expect(..)` を通っても `error_name()` には `HarnessTimeout`（ハーネス自身の期限切れ）・`HarnessScript`（ハーネスのスクリプトの例外）・`OriginMismatch`（呼び出し前の origin 確認）が入り得て、これらはブラウザの拒否ではないので拒否の根拠にしない（操作結果の初期の分類では、それぞれ `harness_timeout`・`check_failed`・`preflight_failed` になり、`rejected` に数えない。「実行の記録の形式（5/6）」の節）。ただし `authentication_run_result` は後続の検査で分類を上書きする。credential の取得に失敗すると `harness_error`、件数や RP ID が合わないと `check_failed` になり、記録の最終の分類に初期の分類が残るのは後続の検査が通ったときだけである。`!outcome.succeeded()` だけで拒否と見なさない。`check_ok` はそれとは別に確かめる。違いの詳細は次のとおり。`registration_run_result` は、登録が成功しなかったとき（`Err` を含む）は credential を見ずに `(run, false)` を返し、成功したときだけ credential の件数と RP ID を見て真偽を決める。偽になる条件は「登録が成功しなかった」「credential の取得に失敗した」「件数が 1 でない・RP ID が `localhost` でない」で、登録が予期せず成功して件数と RP ID が合えば拒否を期待する試験でも真になる。そのため `check_ok` は拒否の判定に使えず、登録の拒否を期待する試験は `!outcome.succeeded()` と `error_name()` で確かめ、`assert!(check_ok, ..)` を拒否の根拠に置かない。登録の成功を期待するときは `assert!(check_ok, ..)` で確かめる。`authentication_run_result` は操作の成否によらず credential を検査するので、拒否を期待する認証でも `assert!(check_ok, ..)` で確かめる（`check_ok` が真でも、認証が成功したり別の理由で拒否されたりし得る）。
     登録だけを見本にする試験でヘルパーを使わないときは、`registration_run_result` の戻り値を `(run, check_ok)` に分け、`run` を `sink.record(PasskeyOperation::Registration, run).expect("record")` で一度だけ記録する。
     `RecordSink::record` は件数の上限を超えると `Err` を返すので、`sink.record(..).expect("record")` のように成功を確かめる。
     エラーを無視すると、記録が欠けたまま `finish()` で完了にできてしまう。登録・認証のどちらの直接の記録も同じ。
-    記録のあと、元の `result` から取り出した `outcome` で登録の成否を、`check_ok` を別に、それぞれ呼び出し側で検査する（手順 6 の `check_ok` はここで得た値）。
+    記録のあと、元の `result` から取り出した `outcome` で登録の成否を、`check_ok` を別に、それぞれ呼び出し側で検査する（手順 6 の `check_ok` は、直接使った登録では `registration_run_result` が返した値、認証では `authentication_run_result` が返した値。操作ごとに、その操作の関数が返した値を使う）。
     ヘルパーを使わないときは、`register_once` の前の準備も自分で行う（見本は `support::passkey::register`、`crates/e2e-harness/tests/support/passkey.rs`）。
     準備は 3 つ。(1) `add_virtual_authenticator(&VirtualAuthenticatorOptions)` で仮想 authenticator を足す、(2) `navigate(&origin.origin())` で試験用 origin へ移動する、
     (3) `set_script_timeout(..)` でスクリプトのタイムアウトを command timeout より短く設定する（時間切れを script timeout として観測するため）。
@@ -200,7 +200,7 @@ PKEY の振る舞いを満たしたとは主張しない。
 - `make test`（`cargo test --workspace --locked`）: workspace 全体の試験を流す。ドライバ不要で、この crate では実ブラウザ・実ドライバを要さない試験だけが流れ（例えば、偽のドライバを使う試験、`crates/e2e-harness/tests/` の `scope.rs`・`test_origin.rs`・`lifecycle.rs`・`webdriver_client.rs`・`run_record.rs`〔記録形式・保存処理〕、`crates/e2e-harness/src/record.rs` 内の単体試験。一覧は `tests/` の実際の構成に従う）（`#[ignore]` のブラウザ E2E は対象外）、ブラウザ E2E の実行回数・合格に数えない（`ACPT-7`）。CI の build-test ジョブと同じ契約。
 - `make e2e-chrome`（`scripts/e2e-chrome.sh`）・`make e2e-firefox`（`scripts/e2e-firefox.sh`）: `#[ignore]` の登録・認証の試験を target ごとに流す。
   引数を拒否するのは各スクリプトの `reject_args`（`scripts/lib.sh`）で、スクリプトを直接実行して位置引数を渡すと usage を出して終了コード 2 で止まる。
-  Makefile のレシピは `make` に渡した引数をスクリプトへ転送しないので、登録・認証の対象やテストのオプションを入口（`make e2e-chrome`・`make e2e-firefox`）から指定することはできない。
+  Makefile のレシピは `make` に渡した引数をスクリプトへ転送しないので、登録・認証の対象やテストのオプションを入口（`make e2e-chrome`・`make e2e-firefox`）から引数で指定することはできない（環境変数は cargo に引き継がれる）。
   target ごとに 1 件以上通らなければ失敗する。CI の外（runner のブラウザは前提にしない。`TASK-6`）。ターゲット名は暫定。
 
 ### 記録の読み方
