@@ -3,7 +3,7 @@
 # 呼び出し元: `make load-trial`。CI では流さない（同じ試験 trial_run は `make test` に入っている）。
 # 負荷の記録は成功時に消えるため、--show-output で記録の本文を標準出力に出す（試験が設定の目印 2 種と出力先のパスの無いことを確かめ、出す本文そのものを秘密値の各表現の照合に通した本文だけ。一致があれば本文を出さず失敗する）。
 # 本文の公開は、この入口が環境変数 FANDHE_AUTH_LOAD_TRIAL_PRINT=1 を試験へ渡したときだけ（通常の `make test` では出ない。SECR-23）。
-# 本文は試験が照合後に固定の開始行・終了行で挟んで出す。この入口は、集計行が合格 1 件（無視 0 件）かつ区画がちょうど 1 件のときだけ区画の中身を出す。
+# 本文は試験が照合後に固定の開始行・終了行で挟んで出す。この入口は、集計行が合格 1 件（無視 0 件）かつ区画がちょうど 1 件で、開始行が終了行より前にあり、区画が空でなく記録の形式の行を含むときだけ区画の中身を出す（満たさなければ固定の文言で 1。本文は出さない）。
 # 終了コード: 0 = 主試験 1 件が流れて合格、1 = 失敗または主試験の合格が 1 件（無視 0 件）でない、2 = 誤用（引数）。
 # stub の結果を実物の結果に数えない（A-2026-10-28-9・ACPT-7）。この入口自身は環境変数・設定ファイルを読まない（DPOL-32）。
 set -euo pipefail
@@ -46,9 +46,16 @@ if [ "${n_begin}" != "1" ] || [ "${n_end}" != "1" ]; then
   exit 1
 fi
 # 開始行が終了行より前にあること（順序が逆なら区画として扱わない）
-begin_no="$(grep -nFx -- "${begin_line}" <<<"${out}" | cut -d: -f1)"
-end_no="$(grep -nFx -- "${end_line}" <<<"${out}" | cut -d: -f1)"
-if [ "${begin_no}" -ge "${end_no}" ]; then
+begin_no="$(grep -nFx -- "${begin_line}" <<<"${out}" | cut -d: -f1)" || {
+  echo "error: could not locate the load record body block; nothing is printed" >&2
+  exit 1
+}
+end_no="$(grep -nFx -- "${end_line}" <<<"${out}" | cut -d: -f1)" || {
+  echo "error: could not locate the load record body block; nothing is printed" >&2
+  exit 1
+}
+# 通ってよい側（開始 < 終了）から書き、比較そのものが誤ったときも失敗の側に落とす
+if ! [ "${begin_no}" -lt "${end_no}" ]; then
   echo "error: the load record body block is out of order (end before begin); nothing is printed" >&2
   exit 1
 fi
