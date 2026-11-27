@@ -6,7 +6,8 @@
 # 呼び出し元: scripts/lint.sh・`make crate-deps`。
 #
 # 表の値は spec の〔提案〕（LIB は検討中）から引いた暫定。表を変える（crate・辺を足す）ときは利用者に確かめる。
-# TODO(TASK-714): 外部の禁止 crate（非同期ランタイム・DB ドライバー・HTTP の枠組み・SDK 等）の検査を足す
+# 外部の禁止 crate（非同期ランタイム・DB ドライバー・HTTP の枠組み・SDK 等）の検査は scripts/check-lib-deps.sh（TASK-714。こちらは workspace 内の辺だけ）。
+# TODO(TASK-714): 禁止の表の充足（#5159〜#5161）と CI への搭載（#5164）
 # TODO(TASK-663): RP 向け crate・共有型・画面の crate の DB 非依存（DPOL-7）の検査を足す
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

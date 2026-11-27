@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps no-vendored pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps lib-deps no-vendored pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -57,6 +57,10 @@ lint: ## rustfmt の差分検査 + clippy -D warnings + crate 間の依存の向
 
 crate-deps: ## crate 間の依存の向きの検査（許可表との照合）。直接: scripts/check-crate-deps.sh
 	@scripts/check-crate-deps.sh
+
+# lib-deps は暫定の名前（人が確定する）。TASK-714・LIB-2。lint への結線は #5164。
+lib-deps: ## 本体の crate の通常の依存の禁止 crate の検査（cargo tree。陰性対照つき。検査のみ）。直接: scripts/check-lib-deps.sh
+	@scripts/check-lib-deps.sh
 
 # no-vendored は暫定の名前（人が確定する）。DPOL-13・TASK-667。lint からも呼ばれる。
 no-vendored: ## openssl-sys の vendored の検査（合否は本番メンバーの normal・build 依存で、既定 feature と PROD_FEATURES で明示した feature だけ。全 feature の走査は参考（警告）。静的リンクを強いる設定の検出を含む。検査のみ）。直接: scripts/check-openssl-vendored.sh
