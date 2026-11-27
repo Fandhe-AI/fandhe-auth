@@ -353,10 +353,19 @@ index_absent_confirmed() {
 }
 # path_enoent_confirmed <パス>: メタデータの照会（stat。ファイルを開かない）が ENOENT で失敗したときだけ 0 を返す
 # （それ以外の誤り・成功は 1。#6047）。入力リダイレクトで開く方式は使わない（/dev/tcp 等の特殊パスがソケット接続になる・
-# 照会の間に FIFO が現れると書き手を待って止まる、の 2 点を避ける）。誤りの種類は strerror の文言の末尾で見る
-# （LC_ALL=C 固定。文言は誤りの種類で決まり、パスの内容に左右されない末尾）。差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
+# 照会の間に FIFO が現れると書き手を待って止まる、の 2 点を避ける）。0 にする条件はすべてそろったときだけ（1 つでも欠ければ 1）:
+#   (1) パスが改行を含まない（診断が複数行になり得て、診断の形を偽装できるため）
+#   (2) 診断の受け皿を照会の前に消せて、照会の後も消せる（リダイレクトの open が失敗すると bash は stat を起動せず 1 を返し、
+#       前回の ENOENT の診断が残ったまま読まれる fail-open になるため。読む診断は必ず今回の照会のもの）
+#   (3) 終了コードが 1（起動の失敗は 126・127。bash 自身が「…: No such file or directory」を出し得るため区別する）
+#   (4) 診断がちょうど 1 行で、stat 自身の接頭辞 "stat: " で始まり、strerror の文言 ": No such file or directory" で終わる
+#       （LC_ALL=C 固定。文言は誤りの種類で決まる。GNU・uutils・BSD〔macOS〕は終了コード 1 と接頭辞 "stat: " と読んでいる。BSD は実機で未確認）
+# 差し替えの窓は残る（窓を狭めるだけ。git-hooks.md の (f)）。
 path_enoent_confirmed() {
-  local err rc=0 p="$1"
+  local err="" extra="" more=0 rc=0 p="$1" errfile="${tmp_dir}/stat-err"
+  case "${p}" in
+    *$'\n'*) return 1 ;;
+  esac
   # 先頭が "/" でない相対パスには "./" を付ける。GNU stat は "--" の後でも単独の "-" を標準入力として扱い、
   # 未作成の代替 index "-" を誤って「ある」と読むため（#6047）。
   case "${p}" in
@@ -364,16 +373,14 @@ path_enoent_confirmed() {
     *) p="./${p}" ;;
   esac
   # 置換を使わず、一時ファイルへ診断を書き出して終了状態をそのまま受ける（resolve_head と同じ。コマンド置換の中で 1 を返すと、
-  # bash 3.2〔macOS〕は ERR トラップをサブシェルで実行して 2 に化かし、本物の ENOENT を取り違える）。診断は 1 行目だけを読む。
-  err=""
-  LC_ALL=C stat -- "${p}" > /dev/null 2> "${tmp_dir}/stat-err" || rc=$?
-  IFS= read -r err < "${tmp_dir}/stat-err" || true
-  # 照会の失敗だけを ENOENT の候補にする。起動の失敗（実行ファイルが無い・実行できない・インタープリタが無い）は
-  # 終了コード 126・127 で、bash 自身が「…: No such file or directory」を出し得る。診断の末尾だけでは照会の ENOENT と区別できず、
-  # 起動できていない stat を「不在」と読むと fail-open になる（#6047）。
-  # stat の照会の失敗は終了コード 1（GNU・uutils・BSD〔macOS〕。BSD は 1 を返すと読んでいる。実機で未確認）で、診断は stat 自身の接頭辞 "stat: " で始まる
-  # （bash の起動失敗の診断は "bash: …" や実行ファイルのパスで始まる）。終了コードと診断の形がそろわなければ「不在とは言えない」（1）。
+  # bash 3.2〔macOS〕は ERR トラップをサブシェルで実行して 2 に化かし、本物の ENOENT を取り違える）。
+  rm -f -- "${errfile}" || return 1
+  LC_ALL=C stat -- "${p}" > /dev/null 2> "${errfile}" || rc=$?
+  # 診断は 1 行目と、2 行目の有無だけを読む（空行の 2 行目も「有る」と数える）。
+  { IFS= read -r err || true; if IFS= read -r extra || [ -n "${extra}" ]; then more=1; fi; } < "${errfile}" || return 1
+  rm -f -- "${errfile}" || return 1
   [ "${rc}" -eq 1 ] || return 1
+  [ "${more}" -eq 0 ] || return 1
   case "${err}" in
     "stat: "*": No such file or directory") return 0 ;;
     *) return 1 ;;
@@ -1560,7 +1567,7 @@ verify_index_unchanged "${tmp_dir}/index-final" "${tmp_dir}/index-listing-final"
 # 2 回目の index の検証の途中に動いた HEAD も見落とさないよう、検証の後にもう一度 HEAD を照合する（#6047。git-hooks.md の (f)）。
 recheck_head
 
-# 最後の HEAD の照合の後にも、index の経路を取り直す（#6047。複写の後の付け替えを、HEAD の再照合の後まで見る）。
+# 最後の HEAD の再照合（2 回目の確認の後）の後にも、index の経路を取り直す（#6047。複写の後の付け替えを、HEAD の再照合の後まで見る）。この後に集計の直前の HEAD の照合し直しが続く。
 require_index_paths_unchanged
 
 # 経路の取り直し（git を 2 回呼ぶ）の間に動いた HEAD も見落とさないよう、集計の直前に HEAD を固定した ID と照合し直す

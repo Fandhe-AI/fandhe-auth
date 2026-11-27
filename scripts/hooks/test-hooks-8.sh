@@ -595,10 +595,10 @@ else
   fail "secret-scan: HEAD moved during the last index path re-check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
-# T17: stat の起動の失敗（診断が ENOENT で終わっても、終了コードが 126・127）と、接頭辞 "stat: " の無い診断（終了コード 1）は「不在」と確かめられたとは言えず 2（path_enoent_confirmed。#6047）
+# T17: stat の起動の失敗（診断が ENOENT で終わっても、終了コードが 126・127）・接頭辞 "stat: " の無い診断・複数行の診断（終了コード 1）は「不在」と確かめられたとは言えず 2（path_enoent_confirmed。#6047）
 # 起動の失敗は、不在の index を空として 0 を返す経路になり得る（fail-open）。直しを外すと 0 を返し、この試験が落ちる。
 t17_i=0
-for t17_kind in bad-interpreter exit-127 exit-2 no-prefix; do
+for t17_kind in bad-interpreter exit-127 exit-2 no-prefix multi-line; do
   t17_i=$((t17_i + 1))
   new_repo; stage src/app.txt "hello"
   stat17_dir="${work_dir}/stat17-shim-${t17_i}"
@@ -617,15 +617,63 @@ for t17_kind in bad-interpreter exit-127 exit-2 no-prefix; do
       # 終了コードは 1 だが、診断に接頭辞 "stat: " が無い（stat 自身の診断とは言えない形）
       printf '#!/bin/sh\necho "x: No such file or directory" >&2\nexit 1\n' > "${stat17_dir}/stat"
       ;;
+    multi-line)
+      # 終了コード 1・1 行目は ENOENT の形だが、診断が 2 行ある（1 行目だけでは判定しない）
+      printf '#!/bin/sh\necho "stat: cannot statx x: No such file or directory" >&2\necho "extra" >&2\nexit 1\n' > "${stat17_dir}/stat"
+      ;;
+  esac
+  case "${t17_kind}" in
+    no-prefix) t17_msg="a stat diagnostic without the stat: prefix" ;;
+    multi-line) t17_msg="a multi-line stat diagnostic" ;;
+    *) t17_msg="a stat that fails to run (${t17_kind})" ;;
   esac
   chmod +x "${stat17_dir}/stat"
   rc=0
   GIT_INDEX_FILE="${work_dir}/t17-absent-index-${t17_i}" PATH="${stat17_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
   if [ "${rc}" -eq 2 ] && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
-    pass "secret-scan: a stat that fails to run (${t17_kind}) does not confirm an absent index (2)"
+    pass "secret-scan: ${t17_msg} does not confirm an absent index (2)"
   else
-    fail "secret-scan: a stat that fails to run (${t17_kind}) does not confirm an absent index (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+    fail "secret-scan: ${t17_msg} does not confirm an absent index (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
   fi
 done
+
+# T18: 診断の受け皿を開けず stat が起動されなかった呼び出しで、前回の ENOENT の診断を読まない（path_enoent_confirmed。#6047）
+# 1 回目の照会の後に受け皿を読み取り専用にして、2 回目のリダイレクトの open を失敗させる（bash は stat を起動せず 1 を返す）。
+# 照会の前に受け皿を消す直しがあれば、2 回目は新しく作られ、stat（shim）が起動されて Permission denied を返し、2 で止まる。
+# 直しを外すと、前回の ENOENT の診断が残ったまま読まれ、不在と確かめたことになって 0 を返し、この試験が落ちる。
+# ルートは権限を迂回するため、一般ユーザーのときだけ行い、ルートでは skip を明示する。
+if [ "$(id -u)" -ne 0 ]; then
+  new_repo; stage src/app.txt "hello"
+  stat18_dir="${work_dir}/stat18-shim"
+  t18_tmp="${work_dir}/t18-tmp"
+  rm -rf "${stat18_dir}" "${t18_tmp}" "${work_dir}/t18-n" "${work_dir}/t18-second"
+  mkdir -p "${stat18_dir}" "${t18_tmp}"
+  cat > "${stat18_dir}/stat" <<'EOF18'
+#!/bin/sh
+# 1 回目: 診断の受け皿を読み取り専用にしてから、本物の stat（ENOENT）を流す。2 回目以降（受け皿が新しく作られたときだけ届く）: 印を残して別の誤りを返す
+if [ ! -e "${T18_N}" ]; then
+  : > "${T18_N}"
+  for f in "${T18_TMP}"/secret-scan.*/stat-err; do
+    chmod 444 "${f}"
+  done
+  exec "${REAL_STAT}" "$@"
+fi
+: > "${T18_SECOND}"
+echo "stat: cannot statx x: Permission denied" >&2
+exit 1
+EOF18
+  chmod +x "${stat18_dir}/stat"
+  rc=0
+  GIT_INDEX_FILE="${work_dir}/t18-absent-index" TMPDIR="${t18_tmp}" T18_TMP="${t18_tmp}" T18_N="${work_dir}/t18-n" T18_SECOND="${work_dir}/t18-second" \
+    PATH="${stat18_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+  if [ -e "${work_dir}/t18-second" ] && [ "${rc}" -eq 2 ] \
+    && grep -qxF "secret-scan: cannot snapshot the index; aborting" "${work_dir}/out"; then
+    pass "secret-scan: a stale ENOENT diagnostic is not read when the diagnostic file cannot be opened (2)"
+  else
+    fail "secret-scan: a stale ENOENT diagnostic is not read when the diagnostic file cannot be opened (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+  fi
+else
+  echo "ok - secret-scan: stale diagnostic test skipped (running as root bypasses permissions)"
+fi
 
 finish "part 8"
