@@ -214,6 +214,21 @@ PKEY の振る舞いを満たしたとは主張しない。
   `!outcome.succeeded()` だけで拒否と見なさない。
 - `authentication_run_result` は後続の検査で分類を上書きする。credential の取得に失敗すると `harness_error`、件数や RP ID が合わないと `check_failed` になり、
   記録の最終の分類に初期の分類が残るのは後続の検査が通ったときだけである。
+- 証跡（`evidence()`）の検査は、成功を期待する場合も拒否を期待する場合も同じに行う。`evidence()` は `AuthenticatorKind::WebDriverVirtual` から導く固定の値で、
+  操作の成否・拒否の名前に依らない。拒否で終わった操作も `Ok(outcome)`（`outcome.succeeded()` が偽）として `outcome` を持つので、拒否の場合も 2 項目を検査できる（`ACPT-7`・`ACPT-8`）。
+  拒否を期待する認証の例は次のとおり（成否の照合の直後に置く）。
+
+  ```rust
+  let outcome = result.expect("authenticate");
+  assert!(!outcome.succeeded());
+  assert_eq!(outcome.error_name(), Some(WebAuthnErrorName::NotAllowed));
+  assert!(check_ok, "credential check failed");
+  assert!(!outcome.evidence().counts_as_real_device());
+  assert!(!outcome.evidence().counts_as_safari());
+  ```
+
+- 見本の拒否のケース（`crates/e2e-harness/tests/chrome_authentication.rs`・`crates/e2e-harness/tests/firefox_authentication.rs` の UV 失敗の試験）には、今は対照の認証にも拒否された認証にもこの検査が無い。
+  見本を写すときは上の 2 行を足す。見本の側の欠けの追跡先は #6142。
 
 
 失敗の場合（`set_user_verified` と対照の認証）の作り方は「認証 1 件の定義（4/6）」の節を見る。
