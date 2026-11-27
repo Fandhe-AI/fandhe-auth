@@ -245,7 +245,55 @@
 
 ## 3/4 自作の暗号処理の走査の仕組み（#5169）
 
-未記入。
+### 1. 目的と範囲
+
+- 受入基準は 3 点: (a) 自作の暗号処理を探す走査の仕組みがある、(b) 範囲（対象・規則・限界）が文書にある、(c) 今の main で検出 0 件で通る。根拠は `LIB-21`・`DPOL-4`・`DPOL-47`。
+- 仕組み: `scripts/check-crypto-primitives.sh`（`make crypto-scan`。名前は暫定）。make check 相当への組み込みと CI への搭載は 4/4（#5170）の範囲で、本節では行わない。
+- 対象: `git ls-files --cached --others --exclude-standard -- crates/` のファイル。`crates/` の外（外部取得物・`scripts/`）は対象外。
+- 合否の範囲: 本番メンバー（core・secret・db-tests・client・plugin-oidc・backend）。参考の範囲: 試験専用メンバー（hub-stub・console-stub・it-harness・e2e-harness・load-harness・trial-deps と配下の fuzz）。
+- 出力中の絶対パスは出さない設計で、記録にも書かない。
+
+### 2. 基準
+
+- base: `origin/main` の `1181a68`。
+- 実行環境: GNU bash 5.3.9、ugrep 7.8.4（`grep`）。
+
+### 3. 規則と限界
+
+| 規則 | 扱い | 内容 |
+|---|---|---|
+| C1 | 合否 | 既知の暗号定数（SHA-1/2・MD5 の IV と K[0]、ChaCha/Salsa の sigma、黄金比、Poly1305 の clamp、Keccak の RC、P-256 の素数の断片、AES の S-box の先頭）。`_` を除き大小文字を区別しない |
+| C2 | 合否 | インラインアセンブリ・アーキテクチャ固有の命令 |
+| C3 | 合否 | Rust 以外のネイティブのソース |
+| C4 | 合否 | 暗号 trait の自前の実装 |
+| C5 | 合否 | 同じファイルでの rotate と wrapping 演算の併存 |
+| N1 | 参考 | 定義の名前に暗号の基本処理の語が入ること |
+| N2 | 参考 | 本番メンバーの `build.rs` |
+
+- 限界: 発見的な規則である。名前を変えた実装・10 進や別表現の定数・マクロで生成したコードは見落としうる。XML 署名は SAML の Plugin（段階 2）の側でまだ crate が無い。人のレビュー（TASK-83）の代わりにならない（CG-2）。
+- fail-closed: メンバーが分類表に無い・表の重複・対象 0 件・制御文字を含むパス・grep の失敗は検査不能（2）。実行のたびに自己試験（陽性 S1〜S8・陰性 S9・S10）を先に流す。検査を外す引数・環境変数・例外の許可リストは無い。
+
+### 4. 実行したコマンド
+
+- `scripts/check-crypto-primitives.sh`: 終了コード 0。`selftest ok`。C1〜C5 は各 0。N1・N2（本番）は各 0。
+- `make crypto-scan`: 終了コード 0。
+- `scripts/check-crypto-primitives.sh foo`: usage を出して終了コード 2。
+- 陽性の実地確認: 未追跡の一時ファイル `crates/core/src/zz_probe.rs` に C1 の定数を書いて実行 → C1 が 1 件、終了コード 1。確認後に削除した。
+
+### 5. 結果
+
+- 合否の範囲の検出: 0 件（走査したファイル: 本番 19・試験専用 127）。
+- 参考の警告: 試験専用メンバーで 1 件（N1: `crates/hub-stub/tests/assertion.rs:277`。関数名に `p256` の語が入る）。
+
+### 6. 人が決めること
+
+- 試験専用の crate を合否に含めるか、N1・N2 を合否に上げるか。
+- 例外を許す仕組みの要否（本段では作っていない）。
+- 規則の集合が十分か。
+
+### 7. 判定
+
+（人が記入する。空欄）
 
 ## 4/4 検査に載せて記録する（#5170）
 
