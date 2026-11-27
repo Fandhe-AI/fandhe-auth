@@ -658,17 +658,58 @@ fn stalled_upstream() -> StalledUpstream {
     }
 }
 
+/// `/proc/net/tcp` 形式の本文に、宛先ポートが `port` で SYN_SENT（状態 02）の行があるか。純粋関数で、読み取りの成否は扱わない。
+#[cfg(target_os = "linux")]
+fn syn_sent_in_text(text: &str, port: u16) -> bool {
+    let want = format!(":{port:04X}");
+    text.lines().skip(1).any(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        f.len() > 3 && f[2].ends_with(&want) && f[3] == "02"
+    })
+}
+
+/// `path` を読んで SYN_SENT の有無を返す。読めないときは環境の誤りとして `Err` を返し、
+/// 「接続が無い」（`Ok(false)`）と区別する（#6048）。パスは試験の中の補助の引数で、本体の設定ではない。
+#[cfg(target_os = "linux")]
+fn syn_sent_at(path: &std::path::Path, port: u16) -> Result<bool, String> {
+    std::fs::read_to_string(path)
+        .map(|t| syn_sent_in_text(&t, port))
+        .map_err(|e| format!("cannot read {}: {:?} ({e})", path.display(), e.kind()))
+}
+
 /// `/proc/net/tcp` に、宛先ポートが `port` で SYN_SENT（状態 02）の接続があるか。
 /// 溜まりきった待ち行列への connect は SYN を落とされ、OS の中で SYN_SENT のまま待つ。
+/// 読み取りの誤りは接続の状態の誤りと分け、環境の誤りとして直ちに panic で示す（ORST-17・TASK-13・#6048）。
+/// `wait_until` の中でも待ちを打ち切り、状態の失敗の文言に化けさせない。
 #[cfg(target_os = "linux")]
 fn syn_sent_to(port: u16) -> bool {
-    let want = format!(":{port:04X}");
-    std::fs::read_to_string("/proc/net/tcp").is_ok_and(|t| {
-        t.lines().skip(1).any(|l| {
-            let f: Vec<&str> = l.split_whitespace().collect();
-            f.len() > 3 && f[2].ends_with(&want) && f[3] == "02"
-        })
-    })
+    syn_sent_at(std::path::Path::new("/proc/net/tcp"), port)
+        .unwrap_or_else(|e| panic!("environment error, not a socket state: {e}"))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn syn_sent_at_reports_read_error_separately_from_socket_state() {
+    // ディレクトリは `read_to_string` が必ず誤りにする（ファイルを作らない）。
+    let err = syn_sent_at(std::path::Path::new("/"), 80).unwrap_err();
+    assert!(err.contains("cannot read"), "{err}");
+    assert!(err.contains('/'), "{err}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn syn_sent_in_text_matches_only_syn_sent_to_port() {
+    let head = "  sl  local_address rem_address   st tx_queue rx_queue\n";
+    let hit = "   0: 0100007F:9C40 0100007F:1F90 02 00000000:00000000 00:00000000 00000000\n";
+    let est = "   1: 0100007F:9C41 0100007F:1F90 01 00000000:00000000 00:00000000 00000000\n";
+    let other = "   2: 0100007F:9C42 0100007F:1F91 02 00000000:00000000 00:00000000 00000000\n";
+    assert!(syn_sent_in_text(
+        &format!("{head}{est}{other}{hit}"),
+        0x1F90
+    ));
+    assert!(!syn_sent_in_text(&format!("{head}{est}{other}"), 0x1F90));
+    // 見出し行は読み飛ばす。
+    assert!(!syn_sent_in_text(head, 0x1F90));
 }
 
 /// ORST-17: 本物の上流への connect が固まっていても `block()` は待たされない（Linux のみ。検出を足す試験で、契約を変えない）。
