@@ -9,7 +9,7 @@
 #   出た package・feature の行の先頭の名前を FORBIDDEN の表と照合する。推移の依存・既定の feature が有効にする optional の依存も入る。
 #   dev の依存は見ない。build を含めるのは LIB-2 の `-e normal` より厳しい側にするため（dependency-policy.md）。この範囲は人の確認待ち。
 # feature: 既定の feature と環境変数 PROD_FEATURES（`<crate>/<feature>` のカンマ区切り。無ければ空）で足した feature。
-#   PROD_FEATURES は検査を足すだけで外す効果は無い。形式が違う値は検査不能（2）。BODY_PKGS 以外の crate の要素は無視する。
+#   PROD_FEATURES は検査を足すだけで外す効果は無い。形式が違う値・BODY_PKGS に無い crate の要素は検査不能（2。黙って無視しない）。
 # 参考の走査（合否に入れない）: 各 crate の --all-features。当たれば warn を出すだけ（本番の監査に --all-features を使わない。DPOL-31）。
 #   全 feature を合否に入れるかは人が決める（未定）。
 # 禁止の表: 1 行 1 件の `<区分>|exact|<crate 名>` か `<区分>|prefix|<接頭辞>`。正規表現・glob は使わず、前方一致は prefix の行だけに効く。
@@ -118,7 +118,7 @@ find_violations() {
 }
 
 # build_feature_args <PROD_FEATURES 相当> <crate>: FA に、その crate 宛ての `--features` を作る。空なら空配列。
-# 形式は `<crate>/<feature>` のカンマ区切り。違えば検査不能（2）。他の crate 宛ての要素は無視する。
+# 形式は `<crate>/<feature>` のカンマ区切り。違えば検査不能（2）。他の crate 宛ての要素はここでは無視する（BODY_PKGS に無い名前は check_feature_targets が 2 にする）。
 FA=()
 build_feature_args() {
   FA=()
@@ -138,6 +138,26 @@ build_feature_args() {
     fi
   done
   if [ -n "${feats}" ]; then FA=(--features "${feats}"); fi
+}
+
+# check_feature_targets <PROD_FEATURES>: 各要素の crate 名が BODY_PKGS に在ることを確かめる。無い名前（workspace に無い名前を含む）は
+# 誤記で検査が掛からないまま通るのを防ぐため、検査不能（2）。形式の検査は build_feature_args に任せる。
+check_feature_targets() {
+  [ -z "$1" ] && return 0
+  build_feature_args "$1" "${BODY_PKGS[0]}"
+  local item name p ok
+  local IFS=,
+  for item in $1; do
+    name="${item%%/*}"
+    ok=0
+    for p in "${BODY_PKGS[@]}"; do
+      [ "${p}" = "${name}" ] && ok=1
+    done
+    if [ "${ok}" -eq 0 ]; then
+      log "error: PROD_FEATURES names a crate not in the inspected set (${name}); cannot inspect"
+      exit 2
+    fi
+  done
 }
 
 # run_tree <dir> <locked|offline> [追加引数...]: cargo tree の出力を stdout に返す。失敗は 2（生の出力は出さない）。
@@ -372,6 +392,7 @@ main() {
   fi
   trap cleanup EXIT
 
+  check_feature_targets "${PROD_FEATURES:-}"
   selftest
 
   for pkg in "${BODY_PKGS[@]}"; do
