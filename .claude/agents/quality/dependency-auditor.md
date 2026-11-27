@@ -21,7 +21,7 @@ tools:
 | 区分 | 内容 |
 |------|------|
 | ✅ 読む | `Cargo.toml`・`Cargo.lock`・`crates/*/Cargo.toml` |
-| ✅ 実行 | `cargo deny fetch`・`cargo audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ）・`cargo deny --locked check <検査> --disable-fetch`・`cargo audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`scripts/check-audit-config.sh`（cargo-audit の前に流す検査。何も変更しない）・`git diff --exit-code Cargo.lock`・`cargo deny --version`・`cargo audit --version` |
+| ✅ 実行 | `cargo deny fetch`・`cargo-audit audit --file Cargo.lock`（DB の取得を兼ねる 1 回だけ。直前に `scripts/check-audit-config.sh`）・`cargo deny --locked check <検査> --disable-fetch`・`cargo-audit audit --no-fetch --file Cargo.lock`・`cargo tree --locked --workspace -e normal,build --target all --features "$PROD_FEATURES" -i <crate>`・`cargo tree --locked --workspace --exclude fandhe-auth-webauthn-wasm -e normal,build --target all --features "$SERVER_FEATURES" -i web-sys`・`scripts/check-audit-config.sh`（cargo-audit の前に流す検査。何も変更しない）・`git diff --exit-code Cargo.lock`・`cargo deny --version`・`cargo audit --version` |
 | ❌ 禁止 | `cargo update`・`cargo add` / `remove`・`cargo install`・ファイルの編集・例外の追加・`cargo deny` / `cargo tree` を `--locked` なしで流すこと・`cargo tree` に `--all-features` を付けること |
 
 ## 遵守する規約
@@ -50,12 +50,13 @@ cargo deny fetch
 ```
 
 ```bash
-cargo audit --file Cargo.lock
+scripts/check-audit-config.sh   # 取得を兼ねる先行実行の前にも同じガード（非 0 なら流さない）
+cargo-audit audit --file Cargo.lock   # cargo の alias で覆われないよう直接起動する
 ```
 
 2 つ目は cargo-audit の DB の取得を兼ねる（QP-2 の手順）ため、DPOL-33 の取得と監査の分離を満たさない暫定の手順である（正式な手順と記録の様式は TASK-679。`../../rules/dependency-policy.md` の「依存を足す・更新するときの確認手順」と同じ）。
 取得はこの 1 回だけで、以後の実行は全て取得なしで流す。報告には「暫定の手順で、DPOL-34 の合格ではない」と書く。
-取得の失敗を記録する（DPOL-33）。`cargo deny fetch` は、非 0 で終わったとき、または出力に DB の取得の誤りがあるときに取得の失敗とする（終了コード 0 でも失敗し得るため、出力も読む）。報告の「実行の条件」に cargo-deny の DB の取得の失敗と書き、`advisories` の行は「実行失敗」と書く（手元に残った DB で流した結果を「検出なし」に集計しない）。`cargo audit --file Cargo.lock` は取得と監査を兼ね、advisory の検出でも非 0 で終わるため、終了コードだけで取得の失敗と読まない。出力に DB の取得の誤りがあるとき、または取得の誤りか検出かを出力から読み分けられないときに取得の失敗とし、報告の「実行の条件」に cargo-audit の DB の取得の失敗と書き、`cargo-audit` の行を「実行失敗」と書く。非 0 の終了は、cargo-deny では取得の失敗の記録に使い、cargo-audit では出力と合わせて読む。どちらの道具でも、終了コード 0 や失敗の表示が無いことは取得の成功や DB の版の根拠にしない（次の段落）。
+取得の失敗を記録する（DPOL-33）。`cargo deny fetch` は、非 0 で終わったとき、または出力に DB の取得の誤りがあるときに取得の失敗とする（終了コード 0 でも失敗し得るため、出力も読む）。報告の「実行の条件」に cargo-deny の DB の取得の失敗と書き、`advisories` の行は「実行失敗」と書く（手元に残った DB で流した結果を「検出なし」に集計しない）。`cargo-audit audit --file Cargo.lock` は取得と監査を兼ね、advisory の検出でも非 0 で終わるため、終了コードだけで取得の失敗と読まない。出力に DB の取得の誤りがあるとき、または取得の誤りか検出かを出力から読み分けられないときに取得の失敗とし、報告の「実行の条件」に cargo-audit の DB の取得の失敗と書き、`cargo-audit` の行を「実行失敗」と書く。非 0 の終了は、cargo-deny では取得の失敗の記録に使い、cargo-audit では出力と合わせて読む。どちらの道具でも、終了コード 0 や失敗の表示が無いことは取得の成功や DB の版の根拠にしない（次の段落）。
 DPOL-33 は Should で、使った DB の commit と取得日の両方の記録を求めるが、今は記録していない。取得日も DB の版も「未記録（TASK-679 で決める）」と書く。取得の開始ログ（`Fetching advisory database from` 等）・終了コード・DB の HEAD・取得元との照合（`ls-remote` 等）は、どれも取得や DB の版の根拠にしない。記録の手順は TASK-679 で決める。
 
 ### Step 3: 4 検査と cargo-audit を取得なしで流す（DPOL-33・DPOL-34）
@@ -83,7 +84,7 @@ scripts/check-audit-config.sh
 ```
 
 ```bash
-cargo audit --no-fetch --file Cargo.lock
+cargo-audit audit --no-fetch --file Cargo.lock   # cargo の alias で覆われないよう直接起動する
 ```
 
 `--locked` は `Cargo.lock` を書き換えない指定（DPOL-33）。cargo-audit には `--locked` が無いため、QP-2 の記録どおり `--file` で `Cargo.lock` を渡し、
