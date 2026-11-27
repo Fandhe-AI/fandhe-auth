@@ -469,7 +469,7 @@ fn written_records_have_no_registered_secret_in_any_form() {
 
 /// 陽性対照 1（照合の検出力）: 登録簿の全値・全形（生・`+` を含む base64 も含む）を出力に混ぜると、
 /// 照合は形ごとに検出する（混ぜた値の、混ぜた形そのものの件数が 1 以上。合計の件数では見ない）。JWT の形の語も数える。生のバイトと `+` を含む base64 は形の網の外にあり、
-/// `write_new` を通らない。ここは照合そのものの検出力を見る（`write_new` を通る経路は、登録簿の 16 進の文字列が語彙外として名前に入らないことを次の試験で見る）。
+/// `write_new` を通らない。ここは照合そのものの検出力を見る（`write_new` に届く前に、登録簿の 16 進の文字列が語彙外の名前・出典・区間名として拒否されることを次の試験で見る）。
 #[test]
 fn matcher_detects_every_form_mixed_into_output() {
     let (registry, cfg) = canary_registry_and_config();
