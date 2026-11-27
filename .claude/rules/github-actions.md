@@ -24,6 +24,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 | `ci.yml` | `make check (...)` / `make build + make test` / `make lint (...)` / `secret scan (tracked files)` / `make it-db-ci (DB integration frame)` / `deps audit frame (tool install only; ...)` / `hook script tests (ubuntu-latest\|macos-latest)` / `PR title (...)` / `ci-complete` | `pull_request`（`opened` / `synchronize` / `reopened` / `edited`。`edited` でも全ジョブを走らせ、`if:` で skip しない）・`push`（`main` のみ） | `ubuntu-latest`（`test-hooks` の matrix のみ `macos-latest`） |
 | `ai-review.yml` | `codex / preflight`・`codex / review`・`codex / post_feedback`（Fandhe-AI/actions の reusable workflow） | `pull_request`（base が `main`。`opened` / `synchronize` / `reopened`） | preflight・post_feedback は `ubuntu-latest`、review は self-hosted の `codex` ラベル |
 | `trust-root-secret-scan.yml` | `trusted secret scan (tracked files)` | `pull_request`（`branches` を一致しにくい名前に絞っており、通常は発火しない。組織の ruleset の「Require workflows to pass」から呼ばれたときに動く。発火の前提は「必須チェックと集約ジョブ」の節の例外を参照） | `ubuntu-latest` |
+| `scheduled.yml` | `scheduled frame (no checks wired; TASK-681)` | `workflow_dispatch` のみ（`schedule` は持たない。足すときに例外を見直す（TASK-681）。`pull_request`・`push` は持たない） | `ubuntu-latest` |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
 
 `ci.yml` の Rust のジョブ（`build-test`・`lint`・`it-db-ci`）は、toolchain を MSRV の版で入れて流す（利用者の指示、2026-11-20）。
@@ -31,10 +32,39 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・edition・整形」を正とし、ここには写さない。
 新しい stable での検査は無く、足すかは未定。入れ方の例外は「ジョブ・ワークフローを追加するときのチェックリスト」の 9 を参照する。
 
+## PR ごとの実行と定期の実行の振り分け（TASK-6 7/10。#54）
+
+- PR の系統は `ci.yml`（`pull_request`・main への `push`）。`ci.yml` 内のジョブでマージを止める検査はここに置き、`ci-complete` で束ねる。
+  `ci-complete` の集約は `ci.yml` 内のジョブに限る。`codex / *` の必須ステータスチェックと `trust-root-secret-scan.yml` は別に要求される（「必須チェックと集約ジョブ」の節を参照）。
+  依存の変更ごとの監査（DPOL-34）も PR の系統の `deps-audit` が持つ（TASK-680）。
+- 定期の系統は `scheduled.yml`（今は `workflow_dispatch` のみ。`schedule` は持たない。足すときは下の例外を見直す）。コードが変わらなくても結果が変わりうる検査を置き、マージは止めない。PR の系統の代わりにしない。
+  今は検査を結線しない枠で、緑でも DPOL-35 を満たしたことにならない。結線・advisory DB の取得日の記録・警報は TASK-681（#1046）、警報の経路は Hub の `AOPS-3`。
+- 定期のジョブも `make`・`scripts/` の同じ入口を呼び、CI 側に検査のロジックを書かない。
+- 道具の版と SHA256 を宣言するのは `ci.yml` の `env` の 1 か所だけ。定期の系統で共有する方法（`workflow_call` か宣言の移設）は未定（TASK-681 で決める）。
+- 例外: PR の検査を担わない定期ジョブに限り、`scheduled.yml` を `ci-complete` の `needs` に入れず、required にも登録しない。
+  この例外は利用者が承認した（2026-11-26。承認は人が行う。ACPT-7）。承認の範囲は、`scheduled.yml` が `workflow_dispatch` だけで動く間に限る。
+  例外の根拠は 2 点に分ける。
+  (1) 集約できない理由: `needs` は同一ワークフロー内のジョブしか参照できず、別ワークフローの `scheduled.yml` のジョブを `ci.yml` の `ci-complete` に直接束ねられない（GitHub Actions の仕様）。
+  (2) required に登録しない理由: `scheduled.yml` は PR で起動しないため、required に登録するとチェックの結果が報告されないこと自体がマージを妨げる。
+  `schedule` などの発火を足すとき（TASK-681）は、承認の範囲の外なので、この例外を見直す。見直して承認が記録されるまで `schedule` は有効にしない。
+  チェックリスト 2 は追加ジョブを `ci-complete` に含めるよう求めるが、`scheduled.yml` はこの承認の範囲で例外とする。PR の検査を担うジョブを足すときは `ci.yml` に置く。
+  - 承認の記録
+    - 根拠: 定期ジョブは PR を検査しないため、`ci-complete` に入れても PR の判定に使われず、失敗が無関係な PR を止める
+    - 2026-11-27 追記: 例外の根拠を 2 点に分けた記述は、上の (1)(2) を参照する（承認時の根拠とは別に足した説明。codex の指摘による補足。承認の範囲は変えない）
+    - 適用範囲: PR の検査を担わない `scheduled.yml` のジョブに限り、かつ `scheduled.yml` が `workflow_dispatch` だけで動く間に限る。PR の検査を担うジョブには広げない
+    - 承認者: 利用者
+    - 承認日: 2026-11-26
+    - 見直し: `schedule` などの発火を足すとき（TASK-681）
+  - `ci-complete` で束ねない代わりの失敗の検知経路: 今は実装に在る経路は無く、GitHub の既定の通知だけ（下の「失敗の通知」の項。失敗時の通知・Issue 起票の結線は `scheduled.yml` に無い）。運用の警報への結線は TASK-681（Hub の `AOPS-3`）で、結線までは定期ジョブの失敗を人が Actions の画面で確かめる。この経路で足りるかは、見直しのときに人が判断する
+- `workflow_dispatch` は、ワークフローのファイルがデフォルトブランチ（main）にあるときだけ起動できる（GitHub の公式の手順書。PR ブランチにしか `scheduled.yml` が無いあいだは手動で起動できない）。起動できる状態では main 以外の ref も指定して流せる。check 名は必須のものと違うのでマージの判定には使われない（読み。〔実機〕では未確認）。
+- 失敗の通知は GitHub の既定だけで、運用の警報には結線していない。
+- schedule は default ブランチ（main）の定義で動く。活動の無い public の repo では GitHub が止めることがある。
+- cron の時刻と頻度は暫定で、人が決める（TASK-681）。頻度の上限は下の「schedule は日次以下」の項の規則のままで、`scheduled.yml` に足すときの候補（日次）だけが暫定。
+
 ## 依存の検査の拡張点（`deps-audit`。TASK-6 6/10）
 
 `ci.yml` の `deps-audit` は、cargo-deny・cargo-audit を版固定 + SHA256 検証で導入して版を照合するだけの枠で、検査は流さない。
-緑でも DPOL-34 を満たしたことにならない（ジョブ名の「frame」はそのため）。結線は TASK-680（前提は TASK-668・TASK-679）で、定期の実行は TASK-681（#54）。
+緑でも DPOL-34 を満たしたことにならない（ジョブ名の「frame」はそのため）。結線は TASK-680（前提は TASK-668・TASK-679）で、定期の系統の枠は `scheduled.yml`（#54）で、定期の監査の結線は TASK-681（#1046）。
 TASK-680 が結線するときの契約は次のとおり。値は spec の ID で引き、本文は写さない。
 
 1. ジョブ ID `deps-audit` を変えず、`ci-complete` の `needs` から外さない。`if:` による skip・`continue-on-error`・`paths` フィルタを付けない（DPOL-34）。
@@ -46,7 +76,7 @@ TASK-680 が結線するときの契約は次のとおり。値は spec の ID �
 5. 設定は TASK-668 の厳格版 `deny.toml` だけを使う。例外（`ignore`・`skip`・許可の追加）を足すかは人が決め、足すときは理由・期限・範囲を同じ場所に書く（DPOL-20・DPOL-35）。
 6. 4 検査と cargo-audit の 5 つがすべて成功したときだけ緑にする（DPOL-34）。結線までの緑は道具の導入の成功だけを表し、DPOL-34 の合格ではない。
     結線したらジョブ名から「frame」を外す（必須チェックは `ci-complete` だけなので影響しない）。
-7. 同じ入口を定期の実行（#54・TASK-681）からも呼べる形に保つ（DPOL-35）。
+7. 同じ入口を定期の実行（`scheduled.yml`・TASK-681）からも呼べる形に保つ（DPOL-35）。
 8. 道具の版は `env` の版と SHA256 を同時に更新する。現在の版は暫定で、人が確定する。
 9. 公開ログには版・件数・advisory ID 程度だけを出し、秘密値は出さない（SECR-23）。
 
@@ -199,14 +229,16 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - 現状の `ci.yml` は全体で数十秒のため導入していない（費用対効果が見合う重いジョブを足した時に検討する）
 - draft PR の skip は現状入れていない。入れる場合は `if: github.event.pull_request.draft == false` とし、
   trigger の `types` に `ready_for_review` を加える（加えないと ready にしても CI が走らない）
-- schedule は日次以下の頻度にする（`update-external.yml` は 00:00 UTC の 1 回）
+- schedule は日次以下の頻度にする（`update-external.yml` は 00:00 UTC の 1 回。`scheduled.yml` に足すときの候補は日次で、暫定。決めるのは TASK-681）
 
 ## ジョブ・ワークフローを追加するときのチェックリスト
 
 1. 新規ワークフローを作らず、まず既存の `ci.yml` へのジョブ追加で済むか検討する（同じトリガーなら `ci.yml` に集約）
+    - 例外: `scheduled.yml`。トリガーが `schedule`・`workflow_dispatch` の定期の系統は別にする（「PR ごとの実行と定期の実行の振り分け」。例外は利用者が承認済み。2026-11-26。範囲は `workflow_dispatch` だけで動く間。`schedule` を足すときは見直す〔TASK-681〕）
     - 例外: `trust-root-secret-scan.yml`。(a) 先行配置の期間と、(b) 組織の ruleset が workflow のファイルを固定して要求する間は、`ci.yml` に入れられない（要求されうる）（「必須チェックと集約ジョブ」の例外）
 2. 追加したジョブを `ci-complete` の `needs` に必ず加える（漏れると未検査のままマージ可能になる）。条件付きで skip
     するジョブは、許容する条件を `ci-complete` の jq 式に明示する
+    - 例外: `scheduled.yml` は `needs` に入れない（PR を検査しない。利用者が承認済み。2026-11-26。範囲は `workflow_dispatch` だけで動く間）
     - 例外: `trust-root-secret-scan.yml` は `needs` に入れない。(a)・(b) の期間の間だけ（「必須チェックと集約ジョブ」の節の例外）
 3. 処理は `make <target>` / `scripts/*.sh` を呼ぶ。CI 側に複数行のロジックを書かない
     （ツール導入のように CI 固有のステップは例外。secret-scan ジョブの走査対象の取得も例外で、理由は「秘密情報の検査ジョブ」の節を参照）
