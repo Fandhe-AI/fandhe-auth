@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
 # test-hooks.sh の各 part（test-hooks-N.sh）が共有する準備・helper・例示値（TASK-6）。
 #
-# 単体では実行しない。各 part が先頭で source する。使い捨ての作業領域（work_dir）・git の隔離・
-# git シム・UTF-8 ロケールの解決・pass / fail の計数・検出器の複製と、例示値（実行時に組み立てる）を持つ。
+# 単体では実行しない。各 part が先頭で source する。最小の準備（使い捨ての作業領域・git の隔離・pass / fail の計数・finish）は
+# test-hooks-core.sh にあり、本ファイルが先に source する。ここには git シム・UTF-8 ロケールの解決・検出器の複製と、
+# 例示値（実行時に組み立てる）を持つ。
 # 例示値は、本ファイル自体のコミットが secret-scan に検知されないよう、すべて実行時に組み立てる。
 # 各 part は別の bash として起動され、状態（変数・関数・cwd）は part の間で引き継がない。
-# 計数は finish が TEST_HOOKS_COUNTS_FILE へ書き、入口（test-hooks.sh）が合算する。
 #
 # 変数・関数は source した側の part が参照するため、単独で未使用に見える定義には、宣言ごとに理由付きの disable を置く。
 set -euo pipefail
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../lib.sh
-source "${HOOKS_DIR}/../lib.sh"
+# shellcheck source=./test-hooks-core.sh
+source "${HOOKS_DIR}/test-hooks-core.sh"
 
 SECRET_SCAN="${HOOKS_DIR}/secret-scan.sh"
 # shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
 COMMIT_MSG_CHECK="${HOOKS_DIR}/commit-msg-check.sh"
-HOOK_BASH="${BASH}"
-
-# テストハーネス自身の文字列比較はバイト単位で行う。フックは下の UTF-8 ロケールで起動する。
-export LC_ALL=C
 
 # (b) の回帰を実際に再現させるため、フックは UTF-8 ロケールで起動する（フック側が内部で
 # C ロケールへ切り替えることを検証する）。見つからない環境では検証にならないため失敗させる。
@@ -37,23 +33,6 @@ if [ -z "${utf8_locale}" ]; then
   echo "test-hooks: no UTF-8 locale available (need C.UTF-8 or en_US.UTF-8)" >&2
   exit 1
 fi
-
-work_dir="$(mktemp -d "${TMPDIR:-/tmp}/test-hooks.XXXXXX")"
-# 権限を落とした試験用ディレクトリ（chmod 000）がシグナルで止まった後も残らないよう、消す前に権限を戻す。
-trap 'chmod -R u+rwx "${work_dir}" 2> /dev/null; rm -rf "${work_dir}"' EXIT
-
-# 開発者・CI ランナーの git 設定（署名・色・フック・テンプレート）から隔離する。
-# lefthook 経由で起動された場合に備え、親リポジトリを指す環境変数も外す。
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY \
-  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
-# shellcheck disable=SC2034 # part から参照する（本ファイルだけを検査すると未使用に見える）
-real_home="${HOME}"
-export HOME="${work_dir}/home"
-export GIT_CONFIG_GLOBAL=/dev/null
-export GIT_CONFIG_NOSYSTEM=1
-export GIT_AUTHOR_NAME=hook-test GIT_AUTHOR_EMAIL=hook-test@example.invalid
-export GIT_COMMITTER_NAME=hook-test GIT_COMMITTER_EMAIL=hook-test@example.invalid
-mkdir -p "${HOME}"
 
 # (e) 用: 指定した引数を含む git 呼び出しだけを失敗させるシム。実体の git は先に解決しておく。
 real_git="$(command -v git)"
@@ -194,26 +173,10 @@ ${jwt_value}
 ${jwk_value}
 ${recovery_value}"
 
+
 last_out=""
-passed=0
-failed=0
 repo_seq=0
 repo=""
-
-pass() {
-  passed=$((passed + 1))
-  echo "ok - $1"
-}
-
-fail() {
-  failed=$((failed + 1))
-  echo "not ok - $1"
-  shift
-  local detail
-  for detail in ${@+"$@"}; do
-    echo "    ${detail}"
-  done
-}
 
 # new_repo: 空コミット 1 つを持つ使い捨てリポジトリを作り、cwd をそこへ移す。
 new_repo() {
@@ -385,16 +348,4 @@ CI_ENTRY="${HOOKS_DIR}/../secret-scan-ci.sh"
 # print_header: 検査対象の bash とロケールを 1 行で出す（part 1 だけが呼ぶ）。
 print_header() {
   echo "# hooks under test run with: ${HOOK_BASH} (${BASH_VERSION}), locale ${utf8_locale}"
-}
-
-# finish <part の名前>: part の計数を出し、入口へ渡す。失敗があれば 1 で終わる。
-# 入口は TEST_HOOKS_COUNTS_FILE に計数が書かれていない part を失敗として扱う（途中で止まった part を成功にしない）。
-finish() {
-  echo "# $1: passed ${passed}, failed ${failed}"
-  if [ -n "${TEST_HOOKS_COUNTS_FILE:-}" ]; then
-    echo "${passed} ${failed}" >> "${TEST_HOOKS_COUNTS_FILE}"
-  fi
-  if [ "${failed}" -ne 0 ]; then
-    exit 1
-  fi
 }

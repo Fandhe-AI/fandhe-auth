@@ -19,7 +19,7 @@
 # 互換性は `/bin/bash scripts/hooks/test-hooks.sh` で確認できる（本スクリプトも 3.2 互換で書く）。
 #
 #
-# 本ファイルは入口で、試験の本体は part（test-hooks-1.sh 〜 test-hooks-N.sh）と共有部（test-hooks-lib.sh）に分けてある。
+# 本ファイルは入口で、試験の本体は part（test-hooks-1.sh 〜 test-hooks-N.sh）と共有部（test-hooks-core.sh・test-hooks-lib.sh・test-hooks-sc-lib.sh）に分けてある。
 # 検査（shellcheck）の時間を縮めるため、バッチに分けて並列に流せる大きさに分けてある（lefthook の pre-commit の時間予算。
 # .claude/rules/git-hooks.md。TASK-6）。part は別の bash として順に起動し、計数を合算する。
 # part の間で状態（変数・関数・cwd）は引き継がない。part を足したら下の parts にも足す。
@@ -33,7 +33,7 @@ source "${HOOKS_DIR}/../lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 
-parts="1 2 3 4 5 6 7 8"
+parts="1 2 3 4 5 6 7 8 9 10 11"
 
 # parts が実在する part のファイル（test-hooks-<数字>.sh）と一致しなければ失敗にする（足した part の起動漏れ・消した part の素通りを防ぐ）
 part_files=0

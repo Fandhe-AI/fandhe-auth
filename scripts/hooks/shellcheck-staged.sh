@@ -16,7 +16,7 @@
 #
 # 目的は pre-commit の時間を縮めること（時間予算は .claude/rules/git-hooks.md。--all-files では予算に未達で、残りは #6056。TASK-6）。macOS 標準の bash 3.2 でも動くように、
 # mapfile・wait -n・空の配列の展開・`cmd || rc=$?`・名前付きの記述子（`{fd}>`）を使わない。
-# 回帰テストは scripts/hooks/test-hooks-1.sh（偽の shellcheck を PATH に置いて確かめる）。
+# 回帰テストは scripts/hooks/test-hooks-9.sh（引数の扱いと集約）・test-hooks-10.sh（並列数の決定と同時実行の上限）・test-hooks-11.sh（中断の扱い）（偽の shellcheck を PATH に置いて確かめる）。
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
