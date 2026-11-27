@@ -6,7 +6,7 @@
 # ---------------------------------------------------------------- shellcheck-staged.sh（pre-commit の shellcheck の並列実行）
 # 本物の shellcheck には頼らず（macOS の CI にあるとは限らない）、PATH 先頭に置いた偽物で呼び方と集約を確かめる。
 # 偽物は呼び出しを 1 行ずつ、呼び出しごとの別ファイル（${SC_LOG}.d/ の下）へ記録する。呼び出しは call と arg:<値>（1 引数 1 行）で記録する。呼ばれた引数の全件を順に見て、名前に bad を含むファイルは 3 行を出し（終了コード 1）、err を含むものは 1 行を出して（終了コード 2。shellcheck 自身の失敗。1 より優先）、slow を含むものは遅れて終わり、die を含むものは呼び出し元（結果を書く子の bash）を落とし、hang を含むものは自分の pid を SC_PIDFILE へ書いて 30 秒眠る。
-# shellcheck disable=SC2154  # work_dir は test-hooks-lib.sh が定義する（part が先に source する）。受け取るのはここだけで、以降は sc_work_dir を参照する
+# shellcheck disable=SC2154  # work_dir は test-hooks-core.sh が定義する（part が先に source する）。受け取るのはここだけで、以降は sc_work_dir を参照する
 sc_work_dir="${work_dir}"
 sc_shim_dir="${sc_work_dir}/sc-shim"
 mkdir -p "${sc_shim_dir}"

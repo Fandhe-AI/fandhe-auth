@@ -34,7 +34,7 @@ description: >
 - 依存パッケージのインストール・ネットワークアクセス
 - `ci.yml` のジョブと同じコマンドを同じ範囲で実行するもの
 - フックスクリプト（`scripts/hooks/*.sh`）自体のテスト — これも CI のジョブとして実行する
-  （`ci.yml` の `test-hooks` ジョブ。実体は `scripts/hooks/test-hooks.sh`〔入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-lib.sh`〕、ローカルでは `make test-hooks`）
+  （`ci.yml` の `test-hooks` ジョブ。実体は `scripts/hooks/test-hooks.sh`〔入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-core.sh`・`test-hooks-lib.sh`・`test-hooks-sc-lib.sh` の 3 つ〕、ローカルでは `make test-hooks`）
 
 ## フックに置いてよいもの
 
@@ -70,7 +70,10 @@ description: >
     - どれにするかは人が決める（#6056・TASK-6）。予算の値と hook の検査範囲は変えていない。
       open PR で part とファイルが増える（`test-hooks-8.sh`・`secret-scan.sh` の拡張）と、この数値は悪くなる見込み
   - 追記（構成の変更。上の計測値は 7 分割の構成のときのもので、書き換えない）: shellcheck-staged の試験を足したため、
-    `test-hooks.sh` の分割は共有部と 11 の part（各約 90〜790 行。shellcheck-staged の試験は part 9〜11 と道具 `test-hooks-sc-lib.sh`。part 11 は中断の試験で、補助関数を共有部に置くと part ごとの解析が重なるため 1 つにまとめた。part 8 は secret-scan の試験）になった（main の取り込み後の構成。以下の測定は取り込み前の 9 分割のとき）。この 9 分割での `--all-files` の summary は 1.13〜1.82 秒（2026-11-26 に 10 コアの 1 台で 6 回測定。直前の load average は 1 未満。1 回目の 1.82 秒は初回で、2 回目以降は 1.13〜1.41 秒）。最長のジョブは shellcheck（1.13〜1.82 秒）で、editorconfig-checker は 0.79〜1.29 秒、secret-scan は 0.29〜0.44 秒。上の 7 分割の測定（0.97〜1.09 秒）より長く、予算の 1 秒未満には届いていない。予算の値と hook の検査範囲は変えていない。見直すかどうかは人が決める（#6056・TASK-6）
+    `test-hooks.sh` の分割は共有部 3 つ（`test-hooks-core.sh`・`test-hooks-lib.sh`・`test-hooks-sc-lib.sh`）と 11 の part（各約 90〜880 行。shellcheck-staged の試験は part 9〜11 と道具 `test-hooks-sc-lib.sh`。part 11 は中断の試験で、補助関数を共有部に置くと part ごとの解析が重なるため 1 つにまとめた。part 8 は secret-scan の試験）になった。
+    - 9 分割のとき（20c83ca の前の構成）の `--all-files` の summary は 1.13〜1.82 秒（2026-11-26 に 10 コアの 1 台で 6 回測定。直前の load average は 1 未満。1 回目の 1.82 秒は初回で、2 回目以降は 1.13〜1.41 秒）。最長のジョブは shellcheck（1.13〜1.82 秒）で、editorconfig-checker は 0.79〜1.29 秒、secret-scan は 0.29〜0.44 秒
+    - 2026-11-27 の測定（`lefthook run pre-commit --all-files` の summary。10 コアの 1 台で、PR と main を交互に 8 回ずつ流した。load average は 0.4〜3.1）: PR（29c33b1。main の取り込み後、11 part）は 1.27〜1.47 秒、main（410982b）は 1.38〜1.63 秒。どちらも予算の 1 秒未満を満たしていない。超過は #6148 で追う。この PR は main より遅くしないことを条件に進めると、利用者が決めた
+    - 上の 7 分割の測定（0.97〜1.09 秒）より長く、予算の値と hook の検査範囲は変えていない。見直すかどうかは人が決める（#6056・TASK-6）
 - `secret-scan.sh` 冒頭の正規表現自己テストは ms 単位の fail-closed ガードであり、
   上記「フックスクリプト自体のテスト」には当たらない。削除・CI への移動はしない
 
@@ -193,8 +196,10 @@ description: >
     - できない → CI へ置く
 3. CI へ置く場合は `ci.yml` にジョブを追加し、集約ジョブ `ci-complete` の `needs` にも必ず追加する
     - ツールの導入・バージョン固定は既存の `check` ジョブの方式（バージョン + SHA256 検証）に合わせる
-4. `scripts/hooks/` を変更した場合は `scripts/hooks/test-hooks-N.sh` の該当する part（共有部は `test-hooks-lib.sh`）に検出・許可（OK / NG）ケースを追加し、
+4. `scripts/hooks/` を変更した場合は `scripts/hooks/test-hooks-N.sh` の該当する part に検出・許可（OK / NG）ケースを追加し、
     `make test-hooks` を通す（Linux・macOS の検証は CI の `test-hooks` ジョブが行う）
+    - 共有部の役割: `test-hooks-core.sh` は最小の準備（作業領域・git の隔離・計数・finish）、`test-hooks-lib.sh` は core を source したうえで git シム・検出器の複製・例示値を持つ（secret-scan 等の検出器の試験用）、`test-hooks-sc-lib.sh` は shellcheck-staged の試験の道具
+    - 足し先: 検出器の試験は `test-hooks-lib.sh` を source する part（1〜8）へ、shellcheck-staged の試験は `test-hooks-core.sh` と `test-hooks-sc-lib.sh` を source する part（9〜11）へ足す
 5. 編集後に以下を実行し、summary の合計時間をユーザーへ報告する（1 秒以上なら構成を見直す）
 
 ```bash
