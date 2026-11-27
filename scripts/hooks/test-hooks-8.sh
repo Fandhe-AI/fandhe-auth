@@ -25,9 +25,16 @@ case "${CP8_MODE:-}:${last}" in
     : > "${CP8_FLAG}.final"
     exit 1
     ;;
+  mark-final:*/index-final)
+    # 複写だけ行い、完了の印だけ残す（付け替えは git の shim が、最後の HEAD の再照合の呼び出しで行う）。
+    "${REAL_CP}" "$@" || exit $?
+    : > "${CP8_FLAG}.final"
+    exit 0
+    ;;
   link-final:*/index-final)
     # index-final の複写の直後に、親ディレクトリのリンクを別の（同じ内容の index を持つ）ディレクトリへ付け替える。
-    # 一覧は一致するため、複写の後の経路の取り直しだけがこれを検出する。
+    # 一覧は一致するため、複写の後の経路の取り直し（verify_index_unchanged の末尾・最後の HEAD の再照合の後）だけがこれを検出する。
+    # どちらでも検出するため、片方だけを外しても落ちない（最後の取り直しだけを固定するのは mark-final と T15）。
     "${REAL_CP}" "$@" || exit $?
     ln -sfn "${CP8_TO}" "${CP8_LINK}" || exit 1
     : > "${CP8_FLAG}.final"
@@ -436,7 +443,8 @@ else
 fi
 
 # T14: 2 回目の複写の直後に親ディレクトリのリンクが付け替わったら、一覧が一致しても 2（複写の後の経路の取り直し。#6047）
-# 2 回目の確認の前の経路の確認だけでは、前の確認の後・複写の最中の付け替えを見落とし、古い実体を読んで 0 を返す。
+# 複写の前の経路の確認だけでは、前の確認の後・複写の最中の付け替えを見落とし、古い実体を読んで 0 を返す。
+# 複写の後の取り直し（verify_index_unchanged の末尾）と最後の取り直し（HEAD の再照合の後）のどちらでも検出するため、片方だけを外しても落ちない（最後の取り直しだけの固定は T15）。
 new_repo; stage src/app.txt "hello"
 t14_dir="${work_dir}/t14"
 rm -rf "${t14_dir}"
@@ -446,12 +454,50 @@ cp "$(git rev-parse --git-path index)" "${t14_dir}/real2/index"
 ln -s "${t14_dir}/real1" "${t14_dir}/lnk"
 rm -f "${work_dir}/t14-flag.final"
 rc=0
-GIT_INDEX_FILE="${t14_dir}/lnk/index" CP8_MODE=link-final CP8_FLAG="${work_dir}/t14-flag" CP8_TO="${t14_dir}/real2" CP8_LINK="${t14_dir}/lnk"   PATH="${cp8_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+GIT_INDEX_FILE="${t14_dir}/lnk/index" CP8_MODE=link-final CP8_FLAG="${work_dir}/t14-flag" CP8_TO="${t14_dir}/real2" CP8_LINK="${t14_dir}/lnk" \
+  PATH="${cp8_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
 if [ -e "${work_dir}/t14-flag.final" ] && [ "${rc}" -eq 2 ] \
   && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
   pass "secret-scan: a parent link retargeted right after the final index copy is a scan failure (2)"
 else
   fail "secret-scan: a parent link retargeted right after the final index copy is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
+# T15: 最後の HEAD の再照合と集計の間に親ディレクトリのリンクが付け替わったら、一覧が一致しても 2（最後の経路の取り直しの固定。#6047）
+# 2 回目の複写（index-final）の後に走る git は、最後の HEAD の再照合の symbolic-ref だけ。その呼び出しでリンクを付け替える。
+# 複写の後の取り直し（verify_index_unchanged の末尾）は付け替えの前に終わっているため、最後の取り直しを外すと 0 を返し、この試験が落ちる。
+new_repo; stage src/app.txt "hello"
+t15_dir="${work_dir}/t15"
+rm -rf "${t15_dir}"
+mkdir -p "${t15_dir}/real1" "${t15_dir}/real2" "${work_dir}/git15-shim"
+cp "$(git rev-parse --git-path index)" "${t15_dir}/real1/index"
+cp "$(git rev-parse --git-path index)" "${t15_dir}/real2/index"
+ln -s "${t15_dir}/real1" "${t15_dir}/lnk"
+rm -f "${work_dir}/t15-flag.final" "${work_dir}/t15-swapped"
+cat > "${work_dir}/git15-shim/git" <<'EOF15'
+#!/bin/sh
+# index-final の複写の完了の印があるとき、最初の symbolic-ref（最後の HEAD の再照合）の前に一度だけ、リンクの参照先を差し替える
+if [ -e "${T15_MARK}" ] && [ ! -e "${T15_SWAPPED}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "symbolic-ref" ]; then
+      : > "${T15_SWAPPED}"
+      ln -sfn "${T15_TO}" "${T15_LINK}"
+      break
+    fi
+  done
+fi
+exec "${REAL_GIT}" "$@"
+EOF15
+chmod +x "${work_dir}/git15-shim/git"
+rc=0
+GIT_INDEX_FILE="${t15_dir}/lnk/index" CP8_MODE=mark-final CP8_FLAG="${work_dir}/t15-flag" \
+  T15_MARK="${work_dir}/t15-flag.final" T15_SWAPPED="${work_dir}/t15-swapped" T15_TO="${t15_dir}/real2" T15_LINK="${t15_dir}/lnk" \
+  PATH="${work_dir}/git15-shim:${cp8_dir}:${PATH}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${SECRET_SCAN}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ -e "${work_dir}/t15-swapped" ] && [ "${rc}" -eq 2 ] \
+  && grep -qxF "secret-scan: the index changed during the scan; aborting" "${work_dir}/out"; then
+  pass "secret-scan: a parent link retargeted during the final HEAD re-check is a scan failure (2)"
+else
+  fail "secret-scan: a parent link retargeted during the final HEAD re-check is a scan failure (2)" "got ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
 finish "part 8"
