@@ -466,7 +466,7 @@ judgment:
 ### 実行の方法
 
 - `make test`: workspace 全体を流す。試し実行を含むが、記録の本文は出ない（cargo は成功した試験の標準出力を捕まえる）。CI の build-test ジョブと同じ契約。
-- `make load-trial`（`scripts/load-trial.sh`）: 試し実行 `trial_run` だけを流し、負荷の記録の本文を標準出力に出す。引数は受けない。主試験（`small_trial_run_writes_record_without_requirement_values`）の合格が 1 件（無視 0 件）でない・失敗は `scripts/load-trial.sh` の直接実行で終了コード 1（make 経由ではレシピが 1 で終了しても make 自体は 2 を返す）。本文は `FANDHE_AUTH_LOAD_TRIAL_PRINT=1` のときだけ出る（通常の `make test` では出さない）。子プロセスの標準エラーは一時ファイルへ集めて中身を出さずに消す（成功・失敗のどちらでも。診断が要るときは `cargo test -p fandhe-auth-load-harness --test trial_run` を直接流す）。成功のときに標準出力へ出るのは、試験が照合を通した本文を固定の開始行・終了行で挟んだ区画の中身だけで、libtest の出力は出ない。成功（終了コード 0）は、集計行が合格 1 件（無視 0 件）で、開始行・終了行がそれぞれちょうど 1 件・開始行が終了行より前・区画が空でなく記録の形式の行を含むときだけ。それ以外は固定の文言で終了コード 1 になり、本文は出ない。集計行が合わない経路でも、捕捉した出力（`test result:` の行を含む）は再掲せず、固定の文言だけを標準エラーに出す。試験の出力の捕捉を外す `RUST_TEST_NOCAPTURE` は入口が子プロセスへ渡さない。CI の外。名前は暫定。
+- `make load-trial`（`scripts/load-trial.sh`）: 試し実行 `trial_run` だけを流し、負荷の記録の本文を標準出力に出す。引数は受けない。主試験（`small_trial_run_writes_record_without_requirement_values`）の合格が 1 件（無視 0 件）でない・失敗は `scripts/load-trial.sh` の直接実行で終了コード 1（make 経由ではレシピが 1 で終了しても make 自体は 2 を返す）。本文は `FANDHE_AUTH_LOAD_TRIAL_PRINT=1` のときだけ出る（通常の `make test` では出さない）。子プロセスの標準エラーは `/dev/null` へ捨てて出さない（成功・失敗のどちらでも。一時ファイルは作らない。診断が要るときは `env -u RUST_TEST_NOCAPTURE cargo test -p fandhe-auth-load-harness --test trial_run --locked` を直接流す）。成功のときに標準出力へ出るのは、試験が照合を通した本文を固定の開始行・終了行で挟んだ区画の中身だけで、libtest の出力は出ない。成功（終了コード 0）は、集計行が合格 1 件（無視 0 件）で、開始行・終了行がそれぞれちょうど 1 件・開始行が終了行より前・区画が空でなく記録の形式の行を含むときだけ。それ以外は固定の文言で終了コード 1 になり、本文は出ない。集計行が合わない経路でも、捕捉した出力（`test result:` の行を含む）は再掲せず、固定の文言だけを標準エラーに出す。試験の出力の捕捉を外す `RUST_TEST_NOCAPTURE` は入口が子プロセスへ渡さない。CI の外。名前は暫定。
 - Docker の有無などで自動に飛ばす分岐は作らない（`DPOL-30`〜`32`）。
 
 ### 記録の置き場と読み方
