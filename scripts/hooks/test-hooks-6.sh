@@ -367,7 +367,7 @@ same_root="${work_dir}/same-root"
 mkdir -p "${same_root}/scripts/hooks"
 cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${same_root}/scripts/"
 cp "${SECRET_SCAN}" "${same_root}/scripts/hooks/secret-scan.sh"
-cp "${HOOKS_DIR}/../../skills-lock.json" "${same_root}/skills-lock.json"
+if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${same_root}/skills-lock.json"; else printf '{}\n' > "${same_root}/skills-lock.json"; fi
 printf 'x = %s\n' "${token}" > "${same_root}/leaked.txt"
 git -C "${same_root}" -c init.defaultBranch=main init -q
 git -C "${same_root}" add -A
@@ -379,6 +379,8 @@ if [ "${rc}" -eq 1 ] && grep -qF -- "this run scanned this entry's own checkout"
   && grep -qF -- "the same-checkout exclusion rules apply" "${work_dir}/out" \
   && grep -qF -- "run ./scripts/hooks/secret-scan.sh --tracked (without --summary and without a target argument) from the root of this same checkout" "${work_dir}/out" \
   && grep -qF -- "read-tree ${same_sha}" "${work_dir}/out" \
+  && grep -qF -- "and HEAD is still ${same_sha}" "${work_dir}/out" \
+  && ! grep -qF -- "${same_root}" "${work_dir}/out" \
   && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
   && ! grep -qF -- "<trusted checkout>" "${work_dir}/out" \
   && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
@@ -386,6 +388,99 @@ if [ "${rc}" -eq 1 ] && grep -qF -- "this run scanned this entry's own checkout"
 else
   fail "secret-scan-ci: a same-checkout run tells to rescan in the same checkout without a target" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
+
+# (6) 検出器の実体のルート・mode・上限・どちらにも無い場合の分岐（案内は検出の結果 1・2 を変えない）
+mk_hint_root() {
+  # 引数: 作るディレクトリ。検出器・入口・一覧を複写してコミットした複製を作る。
+  local r="$1"
+  mkdir -p "${r}/scripts/hooks"
+  cp "${HOOKS_DIR}/../lib.sh" "${HOOKS_DIR}/../secret-scan-ci.sh" "${HOOKS_DIR}/../secret-scan-canary.sh" "${r}/scripts/"
+  cp "${SECRET_SCAN}" "${r}/scripts/hooks/secret-scan.sh"
+  if [ -f "${HOOKS_DIR}/../../skills-lock.json" ]; then cp "${HOOKS_DIR}/../../skills-lock.json" "${r}/skills-lock.json"; else printf '{}\n' > "${r}/skills-lock.json"; fi
+  git -C "${r}" -c init.defaultBranch=main init -q
+}
+hint_commit() {
+  git -C "$1" add -A
+  git -C "$1" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m "chore: hint root"
+}
+# assert_hint_rc <名前> <入口> <許す終了コード（空白区切り）>: 作業ツリーの案内に倒れ、sha の案内が無く、終了コードが期待内。
+assert_hint_rc() {
+  local name="$1" entry="$2" allowed="$3" c
+  rc=0
+  LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${entry}" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+  for c in ${allowed}; do
+    [ "${rc}" -eq "${c}" ] || continue
+    if grep -qF -- "use the detector and exclusion list exactly as this run used them" "${work_dir}/out" \
+      && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+      && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
+      pass "${name}"
+      return 0
+    fi
+  done
+  fail "${name}" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+}
+# 末尾がシンボリックリンクの検出器（コミットも 120000）
+r6="${work_dir}/hint-link-tail"
+mk_hint_root "${r6}"
+mv "${r6}/scripts/hooks/secret-scan.sh" "${r6}/scripts/hooks/real-scan.sh"
+ln -s real-scan.sh "${r6}/scripts/hooks/secret-scan.sh"
+hint_commit "${r6}"
+assert_hint_rc "secret-scan-ci: a symlinked detector does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "1"
+# 親ディレクトリ（scripts）がシンボリックリンク: コミットには通常のファイルがあり、作業ツリーの scripts は別のルートの実体を指す
+r6="${work_dir}/hint-link-parent"
+real6="${work_dir}/hint-link-parent-real"
+mk_hint_root "${r6}"
+hint_commit "${r6}"
+mk_hint_root "${real6}"
+hint_commit "${real6}"
+rm -rf "${r6}/scripts"
+ln -s "${real6}/scripts" "${r6}/scripts"
+assert_hint_rc "secret-scan-ci: a symlinked parent directory does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "1"
+# 実行ビットがコミットの mode（100644）と違う（作業ツリーは実行可）
+r6="${work_dir}/hint-mode"
+mk_hint_root "${r6}"
+git -C "${r6}" add -A
+git -C "${r6}" update-index --chmod=-x scripts/hooks/secret-scan.sh
+git -C "${r6}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m "chore: hint root"
+if [ "$(git -C "${r6}" ls-tree HEAD scripts/hooks/secret-scan.sh | cut -c1-6)" != "100644" ]; then
+  fail "secret-scan-ci: setup for the exec-bit hint" "committed mode is not 100644"
+fi
+assert_hint_rc "secret-scan-ci: a detector exec bit different from the commit does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "1"
+# コミット側の skills-lock.json が通常のファイルでない（120000）
+r6="${work_dir}/hint-lock-link"
+mk_hint_root "${r6}"
+rm -f "${r6}/skills-lock.json"
+ln -s elsewhere.json "${r6}/skills-lock.json"
+hint_commit "${r6}"
+rm -f "${r6}/skills-lock.json"
+printf '{}\n' > "${r6}/skills-lock.json"
+assert_hint_rc "secret-scan-ci: a committed symlink skills-lock.json does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "1 2"
+# 検出器がコミットに無い（未追跡）: 一覧と違い、無いことを一致とみなさない
+r6="${work_dir}/hint-detector-untracked"
+mk_hint_root "${r6}"
+git -C "${r6}" add skills-lock.json scripts/lib.sh scripts/secret-scan-ci.sh scripts/secret-scan-canary.sh
+git -C "${r6}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m "chore: hint root"
+assert_hint_rc "secret-scan-ci: an untracked detector does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "1"
+# skills-lock.json がコミットにも作業ツリーにも無い: 検出器が除外なしで読むため一致（sha の案内）
+r6="${work_dir}/hint-lock-none"
+mk_hint_root "${r6}"
+rm -f "${r6}/skills-lock.json"
+hint_commit "${r6}"
+r6_sha="$(git -C "${r6}" rev-parse HEAD)"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qF -- "check out the trusted detector and exclusion list at the commit this job used (${r6_sha})" "${work_dir}/out"; then
+  pass "secret-scan-ci: a skills-lock.json absent from both the commit and the working tree still matches"
+else
+  fail "secret-scan-ci: a skills-lock.json absent from both the commit and the working tree still matches" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# skills-lock.json が検出器と同じ上限（65,536 バイト）を超える: 検出器は検査不能（2）で止まり、案内は sha を勧めない
+r6="${work_dir}/hint-lock-big"
+mk_hint_root "${r6}"
+head -c 70000 /dev/zero | tr '\0' ' ' > "${r6}/skills-lock.json"
+hint_commit "${r6}"
+assert_hint_rc "secret-scan-ci: a skills-lock.json over the detector's size limit does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "2"
+grep -qF -- "secret-scan: skills-lock.json is too large; aborting" "${work_dir}/out" || fail "secret-scan-ci: an oversized skills-lock.json keeps the detector's fixed diagnostic" "output: $(cat "${work_dir}/out")"
 
 # 絶対パスへの解決（cd）が失敗しても、mktemp が作った一時領域を残さない（EXIT トラップが消せること）
 cd_tmp_fail_env="${work_dir}/cd-tmp-fail.sh"
