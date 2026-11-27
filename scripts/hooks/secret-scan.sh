@@ -1373,10 +1373,12 @@ fi
 # 「NUL あり」が検査不能と取り違えられるため、cmp は親のシェルの `||` の左で流す。取り除いた版はファイルに複製せず
 # （--tracked では登録名の本文も含む全体の複製になり、一時領域の最大が増える）、プロセス置換で流して元のファイルと比べる。
 # tr が途中で失敗しても出力が短くなるだけで、差あり（1）として両方の版を走査する側に倒れる（NUL の見落としにはならない）。
+# cmp は最初の差で読むのをやめるため、tr は SIGPIPE（141）で終わる。bash 3.2 は子（プロセス置換）の中でも ERR の trap を走らせ、
+# fd 4 へ "internal error" を余分に出すため、子の中で ERR の trap を外す（終了コードには影響しない。bash 3.2 の実機で確認）。
 cmp_rc=0
 for nul_src in diff diff.dropped; do
   one_rc=0
-  cmp -s <(tr -d '\000' < "${tmp_dir}/${nul_src}") "${tmp_dir}/${nul_src}" || one_rc=$?
+  cmp -s <(trap - ERR; tr -d '\000' < "${tmp_dir}/${nul_src}") "${tmp_dir}/${nul_src}" || one_rc=$?
   if [ "${one_rc}" -gt "${cmp_rc}" ]; then
     cmp_rc="${one_rc}"
   fi
@@ -1390,9 +1392,11 @@ done
 # 対応が取れないため落とさず走査する（走査する側に倒す。2 にはしない）。
 filter_sections() {
   if [ "${body_skip_filter}" -eq 1 ]; then
-    LC_ALL=C awk -v want="${skip_total}" -v f1="${tmp_dir}/skip-flags" -v f2="${tmp_dir}/dropped-headers" '
-      FILENAME == f1 { flag[FNR] = $0; next }
-      FILENAME == f2 { dh[$0] = 1; next }
+    # ファイル名は `-v` で渡さない（値のバックスラッシュがエスケープとして解釈され、TMPDIR にバックスラッシュがあると
+    # 振り分けが外れる）。環境変数で渡し、ENVIRON から読む。
+    SS_F1="${tmp_dir}/skip-flags" SS_F2="${tmp_dir}/dropped-headers" LC_ALL=C awk -v want="${skip_total}" '
+      FILENAME == ENVIRON["SS_F1"] { flag[FNR] = $0; next }
+      FILENAME == ENVIRON["SS_F2"] { dh[$0] = 1; next }
       /^diff --git / {
         sec++
         drop = (substr(flag[sec], 1, 1) == "1")

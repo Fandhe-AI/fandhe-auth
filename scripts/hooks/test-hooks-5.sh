@@ -423,6 +423,38 @@ stage .agents/skills/vendored-a/x.md "harmless = 1"
 stage src/app.txt "harmless = 2"
 PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "the same fixture without the extra listing entry passes (the filter is on the path)" 0
 
+# TMPDIR にバックスラッシュがあっても、一時ファイルの振り分け（登録名の除外と外した名前の区画の除外）が外れない
+bs_tmp="${work_dir}/tmp\\dir"
+mkdir -p "${bs_tmp}"
+new_repo; stage_lock
+stage .agents/skills/vendored-a/x.md "x = ${token}"
+stage src/app.txt "x = ${token}"
+TMPDIR="${bs_tmp}" SCAN_BIN="${small_bin}" check_scan "a backslash in TMPDIR keeps the registered exclusion" 1 src/app.txt
+expect_out "a backslash in TMPDIR counts only the outside file" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
+# NUL の後ろに 64 KiB を超える本文があっても、NUL の確認（cmp が最初の差で読むのをやめ、tr が SIGPIPE になる）で
+# 検査不能にならず、NUL を含む差分として両方の版を走査する（終了コード 1・内部エラーの出力なし）
+new_repo
+{
+  printf 'pad\000\n'
+  for ((i = 0; i < 6000; i++)); do
+    printf 'harmless line number %08d padding padding\n' "${i}"
+  done
+  printf 'x = %s\n' "${token}"
+} > nulbig.dat
+git add nulbig.dat
+if [ "$(wc -c < nulbig.dat)" -gt 131072 ]; then
+  pass "secret-scan: the NUL fixture exceeds the pipe buffer after the NUL byte"
+else
+  fail "secret-scan: the NUL fixture exceeds the pipe buffer after the NUL byte" "size $(wc -c < nulbig.dat)"
+fi
+SCAN_BIN="${small_bin}" check_scan "a NUL followed by more than 64 KiB is scanned (exit 1)" 1 nulbig.dat
+if [[ "${last_out}" == *"internal error"* ]]; then
+  fail "secret-scan: a NUL followed by more than 64 KiB prints no internal error" "output: ${last_out}"
+else
+  pass "secret-scan: a NUL followed by more than 64 KiB prints no internal error"
+fi
+
 # diff.submodule=log が設定されていても、gitlink を含む index で区画の対応が崩れず走査できる（--submodule=short の明示）
 new_repo; stage_lock
 # 設定を有効にしたまま、登録名の下の除外（区画を落とす分岐）と未登録の名前の検出を同時に確かめる（登録名の区画が無いと除外の経路を通らない）
