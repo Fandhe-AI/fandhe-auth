@@ -385,4 +385,219 @@ else
   fail "secret-scan-ci: diagnostics are not passed through on exit 1" "exit ${rc}" "output: $(cat "${work_dir}/out")"
 fi
 
+# ---- 除外の一覧の大きさと引数の長さ（#6053）
+# 登録名ごとの exclude を並べると、有効な一覧（64 KiB 以内）でも引数が macOS の上限を超えて git を起動できなくなる。
+# 実際の上限は CI の macOS で踏み、ここでは shim の MAX_GIT_ARG_BYTES で模す。
+big_chars="0 1 2 3 4 5 6 7 8 9 a b c d e f g h i j k l m n o p q r s t u v w x y z"
+big_body=""
+big_n=0
+for c1 in ${big_chars}; do
+  big_body+="${q}${c1}${q}:{},"
+  for c2 in ${big_chars}; do
+    big_body+="${q}${c1}${c2}${q}:{},"
+  done
+done
+for c1 in ${big_chars}; do
+  for c2 in ${big_chars}; do
+    for c3 in ${big_chars}; do
+      [ "${#big_body}" -gt 64800 ] && break 3
+      big_body+="${q}${c1}${c2}${c3}${q}:{},"
+      big_n=$((big_n + 1))
+    done
+  done
+done
+lock_big="{${q}version${q}:2,${q}skills${q}:{${big_body%,}}}"
+if [ "${#lock_big}" -le 65536 ] && [ "${big_n}" -gt 4000 ]; then
+  pass "secret-scan: big lock fixture is within the size limit and has many names"
+else
+  fail "secret-scan: big lock fixture is within the size limit and has many names" "size ${#lock_big}, names ${big_n}"
+fi
+make_detector big "${lock_big}"
+big_bin="${det_bin}"
+
+big_repo() {
+  new_repo
+  printf '%s\n' "${lock_big}" > skills-lock.json
+  git add -- skills-lock.json
+  stage .agents/skills/aa/SKILL.md "x = ${token}"
+  stage .agents/skills/zzzz/x.md "x = ${token}"
+  stage src/app.txt "x = ${token}"
+}
+big_expect() {
+  expect_out "$1: unregistered name under the skills dir is reported" "  .agents/skills/zzzz/x.md"
+  expect_out "$1: outside file is reported" "  src/app.txt"
+  expect_out "$1: registered name under the skills dir is excluded (2 findings)" "secret-scan: total: 2 finding(s) in 2 file(s)"
+}
+big_repo
+PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=131072 SCAN_BIN="${big_bin}" check_scan "big lock (staged): arguments stay short" 1 src/app.txt
+big_expect "big lock (staged)"
+git commit -q -m "test: big lock"
+SCAN_ARG=--tracked
+PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=131072 SCAN_BIN="${big_bin}" check_scan "big lock (--tracked): arguments stay short" 1 src/app.txt
+big_expect "big lock (--tracked)"
+SCAN_ARG=
+
+# 未登録の名前の下に大量の無害なパスと、先頭・末尾の token のファイルがあっても、git の呼び出しは固定回数で引数は短い
+make_detector small "${lock_ok}"
+small_bin="${det_bin}"
+many_repo() {
+  new_repo
+  stage_lock
+  stage .agents/skills/unreg/a-first.txt "x = ${token}"
+  stage .agents/skills/unreg/z-last.txt "x = ${token}"
+  local blob i
+  blob="$(printf 'harmless\n' | git hash-object -w --stdin)"
+  {
+    for ((i = 0; i < 1500; i++)); do
+      printf '100644 %s\t.agents/skills/unreg/f-%0100d.txt\n' "${blob}" "${i}"
+    done
+  } | git update-index --add --index-info
+}
+many_repo
+PATH="${shim_dir}:${PATH}" MAX_GIT_ARG_BYTES=4096 SCAN_BIN="${small_bin}" check_scan "many paths keep the arguments short" 1 .agents/skills/unreg/z-last.txt
+expect_out "many paths count each file once" "secret-scan: total: 2 finding(s) in 2 file(s)"
+many_repo
+FAIL_GIT_BOTH1=--name-only FAIL_GIT_BOTH2=. PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a failing file listing is not scannable (exit 2)" 2
+expect_out "a failing file listing reports its own message" "secret-scan: failed to list files; aborting"
+
+# 一覧のファイル数と diff の区画の数が食い違えば、除外の対応が崩れているため検査不能（2。落とす区画があるときの照合）
+new_repo; stage_lock
+stage .agents/skills/vendored-a/x.md "harmless = 1"
+stage src/app.txt "harmless = 2"
+EXTRA_LIST_ENTRY=extra.txt PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a section count that differs from the file listing is not scannable (exit 2)" 2
+expect_out "a section count mismatch reports a normalization failure" "secret-scan: failed to normalize diff; aborting"
+new_repo; stage_lock
+stage .agents/skills/vendored-a/x.md "harmless = 1"
+stage src/app.txt "harmless = 2"
+PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "the same fixture without the extra listing entry passes (the filter is on the path)" 0
+
+# TMPDIR に `\t` のようなエスケープに読める並びがあっても、一時ファイルの振り分け（登録名の除外と外した名前の区画の除外）が外れない
+# （awk の `-v` で値を渡すと、gawk・mawk・busybox awk のどれも `\t` をタブへ書き換える。`\d` のような未知の並びは mawk が書き換えない）。
+# 外した名前（vendored-b。索引の一覧では外れ、検出器の一覧にはある）も含め、両方のファイル（SS_F1・SS_F2）を使う経路を通す。
+bs_tmp="${work_dir}/tmp\\tdir"
+mkdir -p "${bs_tmp}"
+new_repo
+printf '%s\n' '{"version":2,"skills":{"vendored-a":{"source":"x"}}}' > skills-lock.json
+git add -- skills-lock.json
+stage .agents/skills/vendored-a/x.md "x = ${token}"
+stage .agents/skills/vendored-b/x.md "x = ${token}"
+stage src/app.txt "x = ${token}"
+TMPDIR="${bs_tmp}" SCAN_BIN="${small_bin}" check_scan "an escape-like TMPDIR keeps the exclusions" 1 src/app.txt
+expect_out "an escape-like TMPDIR counts the outside and the dropped files once each" "secret-scan: total: 2 finding(s) in 2 file(s)"
+expect_out "an escape-like TMPDIR reports the dropped name" "  .agents/skills/vendored-b/x.md"
+
+# NUL の後ろに 64 KiB を超える本文があっても、NUL の確認（cmp が最初の差で読むのをやめ、tr が SIGPIPE になる）で
+# 検査不能にならず、NUL を含む差分として両方の版を走査する（終了コード 1・内部エラーの出力なし）
+new_repo
+{
+  printf 'pad\000\n'
+  for ((i = 0; i < 6000; i++)); do
+    printf 'harmless line number %08d padding padding\n' "${i}"
+  done
+  printf 'x = %s\n' "${token}"
+} > nulbig.dat
+git add nulbig.dat
+if [ "$(wc -c < nulbig.dat)" -gt 131072 ]; then
+  pass "secret-scan: the NUL fixture exceeds the pipe buffer after the NUL byte"
+else
+  fail "secret-scan: the NUL fixture exceeds the pipe buffer after the NUL byte" "size $(wc -c < nulbig.dat)"
+fi
+SCAN_BIN="${small_bin}" check_scan "a NUL followed by more than 64 KiB is scanned (exit 1)" 1 nulbig.dat
+if [[ "${last_out}" == *"internal error"* ]]; then
+  fail "secret-scan: a NUL followed by more than 64 KiB prints no internal error" "output: ${last_out}"
+else
+  pass "secret-scan: a NUL followed by more than 64 KiB prints no internal error"
+fi
+
+# diff.submodule=log が設定されていても、gitlink を含む index で区画の対応が崩れず走査できる（--submodule=short の明示）
+new_repo; stage_lock
+# 設定を有効にしたまま、登録名の下の除外（区画を落とす分岐）と未登録の名前の検出を同時に確かめる（登録名の区画が無いと除外の経路を通らない）
+git update-index --add --cacheinfo 160000,1111111111111111111111111111111111111111,docs/spec
+stage .agents/skills/vendored-a/x.md "x = ${token}"
+stage .agents/skills/unreg/x.md "x = ${token}"
+git config diff.submodule log
+SCAN_BIN="${small_bin}" check_scan "diff.submodule=log keeps the registered exclusion and the unregistered detection" 1 .agents/skills/unreg/x.md
+expect_out "diff.submodule=log counts only the unregistered path" "secret-scan: total: 1 finding(s) in 1 file(s)"
+git config --unset diff.submodule
+
+# 登録名の下の変更と gitlink が同じ diff にあっても、登録名の下だけが落ち、未登録の名前は走査される（区画の対応と突き合わせの経路）
+# diff.orderFile で区画の順序を変えても、パスの突き合わせで対応が保たれる
+new_repo; stage_lock
+git update-index --add --cacheinfo 160000,1111111111111111111111111111111111111111,docs/spec
+stage .agents/skills/vendored-a/x.md "x = ${token}"
+stage .agents/skills/unreg/x.md "x = ${token}"
+printf '%s\n' 'docs/*' '.agents/skills/unreg/*' '.agents/skills/vendored-a/*' > "${PWD}/order.txt"
+git config diff.orderFile "${PWD}/order.txt"
+SCAN_BIN="${small_bin}" check_scan "registered path is excluded and unregistered path is scanned beside a gitlink" 1 .agents/skills/unreg/x.md
+expect_out "only the unregistered path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
+git config --unset diff.orderFile
+
+# 環境に SKSET_* が残っていても、未登録の名前は除外されない
+new_repo; stage_lock
+stage .agents/skills/unreg/x.md "x = ${token}"
+SKSET_unreg=1 SKSET_aa=1 SCAN_BIN="${small_bin}" check_scan "an inherited SKSET_ variable does not exclude an unregistered name" 1 .agents/skills/unreg/x.md
+expect_out "the inherited variable leaves the finding in place" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
+# 区画の形が紛らわしいパスは除外せず走査する
+new_repo; stage_lock
+stage ".agents/skills/vendored-a vendored-b/x.md" "x = ${token}"
+stage ".agents/skills/vendored-*/x.md" "x = ${token}"
+stage ".agents/skills/vendored-[ab]/x.md" "x = ${token}"
+stage ".agents/skills/vendored-a/x.md" "x = ${token}"
+nl_blob="$(printf 'x = %s\n' "${token}" | git hash-object -w --stdin)"
+printf '100644 %s 0\t.agents/skills/vendored-a\n/x.md\0' "${nl_blob}" | git update-index --add -z --index-info
+SCAN_BIN="${small_bin}" check_scan "odd path segments are scanned, not excluded" 1
+expect_out "all four odd paths are counted" "secret-scan: total: 4 finding(s) in 4 file(s)"
+new_repo; stage_lock; stage .agents/skills "x = ${token}"
+SCAN_BIN="${small_bin}" check_scan "a file named like the skills dir is scanned" 1 .agents/skills
+
+# git の起動回数（scan_diff）は、登録名の下のパスを含むとき（除外のフィルタが動くとき）も、ファイルの数に依らず一定
+count_repo() {
+  local n="$1" blob i
+  new_repo
+  stage_lock
+  stage .agents/skills/vendored-a/x.md "x = ${token}"
+  stage src/app.txt "x = ${token}"
+  blob="$(printf 'harmless\n' | git hash-object -w --stdin)"
+  {
+    for ((i = 0; i < n; i++)); do
+      printf '100644 %s\t.agents/skills/unreg/f-%d.txt\n' "${blob}" "${i}"
+    done
+  } | git update-index --add --index-info
+}
+count_log="${work_dir}/git-diff-count.log"
+count_repo 3
+rm -f -- "${count_log}"
+COUNT_GIT_LOG="${count_log}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "few files with a registered path (counting git diff calls)" 1 src/app.txt
+expect_out "the registered path is excluded in the counted run" "secret-scan: total: 1 finding(s) in 1 file(s)"
+count_few="$(wc -l < "${count_log}" | tr -d ' ')"
+count_repo 800
+rm -f -- "${count_log}"
+COUNT_GIT_LOG="${count_log}" PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "many files with a registered path (counting git diff calls)" 1 src/app.txt
+expect_out "the registered path is excluded in the many-files run" "secret-scan: total: 1 finding(s) in 1 file(s)"
+count_many="$(wc -l < "${count_log}" | tr -d ' ')"
+rm -f -- "${count_log}"
+if [ "${count_few}" -ge 1 ] && [ "${count_few}" -eq "${count_many}" ]; then
+  pass "secret-scan: git diff call count does not depend on the number of files (${count_few})"
+else
+  fail "secret-scan: git diff call count does not depend on the number of files" "few ${count_few}, many ${count_many}"
+fi
+
+# 非 ASCII のパスの登録名の下の区画は、core.quotePath が true でも false でも除外される（一覧は生のパス、ヘッダは引用されない）
+for qp in true false; do
+  new_repo; stage_lock
+  git config core.quotePath "${qp}"
+  stage ".agents/skills/vendored-a/caf$(printf '\303\251').md" "x = ${token}"
+  SCAN_BIN="${small_bin}" check_scan "non-ASCII path under a registered name is excluded (core.quotePath=${qp})" 0
+  stage ".agents/skills/unreg/caf$(printf '\303\251').md" "x = ${token}"
+  SCAN_BIN="${small_bin}" check_scan "non-ASCII path under an unregistered name is scanned (core.quotePath=${qp})" 1
+  expect_out "only the unregistered non-ASCII path is counted (core.quotePath=${qp})" "secret-scan: total: 1 finding(s) in 1 file(s)"
+done
+
+# ヘッダが引用される登録名の下のパス（二重引用符）は、落とさず走査する（2 にしない。検出があれば 1）
+new_repo; stage_lock
+stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
+SCAN_BIN="${small_bin}" check_scan "a quoted header under a registered name is scanned, not an error" 1
+expect_out "the quoted-header path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
 finish "part 5"
