@@ -121,6 +121,7 @@ version = "0.0.0"
 dependencies = [
  "fandhe-auth-hub-stub",
  "fandhe-auth-it-harness",
+ "fandhe-auth-secret",
  "ring",
 ]
 

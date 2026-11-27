@@ -58,7 +58,7 @@ allowed_deps() {
 # normal・build の辺で現れたら allowed_deps だけで判定し、ここに書いた crate でも拒否する（試験用の許可を本体側へ広げない）。
 dev_only_deps() {
   case "$1" in
-    fandhe-auth-load-harness) echo "fandhe-auth-it-harness fandhe-auth-hub-stub" ;;
+    fandhe-auth-load-harness) echo "fandhe-auth-it-harness fandhe-auth-hub-stub fandhe-auth-secret" ;;
     *) echo "" ;;
   esac
 }

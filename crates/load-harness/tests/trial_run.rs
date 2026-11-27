@@ -22,6 +22,7 @@ use fandhe_auth_load_harness::{
     MetricKey, RefId, RunRecordFile, RunSession, StageConfig, StageError, StageLimits, StagePlan,
     TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
 };
+use fandhe_auth_secret::SecretString;
 
 /// 照合済みの本文を挟む固定の行。`scripts/load-trial.sh` の同名の文字列と一致させる。
 const PRINT_BEGIN: &str = "-----BEGIN LOAD RECORD BODY-----";
@@ -261,27 +262,25 @@ fn print_checked_load_record_body() {
 }
 
 /// 主試験の照合の登録簿: 設定の 4 欄と、署名鍵の秘密値（PKCS#8 の全文・`d`）。
-fn trial_registry(cfg: &HubStubConfig, key_secrets: &[SecretBytes]) -> Vec<Vec<u8>> {
+fn trial_registry(cfg: &HubStubConfig, key_secrets: &[SecretString]) -> Vec<Vec<u8>> {
     let mut registry = stdout_registry(cfg);
-    registry.extend(key_secrets.iter().map(|s| s.expose().to_vec()));
+    registry.extend(key_secrets.iter().map(secret_raw));
     registry
 }
 
-/// 試験の側で持つ秘密のバイト列の型。`Debug` は固定文字列で、`Clone`・`Display` を持たない。
-/// 値は `expose` でだけ取り出す（照合の登録簿へ入れる時点。SECR-10・SECR-16・SECR-29〜33）。
-/// 本体の `fandhe-auth-secret` にバイト列の型は未実装のため試験の内側に置く（本体への型の追加と依存の許可は人の決定待ち）。
-struct SecretBytes(Vec<u8>);
-
-impl SecretBytes {
-    fn expose(&self) -> &[u8] {
-        &self.0
-    }
+/// 秘密のバイト列は共有の秘密値の型 `SecretString`（16 進の文字列）で持ち、試験内に型を新設しない（SECR-15・SECR-31）。
+/// 生のバイト列へ戻すのは、照合の登録簿へ入れる時点だけ（`expose` を明示的に呼ぶ。SECR-10・SECR-16・SECR-29〜33）。
+fn secret_hex(bytes: &[u8]) -> SecretString {
+    SecretString::new(hex(bytes, false))
 }
 
-impl std::fmt::Debug for SecretBytes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SecretBytes(<redacted>)")
-    }
+/// `secret_hex` の逆。照合の直前だけで呼び、戻り値をログ・誤り・記録に渡さない。
+fn secret_raw(s: &SecretString) -> Vec<u8> {
+    let h = s.expose().as_bytes();
+    assert!(h.len().is_multiple_of(2), "malformed secret encoding");
+    h.chunks(2)
+        .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+        .collect()
 }
 
 /// DER の 1 要素（タグ・内容・残り）を読む。長さは 1 バイト形か `0x81`・`0x82` の形だけ（ring の出力で足りる）。
@@ -301,7 +300,7 @@ fn der_tlv(b: &[u8]) -> (u8, &[u8], &[u8]) {
 /// 形の網では止まらないため、全文とは別に照合する。暗号の処理は `ring` に任せ、ここは DER の構造をたどって位置を取る（DPOL-47）。
 /// PKCS#8 { INTEGER, SEQUENCE(alg), OCTET STRING { ECPrivateKey { INTEGER 1, OCTET STRING d, [1] { BIT STRING 公開鍵 } } } }。
 /// 取り出した位置が正しいことは、公開鍵の部分と `public_key()` の一致で確かめる。失敗の文言は値を出さない（SECR-23）。
-fn signing_key_with_secrets(kid: &str) -> (AssertionSigningKey, Vec<SecretBytes>) {
+fn signing_key_with_secrets(kid: &str) -> (AssertionSigningKey, Vec<SecretString>) {
     let rng = SystemRandom::new();
     let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
     let pkcs8 = pkcs8.as_ref().to_vec();
@@ -332,8 +331,7 @@ fn signing_key_with_secrets(kid: &str) -> (AssertionSigningKey, Vec<SecretBytes>
         bits[1..] == *key.public_key(),
         "PKCS#8 does not belong to the generated key"
     );
-    let d = d.to_vec();
-    (key, vec![SecretBytes(pkcs8), SecretBytes(d)])
+    (key, vec![secret_hex(&pkcs8), secret_hex(d)])
 }
 
 /// 書き出したファイルの全文を登録簿の各形と JWT の形で走査し、あれば失敗させる。文言は種類と件数だけ（値・パス・本文を出さない）。
@@ -612,7 +610,7 @@ fn canary_registry_and_config() -> (Vec<Vec<u8>>, HubStubConfig, AssertionSignin
         jwks_uri.clone().into_bytes(),
         logout_receiver_uri.clone().into_bytes(),
     ]);
-    registry.extend(key_secrets.iter().map(|s| s.expose().to_vec()));
+    registry.extend(key_secrets.iter().map(secret_raw));
     assert_eq!(registry.len(), 10);
     let mut cfg = hub_config();
     cfg.client_id = StubValue::test(client_id);
@@ -753,21 +751,15 @@ fn registry_hex_strings_outside_vocabulary_are_rejected_as_names() {
 fn registries_include_signing_key_secret() {
     let (key, secrets) = signing_key_with_secrets("kid-load-trial.test");
     assert_eq!(secrets.len(), 2);
-    assert!(
-        secrets[0].expose().len() > secrets[1].expose().len() && secrets[1].expose().len() == 32
-    );
+    let (pkcs8, d) = (secret_raw(&secrets[0]), secret_raw(&secrets[1]));
+    assert!(pkcs8.len() > d.len() && d.len() == 32);
     let trial = trial_registry(&hub_config(), &secrets);
     assert_eq!(trial.len(), 6);
-    assert!(trial.ends_with(&[secrets[0].expose().to_vec(), secrets[1].expose().to_vec()]));
+    assert!(trial.ends_with(&[pkcs8.clone(), d.clone()]));
     let (canary, _cfg, _key) = canary_registry_and_config();
     assert!(canary.len() == 10 && canary[8].len() == 138 && canary[9].len() == 32);
     // 登録簿の `d` は鍵そのものを示す: 公開鍵と対の PKCS#8 の中にだけ現れる。
-    assert!(
-        secrets[0]
-            .expose()
-            .windows(32)
-            .any(|w| w == secrets[1].expose())
-    );
+    assert!(pkcs8.windows(32).any(|w| w == d.as_slice()));
     assert_eq!(key.public_key().len(), 65);
 }
 

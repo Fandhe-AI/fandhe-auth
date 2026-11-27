@@ -20,4 +20,5 @@ workspace = true
 [dev-dependencies]
 fandhe-auth-it-harness = { path = "../it-harness" }
 fandhe-auth-hub-stub = { path = "../hub-stub" }
+fandhe-auth-secret = { path = "../secret" }
 ring = "0.17.14"
