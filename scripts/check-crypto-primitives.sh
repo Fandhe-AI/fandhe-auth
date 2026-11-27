@@ -286,7 +286,7 @@ report N1 N1 "warning N1 (production, advisory)"
 report N2 N2 "warning N2 (production, advisory)"
 tn="$(grep -c '^T:' "${OUT}" || true)"
 log "warning test-only crates (advisory, not counted): ${tn}"
-grep '^T:' "${OUT}" | sed 's/^T://; s/\t/ /; s/^/  /' >&2 || true
+grep '^T:' "${OUT}" | sed 's/^T://' | tr '\t' ' ' | sed 's/^/  /' >&2 || true
 
 log "scanned: production files ${prod_n}, test-only files ${test_n}; violations ${fails}"
 if [ "${fails}" -gt 0 ]; then
