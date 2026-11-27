@@ -49,7 +49,7 @@ MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・
   `schedule` などの発火を足すとき（TASK-681）は、承認の範囲の外なので、この例外を見直す。見直して承認が記録されるまで `schedule` は有効にしない。
   チェックリスト 2 は追加ジョブを `ci-complete` に含めるよう求めるが、`scheduled.yml` はこの承認の範囲で例外とする。PR の検査を担うジョブを足すときは `ci.yml` に置く。
   - 承認の記録
-    - 根拠: 定期ジョブは PR を検査しないため、`ci-complete` に入れても PR の判定に使われず、失敗が無関係な PR を止める
+    - 根拠: 上の (1)(2) の 2 点。`ci-complete` に集約できない理由は、`needs` が別のワークフローを参照できないこと。必須チェックに登録できない理由は、PR で起動せず結果が報告されないこと自体がマージを妨げること
     - 適用範囲: PR の検査を担わない `scheduled.yml` のジョブに限り、かつ `scheduled.yml` が `workflow_dispatch` だけで動く間に限る。PR の検査を担うジョブには広げない
     - 承認者: 利用者
     - 承認日: 2026-11-26
@@ -58,7 +58,7 @@ MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・
 - `workflow_dispatch` は、ワークフローのファイルがデフォルトブランチ（main）にあるときだけ起動できる（GitHub の公式の手順書。PR ブランチにしか `scheduled.yml` が無いあいだは手動で起動できない）。起動できる状態では main 以外の ref も指定して流せる。check 名は必須のものと違うのでマージの判定には使われない（読み。〔実機〕では未確認）。
 - 失敗の通知は GitHub の既定だけで、運用の警報には結線していない。
 - schedule は default ブランチ（main）の定義で動く。活動の無い public の repo では GitHub が止めることがある。
-- cron の時刻と頻度は暫定で、人が決める（見直しは TASK-681）。
+- cron の時刻と頻度は暫定で、決めるのは人（TASK-681）。頻度の上限は日次以下（下の「schedule は日次以下」の項）、`scheduled.yml` に足すときの候補は日次で、どちらも暫定。
 
 ## 依存の検査の拡張点（`deps-audit`。TASK-6 6/10）
 
@@ -228,7 +228,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - 現状の `ci.yml` は全体で数十秒のため導入していない（費用対効果が見合う重いジョブを足した時に検討する）
 - draft PR の skip は現状入れていない。入れる場合は `if: github.event.pull_request.draft == false` とし、
   trigger の `types` に `ready_for_review` を加える（加えないと ready にしても CI が走らない）
-- schedule は日次以下の頻度にする（`update-external.yml` は 00:00 UTC の 1 回、`scheduled.yml` に足すときは 1 日 1 回）
+- schedule は日次以下の頻度にする（上限。`update-external.yml` は 00:00 UTC の 1 回。`scheduled.yml` に足すときの候補は日次で、暫定。決めるのは TASK-681）
 
 ## ジョブ・ワークフローを追加するときのチェックリスト
 
