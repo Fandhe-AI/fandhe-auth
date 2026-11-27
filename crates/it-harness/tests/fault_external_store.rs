@@ -9,8 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fandhe_auth_it_harness::fault::{
-    DbFaultProxy, ExternalStoreFaultError, ExternalStoreFaultProxy, FaultRecordError, StallExit,
-    UpstreamStall,
+    AcceptSyncExit, DbFaultProxy, ExternalStoreFaultError, ExternalStoreFaultProxy,
+    FaultRecordError, StallExit, UpstreamStall,
 };
 use fandhe_auth_it_harness::record::UtcTimestamp;
 use fandhe_auth_it_harness::{EndpointHandle, FaultRecord, FaultTimeline};
@@ -412,12 +412,21 @@ enum UpstreamObservation {
 }
 
 /// 上流の接続を 1 本だけ受け、閉じられるまでの受信バイト数を数える。呼び出し側は blocking のリスナーを渡す。
-fn observe_upstream(up: TcpListener) -> thread::JoinHandle<UpstreamObservation> {
+///
+/// `notify` を渡すと、accept の成功の直後に完了を通知する（#6042。転送器が accept の完了を待ってから閉じる順序に固定し、
+/// OS によって accept が `ConnectionAborted` で失敗して観測できなくなるのを避ける）。accept の失敗では通知しない。
+fn observe_upstream(
+    up: TcpListener,
+    notify: Option<UpstreamStall>,
+) -> thread::JoinHandle<UpstreamObservation> {
     thread::spawn(move || {
         let mut c = match up.accept() {
             Ok((c, _)) => c,
             Err(e) => return UpstreamObservation::Unverifiable(e.kind()),
         };
+        if let Some(stall) = &notify {
+            stall.notify_upstream_accepted();
+        }
         c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         read_until_eof(&mut c)
     })
@@ -510,7 +519,7 @@ fn judge_upstream_accepts_only_zero_bytes() {
 fn observe_upstream_counts_delivered_bytes() {
     let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = up.local_addr().unwrap().port();
-    let h = observe_upstream(up);
+    let h = observe_upstream(up, None);
     let mut c = connect(port);
     c.write_all(b"abc").unwrap();
     drop(c);
@@ -530,8 +539,9 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     let upstream_port = up.local_addr().unwrap().port();
     // blocking の accept で待つ観測のスレッドを、転送器の起動の前に作る（待ち行列に残って切られる前に受ける）。
     up.set_nonblocking(false).unwrap();
-    let observer = observe_upstream(up);
-    let stall = UpstreamStall::new();
+    // #6042: 観測側の accept の完了を転送器が待ってから世代の不一致で閉じる（順序の固定）。
+    let stall = UpstreamStall::with_upstream_accept_sync();
+    let observer = observe_upstream(up, Some(stall.clone()));
     let mut p =
         ExternalStoreFaultProxy::start_to_port_with_stall(upstream_port, stall.clone()).unwrap();
     let mut tl = timeline();
@@ -577,6 +587,16 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
         released_in < Duration::from_secs(1),
         "release waited for the stalled accept: {released_in:?}"
     );
+    // 受理の同期点が通知で抜けたこと。期限切れなら、計数の失敗の前にここで原因を示す（#6042・AUDB-6）。
+    let sync_deadline = Instant::now() + UpstreamStall::MAX_ACCEPT_WAIT + Duration::from_secs(5);
+    while stall.accept_sync_exit().is_none() && Instant::now() < sync_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        stall.accept_sync_exit(),
+        Some(AcceptSyncExit::Accepted),
+        "accept sync point did not see the upstream accept"
+    );
     // 上流への接続が成立したこと（遮断前の接続の中継を拒む分岐に届いたこと）を確かめる。
     // 対象の接続について、上流への接続の成功と世代の不一致による拒否を、専用の計数で同期的に確かめる
     // （どちらの分岐でも。接続の試行数・拒否の合計では、接続の失敗や複製の失敗でも増えるため代わりにならない。ORST-17・AUDB-6）。
@@ -595,6 +615,73 @@ fn block_returns_promptly_while_accept_is_stalled_on_upstream() {
     }
     assert!(wait_until(|| p.refused_count() >= 1));
     assert_eq!(p.accepted_count(), 0, "stalled conn was relayed");
+}
+
+/// #6042・ORST-17: 受理の同期点では、上流側の accept の完了の通知が来るまで世代の検査も拒否も進まない。
+/// 同期点が無い（または世代の検査の後ろにある）と、通知の前に拒否が進んで落ちる（OS に依らない）。
+#[test]
+fn generation_check_waits_for_upstream_accept() {
+    let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream_port = up.local_addr().unwrap().port();
+    let stall = UpstreamStall::with_upstream_accept_sync();
+    let mut p =
+        ExternalStoreFaultProxy::start_to_port_with_stall(upstream_port, stall.clone()).unwrap();
+    let mut tl = timeline();
+    let mut client = connect(p.listen_port());
+    client.write_all(b"s").unwrap();
+    assert!(stall.wait_entered(Duration::from_secs(5)));
+    p.block(&mut tl).unwrap();
+    p.release_block(&mut tl).unwrap();
+    stall.release();
+    assert!(
+        stall.wait_accept_sync_entered(Duration::from_secs(5)),
+        "accept thread never reached the accept sync point"
+    );
+    // 通知の前は、拒否も中継も進まない（時間は下限だけを見る）。
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        p.generation_refused_count(),
+        0,
+        "refused before accept sync"
+    );
+    assert_eq!(p.refused_count(), 0, "refused before accept sync");
+    assert_eq!(p.accepted_count(), 0, "relayed before accept sync");
+    assert_eq!(stall.accept_sync_exit(), None, "left sync before notify");
+    let (mut c, _) = up.accept().unwrap();
+    stall.notify_upstream_accepted();
+    assert!(
+        wait_until(|| p.upstream_connected_count() == 1 && p.generation_refused_count() == 1),
+        "expected 1 upstream connect and 1 generation refusal"
+    );
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(read_until_eof(&mut c), UpstreamObservation::Received(0));
+    assert_eq!(stall.accept_sync_exit(), Some(AcceptSyncExit::Accepted));
+    assert_eq!(p.accepted_count(), 0);
+}
+
+/// #6042: 受理の同期点で待たせたままでも `stop()` は戻り、上流へバイトは届かない。
+#[test]
+fn stop_returns_while_held_at_accept_sync_point() {
+    let up = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream_port = up.local_addr().unwrap().port();
+    let stall = UpstreamStall::with_upstream_accept_sync();
+    let p =
+        ExternalStoreFaultProxy::start_to_port_with_stall(upstream_port, stall.clone()).unwrap();
+    let mut client = connect(p.listen_port());
+    client.write_all(b"s").unwrap();
+    assert!(stall.wait_entered(Duration::from_secs(5)));
+    stall.release();
+    assert!(stall.wait_accept_sync_entered(Duration::from_secs(5)));
+    let started = Instant::now();
+    p.stop();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "stop waited for the accept sync point"
+    );
+    assert_eq!(stall.accept_sync_exit(), Some(AcceptSyncExit::Stopped));
+    let (mut c, _) = up.accept().unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(read_until_eof(&mut c), UpstreamObservation::Received(0));
 }
 
 /// 停止点で止まったままでも `stop()` は戻る（停止の信号で停止点の待ちが解ける）。
