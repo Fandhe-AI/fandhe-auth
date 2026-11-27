@@ -206,7 +206,7 @@ PoC・QP で試験の条件として置いた値。要件の値としては検�
     64 バイト以下の英数字・base64url・16 進の秘密値は形では止められない。各欄の語彙・列挙・整数の検査が止めるのは、固定語彙の外の名前と、列挙・整数の外の値である。
     区間名・`ValueName`・`RefId` の語彙は crate の固定の定数（`RECORD_INTERVALS`・`VALUE_NAMES`・`REF_IDS`。中身は仮置きで人が確認する）で、記録に書く名前を渡す入力から独立している。
     呼び出し元は語彙を足せず（語彙を受ける引数・feature・環境変数を作らない）、値の名前・出典はコンストラクタ（作る時点）で形式検査（文字種・長さ。出典は予約語の拒否も）を通したうえで固定語彙との完全一致だけを受け付け、語彙にない文字列を拒否する（入力の由来は見ない。記録に載る名前と出典は固定語彙に限られる）。区間名は文字種と長さが妥当なら `IntervalName::new` が受理し、固定語彙との照合は `run_stages` が最初の回を開始する前に行って拒否する（語彙外の 16 進の文字列の拒否は `registry_hex_strings_outside_vocabulary_are_rejected_as_names`。#6038）。
-    語彙に足すのは人で、PR のレビューで決める。残る限界は、64 バイト以下の秘密値が名前以外の欄に流れる経路があれば形の網では止まらないこと、署名鍵の秘密値が登録簿の外であること（`TODO(TASK-500)`・`TASK-518`）。
+    語彙に足すのは人で、PR のレビューで決める（仮置き。`:540` を参照）。残る限界は、64 バイト以下の秘密値が名前以外の欄に流れる経路があれば形の網では止まらないこと、署名鍵の秘密値が登録簿の外であること（`TODO(TASK-500)`・`TASK-518`）。
     整形は上限付きの書き込み先に行い、全体の 1 MiB を超えた時点で打ち切って `Format` にする（上限ちょうどは受理。拒否する場合も上限を大きく超える確保をしない）。
     漏れは照合の試験（`tests/trial_run.rs`）で確かめる。実行時に作った登録簿（乱数の値と、stub の設定の 4 欄に入れた文字列の全文）の各値を、生・base64・base64url・16 進の形で負荷の記録と it-run の記録の全文に掛け、一致と JWT の形の語が 0 件であること、混ぜた場合に混ぜた形そのものが形ごとに検出されること（合計の件数では見ない。陽性対照。`write_new` を通る名前の経路は上の拒否の試験で塞ぐ）、符号化が RFC 4648 の例と一致することを見る。
     これは `AAUD-30`・`AAUD-31` の方法をハーネスの出力に当てはめたもので、`AAUD-30`・`AAUD-31` を満たしたものではない。実環境の走査は Hub（`AOPS-73`）が持つ。
@@ -457,7 +457,7 @@ judgment:
 1. it-harness で構成要素を起動する（`Harness::start`）。起動前に `handle()` を取っておく。
 2. it-harness の実行の記録を `write_new` で出力先へ書き、そのファイル名から `RunRecordFile` を作る。起動秒は記録の `started_at` から取る。
 3. 起動済みの構成（`composition_record`）を写して `ComponentConditions` を作り、`MeasurementConditions::detect` で測定の条件を作る（閉ループ）。
-4. `TargetSpec`（対象名・区間名）と `StagePlan::new(stages, by, limits)`（段階の `StageConfig`・比べる指標・`StageLimits`）を組む。区間名は crate の固定の語彙 `RECORD_INTERVALS` から選び、呼び出し元は語彙を渡せない。語彙に足すのは人で、PR のレビューで決める。上限は実行環境に合わせて呼び出し元が明示する。既定値は無い。
+4. `TargetSpec`（対象名・区間名）と `StagePlan::new(stages, by, limits)`（段階の `StageConfig`・比べる指標・`StageLimits`）を組む。区間名は crate の固定の語彙 `RECORD_INTERVALS` から選び、呼び出し元は語彙を渡せない。型で選ばせるのではなく、語彙の外の区間名は手順 5 の `.run(..)`（中の `run_stages`）が最初の回の前に `InvalidPlan`（`LoadRecordError::Stage`）で拒否する。語彙に足すのは人で、PR のレビューで決める（仮置き。`:540` を参照）。上限は実行環境に合わせて呼び出し元が明示する。既定値は無い。
 5. `RunSession::new(..)?`（`Result<RunSession, LoadRecordError>`）で実行を作り、`.run(申告する構成要素, &spec, &plan, 呼び出しの閉包)?`（これも `Result`）で回して `RunEvidence` を取り出す。見本は `.unwrap()` で取り出している。閉包は `CallResult` を返す。申告と閉包が実際に呼ぶ相手の一致は呼び出し元の責任で、見本は stub 側の呼び出し件数で確かめている。
 6. 比べる値は `ComparisonValue` で渡す。性能の目標は持ち越しなので `undecided` で渡す（`AUDP-29`）。`requirement`・`initial` は今は常に拒否される。
 7. `LoadRecord::new(&evidence, 記録時刻, 値)` を作り、`write_new(dir)` で書く。出力先 `dir` とその祖先は呼び出し元だけが変更できること（9/10 の利用条件）。
