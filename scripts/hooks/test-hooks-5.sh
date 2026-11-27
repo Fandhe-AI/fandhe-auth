@@ -649,7 +649,8 @@ for qp in true false; do
   expect_out "only the four unregistered paths are counted (core.quotePath=${qp})" "secret-scan: total: 4 finding(s) in 4 file(s)"
 done
 
-# diff.orderFile で登録名と未登録の引用されるパスの順序を入れ替えても、落とすべきでない区画は落とさない
+# diff.orderFile は --name-only（一覧）にも効くため、一覧と区画の並びは揃ったままで、順序の変更だけでは対応は崩れない。
+# 並びを入れ替えても、未登録の区画は走査される。
 new_repo; stage_lock
 stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
 stage '.agents/skills/unreg/q"x.md' "x = ${token}"
@@ -658,5 +659,15 @@ git config diff.orderFile "${PWD}/order.txt"
 SCAN_BIN="${small_bin}" check_scan "reordered quoted sections: the unregistered one is still scanned" 1
 expect_out "reordered quoted sections: only the unregistered path is counted" "secret-scan: total: 1 finding(s) in 1 file(s)"
 git config --unset diff.orderFile
+
+# 一覧と区画を実際にずらす（shim が -U0 の呼び出しにだけ区画の並びを変える）。一覧では未登録が先、区画では登録名が先になり、
+# 一覧の 2 番目（登録名の印）が区画の 2 番目（未登録）に当たる。ヘッダの一致の歯止めが無いと、未登録の区画が落ちて 1 件になる。
+# 歯止めがあれば、一致しない区画は落とさず、両方が走査される（2 件）。
+new_repo; stage_lock
+stage '.agents/skills/vendored-a/q"x.md' "x = ${token}"
+stage '.agents/skills/unreg/q"x.md' "x = ${token}"
+printf '%s\n' '.agents/skills/vendored-a/*' '.agents/skills/unreg/*' > "${work_dir}/order-u0.txt"
+PATH="${shim_dir}:${PATH}" ORDER_U0_FILE="${work_dir}/order-u0.txt" SCAN_BIN="${small_bin}" check_scan "misaligned sections: the unregistered section at a registered position is scanned" 1
+expect_out "misaligned sections: header mismatch scans both sections" "secret-scan: total: 2 finding(s) in 2 file(s)"
 
 finish "part 5"
