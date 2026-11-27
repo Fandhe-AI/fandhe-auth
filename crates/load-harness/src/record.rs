@@ -7,7 +7,9 @@
 //! 時計・対象の型は `meter`・`target`）と std だけ（通常の依存は 0。it-harness に依存できないため、
 //! RFC 3339 の整形は it-harness の `UtcTimestamp` と同じ civil 変換をここに重複して持つ）。
 //!
-//! 安全: 記録に入る文字列は作る時点で文字種・長さ・語彙を検査し、自由文の欄を作らない。違反は誤りにする
+//! 安全: 記録に入る文字列は作る時点で文字種・長さ・語彙を検査し、自由文の欄を作らない。語彙（区間名の
+//! `stage::RECORD_INTERVALS`・値の名前の [`VALUE_NAMES`]・出典の [`REF_IDS`]）は crate の固定の定数で、
+//! 記録に書く名前を渡す入力から独立している（呼び出し元は足せない。#6038）。違反は誤りにする
 //! （fail-closed。黙って `undecided` に落とさない。DPOL-32）。区分に既定値を置かず、ハーネスの中に測定値を要件の値へ上げる経路を作らない
 //! （要件の値・初期値は、承認一覧の置き場・形・承認の手順が決まるまで常に拒否する。TASK-12・#111。[`ApprovedValues`] の信頼の境界）。
 //! 段階の結果は [`RunSession::run`] の中でだけ作り、実行の文脈に結び付ける（型で塞げない部分は [`RunSession`] の信頼の境界）。
@@ -44,6 +46,22 @@ pub const MAX_UNIX_SECS: u64 = 253_402_300_799;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_LINE_BYTES: usize = 1024;
 const MAX_WORD_BYTES: usize = 64;
+
+/// 記録に出してよい値の名前の固定語彙（仮置き。人が確認する。SECR-23・`load.md` の 2・6）。
+/// 呼び出し元は足せない。固定語彙にない文字列は拒否され、記録に載る名前は固定語彙に限られる（入力の由来は検査しない。#6038）。足すのは人（PR のレビュー）。
+///
+/// 現在の語彙は `p99_target` だけで、これは `AUDP-29` により `undecided`（値なし）の区分にだけ使える（`NAME_CLASS_RULES`）。
+/// そのため公開の口から作れる比べる値の行は `p99_target` の `undecided` だけで、`external`・`test_condition`・`measured` の行は
+/// 公開の口からは作れない（`ClassNotAllowed`）。これらの区分の名前は、用途が決まったときに人がレビューして語彙へ足す（TASK-12）。
+///
+/// `ComparisonValue::new` の拒否の順序: `requirement`・`initial` は出典に関係なく最初に `ClassNotAllowed` で拒否する。
+/// それ以外の区分は、出典の件数（`TooManyRefs`）と重複（`InvalidRef`）の検査が名前ごとの区分の検査より先に来るため、
+/// 出典が 9 件以上または重複していれば `ClassNotAllowed` より先にそちらの誤りが返る。
+pub const VALUE_NAMES: [&str; 1] = ["p99_target"];
+
+/// 記録に出してよい出典の ID の固定語彙（仮置き。人が確認する。SECR-23・`load.md` の 6）。
+/// 性能の目標の持ち越しの根拠として `load.md` に出る ID だけ。他所有者の値は入れない（D-2026-10-15-21）。
+pub const REF_IDS: [&str; 4] = ["AUDP-29", "TASK-15", "TASK-21", "D-2026-10-17-36"];
 
 /// `refs` 欄で出力側が使う語。出典の ID には使わせない（出典なし・自動取得の印と取り違えない）。
 const RESERVED_REFS: [&str; 3] = ["none", "harness_config", "measured"];
@@ -167,6 +185,17 @@ impl ValueUnit {
     }
 }
 
+/// 値の名前の検査（形式 → 語彙の完全一致）。`ValueName::new` が固定語彙で呼ぶ。語彙を引数にするのは、
+/// 形式の検査だけの退行を、語彙に入れた不正な候補で試験が検出できるようにするため（SECR-23）。
+fn name_in(s: &str, vocab: &[&str]) -> bool {
+    is_name(s) && vocab.contains(&s)
+}
+
+/// 出典の ID の検査（形式 → 語彙の完全一致）。`RefId::new` が固定語彙で呼ぶ。理由は [`name_in`] と同じ。
+fn ref_in(s: &str, vocab: &[&str]) -> bool {
+    is_ref_shape(s) && vocab.contains(&s)
+}
+
 fn is_name(s: &str) -> bool {
     (1..=64).contains(&s.len())
         && s.bytes()
@@ -194,11 +223,9 @@ fn is_ref_shape(s: &str) -> bool {
 /// 長すぎる行・全体の回帰だけである。次は通る: `key=<64 バイト以下>`、区切りで連ねた値、`+` を含まない base64、
 /// ホスト名・`IP:port`・パス、libpq の `key=value` 形式、全体が 64 バイト以下の語になる JWT の形（`.` は区切りでないため、通常の長さの JWT は語の上限で止まる）。
 /// 64 バイト以下の英数字・base64url・16 進の秘密値は形では止められない。各欄の語彙・列挙・整数の検査が止めるのは、
-/// 渡された語彙の外の名前と、列挙・整数の外の値である。ただし区間名（`IntervalName`）・[`ValueName`]・[`RefId`] の
-/// 語彙と信頼済みの一覧は、記録に書く名前と同じ呼び出し元が渡す（`StagePlan::new` の `allowed_intervals`・
-/// `ValueName::new` の語彙・`RefId::new` の信頼済みの一覧）。呼び出し元が秘密値を名前と語彙の両方に入れれば、
-/// 語彙の検査もこの検査も通り、記録に出る（陽性対照 `matcher_detects_registered_hex_written_through_write_new` の経路）。
-/// そのため名前の欄は、呼び出し元が設定由来の値を名前にしないことに頼っている（ここでは止めない）。
+/// 固定語彙の外の名前と、列挙・整数の外の値である。区間名（`IntervalName`）・[`ValueName`]・[`RefId`] の語彙は
+/// crate の固定の定数で、記録に書く名前を渡す入力から独立している（呼び出し元は足せない。#6038）。
+/// そのため名前の欄に入るのは固定語彙・列挙・整数だけで、語彙にない文字列は拒否される（検査は完全一致で、入力の由来は見ない）。
 /// 漏れは照合の試験（`tests/trial_run.rs`）で確かめる。これは AAUD-30・AAUD-31 の方法を
 /// ハーネスの出力に当てはめたもので、満たしたものではない（実環境の走査は Hub の `AOPS-73`）。対象は stub の設定の
 /// 3 欄から負荷の記録へ値が流れないことの回帰の検出と、設定の口（`with_hub_stub_record`）を通した it-run の記録に
@@ -206,8 +233,7 @@ fn is_ref_shape(s: &str) -> bool {
 /// 署名鍵の秘密値は対象外で、未確認のまま持ち越し。
 // TODO(TASK-500): 署名鍵の秘密値を登録簿に入れて走査する（AAUD-30・AAUD-31。#1391）。
 // 出力の面の秘密値の扱いは TASK-518（SECR-23。#1407）。
-// TODO(TASK-12): 区間名・値の名前・出典の語彙を、記録に書く名前を渡す入力から独立させる（#6038）。
-fn is_fixed_shape(text: &str) -> bool {
+pub(crate) fn is_fixed_shape(text: &str) -> bool {
     text.len() <= MAX_RECORD_BYTES
         && text.bytes().all(|b| {
             b.is_ascii_alphanumeric()
@@ -221,17 +247,20 @@ fn is_fixed_shape(text: &str) -> bool {
         })
 }
 
-/// 値の名前（`[a-z0-9_]`・1〜64 文字で、呼び出し元が渡す承認済みの語彙に含まれるもの）。
+/// 値の名前（`[a-z0-9_]`・1〜64 文字で、固定語彙 [`VALUE_NAMES`] に完全一致するもの）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct ValueName(String);
 
 impl ValueName {
     /// 記録に出してよい名前だけを作る。語彙の外は誤りにする（自由な名前を出さない。SECR-23）。
+    /// 現在の語彙は `p99_target` だけで、`ComparisonValue::new` は `undecided` 以外の区分を `ClassNotAllowed` で拒否する。
+    /// 検査の順序は、`requirement`・`initial` が最初で、それ以外は出典の件数（`TooManyRefs`）と重複（`InvalidRef`）の検査の後
+    /// （[`VALUE_NAMES`] の説明）。
     ///
     /// # Errors
-    /// 文字種・長さの規則を満たさないか、`vocabulary` に無いとき [`LoadRecordError::InvalidName`]。
-    pub fn new(s: &str, vocabulary: &[&str]) -> Result<Self, LoadRecordError> {
-        if is_name(s) && vocabulary.contains(&s) {
+    /// 文字種・長さの規則を満たさないか、固定語彙 [`VALUE_NAMES`] に無いとき [`LoadRecordError::InvalidName`]。
+    pub fn new(s: &str) -> Result<Self, LoadRecordError> {
+        if name_in(s, &VALUE_NAMES) {
             Ok(Self(s.to_owned()))
         } else {
             Err(LoadRecordError::InvalidName)
@@ -246,17 +275,17 @@ impl fmt::Debug for ValueName {
     }
 }
 
-/// 出典の ID（ASCII 英数字・`-`・`_`・1〜64 文字で、呼び出し元が渡す信頼済みの一覧に完全一致するもの）。
+/// 出典の ID（ASCII 英数字・`-`・`_`・1〜64 文字で、固定語彙 [`REF_IDS`] に完全一致するもの）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct RefId(String);
 
 impl RefId {
-    /// 信頼済みの一覧（spec の ID 等）と完全一致するものだけを受ける。任意の文字列を出典として出さない（SECR-23）。
+    /// 固定語彙 [`REF_IDS`]（spec の ID 等）と完全一致するものだけを受ける。任意の文字列を出典として出さない（SECR-23）。
     ///
     /// # Errors
-    /// 規則を満たさない・予約語（`none`・`harness_config`・`measured`）・`trusted` に無いとき [`LoadRecordError::InvalidRef`]。
-    pub fn new(s: &str, trusted: &[&str]) -> Result<Self, LoadRecordError> {
-        if is_ref_shape(s) && trusted.contains(&s) {
+    /// 規則を満たさない・予約語（`none`・`harness_config`・`measured`）・固定語彙に無いとき [`LoadRecordError::InvalidRef`]。
+    pub fn new(s: &str) -> Result<Self, LoadRecordError> {
+        if ref_in(s, &REF_IDS) {
             Ok(Self(s.to_owned()))
         } else {
             Err(LoadRecordError::InvalidRef)
@@ -772,6 +801,71 @@ impl fmt::Debug for RunEvidence {
     }
 }
 
+/// 上限付きの書き込み先。上限を超える追記は何も足さずに `fmt::Error` で拒否する（上限ちょうどは受理）。
+/// 記録の整形で、拒否する場合も上限を大きく超えるメモリを確保しないため（A04・fail-closed。#6038）。
+/// `StagedRun` の `Display` 内の小さな一時の文字列（回の番号等）は上限の外で、行ごとに捨てられる。
+struct BoundedText {
+    buf: String,
+    limit: usize,
+}
+
+impl BoundedText {
+    fn new(limit: usize) -> Self {
+        Self {
+            buf: String::new(),
+            limit,
+        }
+    }
+}
+
+impl fmt::Write for BoundedText {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let needed = self.buf.len().checked_add(s.len()).ok_or(fmt::Error)?;
+        if needed > self.limit {
+            return Err(fmt::Error);
+        }
+        if needed > self.buf.capacity() {
+            // 広げた先も上限までに抑える。
+            let target = needed
+                .max(self.buf.capacity().saturating_mul(2))
+                .min(self.limit);
+            self.buf.reserve_exact(target - self.buf.len());
+        }
+        self.buf.push_str(s);
+        Ok(())
+    }
+}
+
+/// 記録の本文を `limit` バイトまでの書き込み先に組む。超えた時点で打ち切り `Format` を返す。
+/// 本番は [`MAX_RECORD_BYTES`]。上限を引数にしたのは、上限での打ち切りを小さな値で試験するため（本番の入口は `LoadRecord::new` だけ）。
+fn compose(
+    evidence: &RunEvidence,
+    recorded_at_unix_secs: u64,
+    values: &[ComparisonValue],
+    limit: usize,
+) -> Result<LoadRecord, LoadRecordError> {
+    let fmt_err = |_| LoadRecordError::Format;
+    let mut t = BoundedText::new(limit);
+    writeln!(t, "format: {LOAD_RECORD_FORMAT}").map_err(fmt_err)?;
+    writeln!(t, "run_record_file: {}", evidence.run_record_file.0).map_err(fmt_err)?;
+    writeln!(t, "run_started_at: {}", rfc3339(evidence.run_started_at)).map_err(fmt_err)?;
+    writeln!(t, "recorded_at: {}", rfc3339(recorded_at_unix_secs)).map_err(fmt_err)?;
+    write!(t, "{}", evidence.conditions).map_err(fmt_err)?;
+    write!(t, "{}", evidence.staged).map_err(fmt_err)?;
+    for v in values {
+        writeln!(t, "{v}").map_err(fmt_err)?;
+    }
+    // ACPT-7: 判定の欄は人が記入する。ハーネスは常に空で出す。
+    writeln!(t, "judgment:").map_err(fmt_err)?;
+    if !is_fixed_shape(&t.buf) {
+        return Err(LoadRecordError::Format);
+    }
+    Ok(LoadRecord {
+        run_started_at: evidence.run_started_at,
+        text: t.buf,
+    })
+}
+
 /// 結果の記録のファイル全体。行の順は `load.md` の 7 の見本に合わせる。
 #[derive(Clone, PartialEq, Eq)]
 pub struct LoadRecord {
@@ -780,7 +874,8 @@ pub struct LoadRecord {
 }
 
 impl LoadRecord {
-    /// 作る時点で全体を文字列にして持つ（部分の記録を作らない）。
+    /// 作る時点で全体を文字列にして持つ（部分の記録を作らない）。整形は上限付きの書き込み先に行い、
+    /// 1 MiB を超えた時点で打ち切って `Format` にする（拒否する場合も上限を大きく超える確保をしない）。
     ///
     /// # Errors
     /// 時刻の順が逆・値の行が多すぎる・名前の重複・整形の失敗のとき。
@@ -790,8 +885,6 @@ impl LoadRecord {
         values: Vec<ComparisonValue>,
     ) -> Result<Self, LoadRecordError> {
         let run_started_at_unix_secs = evidence.run_started_at;
-        let run_record_file = &evidence.run_record_file;
-        let (conditions, staged) = (&evidence.conditions, &evidence.staged);
         if recorded_at_unix_secs > MAX_UNIX_SECS {
             return Err(LoadRecordError::TimeOutOfRange);
         }
@@ -805,26 +898,7 @@ impl LoadRecord {
         if names.len() != values.len() {
             return Err(LoadRecordError::DuplicateValue);
         }
-        let fmt_err = |_| LoadRecordError::Format;
-        let mut t = String::new();
-        writeln!(t, "format: {LOAD_RECORD_FORMAT}").map_err(fmt_err)?;
-        writeln!(t, "run_record_file: {}", run_record_file.0).map_err(fmt_err)?;
-        writeln!(t, "run_started_at: {}", rfc3339(run_started_at_unix_secs)).map_err(fmt_err)?;
-        writeln!(t, "recorded_at: {}", rfc3339(recorded_at_unix_secs)).map_err(fmt_err)?;
-        write!(t, "{conditions}").map_err(fmt_err)?;
-        write!(t, "{staged}").map_err(fmt_err)?;
-        for v in &values {
-            writeln!(t, "{v}").map_err(fmt_err)?;
-        }
-        // ACPT-7: 判定の欄は人が記入する。ハーネスは常に空で出す。
-        writeln!(t, "judgment:").map_err(fmt_err)?;
-        if !is_fixed_shape(&t) {
-            return Err(LoadRecordError::Format);
-        }
-        Ok(Self {
-            run_started_at: run_started_at_unix_secs,
-            text: t,
-        })
+        compose(evidence, recorded_at_unix_secs, &values, MAX_RECORD_BYTES)
     }
 
     /// 新規のファイルへ書き出す。`dir` は呼び出し元が渡し、無ければ作る。既存のファイルは上書きしない。
@@ -899,6 +973,9 @@ impl fmt::Display for LoadRecord {
 }
 
 #[cfg(test)]
+mod name_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -909,32 +986,7 @@ mod tests {
         }
     }
 
-    /// 排他的に新規作成したディレクトリ。既存のものは消さず、自分が作ったものだけを Drop で片付ける。
-    struct TestDir(PathBuf);
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn dir(name: &str) -> TestDir {
-        static N: AtomicU64 = AtomicU64::new(0);
-        for _ in 0..100 {
-            let d = std::env::temp_dir().join(format!(
-                "{name}-{}-{}",
-                std::process::id(),
-                N.fetch_add(1, Ordering::Relaxed)
-            ));
-            // create_dir は既存なら失敗する。別の名前で作り直し、既存を消さない。
-            match std::fs::create_dir(&d) {
-                Ok(()) => return TestDir(d),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => panic!("create test dir: {e}"),
-            }
-        }
-        panic!("no free test dir name");
-    }
+    use super::name_tests::TestDir;
 
     /// 許可文字・長さの網。境界の値（64/65・1024/1025・1 MiB/+1）で、通る側と止まる側の両方を確かめる。
     #[test]
@@ -980,21 +1032,21 @@ mod tests {
     #[test]
     fn write_new_rejects_text_outside_shape() {
         for bad in [format!("x: {}\n", "a".repeat(65)), "x: p@ss\n".to_owned()] {
-            let td = dir("load-shape");
+            let td = TestDir::new("load-shape");
             let r = LoadRecord {
                 run_started_at: 0,
                 text: bad,
             };
-            assert_eq!(r.write_new(&td.0), Err(LoadRecordError::Format));
-            assert_eq!(std::fs::read_dir(&td.0).unwrap().count(), 0);
+            assert_eq!(r.write_new(td.path()), Err(LoadRecordError::Format));
+            assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
         }
     }
 
     /// 一時名が衝突したら WriteFailed。既存の内容を消さず、最終名も作らない。
     #[test]
     fn tmp_name_collision_fails_and_keeps_existing() {
-        let td = dir("load-collision-tmp");
-        let d = td.0.clone();
+        let td = TestDir::new("load-collision-tmp");
+        let d = td.path().to_owned();
         let pid = std::process::id();
         let tmp = d.join(format!(".tmp-load-run-0-{pid}-7"));
         std::fs::write(&tmp, b"keep").unwrap();
@@ -1009,8 +1061,8 @@ mod tests {
     /// 最終名が衝突したら WriteFailed。既存の内容は保たれ、一時ファイルは残らない。
     #[test]
     fn final_name_collision_fails_and_keeps_existing() {
-        let td = dir("load-collision-final");
-        let d = td.0.clone();
+        let td = TestDir::new("load-collision-final");
+        let d = td.path().to_owned();
         let pid = std::process::id();
         let fin = d.join(format!("load-run-0-{pid}-9.txt"));
         std::fs::write(&fin, b"keep").unwrap();

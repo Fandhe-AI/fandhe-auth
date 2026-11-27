@@ -15,9 +15,9 @@ use fandhe_auth_it_harness::{
 };
 use fandhe_auth_load_harness::{
     ApprovedValues, CallResult, ComparisonValue, ComponentConditions, ConditionComponent,
-    IntervalName, LoadConfig, LoadRecord, LoopModel, MeasurementConditions, MetricKey, RefId,
-    RunRecordFile, RunSession, StageConfig, StageLimits, StagePlan, TargetName, TargetSpec,
-    ValueClass, ValueName, ValueUnit,
+    IntervalName, LoadConfig, LoadRecord, LoadRecordError, LoopModel, MeasurementConditions,
+    MetricKey, RefId, RunRecordFile, RunSession, StageConfig, StageError, StageLimits, StagePlan,
+    TargetName, TargetSpec, ValueClass, ValueName, ValueUnit,
 };
 
 /// 照合済みの本文を挟む固定の行。`scripts/load-trial.sh` の同名の文字列と一致させる。
@@ -102,7 +102,6 @@ fn small_trial_run_writes_record_without_requirement_values() {
         ],
         MetricKey::P99Ns,
         StageLimits::new(8, 8, 1_000, 10_000).unwrap(),
-        vec![IntervalName::new("stub_jwks").unwrap()],
     )
     .unwrap();
     let call = || match handle.with(|s| s.jwks.serve(T0)) {
@@ -121,11 +120,11 @@ fn small_trial_run_writes_record_without_requirement_values() {
 
     // 性能の目標は持ち越し（AUDP-29）。要件の値として記録せず、未決を明示する。
     let target = ComparisonValue::new(
-        ValueName::new("p99_target", &["p99_target"]).unwrap(),
+        ValueName::new("p99_target").unwrap(),
         ValueClass::Undecided,
         None,
         ValueUnit::Ns,
-        vec![RefId::new("AUDP-29", &["AUDP-29"]).unwrap()],
+        vec![RefId::new("AUDP-29").unwrap()],
         &ApprovedValues::default(),
     )
     .unwrap();
@@ -414,9 +413,8 @@ struct Written {
     it_run: Vec<u8>,
 }
 
-/// 負荷の記録を作って書く（呼び出し元の入力は `cfg`。`hub_config` と同じ組み立て）。`interval` は測る区間の名前で、
-/// 記録の `interval=` に出る。負荷の記録と it-run の記録の全文を読み、消してから返す。
-fn write_record_for(cfg: HubStubConfig, interval: &str) -> Written {
+/// 負荷の記録を作って書く（呼び出し元の入力は `cfg`。`hub_config` と同じ組み立て）。測る区間の名前は固定語彙の `stub_jwks`。負荷の記録と it-run の記録の全文を読み、消してから返す。
+fn write_record_for(cfg: HubStubConfig) -> Written {
     let hub = HubStubComponent::new(cfg);
     let handle = hub.handle();
     let running = Harness::start(HarnessConfig::new().with(Box::new(hub))).unwrap();
@@ -444,13 +442,12 @@ fn write_record_for(cfg: HubStubConfig, interval: &str) -> Written {
     .unwrap();
     let spec = TargetSpec::new(
         TargetName::new("hub_stub_jwks").unwrap(),
-        IntervalName::new(interval).unwrap(),
+        IntervalName::new("stub_jwks").unwrap(),
     );
     let plan = StagePlan::new(
         vec![StageConfig::new(LoadConfig::new(1, 5, 1).unwrap(), 1).unwrap()],
         MetricKey::P99Ns,
         StageLimits::new(8, 8, 1_000, 10_000).unwrap(),
-        vec![IntervalName::new(interval).unwrap()],
     )
     .unwrap();
     let call = || match handle.with(|s| s.jwks.serve(T0)) {
@@ -510,7 +507,7 @@ fn canary_registry_and_config() -> (Vec<Vec<u8>>, HubStubConfig) {
 #[test]
 fn written_records_have_no_registered_secret_in_any_form() {
     let (registry, cfg) = canary_registry_and_config();
-    let w = write_record_for(cfg, "stub_jwks");
+    let w = write_record_for(cfg);
     assert!(!w.load.is_empty() && !w.it_run.is_empty());
     // 設定の口（`with_hub_stub_record`）を通った行が it-run の記録に実際に書き出されている（欄名と印だけ）。
     let it_text = String::from_utf8(w.it_run.clone()).unwrap();
@@ -537,11 +534,11 @@ fn written_records_have_no_registered_secret_in_any_form() {
 
 /// 陽性対照 1（照合の検出力）: 登録簿の全値・全形（生・`+` を含む base64 も含む）を出力に混ぜると、
 /// 照合は形ごとに検出する（混ぜた値の、混ぜた形そのものの件数が 1 以上。合計の件数では見ない）。JWT の形の語も数える。生のバイトと `+` を含む base64 は形の網の外にあり、
-/// `write_new` を通らない（その経路は次の試験）。ここは照合そのものの検出力を見る。
+/// `write_new` を通らない。ここは照合そのものの検出力を見る（`write_new` に届く前に、登録簿の 16 進の文字列が語彙外の名前・出典・区間名として拒否されることを次の試験で見る）。
 #[test]
 fn matcher_detects_every_form_mixed_into_output() {
     let (registry, cfg) = canary_registry_and_config();
-    let w = write_record_for(cfg, "stub_jwks");
+    let w = write_record_for(cfg);
     assert_eq!(count_matches(&registry, &w.load), 0);
     for (vi, v) in registry.iter().enumerate() {
         for (fi, f) in forms(v).iter().enumerate() {
@@ -579,21 +576,54 @@ fn matcher_detects_every_form_mixed_into_output() {
     assert_eq!(count_jwt_like(b"eyJabc.def.ghi"), 0);
 }
 
-/// 陽性対照 2（`write_new` を通る経路）: 登録簿の 16 進の値を測る区間の名前に入れて書き出すと、
-/// 負荷の記録のファイルに現れ、照合が 1 件以上を見つける。形の網の内側に収まる値（16 進 32 文字）が
-/// 網では止まらず、見つけるのは照合であること（網は秘密値を止めない）を確かめる。
+/// 登録簿から取った 16 進の文字列（固定語彙の外。文字種の規則には合う）は、値の名前・出典・区間名として記録に出せない
+/// （SECR-23・#6038。語彙は crate の固定の定数で、呼び出し元は足せない）。設定由来の値を一律に拒否するわけではなく、
+/// 固定語彙に一致する文字列（`p99_target` 等）は由来を問わず通る。この試験は、語彙外の 16 進の文字列を名前・出典に渡すと拒否され、
+/// 区間名にした対象は 1 回も呼ばれない（実行の前の拒否と呼び出し 0 件。記録のファイルの未作成までは確かめない）。
+/// 以前はここで「語彙にも入れた 16 進の値が書き出される」ことを陽性対照にしていたが、その経路を塞いだため
+/// 拒否の試験に置き換えた。照合の検出力は陽性対照 1（`matcher_detects_every_form_mixed_into_output`）で見る。
 #[test]
-fn matcher_detects_registered_hex_written_through_write_new() {
-    let (mut registry, cfg) = canary_registry_and_config();
-    let value = random_value();
-    let interval = hex(&value, false);
-    registry.push(value);
-    let w = write_record_for(cfg, &interval);
-    let n = count_matches(&registry, &w.load);
-    assert!(
-        n >= 1,
-        "registered hex value written via write_new not detected"
-    );
+fn registry_hex_strings_outside_vocabulary_are_rejected_as_names() {
+    let (registry, _cfg) = canary_registry_and_config();
+    let candidates: Vec<String> = registry.iter().take(3).map(|raw| hex(raw, false)).collect();
+    for c in &candidates {
+        assert_eq!(ValueName::new(c), Err(LoadRecordError::InvalidName));
+        assert_eq!(RefId::new(c), Err(LoadRecordError::InvalidRef));
+    }
+    // 区間名に使うと、実行の前に拒否される（対象を呼ばない）。
+    let conditions = MeasurementConditions::detect(
+        ComponentConditions::new(&[(ConditionComponent::HubStub, true)]).unwrap(),
+        LoopModel::Closed,
+    )
+    .unwrap();
+    let calls = std::sync::atomic::AtomicU64::new(0);
+    for c in &candidates {
+        let spec = TargetSpec::new(
+            TargetName::new("hub_stub_jwks").unwrap(),
+            IntervalName::new(c).unwrap(),
+        );
+        let plan = StagePlan::new(
+            vec![StageConfig::new(LoadConfig::new(1, 5, 1).unwrap(), 1).unwrap()],
+            MetricKey::P99Ns,
+            StageLimits::new(8, 8, 1_000, 10_000).unwrap(),
+        )
+        .unwrap();
+        let session = RunSession::new(
+            RunRecordFile::new("it-run-0-1-1.txt").unwrap(),
+            0,
+            conditions.clone(),
+        )
+        .unwrap();
+        let r = session.run(&[ConditionComponent::HubStub], &spec, &plan, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            CallResult::Ok
+        });
+        assert_eq!(
+            r.err(),
+            Some(LoadRecordError::Stage(StageError::InvalidPlan))
+        );
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 /// 標準出力用の登録簿はログアウトの受信 URI を含み、その符号化した形（base64・base64url・16 進）を含む本文を拒否する。
