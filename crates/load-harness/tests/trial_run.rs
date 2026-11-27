@@ -710,12 +710,9 @@ fn matcher_detects_every_form_mixed_into_output() {
 /// 拒否の試験に置き換えた。照合の検出力は陽性対照 1（`matcher_detects_every_form_mixed_into_output`）で見る。
 #[test]
 fn registry_hex_strings_outside_vocabulary_are_rejected_as_names() {
-    let (registry, _cfg, _key) = canary_registry_and_config();
-    let candidates: Vec<String> = registry
-        .iter()
-        .take(3)
-        .map(|s| s.expose().to_owned())
-        .collect();
+    // 登録簿の乱数の値（`canary_registry_and_config` の先頭 4 件）と同じ作り（`random_value` の 16 進）で作る。
+    // 登録簿は経由しない（秘密値の型から文字列を取り出して持たない。SECR-16）。
+    let candidates: Vec<String> = (0..3).map(|_| hex(&random_value(), false)).collect();
     for c in &candidates {
         assert_eq!(ValueName::new(c), Err(LoadRecordError::InvalidName));
         assert_eq!(RefId::new(c), Err(LoadRecordError::InvalidRef));
@@ -766,7 +763,11 @@ fn registries_include_signing_key_secret() {
     let trial = trial_registry(&hub_config(), &secrets);
     assert_eq!(trial.len(), 6);
     let tail: Vec<Vec<u8>> = trial[4..].iter().map(secret_raw).collect();
-    assert_eq!(tail, vec![pkcs8.clone(), d.clone()]);
+    // 失敗診断に鍵の値を出さないため、値を含む比較は固定の文言にする（SECR-23）。
+    assert!(
+        tail == vec![pkcs8.clone(), d.clone()],
+        "trial registry tail differs from the signing key secrets"
+    );
     let (canary, _cfg, _key) = canary_registry_and_config();
     assert!(
         canary.len() == 10
