@@ -412,6 +412,7 @@ assert_hint_rc() {
     [ "${rc}" -eq "${c}" ] || continue
     if grep -qF -- "use the detector and exclusion list exactly as this run used them" "${work_dir}/out" \
       && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+      && grep -qF -- "with skills-lock.json at the root two directories above it" "${work_dir}/out" \
       && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
       && ! grep -qF -- "${work_dir}" "${work_dir}/out" \
       && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
@@ -471,6 +472,85 @@ if [ "$(git -C "${r6}" rev-parse HEAD:skills-lock.json)" != "$(git -C "${r6}" ha
   fail "secret-scan-ci: setup for the committed-symlink hint" "worktree bytes differ from the committed link target"
 fi
 assert_hint_rc "secret-scan-ci: a committed symlink skills-lock.json does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "2"
+# 末尾がリンクの検出器: 案内は「リンクを経由して起動した」ことと所在の規則を書き、パスは出さない
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${work_dir}/hint-link-tail/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qF -- "started through a symbolic link" "${work_dir}/out" \
+  && grep -qF -- "reads skills-lock.json from its real root" "${work_dir}/out" \
+  && ! grep -qF -- "${work_dir}" "${work_dir}/out"; then
+  pass "secret-scan-ci: a detector started through a symlink describes where its exclusion list is read from"
+else
+  fail "secret-scan-ci: a detector started through a symlink describes where its exclusion list is read from" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# 検出器の所在を求められない（自己参照のリンク）: 再現に要るファイルを特定できないと案内する。検出器は起動できず検査不能（2）
+r6="${work_dir}/hint-unresolved"
+mk_hint_root "${r6}"
+rm -f "${r6}/scripts/hooks/secret-scan.sh"
+ln -s secret-scan.sh "${r6}/scripts/hooks/secret-scan.sh"
+rc=0
+LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 2 ] && grep -qF -- "the files this run needed cannot be identified" "${work_dir}/out" \
+  && grep -qF -- "only in a private local terminal" "${work_dir}/out" \
+  && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+  && ! grep -qF -- "${work_dir}" "${work_dir}/out"; then
+  pass "secret-scan-ci: an unresolvable detector location reports that the needed files cannot be identified"
+else
+  fail "secret-scan-ci: an unresolvable detector location reports that the needed files cannot be identified" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# 走査の間に検出器の repo の HEAD が切り替わる: 走査の後の sha を、走査に使った版として案内しない（終了コードは検出器のまま 1）
+r6="${work_dir}/hint-switch"
+mk_hint_root "${r6}"
+cat > "${r6}/scripts/hooks/secret-scan.sh" <<'EOF'
+#!/usr/bin/env bash
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+# 走査の一時 index（対象の tree）を使わず、検出器の repo の HEAD だけを進める
+env -u GIT_INDEX_FILE git -C "${root}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m "chore: switched during the scan"
+exit 1
+EOF
+chmod +x "${r6}/scripts/hooks/secret-scan.sh"
+hint_commit "${r6}"
+assert_hint_rc "secret-scan-ci: a checkout switched during the scan does not get a commit hint" "${r6}/scripts/secret-scan-ci.sh" "1"
+
+# 検出器が同じディレクトリの中へのリンクで、引数なしのローカル実行: 同じ checkout の案内にする（検出器の実体のルートが入口と同じ）
+r6="${work_dir}/hint-link-same"
+mk_hint_root "${r6}"
+mv "${r6}/scripts/hooks/secret-scan.sh" "${r6}/scripts/hooks/real-scan.sh"
+ln -s real-scan.sh "${r6}/scripts/hooks/secret-scan.sh"
+printf 'x = %s\n' "${token}" > "${r6}/leaked.txt"
+hint_commit "${r6}"
+rc=0
+(cd "${work_dir}" && LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh") > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qF -- "this run scanned this entry's own checkout" "${work_dir}/out" \
+  && grep -qF -- "and HEAD is still $(git -C "${r6}" rev-parse HEAD)" "${work_dir}/out" \
+  && ! grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+  && ! grep -qF -- "${r6}" "${work_dir}/out" \
+  && ! grep -qF -- "${token}" "${work_dir}/out" && ! grep -qF -- "leaked.txt" "${work_dir}/out"; then
+  pass "secret-scan-ci: a detector linked inside its own directory still gets the same-checkout hint"
+else
+  fail "secret-scan-ci: a detector linked inside its own directory still gets the same-checkout hint" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+# 案内の組み立ての中の stderr（bash 自身の診断等）は公開ログへ出さない（SECR-23）: pwd の差し替えで、案内の組み立ての中（resolve_detector_root）だけ印を stderr へ書かせる
+r6="${work_dir}/hint-stderr"
+mk_hint_root "${r6}"
+hint_commit "${r6}"
+hint_stderr_env="${work_dir}/hint-stderr-env.sh"
+cat > "${hint_stderr_env}" <<'EOF'
+pwd() {
+  case " ${FUNCNAME[*]} " in
+    *" resolve_detector_root "*) echo "HINT-STDERR-MARK" >&2 ;;
+  esac
+  builtin pwd "$@"
+}
+EOF
+rc=0
+BASH_ENV="${hint_stderr_env}" LC_ALL="${utf8_locale}" "${HOOK_BASH}" "${r6}/scripts/secret-scan-ci.sh" "${ci_target}" > "${work_dir}/out" 2>&1 || rc=$?
+if [ "${rc}" -eq 1 ] && grep -qF -- "check out the trusted detector" "${work_dir}/out" \
+  && ! grep -qF -- "HINT-STDERR-MARK" "${work_dir}/out"; then
+  pass "secret-scan-ci: stderr written while building the rescan hint does not reach the public log"
+else
+  fail "secret-scan-ci: stderr written while building the rescan hint does not reach the public log" "exit ${rc}" "output: $(cat "${work_dir}/out")"
+fi
+
 # 検出器がコミットに無い（未追跡）: 一覧と違い、無いことを一致とみなさない
 r6="${work_dir}/hint-detector-untracked"
 mk_hint_root "${r6}"
@@ -581,8 +661,8 @@ run_without_cmd() {
 }
 new_repo; stage app.txt "hello"; git commit -q -m "chore: add"
 run_arg="${repo}"
-for missing in git mktemp grep rm; do
-  run_without_cmd "${missing}" "${CI_ENTRY}" git mktemp grep rm
+for missing in git mktemp grep rm head sleep; do
+  run_without_cmd "${missing}" "${CI_ENTRY}" git mktemp grep rm head sleep
   if [ "${rc}" -eq 2 ] && grep -q "required command not found on PATH: ${missing}" "${work_dir}/out"; then
     pass "secret-scan-ci: missing ${missing} exits 2 before starting"
   else
