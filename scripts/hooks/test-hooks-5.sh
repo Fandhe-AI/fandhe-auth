@@ -412,6 +412,16 @@ many_repo
 FAIL_GIT_BOTH1=--name-only FAIL_GIT_BOTH2=. PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a failing file listing is not scannable (exit 2)" 2
 expect_out "a failing file listing reports its own message" "secret-scan: failed to list files; aborting"
 
+# 一覧のファイル数と diff の区画の数が食い違えば、除外の対応が崩れているため検査不能（2。落とす区画があるときの照合）
+new_repo; stage_lock
+stage .agents/skills/vendored-a/x.md "harmless = 1"
+stage src/app.txt "harmless = 2"
+EXTRA_LIST_ENTRY=extra.txt PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "a section count that differs from the file listing is not scannable (exit 2)" 2
+expect_out "a section count mismatch reports a normalization failure" "secret-scan: failed to normalize diff; aborting"
+new_repo; stage_lock
+stage .agents/skills/vendored-a/x.md "harmless = 1"
+PATH="${shim_dir}:${PATH}" SCAN_BIN="${small_bin}" check_scan "the same fixture without the extra listing entry passes (the filter is on the path)" 0
+
 # diff.submodule=log が設定されていても、gitlink を含む index で区画の対応が崩れず走査できる（--submodule=short の明示）
 new_repo; stage_lock
 # 設定を有効にしたまま、登録名の下の除外（区画を落とす分岐）と未登録の名前の検出を同時に確かめる（登録名の区画が無いと除外の経路を通らない）
@@ -446,6 +456,7 @@ new_repo; stage_lock
 stage ".agents/skills/vendored-a vendored-b/x.md" "x = ${token}"
 stage ".agents/skills/vendored-*/x.md" "x = ${token}"
 stage ".agents/skills/vendored-[ab]/x.md" "x = ${token}"
+stage ".agents/skills/vendored-a/x.md" "x = ${token}"
 nl_blob="$(printf 'x = %s\n' "${token}" | git hash-object -w --stdin)"
 printf '100644 %s 0\t.agents/skills/vendored-a\n/x.md\0' "${nl_blob}" | git update-index --add -z --index-info
 SCAN_BIN="${small_bin}" check_scan "odd path segments are scanned, not excluded" 1

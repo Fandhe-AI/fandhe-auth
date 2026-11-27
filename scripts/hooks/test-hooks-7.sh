@@ -357,6 +357,27 @@ git add .agents/skills/vendored-a/SKILL.md
 SCAN_BIN="${same_bin}" check_scan "dropped skill: a body also modified in the commit" 1 .agents/skills/vendored-a/SKILL.md
 expect_out "dropped skill: modified body is not counted twice" "secret-scan: total: 2 finding(s) in 1 file(s)"
 
+# 外した名前と、登録中の別名の変更が同じコミットにあるとき、外した名前の既存の本文は走査され、登録中の別名の変更は除外される
+dropped_repo
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+git add skills-lock.json
+printf '%s\n' "w = ${token}" >> .agents/skills/vendored-b/SKILL.md
+git add .agents/skills/vendored-b/SKILL.md
+SCAN_BIN="${same_bin}" check_scan "dropped skill: the dropped body is scanned beside a registered sibling's change" 1 .agents/skills/vendored-a/SKILL.md
+expect_out "dropped skill: only the dropped name is counted, the registered sibling stays excluded" "secret-scan: total: 1 finding(s) in 1 file(s)"
+
+# 外した名前の本文だけが NUL を含むとき（主の差分には NUL が無い）も、NUL を空白へ置き換えた版を走査する。
+# 区切りが NUL のヘッダ文は、NUL を取り除くと一致せず、空白へ置き換えると一致する
+same_checkout_repo "${lock_ok}"
+mkdir -p .agents/skills/vendored-a
+printf 'BEGIN\000PRIVATE KEY\n' > .agents/skills/vendored-a/SKILL.md
+git add .agents/skills/vendored-a/SKILL.md
+SCAN_BIN="${same_bin}" check_scan "dropped-skill NUL setup: the registered body is excluded when committed" 0
+git commit -q -m "chore: add skill body with a NUL"
+printf '%s\n' "${lock_only_b}" > skills-lock.json
+git add skills-lock.json
+SCAN_BIN="${same_bin}" check_scan "dropped skill: a NUL only in the dropped body is scanned with the space-replaced copy" 1 .agents/skills/vendored-a/SKILL.md
+
 # 作業ツリーだけで登録を消した未ステージの変更は、無関係なコミットを止めない（HEAD と index だけで判定する）
 dropped_repo
 printf '%s\n' "${lock_only_b}" > skills-lock.json

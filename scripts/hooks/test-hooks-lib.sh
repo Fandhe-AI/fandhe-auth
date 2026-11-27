@@ -132,6 +132,21 @@ if [ -n "${COUNT_GIT_LOG:-}" ]; then
     fi
   done
 fi
+# EXTRA_LIST_ENTRY: `--name-only` と `.` を含む呼び出し（本文の区画の対応に使う一覧）の出力の後ろへ、1 件余分なパスを足す
+# （一覧のファイル数と diff の区画の数を食い違わせる再現用。#6053）
+if [ -n "${EXTRA_LIST_ENTRY:-}" ]; then
+  has_name_only=0
+  has_dot=0
+  for arg in "$@"; do
+    [ "${arg}" = "--name-only" ] && has_name_only=1
+    [ "${arg}" = "." ] && has_dot=1
+  done
+  if [ "${has_name_only}" -eq 1 ] && [ "${has_dot}" -eq 1 ]; then
+    "${REAL_GIT}" "$@" || exit $?
+    printf '%s\0' "${EXTRA_LIST_ENTRY}"
+    exit 0
+  fi
+fi
 # MAX_GIT_ARG_BYTES: 各引数の長さ + 1 + ポインタ 8 バイトの合計が上限を超える呼び出しを、macOS の E2BIG の代わりに失敗させる（#6053）
 if [ -n "${MAX_GIT_ARG_BYTES:-}" ]; then
   arg_total=0
