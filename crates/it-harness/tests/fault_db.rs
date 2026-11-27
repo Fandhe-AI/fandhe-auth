@@ -4,7 +4,7 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -27,81 +27,9 @@ fn finish(tl: FaultTimeline) -> FaultRecord {
         .unwrap()
 }
 
-/// 上流のサーバー。drop で待ち受けと接続のスレッドを止めて回収する（試験の後にスレッドとポートを残さない）。
-struct Upstream {
-    port: u16,
-    stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl Upstream {
-    /// 受けた接続ごとに `conn` を別スレッドで走らせる。`conn` は `stop` が立つか相手が閉じたら戻ること。
-    fn serve(conn: impl Fn(TcpStream, &AtomicBool) + Send + Sync + 'static) -> Self {
-        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        l.set_nonblocking(true).unwrap();
-        let port = l.local_addr().unwrap().port();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop2 = Arc::clone(&stop);
-        let conn = Arc::new(conn);
-        let handle = thread::spawn(move || {
-            let mut workers = Vec::new();
-            while !stop2.load(Ordering::SeqCst) {
-                match l.accept() {
-                    Ok((s, _)) => {
-                        let _ = s.set_nonblocking(false);
-                        let (stop3, conn) = (Arc::clone(&stop2), Arc::clone(&conn));
-                        workers.push(thread::spawn(move || conn(s, &stop3)));
-                    }
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
-            for w in workers {
-                let _ = w.join();
-            }
-        });
-        Self {
-            port,
-            stop,
-            handle: Some(handle),
-        }
-    }
-
-    fn port(&self) -> u16 {
-        self.port
-    }
-}
-
-impl Drop for Upstream {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-/// echo の上流。
-fn echo_upstream() -> Upstream {
-    Upstream::serve(|mut s, stop| {
-        let _ = s.set_read_timeout(Some(Duration::from_millis(50)));
-        let mut b = [0u8; 1024];
-        while !stop.load(Ordering::SeqCst) {
-            match s.read(&mut b) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if s.write_all(&b[..n]).is_err() {
-                        break;
-                    }
-                }
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-                Err(_) => break,
-            }
-        }
-    })
-}
+#[path = "support/upstream.rs"]
+mod upstream;
+use upstream::{Upstream, echo_upstream};
 
 fn connect(port: u16) -> TcpStream {
     let s = TcpStream::connect_timeout(
@@ -480,6 +408,8 @@ fn streaming_conn_ends_after_block_returns() {
 }
 
 /// #5983: `Applied`・`Released` の `offset_ms` は、呼び出しが戻る時刻より後にならない（下限の契約）。
+/// 確かめるのは「記録の `offset_ms` が呼び出しの復帰時刻を超えない」ことまで。`Applied` を記録した時点の状態
+/// （記録の後に状態を変える順序）は観測していない（未実施。`Released` は `released_is_recorded_while_still_blocked` が受け持つ）。
 #[test]
 fn recorded_offsets_are_not_after_call_return() {
     let up = echo_upstream();

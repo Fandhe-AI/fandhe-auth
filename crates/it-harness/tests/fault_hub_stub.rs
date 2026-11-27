@@ -210,7 +210,7 @@ fn injected_flags(log: &InjectionLog) -> Vec<bool> {
 fn jwks_status_refusal_then_release() {
     let mut tl = timeline();
     let (mut inj, _) = injector(&tl);
-    let mut jwks = HubJwksEndpoint::new(&config());
+    let mut jwks = inj.bind_receiver(HubJwksEndpoint::new(&config()));
     let key = new_key();
     jwks.publish_es256("k-expected", key.public_key().as_ref())
         .unwrap();
@@ -253,7 +253,7 @@ fn jwks_status_refusal_then_release() {
 fn jwks_malformed_body_is_200_but_unparsable() {
     let mut tl = timeline();
     let (mut inj, _) = injector(&tl);
-    let mut jwks = HubJwksEndpoint::new(&config());
+    let mut jwks = inj.bind_receiver(HubJwksEndpoint::new(&config()));
     let key = new_key();
     jwks.publish_es256("k1", key.public_key().as_ref()).unwrap();
     let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::MalformedBody);
@@ -271,7 +271,7 @@ fn jwks_malformed_body_is_200_but_unparsable() {
 fn heartbeat_refusal_makes_loss_and_release_recovers() {
     let mut tl = timeline();
     let (mut inj, _) = injector(&tl);
-    let mut hbr = HeartbeatReceiver::new(&config());
+    let mut hbr = inj.bind_receiver(HeartbeatReceiver::new(&config()));
     // 注入前: 正常な生存確認を受理する。
     inj.receive_heartbeat(&tl, &mut hbr, &hb(), NOW).unwrap();
     assert_eq!(hbr.status("a.test", NOW), Liveness::Alive);
@@ -307,8 +307,8 @@ fn logout_and_presentation_refusal_do_not_reach_inner() {
     let key = new_key();
     let mut tl = timeline();
     let (mut inj, _) = injector(&tl);
-    let mut lo = keyed_logout(&key);
-    let mut pr = keyed_presenter(&key);
+    let mut lo = inj.bind_receiver(keyed_logout(&key));
+    let mut pr = inj.bind_receiver(keyed_presenter(&key));
     let lt = logout_token(&key);
     let it = identity_token(&key);
     let kl = refusal(HubStubPort::Logout, HubStubRefusalKind::Status(500));
@@ -351,10 +351,10 @@ fn logout_and_presentation_refusal_do_not_reach_inner() {
 fn delay_reaches_wait_on_all_ports_and_passes_result_through() {
     let mut tl = timeline();
     let (mut inj, waits) = injector(&tl);
-    let mut lo = logout_rx();
-    let mut pr = presenter();
-    let mut hbr = HeartbeatReceiver::new(&config());
-    let mut jwks = HubJwksEndpoint::new(&config());
+    let mut lo = inj.bind_receiver(logout_rx());
+    let mut pr = inj.bind_receiver(presenter());
+    let mut hbr = inj.bind_receiver(HeartbeatReceiver::new(&config()));
+    let mut jwks = inj.bind_receiver(HubJwksEndpoint::new(&config()));
     let c = canary();
     for p in [
         HubStubPort::Presentation,
@@ -377,7 +377,7 @@ fn delay_reaches_wait_on_all_ports_and_passes_result_through() {
 fn delay_and_refusal_on_same_port_are_combined() {
     let mut tl = timeline();
     let (mut inj, waits) = injector(&tl);
-    let mut hbr = HeartbeatReceiver::new(&config());
+    let mut hbr = inj.bind_receiver(HeartbeatReceiver::new(&config()));
     inj.apply(&mut tl, delay(HubStubPort::Heartbeat, 5))
         .unwrap();
     inj.apply(
@@ -400,7 +400,7 @@ fn delay_and_refusal_on_same_port_are_combined() {
 fn baseline_rejects_apply_and_injects_nothing() {
     let mut tl = FaultTimeline::baseline(Instant::now(), t0()).unwrap();
     let (mut inj, waits) = injector(&tl);
-    let mut jwks = HubJwksEndpoint::new(&config());
+    let mut jwks = inj.bind_receiver(HubJwksEndpoint::new(&config()));
     let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503));
     assert_eq!(
         inj.apply(&mut tl, k).unwrap_err(),
@@ -476,8 +476,8 @@ fn state_errors_do_not_record() {
 fn record_lines_and_no_token_leak() {
     let mut tl = timeline();
     let (mut inj, _) = injector(&tl);
-    let mut lo = logout_rx();
-    let mut pr = presenter();
+    let mut lo = inj.bind_receiver(logout_rx());
+    let mut pr = inj.bind_receiver(presenter());
     let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503));
     let kl = refusal(HubStubPort::Logout, HubStubRefusalKind::Unreachable);
     let kp = refusal(HubStubPort::Presentation, HubStubRefusalKind::Unreachable);
@@ -547,8 +547,12 @@ fn injects_into_harness_started_stub() {
         refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503)),
     )
     .unwrap();
+    // 受け口は実行ごとに、セッションの設定から作って実行に結ぶ（7/8）。
+    let mut jwks = handle
+        .with(|s| inj.bind_receiver(HubJwksEndpoint::new(s.config())))
+        .unwrap();
     let r = handle
-        .with(|s| inj.serve_jwks(&tl, &mut s.jwks, NOW))
+        .with_injector(&mut inj, |_, inj| inj.serve_jwks(&tl, &mut jwks, NOW))
         .unwrap();
     assert_eq!(r.unwrap_err(), InjectedRefusal::Status(503));
 }
@@ -575,7 +579,7 @@ fn injector_is_bound_to_a_single_run() {
     }
     assert_eq!(inj.active_count(), 1);
     // 受け口も実行の一致を確かめ、別の実行の呼び出しは内側のログに入れない。
-    let mut jwks0 = HubJwksEndpoint::new(&config());
+    let mut jwks0 = inj.bind_receiver(HubJwksEndpoint::new(&config()));
     let calls = inj.call_log().records().len();
     assert_eq!(
         inj.serve_jwks(&base, &mut jwks0, NOW).unwrap_err(),
@@ -604,7 +608,7 @@ fn injector_is_bound_to_a_single_run() {
     // 基準線には新しい注入器を作る。以前の規則は効かない。
     let base = FaultTimeline::baseline(Instant::now(), t0()).unwrap();
     let (mut fresh, _) = injector(&base);
-    let mut jwks = HubJwksEndpoint::new(&config());
+    let mut jwks = fresh.bind_receiver(HubJwksEndpoint::new(&config()));
     assert_eq!(fresh.serve_jwks(&base, &mut jwks, NOW).unwrap().status, 200);
     assert_eq!(injected_flags(fresh.call_log()), [false]);
 }
@@ -614,7 +618,7 @@ fn injector_is_bound_to_a_single_run() {
 fn event_log_positions_separate_periods_of_the_same_fault() {
     let mut tl = timeline();
     let (mut inj, _) = injector(&tl);
-    let mut jwks = HubJwksEndpoint::new(&config());
+    let mut jwks = inj.bind_receiver(HubJwksEndpoint::new(&config()));
     let k = refusal(HubStubPort::Jwks, HubStubRefusalKind::Status(503));
     inj.apply(&mut tl, k).unwrap();
     assert!(inj.serve_jwks(&tl, &mut jwks, NOW).is_err());
@@ -736,7 +740,7 @@ fn second_injector_is_already_bound_even_after_events() {
 fn dropping_injector_after_delegated_call_keeps_binding() {
     let tl = timeline();
     let (mut inj, _) = injector(&tl);
-    let mut jwks = HubJwksEndpoint::new(&config());
+    let mut jwks = inj.bind_receiver(HubJwksEndpoint::new(&config()));
     assert_eq!(inj.serve_jwks(&tl, &mut jwks, NOW).unwrap().status, 200);
     drop(inj);
     assert!(matches!(
@@ -745,18 +749,80 @@ fn dropping_injector_after_delegated_call_keeps_binding() {
     ));
 }
 
-/// `with` のクロージャ内で遅れの `Wait` が走っても、同じハンドルを参照しない `Wait` なら止まらない。
+/// `with_injector` は遅れの `Wait` をセッションのロックの外で、戻る前に走らせる。`Wait` の中で同じハンドルの
+/// `is_running` を呼んでも自己待ちで止まらない（7/8）。
 #[test]
-fn delay_through_handle_with_runs_non_reentrant_wait() {
+fn delay_through_with_injector_runs_wait_outside_the_lock() {
     let comp = HubStubComponent::new(config());
     let handle = comp.handle();
     let _running = Harness::start(HarnessConfig::new().with(Box::new(comp))).unwrap();
     let mut tl = timeline();
-    let (mut inj, waits) = injector(&tl);
+    let seen: Rc<RefCell<Vec<(Duration, bool)>>> = Rc::default();
+    let (h2, s2) = (handle.clone(), Rc::clone(&seen));
+    let mut inj = HubStubFaultInjector::new(
+        move |d: Duration| s2.borrow_mut().push((d, h2.is_running())),
+        &tl,
+    )
+    .unwrap();
     inj.apply(&mut tl, delay(HubStubPort::Jwks, 5)).unwrap();
+    let mut jwks = handle
+        .with(|s| inj.bind_receiver(HubJwksEndpoint::new(s.config())))
+        .unwrap();
     let r = handle
-        .with(|s| inj.serve_jwks(&tl, &mut s.jwks, NOW))
+        .with_injector(&mut inj, |_, inj| {
+            let r = inj.serve_jwks(&tl, &mut jwks, NOW);
+            // ロックの中ではまだ流れていない。
+            assert!(seen.borrow().is_empty());
+            r
+        })
         .unwrap();
     assert_eq!(r.unwrap().status, 200);
-    assert_eq!(*waits.borrow(), vec![Duration::from_millis(5)]);
+    assert_eq!(*seen.borrow(), vec![(Duration::from_millis(5), true)]);
+    // 後続の直接の呼び出しは、これまでどおりその場で流す。
+    let r = inj.serve_jwks(&tl, &mut jwks, NOW + 1).unwrap();
+    assert_eq!(r.status, 200);
+    assert_eq!(seen.borrow().len(), 2);
+}
+
+/// 受け口は結んだ実行の注入器にだけ渡せる。別の実行の注入器の受け口は、内側へ委ねる前に拒否し、
+/// どちらのログにも残さない（7/8。P1）。`Debug` は固定の文字列。
+#[test]
+fn receiver_bound_to_another_run_is_rejected_on_all_ports() {
+    let key = new_key();
+    let tl_a = timeline();
+    let (mut inj_a, _) = injector(&tl_a);
+    let tl_b = timeline();
+    let (inj_b, _) = injector(&tl_b);
+    let mut jwks = inj_b.bind_receiver(HubJwksEndpoint::new(&config()));
+    let mut hbr = inj_b.bind_receiver(HeartbeatReceiver::new(&config()));
+    let mut lo = inj_b.bind_receiver(keyed_logout(&key));
+    let mut pr = inj_b.bind_receiver(keyed_presenter(&key));
+    assert_eq!(
+        inj_a.serve_jwks(&tl_a, &mut jwks, NOW).unwrap_err(),
+        HubStubCallError::RunMismatch
+    );
+    assert_eq!(
+        inj_a
+            .receive_heartbeat(&tl_a, &mut hbr, &hb(), NOW)
+            .unwrap_err(),
+        HubStubCallError::RunMismatch
+    );
+    assert_eq!(
+        inj_a
+            .receive_logout(&tl_a, &mut lo, &logout_token(&key), NOW)
+            .unwrap_err(),
+        HubStubCallError::RunMismatch
+    );
+    assert_eq!(
+        inj_a
+            .present(&tl_a, &mut pr, &identity_token(&key), NOW)
+            .unwrap_err(),
+        HubStubCallError::RunMismatch
+    );
+    assert!(inj_a.call_log().records().is_empty());
+    assert!(inj_b.call_log().records().is_empty());
+    assert_eq!(format!("{jwks:?}"), "RunBound { .. }");
+    // 注入器 A は結んだ受け口で通常どおり呼べる。
+    let mut own = inj_a.bind_receiver(HubJwksEndpoint::new(&config()));
+    assert_eq!(inj_a.serve_jwks(&tl_a, &mut own, NOW).unwrap().status, 200);
 }

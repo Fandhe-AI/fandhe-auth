@@ -19,8 +19,11 @@
 //! - 記録が先、状態の変更が後。記録が拒否されたら状態を変えない。基準線では記録が拒否し、注入もしない（fail-closed）。
 //! - `MalformedBody` は JWKS の口だけが受ける（hub-stub の `Refusal` で表せない）。他の口は `InvalidParam`。
 //! - 遅れは `Wait` へ渡すだけ。眠る実装は出さない（セッションのロックを握ったまま待たないため。未決）。
-//!   `HubStubHandle::with` のクロージャ内で受け口を呼ぶとセッションのロックを握ったまま `Wait` が走る。
-//!   `Wait` は同じハンドルを参照しない（再入しない）ものに限る。
+//!   遅れは内側の呼び出しが戻った直後に溜め場から `Wait` へ流す（応答を返す前）。`HubStubHandle::with` の中で受け口を
+//!   直接呼ぶと、今までどおりセッションのロックを握ったまま `Wait` が走る。ロックの外で流すには `HubStubHandle::with_injector`
+//!   を使う（7/8）。
+//! - 受け口は [`RunBound`] に包んで実行に結ぶ（`bind_receiver`）。別の実行の注入器の受け口には、この実行の注入が効かず、
+//!   内側へ委ねる前に `RunMismatch`（7/8）。
 //! - 受け口は `timeline` を受け、注入器の実行と一致しなければ内側を呼ばず `RunMismatch`（基準線の呼び出しを注入器のログへ入れない）。
 //! - hub-stub の呼び出しの記録（`InjectionLog.at` は試験の論理時刻）は [`FaultRecord`](super::FaultRecord) に入れず、
 //!   [`HubStubFaultInjector::call_log`] で読み取り専用に出す。対応は順序だけで取る。
@@ -32,8 +35,8 @@
 //! 名前・形は仮置きで、人が確認する。
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fandhe_auth_hub_stub::fault::{
@@ -184,10 +187,68 @@ fn build_config(active: &[PortFaults; 4]) -> HubFaultConfig {
     }
 }
 
+/// 内側の注入器が遅れを渡す先。値を溜めるだけで眠らない（実際の `Wait` は注入器が受け口の呼び出しの後に呼ぶ。7/8）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DelayBuf(Arc<Mutex<Vec<Duration>>>);
+
+impl Wait for DelayBuf {
+    fn wait(&mut self, delay: Duration) {
+        if let Ok(mut g) = self.0.lock() {
+            g.push(delay);
+        }
+    }
+}
+
+/// 実行に結んだ受け口（TASK-13 の 7/8）。別の実行の注入が効かないよう、受け口は
+/// [`HubStubFaultInjector::bind_receiver`] でだけ作り、結んだ実行の注入器にだけ渡せる（違えば内側へ委ねる前に `RunMismatch`）。
+/// 一度結んだ受け口を取り出して別の実行へ結び直す口（`into_inner`）は出さない。
+pub struct RunBound<T> {
+    run_id: u64,
+    inner: T,
+}
+
+impl<T> RunBound<T> {
+    /// 内側の受け口の参照（状態の確認用）。
+    pub fn get(&self) -> &T {
+        &self.inner
+    }
+
+    /// 内側の受け口の可変参照（鍵の公開などの準備用）。
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T> std::ops::Deref for RunBound<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> std::ops::DerefMut for RunBound<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T> fmt::Debug for RunBound<T> {
+    /// 受け口は鍵・期待値を持つので固定の文字列だけを出す（SECR-11・SECR-23）。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RunBound { .. }")
+    }
+}
+
 /// 注入の入口。内側は hub-stub の注入器。
 pub struct HubStubFaultInjector<W: Wait> {
     run_id: u64,
-    inner: HubFaultInjector<W>,
+    inner: HubFaultInjector<DelayBuf>,
+    /// 内側が渡した遅れの溜め場。
+    delays: DelayBuf,
+    /// 利用者の遅れの渡し先。
+    wait: W,
+    /// `true` の間は溜めた遅れを流さず、`flush_delays` まで残す（`HubStubHandle::with_injector` が使う）。
+    deferred: bool,
     active: [PortFaults; 4],
     /// 実行側の結合の印。未使用（`apply` も受け口の委譲も通っていない）まま破棄されたら下ろす。
     bound: Arc<AtomicBool>,
@@ -223,8 +284,8 @@ impl<W: Wait> HubStubFaultInjector<W> {
     /// 複数あると順序の照合が崩れる。2 つ目は `AlreadyBound`。
     /// 一度も `apply` も受け口の委譲も通らないまま注入器を破棄した場合は結合を取り消し、結び直すか直接の確定ができる。
     ///
-    /// `wait` は遅れの渡し先で、`HubStubHandle::with` のクロージャ内で受け口を呼ぶとセッションのロックを握ったまま走る。
-    /// 同じハンドルを参照する（再入する）ものを渡さない。
+    /// `wait` は遅れの渡し先。`HubStubHandle::with` の中で受け口を直接呼ぶとセッションのロックを握ったまま走るので、
+    /// 同じハンドルを参照する（再入する）ものを渡さない。`HubStubHandle::with_injector` ならロックの外で走る。
     pub fn new(wait: W, timeline: &FaultTimeline) -> Result<Self, HubStubFaultError> {
         let Some(bound) = timeline
             .bind_injector()
@@ -232,9 +293,13 @@ impl<W: Wait> HubStubFaultInjector<W> {
         else {
             return Err(HubStubFaultError::AlreadyBound);
         };
+        let delays = DelayBuf::default();
         Ok(Self {
             run_id: timeline.run_id(),
-            inner: HubFaultInjector::new(HubFaultConfig::baseline(), wait),
+            inner: HubFaultInjector::new(HubFaultConfig::baseline(), delays.clone()),
+            delays,
+            wait,
+            deferred: false,
             active: [PortFaults::default(); 4],
             bound,
             used: false,
@@ -403,66 +468,123 @@ impl<W: Wait> HubStubFaultInjector<W> {
         self.inner.log()
     }
 
+    /// 受け口をこの注入器の実行に結ぶ。結んだ受け口だけがこの注入器の受け口の口へ渡せる（7/8。別の実行の注入を持ち込まない）。
+    pub fn bind_receiver<T>(&self, inner: T) -> RunBound<T> {
+        RunBound {
+            run_id: self.run_id,
+            inner,
+        }
+    }
+
+    /// 受け口がこの実行のものかを、内側へ委ねる前に確かめる。
+    fn guard_receiver<T>(&self, bound: &RunBound<T>) -> Result<(), HubStubCallError> {
+        if bound.run_id == self.run_id {
+            Ok(())
+        } else {
+            Err(HubStubCallError::RunMismatch)
+        }
+    }
+
+    /// 内側が溜めた遅れを利用者の `wait` へ流す。`deferred` の間は残す。
+    fn after_call(&mut self) {
+        if !self.deferred {
+            self.flush_delays();
+        }
+    }
+
+    /// 溜めた遅れを利用者の `wait` へ渡す（受け口の呼び出しの後、または `with_injector` がロックを放した後）。
+    /// 溜め場のロックは `wait` を呼ぶ前に放す（`wait` の中の再入で止まらない）。
+    pub(crate) fn flush_delays(&mut self) {
+        let taken = match self.delays.0.lock() {
+            Ok(mut g) => std::mem::take(&mut *g),
+            Err(_) => Vec::new(),
+        };
+        for d in taken {
+            self.wait.wait(d);
+        }
+    }
+
+    /// 流すのを後にするかを切り替える（`HubStubHandle::with_injector` 用）。
+    pub(crate) fn set_deferred(&mut self, deferred: bool) {
+        self.deferred = deferred;
+    }
+
     /// 本人トークンの提示（hub-stub の同名へ委ねる）。
     pub fn present(
         &mut self,
         timeline: &FaultTimeline,
-        inner: &mut IdentityTokenReceiver,
+        inner: &mut RunBound<IdentityTokenReceiver>,
         token: &str,
         now: u64,
     ) -> Result<Result<ReceivedIdentity, PresentationRejection>, HubStubCallError> {
         self.guard(timeline)?;
+        self.guard_receiver(inner)?;
         // 内側を呼ぶと呼び出しの記録が積まれる。以後は結合を取り消さない（再結合で記録と log_pos がずれるため）。
         self.used = true;
-        self.inner
-            .present(inner, token, now)
-            .map_err(HubStubCallError::Injected)
+        let r = self
+            .inner
+            .present(&mut inner.inner, token, now)
+            .map_err(HubStubCallError::Injected);
+        self.after_call();
+        r
     }
 
     /// 失効の通知（同上）。
     pub fn receive_logout(
         &mut self,
         timeline: &FaultTimeline,
-        inner: &mut LogoutTokenReceiver,
+        inner: &mut RunBound<LogoutTokenReceiver>,
         token: &str,
         now: u64,
     ) -> Result<Result<LogoutReceipt, LogoutRejection>, HubStubCallError> {
         self.guard(timeline)?;
+        self.guard_receiver(inner)?;
         // 内側を呼ぶと呼び出しの記録が積まれる。以後は結合を取り消さない（再結合で記録と log_pos がずれるため）。
         self.used = true;
-        self.inner
-            .receive_logout(inner, token, now)
-            .map_err(HubStubCallError::Injected)
+        let r = self
+            .inner
+            .receive_logout(&mut inner.inner, token, now)
+            .map_err(HubStubCallError::Injected);
+        self.after_call();
+        r
     }
 
     /// 生存確認（同上）。
     pub fn receive_heartbeat(
         &mut self,
         timeline: &FaultTimeline,
-        inner: &mut HeartbeatReceiver,
+        inner: &mut RunBound<HeartbeatReceiver>,
         heartbeat: &Heartbeat,
         now: u64,
     ) -> Result<(), HubStubCallError> {
         self.guard(timeline)?;
+        self.guard_receiver(inner)?;
         // 内側を呼ぶと呼び出しの記録が積まれる。以後は結合を取り消さない（再結合で記録と log_pos がずれるため）。
         self.used = true;
-        self.inner
-            .receive_heartbeat(inner, heartbeat, now)
-            .map_err(HubStubCallError::Injected)
+        let r = self
+            .inner
+            .receive_heartbeat(&mut inner.inner, heartbeat, now)
+            .map_err(HubStubCallError::Injected);
+        self.after_call();
+        r
     }
 
     /// Hub の JWKS の配信（同上）。
     pub fn serve_jwks(
         &mut self,
         timeline: &FaultTimeline,
-        inner: &mut HubJwksEndpoint,
+        inner: &mut RunBound<HubJwksEndpoint>,
         now: u64,
     ) -> Result<JwksResponse, HubStubCallError> {
         self.guard(timeline)?;
+        self.guard_receiver(inner)?;
         // 内側を呼ぶと呼び出しの記録が積まれる。以後は結合を取り消さない（再結合で記録と log_pos がずれるため）。
         self.used = true;
-        self.inner
-            .serve_jwks(inner, now)
-            .map_err(HubStubCallError::Injected)
+        let r = self
+            .inner
+            .serve_jwks(&mut inner.inner, now)
+            .map_err(HubStubCallError::Injected);
+        self.after_call();
+        r
     }
 }

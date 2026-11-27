@@ -3,7 +3,7 @@
 //! 役割: DB の遮断と遅延・インスタンスの停止・DB の外の保存先の遮断・Hub の stub の遅れと拒否・時計のずれ
 //! の種類を 1 か所で数え、種類ごとの対象とパラメータの形を決める。呼び出し元は結合試験（試験ビルド）と、
 //! 後続の段（2/8〜7/8）の注入の実装。注入の仕組み自体はここに無い（各段が `fault/` にファイルを足す）。
-//! 記録の形式は [`record`]。2/8 で DB の遮断と遅延の注入（[`db`]）を、3/8 でインスタンスの停止の注入（`instance`。Unix 限定）を、4/8 で DB の外の保存先の遮断の注入（[`external_store`]）を、5/8 で Hub の stub の遅れと拒否の注入（[`hub_stub`]）を、6/8 で時計のずれの注入（[`clock`]）を置いた。
+//! 記録の形式は [`record`]。2/8 で DB の遮断と遅延の注入（[`db`]）を、3/8 でインスタンスの停止の注入（`instance`。Unix 限定）を、4/8 で DB の外の保存先の遮断の注入（[`external_store`]）を、5/8 で Hub の stub の遅れと拒否の注入（[`hub_stub`]）を、6/8 で時計のずれの注入（[`clock`]）を置いた。7/8 で、基準線と注入ありを同じ本体で流す入口（[`pair`]・`FaultTimeline::inject`）を置いた。
 //!
 //! 設計上の約束:
 //! - 種類は網羅の `match` で名前と対象を引く。種類を足して書き忘れるとコンパイルできない。
@@ -24,19 +24,21 @@ pub mod external_store;
 pub mod hub_stub;
 #[cfg(unix)]
 pub mod instance;
+pub mod pair;
 pub mod record;
 
 pub use clock::{ClockSkewError, ClockSkewInjector, SkewedClock};
 pub use db::{DbFaultError, DbFaultProxy, StallExit, UpstreamStall};
 pub use external_store::{ExternalStoreFaultError, ExternalStoreFaultProxy};
 pub use hub_stub::{
-    HubStubCallError, HubStubFaultError, HubStubFaultInjector, HubStubFinishFailure,
+    HubStubCallError, HubStubFaultError, HubStubFaultInjector, HubStubFinishFailure, RunBound,
 };
 #[cfg(unix)]
 pub use instance::{InstanceExit, InstanceFaultError, InstanceFaultHandle};
+pub use pair::{FaultPair, PairError, PairedRecords};
 pub use record::{
-    FAULT_RECORD_FORMAT, FaultEvent, FaultFinishFailure, FaultRecord, FaultRecordError,
-    FaultTimeline, RunMode,
+    FAULT_RECORD_FORMAT, FaultEvent, FaultFinishFailure, FaultRecord, FaultRecordError, FaultStep,
+    FaultTimeline, InjectError, RunMode,
 };
 
 /// 注入の対象。[`crate::ComponentKind`] とは別の型（DB の外の保存先は構成要素ではないため）。
