@@ -95,5 +95,12 @@ ld_pf="fandhe-auth-core"
 ld_run "cannot inspect: PROD_FEATURES malformed" 2 "must be comma-separated"
 ld_pf=""
 ld_write core ""
+# (8) glob の文字を含む名前は展開されない。cwd に一致するファイルがあっても BODY_PKGS に無い名前として 2（#6170）
+mkdir -p "${ld_fx}/co-glob-probe"
+: > "${ld_fx}/co-glob-probe/x"
+ld_pf="co*/x"
+ld_run "cannot inspect: PROD_FEATURES with a glob character is not expanded" 2 "not in the inspected set (co*)"
+ld_pf=""
+rm -rf "${ld_fx}/co-glob-probe"
 
 finish "part 12"
