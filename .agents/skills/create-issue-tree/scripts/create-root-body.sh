@@ -6,7 +6,9 @@
 #       レビュー修正のたびに SKILL.md が肥大するため、本文生成を本スクリプトへ切り出した（Issue #555）。
 #       Phase 別表は sub_issues API の実ツリーだけから生成し、手書きのプレースホルダーを本文に載せない。
 #
-# 使い方: create-root-body.sh --root <n> --granularity <Nh>
+# 使い方: create-root-body.sh --root <n> --granularity <Nh> [--repo <host/owner/repo>]
+#   --repo  対象リポジトリ（任意）。渡すと sub_issues の取得と gh issue edit をそのリポジトリへ明示する（Step 5 が状態ファイルに
+#           記録したリポジトリ。別のリポジトリの同じ番号のルートを更新しない）。省略時は gh の {owner}/{repo} の解決に従う
 #         引数が無ければ環境変数 ROOT_NUMBER / GRANULARITY を使う（SKILL.md の既存フロー互換）。
 #
 # 不変条件:
@@ -34,18 +36,31 @@ die() {
 
 ROOT_NUMBER="${ROOT_NUMBER:-}"
 GRANULARITY="${GRANULARITY:-}"
+REPO=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --root | --granularity)
-      [[ $# -ge 2 ]] || die 1 "$1 に値がありません。使い方: create-root-body.sh --root <n> --granularity <Nh>"
-      if [[ "$1" == "--root" ]]; then ROOT_NUMBER="$2"; else GRANULARITY="$2"; fi
+    --root | --granularity | --repo)
+      [[ $# -ge 2 ]] || die 1 "$1 に値がありません。使い方: create-root-body.sh --root <n> --granularity <Nh> [--repo <host/owner/repo>]"
+      case "$1" in
+        --root) ROOT_NUMBER="$2" ;;
+        --granularity) GRANULARITY="$2" ;;
+        --repo) REPO="$2" ;;
+      esac
       shift 2
       ;;
-    *) die 1 "未知の引数: $1。使い方: create-root-body.sh --root <n> --granularity <Nh>" ;;
+    *) die 1 "未知の引数: $1。使い方: create-root-body.sh --root <n> --granularity <Nh> [--repo <host/owner/repo>]" ;;
   esac
 done
 [[ "${ROOT_NUMBER}" =~ ^[1-9][0-9]*$ ]] || die 1 "--root（ROOT_NUMBER）は正整数で指定してください。"
 [[ "${GRANULARITY}" =~ ^[1-9][0-9]*h$ ]] || die 1 "--granularity（GRANULARITY）は正整数+h 形式（例: 2h）で指定してください。"
+# --repo は gh の引数・API のパスへ入れる前に形式を確かめる。ホスト・owner/repo は list_subs へ、--repo は gh issue edit へ渡す
+LS_ARGS=()
+GH_REPO_ARGS=()
+if [[ -n "${REPO}" ]]; then
+  [[ "${REPO}" =~ ^[A-Za-z0-9.-]+(:[0-9]{1,5})?/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$ ]] || die 1 "--repo は host/owner/repo の形式で指定してください。"
+  LS_ARGS=("${REPO%%/*}" "${REPO#*/}")
+  GH_REPO_ARGS=(--repo "${REPO}")
+fi
 
 # gh・jq の欠落はライブラリ読み込み失敗と区別して前提不備（exit 2）にする
 command -v gh >/dev/null 2>&1 || die 2 "gh が見つかりません。"
@@ -60,7 +75,7 @@ trap 'rm -f "${BODY_FILE}" "${SUMMARY_FILE}" "${DETAIL_FILE}"' EXIT
 BODY_FILE=$(mktemp) && SUMMARY_FILE=$(mktemp) && DETAIL_FILE=$(mktemp) \
   || die 1 "一時ファイルを作成できません。中止します。"
 
-PHASES=$(list_subs "${ROOT_NUMBER}") \
+PHASES=$(list_subs "${ROOT_NUMBER}" ${LS_ARGS[@]+"${LS_ARGS[@]}"}) \
   || die 1 "ルート #${ROOT_NUMBER} の sub-issues を取得できません。中止します。"
 PHASE_COUNT=$(printf '%s' "${PHASES}" | jq 'length') \
   || die 1 "ルート #${ROOT_NUMBER} の Phase 親数の集計に失敗しました。ルート本文は更新しません。"
@@ -87,7 +102,7 @@ for i in $(seq 0 $((PHASE_COUNT - 1))); do
     || PNO=''
   [[ "${PNO}" =~ ^[0-9]+$ ]] \
     || die 1 "Phase 親 #${PNUM} の Phase 番号（phase:N ラベル / タイトル）を決定できません。中止します。"
-  ALL_CHILDREN=$(list_subs "${PNUM}") \
+  ALL_CHILDREN=$(list_subs "${PNUM}" ${LS_ARGS[@]+"${LS_ARGS[@]}"}) \
     || die 1 "Phase 親 #${PNUM} の sub-issues を取得できません。中止します。"
   CHILDREN=$(printf '%s' "${ALL_CHILDREN}" | jq '[.[] | select(.state == "open")]') \
     || die 1 "Phase 親 #${PNUM} の sub-issues の絞り込みに失敗しました。ルート本文は更新しません。"
@@ -112,7 +127,7 @@ for i in $(seq 0 $((PHASE_COUNT - 1))); do
       || die 1 "子 issue の番号が正整数ではありません。ルート本文は更新しません。"
     CTITLE=$(printf '%s' "${CHILDREN}" | jq -er --argjson j "${j}" ".[\$j].title | ${CELL}") \
       || die 1 "#${CNUM} のタイトルを取得できません。ルート本文は更新しません。"
-    GRAND_OPEN=$(count_open_desc "${CNUM}") \
+    GRAND_OPEN=$(count_open_desc "${CNUM}" ${LS_ARGS[@]+"${LS_ARGS[@]}"}) \
       || die 1 "#${CNUM} の子孫を取得できません。中止します。"
     TOTAL=$((TOTAL + GRAND_OPEN))
     if [ "${GRAND_OPEN}" -ge 1 ]; then DECOMP='sub-issue あり'; else DECOMP='-'; fi
@@ -123,7 +138,7 @@ for i in $(seq 0 $((PHASE_COUNT - 1))); do
   for CNUM in ${CLOSED_NUMS}; do
     [[ "${CNUM}" =~ ^[1-9][0-9]*$ ]] \
       || die 1 "closed の子 issue の番号が正整数ではありません。ルート本文は更新しません。"
-    GRAND_OPEN=$(count_open_desc "${CNUM}") \
+    GRAND_OPEN=$(count_open_desc "${CNUM}" ${LS_ARGS[@]+"${LS_ARGS[@]}"}) \
       || die 1 "#${CNUM} の子孫を取得できません。中止します。"
     TOTAL=$((TOTAL + GRAND_OPEN))
   done
@@ -167,5 +182,5 @@ rc=0; ROWS=$(grep -cE '^\| Phase [0-9]+ \| #[0-9]+ ' "${BODY_FILE}") || rc=$?
 { [ "${rc}" -le 1 ] && [ "${ROWS}" -eq "${PHASE_COUNT}" ]; } \
   || die 1 "Phase 行数（${ROWS:-?}）が Phase 親数（${PHASE_COUNT}）と一致しません。ルート本文は更新しません。"
 
-gh issue edit "${ROOT_NUMBER}" --body-file "${BODY_FILE}" || exit $?
+gh issue edit "${ROOT_NUMBER}" ${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"} --body-file "${BODY_FILE}" || exit $?
 echo "result=updated root=${ROOT_NUMBER} phases=${PHASE_COUNT}"

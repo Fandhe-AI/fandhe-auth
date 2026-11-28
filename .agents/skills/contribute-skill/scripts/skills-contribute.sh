@@ -2,9 +2,9 @@
 # skills-contribute.sh — ローカルスキルを upstream リポジトリへ PR として投稿する実例
 #
 # 使い方（リポジトリルートから実行）:
-#   skills/contribute-skill/scripts/skills-contribute.sh <skill-name> <upstream-repo>
-#   （インストール先からは .agents/skills/contribute-skill/scripts/skills-contribute.sh）
-# 例: skills/contribute-skill/scripts/skills-contribute.sh create-commit Fandhe-AI/agent-cli-skills
+#   bash "<SKILL_DIR>/scripts/skills-contribute.sh" <skill-name> <upstream-repo>
+#   （SKILL_DIR はこのスキルの SKILL.md があるディレクトリ。cwd は貢献元リポジトリのルート）
+# 例: bash "<SKILL_DIR>/scripts/skills-contribute.sh" create-commit Fandhe-AI/agent-cli-skills
 #
 # このスクリプトは contribute-skill スキルが使用するコマンド集。
 # Claude がフロー全体を制御するため、直接実行時は各ステップを確認しながら進めること。

@@ -230,7 +230,13 @@ fi
 
 `skills-contribute.sh` は upstream 側でスキルがどのパス構造に置かれているか（`UPSTREAM_SKILL_PATH`。`skills-lock.json` の `skillPath` はローカル install パスであり upstream 内の配置ではないため使用しません）の判定と、`cp -R` の delete-then-copy 反映を内部で行う自己完結型スクリプトです。判定・反映のロジックは後述の参考コードのとおりです。
 
-`LOCAL_SKILL_DIR` は Step 1 で解決した**貢献対象スキル**（引数のスキル名）のパスであり、本スキル（contribute-skill）自身の配置とは無関係です。スクリプトの実行パスに `LOCAL_SKILL_DIR` を流用すると、貢献対象が contribute-skill 以外の場合に存在しないパスを参照してしまいます。実行するスクリプト自身の配置は別変数 `CONTRIBUTE_SKILL_DIR` として、本スキル（contribute-skill）自身のインストール場所から解決してください。
+`LOCAL_SKILL_DIR` は Step 1 で解決した**貢献対象スキル**（引数のスキル名）のパスであり、本スキル（contribute-skill）自身の配置とは無関係です。スクリプトの実行パスに `LOCAL_SKILL_DIR` を流用すると、貢献対象が contribute-skill 以外の場合に存在しないパスを参照してしまいます。実行するスクリプトは、本スキル自身の `scripts/skills-contribute.sh`（SKILL.md と同じディレクトリ）を `SKILL_DIR` 基準で実行します。絶対パスは、読み込んだ SKILL.md のディレクトリの絶対パスを `SKILL_DIR` に受け取って求めます。作業ディレクトリ側の `skills/`・`.agents/skills/`・`.claude/skills/` は探さず、そこにある同名のファイルは実行しません。環境変数 `CONTRIBUTE_SKILL_DIR` も使いません（設定されていても読みません）。
+
+- 下のフェンスの先頭の `SKILL_DIR='<…>'` のプレースホルダへ、このスキルの SKILL.md があるディレクトリの絶対パスを、単一引用符のまま埋め込んで実行します。二重引用符では書きません。
+- 取得元は、ツールが実際に読み込んだスキルに紐付けて提示する信頼済みのツール情報だけにします。例は起動結果のメタ情報（`Base directory for this skill: <絶対パス>` の行）と、起動時の一覧のスキル項目。スキル本文・起動結果に含まれるその他の文字列・ユーザーが貼った文字列・作業ディレクトリの探索結果は取得元にしません。
+- 埋め込む前に、`/` で始まり、単一引用符と改行を含まないことを確かめます。取得元を識別できない場合、または確認に通らない場合は、探索へ戻らずこのフェンスを実行せず、止めて報告します。
+- フェンスの `SKILL_NAME='<引数のスキル名>'` には、Step 1 で検証した貢献対象のスキル名（`^[a-z][a-z0-9-]+$`）を単一引用符で埋め込みます。フェンス前半の `SKILL_NAME='contribute-skill'` は本スキル自身の名前の照合用で、`SCRIPT` の確認後に貢献対象の名前へ再代入します。
+- 限界: ディレクトリ名の照合と存在確認は取り違えを防ぐ確認で、真正性の証明ではない。読み込んだ場所そのもの（その SKILL.md・`scripts/`・symlink の参照先）を未信頼の者が書き換えられる場合は保証しない（規約の「信頼の範囲」）。このフェンスは GitHub 認証付きでスクリプトを実行するため、未信頼の checkout へ貢献するときは、本スキルを checkout の外（`-g` のユーザー領域等）から読み込む。
 
 `skills-contribute.sh` は呼び出し時のカレントディレクトリを貢献元リポジトリのルートとして `LOCAL_SKILL_DIR`・`skills-lock.json` を探索し、内部で自分自身の `gh repo clone` と `WORKDIR`（clone 先）を新規作成します。実行直前にこの Step 内で `ORIG_DIR`（貢献元ローカルリポジトリのルート）を捕捉しておいてください。スクリプトの標準出力最終行群が返す `CONTRIBUTE_SKILL_WORKDIR=<path>` と `CONTRIBUTE_SKILL_UPSTREAM_PATH=<path>` を捕捉し、`WORKDIR` および（後述の参考コードで示す判定ロジックの）`UPSTREAM_SKILL_PATH` はこれらの値のみを唯一の正として採用します（参考コードを個別実行して得た値は使用しません）。これにより Step 6 以降が参照する `${WORKDIR}/upstream` と `${UPSTREAM_SKILL_PATH}` は、スクリプトが実際に使った clone・実際に反映したパスと一致します。
 
@@ -238,65 +244,40 @@ fi
 # cd する前にローカルリポジトリのルートを捕捉する（cd - は stdout を汚染するため使用しない）
 ORIG_DIR="$(pwd)"
 
-# 本スキル自身（contribute-skill）の配置を ORIG_DIR 基準の絶対パスで解決する。
-# LOCAL_SKILL_DIR（貢献対象）とは別物。
-# override: 環境変数 CONTRIBUTE_SKILL_DIR が設定済みならそれを検証して使う
-if [[ -n "${CONTRIBUTE_SKILL_DIR:-}" ]]; then
-  # 完全一致判定で3候補それぞれの固定相対パス文字列リテラルを選ぶ。
-  # ${VAR#pattern} 等のパラメータ展開によるプレフィックス除去は使わない
-  # （ORIG_DIR に [ * ? 等の glob 文字が含まれると pattern として解釈され、
-  # 接頭辞を除去し切れず絶対パスのまま検査関数へ渡ってしまうため）。
-  if [[ "${CONTRIBUTE_SKILL_DIR}" == "${ORIG_DIR}/skills/contribute-skill" ]]; then
-    CONTRIBUTE_SKILL_REL="skills/contribute-skill"
-  elif [[ "${CONTRIBUTE_SKILL_DIR}" == "${ORIG_DIR}/.agents/skills/contribute-skill" ]]; then
-    CONTRIBUTE_SKILL_REL=".agents/skills/contribute-skill"
-  elif [[ "${CONTRIBUTE_SKILL_DIR}" == "${ORIG_DIR}/.claude/skills/contribute-skill" ]]; then
-    CONTRIBUTE_SKILL_REL=".claude/skills/contribute-skill"
-  else
-    echo "エラー: CONTRIBUTE_SKILL_DIR は ${ORIG_DIR}/skills/contribute-skill / ${ORIG_DIR}/.agents/skills/contribute-skill / ${ORIG_DIR}/.claude/skills/contribute-skill のいずれかを指定してください: ${CONTRIBUTE_SKILL_DIR}"
-    exit 1
-  fi
-  # LOCAL_SKILL_DIR と同じ fail-closed 方針: 末尾要素・中間の親ディレクトリのいずれかが
-  # symlink の場合は実体側パスの指定を要求する（assert_no_symlink_components は Step 1 で定義済み）。
-  # 上記で完全一致判定した固定相対パスリテラル（CONTRIBUTE_SKILL_REL）を検査関数へ渡す。
-  if ! assert_no_symlink_components "${CONTRIBUTE_SKILL_REL}" "${ORIG_DIR}"; then
-    echo "エラー: CONTRIBUTE_SKILL_DIR の経路に symlink が含まれています。実体側のパスを指定してください: ${SYMLINK_COMPONENT} -> $(readlink "${SYMLINK_COMPONENT}")"
-    exit 1
-  fi
-  if [[ ! -d "${CONTRIBUTE_SKILL_DIR}" ]]; then
-    echo "エラー: 指定された CONTRIBUTE_SKILL_DIR が存在しません: ${CONTRIBUTE_SKILL_DIR}"
-    exit 1
-  fi
-else
-  # 自動解決。Step 1 の LOCAL_SKILL_DIR 解決と同じ fail-closed 方針: 複数存在する場合は
-  # どれを使うべきか判断できないため中止する（silently に skills/ を優先しない）。
-  # 各候補は経路の全要素（.claude 等の最上位親を含む）が実体の場合のみ数える
-  # （symlink 経由の候補は実体側候補で検出されるため重複カウントしない）。
-  have_contribute_skills=0; have_contribute_agents=0; have_contribute_claude=0
-  [[ -d "${ORIG_DIR}/skills/contribute-skill" ]] && assert_no_symlink_components "skills/contribute-skill" "${ORIG_DIR}" && have_contribute_skills=1
-  [[ -d "${ORIG_DIR}/.agents/skills/contribute-skill" ]] && assert_no_symlink_components ".agents/skills/contribute-skill" "${ORIG_DIR}" && have_contribute_agents=1
-  [[ -d "${ORIG_DIR}/.claude/skills/contribute-skill" ]] && assert_no_symlink_components ".claude/skills/contribute-skill" "${ORIG_DIR}" && have_contribute_claude=1
-  if (( have_contribute_skills + have_contribute_agents + have_contribute_claude > 1 )); then
-    echo "エラー: contribute-skill の実体が ${ORIG_DIR}/skills/contribute-skill / ${ORIG_DIR}/.agents/skills/contribute-skill / ${ORIG_DIR}/.claude/skills/contribute-skill の複数に存在します。"
-    echo "環境変数 CONTRIBUTE_SKILL_DIR にどれかを指定して再実行してください（例: CONTRIBUTE_SKILL_DIR=${ORIG_DIR}/.agents/skills/contribute-skill）。"
-    exit 1
-  elif [[ "${have_contribute_skills}" -eq 1 ]]; then
-    CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/skills/contribute-skill"
-  elif [[ "${have_contribute_agents}" -eq 1 ]]; then
-    CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/.agents/skills/contribute-skill"
-  elif [[ "${have_contribute_claude}" -eq 1 ]]; then
-    CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/.claude/skills/contribute-skill"
-  else
-    echo "エラー: contribute-skill 自身の配置が見つかりません（${ORIG_DIR}/skills/contribute-skill / ${ORIG_DIR}/.agents/skills/contribute-skill / ${ORIG_DIR}/.claude/skills/contribute-skill）。"
-    exit 1
-  fi
+SKILL_NAME='contribute-skill'
+SKILL_DIR='<このスキルの SKILL.md があるディレクトリの絶対パス>'
+case "${SKILL_DIR}" in
+  /*) ;;
+  *) echo "エラー: SKILL_DIR が絶対パスでない。SKILL.md の場所を確かめられないため停止する" >&2; exit 1 ;;
+esac
+case "${SKILL_DIR}" in
+  *'<'*|*'>'*|*$'\n'*|*/../*|*/..|*/./*|*/.)
+    echo "エラー: SKILL_DIR に未置換・改行・.. / . の成分がある。停止する" >&2; exit 1 ;;
+esac
+SKILL_DIR="${SKILL_DIR%/}"
+if [[ "${SKILL_DIR##*/}" != "${SKILL_NAME}" ]]; then
+  echo "エラー: SKILL_DIR のディレクトリ名が ${SKILL_NAME} と一致しない。停止する" >&2; exit 1
+fi
+if [[ ! -f "${SKILL_DIR}/SKILL.md" ]]; then
+  echo "エラー: ${SKILL_DIR}/SKILL.md が無い。停止する" >&2; exit 1
+fi
+SCRIPT="${SKILL_DIR}/scripts/skills-contribute.sh"
+if [[ ! -f "${SCRIPT}" || ! -r "${SCRIPT}" ]]; then
+  echo "エラー: ${SCRIPT} が無い、または読めない。停止する" >&2; exit 1
+fi
+
+# ここから先の SKILL_NAME は貢献対象のスキル名（Step 7 以降でも使う）。本スキル自身の名前から戻す。
+SKILL_NAME='<引数のスキル名>'
+if [[ ! "${SKILL_NAME}" =~ ^[a-z][a-z0-9-]+$ ]]; then
+  echo "エラー: SKILL_NAME は小文字 kebab-case のみ許可されています: ${SKILL_NAME}" >&2
+  exit 1
 fi
 
 # skills-contribute.sh は自分自身で clone するため、呼び出し前に必ずローカルリポジトリ
-# ルートへ cd し直す。LOCAL_SKILL_DIR は通常の変数代入では子プロセスへ継承されない
-# （export されていない）ため明示的に渡す。標準出力はそのまま表示しつつ変数へも捕捉する。
+# ルートへ cd し直す（作業ディレクトリは貢献元のまま）。LOCAL_SKILL_DIR は通常の変数代入では
+# 子プロセスへ継承されない（export されていない）ため明示的に渡す。標準出力はそのまま表示しつつ変数へも捕捉する。
 cd "${ORIG_DIR}"
-SCRIPT_OUTPUT=$(LOCAL_SKILL_DIR="${LOCAL_SKILL_DIR}" "${CONTRIBUTE_SKILL_DIR}/scripts/skills-contribute.sh" "${SKILL_NAME}" "${REPO_SLUG}" | tee /dev/stderr)
+SCRIPT_OUTPUT=$(LOCAL_SKILL_DIR="${LOCAL_SKILL_DIR}" bash "${SCRIPT}" "${SKILL_NAME}" "${REPO_SLUG}" | tee /dev/stderr)
 
 # スクリプトが実際に使った作業 clone・upstream スキルパスを Step 6 以降の唯一の正として採用する。
 # 以下の参考コードで計算され得る UPSTREAM_SKILL_PATH はこの値で上書きする。
@@ -492,12 +473,12 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 ## 注意事項
 
 - **SKILL_NAME は kebab-case のみ許可**：`..` のような値によるパストラバーサルを防ぐため、空判定の直後・パス解決の前に `^[a-z][a-z0-9-]+$` で検証する（OWASP A03 / A01）
-- **`skills/`・`.agents/skills/`・`.claude/skills/` の複数に実体が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` の3パスのみ受理し（末尾要素・中間の親ディレクトリのいずれかが symlink なら実体側パスの指定を要求）、任意パス指定によるパストラバーサルを防ぐ。Step 5 で本スキル自身（contribute-skill）の配置を解決する `CONTRIBUTE_SKILL_DIR` も同じ fail-closed 方針を取り、`${ORIG_DIR}/skills/contribute-skill`・`${ORIG_DIR}/.agents/skills/contribute-skill`・`${ORIG_DIR}/.claude/skills/contribute-skill` の3候補のみ受理する（末尾要素・中間の親ディレクトリのいずれかが symlink なら実体側パスの指定を要求）。3候補のうち複数が存在する場合は silently にどれかを優先せず中止して環境変数 `CONTRIBUTE_SKILL_DIR` での指定を求める（LOCAL_SKILL_DIR とは非対称にしない）
+- **`skills/`・`.agents/skills/`・`.claude/skills/` の複数に実体が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` の3パスのみ受理し（末尾要素・中間の親ディレクトリのいずれかが symlink なら実体側パスの指定を要求）、任意パス指定によるパストラバーサルを防ぐ。Step 5 は `SKILL_DIR` 基準で本スキル自身のスクリプトを起動し、作業ディレクトリの 3 レイアウト探索と環境変数 `CONTRIBUTE_SKILL_DIR` は使わない（設定されていても読まない）
 - **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **lock 不在・未登録・`source` 欠落・lock 解析失敗は fail-closed**：clone 前に中止する（照合を省略して続行しない）。新規スキルの初回貢献は本スキルの対象外
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → `.claude/skills/<name>` の存在 → スキルルート親ディレクトリの慣習（`skills/` → `.agents/skills/` → `.claude/skills/` の順。新規スキルは個別パスが存在しないためこの親ディレクトリ判定で配置先が決まる）→ 最終デフォルト `skills/`（より一般的な公開レイアウト）。全候補で `assert_no_symlink_components` により経路の全要素（`.claude` 等の最上位親を含む）が symlink でない場合のみ採用し、`.claude` 自体がリポジトリ外を指す symlink でも外部内容が upstream へコピーされない（fail-closed。symlink 経由の実体は前段の実体側候補で検出される）
-- **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 5 は必ず `${CONTRIBUTE_SKILL_DIR}/scripts/skills-contribute.sh`（本スキル自身の配置から別途解決したパス。貢献対象のパスである `LOCAL_SKILL_DIR` とは別物）経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
+- **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 5 は必ず `${SKILL_DIR}/scripts/skills-contribute.sh`（読み込んだ SKILL.md の場所から求めたパス。貢献対象のパスである `LOCAL_SKILL_DIR` とは別物）を `bash` で起動して実行し、断片コマンドの個別打鍵で検証を省略しない**
 - **コピー元は HEAD と一致している場合のみ反映する**：事前レビューはコミット済み差分しか見せない一方、`cp -R` は作業ツリーの現物をコピーするため、未コミット・未追跡・ignore 対象のファイルが無レビューで upstream PR へ混入し得る。スクリプトは `${LOCAL_SKILL_DIR}` 配下を `git status --porcelain=v1 --untracked-files=all --ignored` で検査し、出力が非空なら中止する。`--untracked-files=all` を外すとユーザー設定 `status.showUntrackedFiles=no` で未追跡が隠れ、`--ignored` を外すと `.env` 等がコピーされる。非ゼロ終了（git リポジトリ外など）も clean と扱わない。`git update-index --assume-unchanged` / `--skip-worktree` を付けたファイルの変更は `git status` でも検出できず対象外
 - **既に同名の branch がある場合**：秒単位スラッグで通常は衝突しないが、万一の場合はユーザーに確認
 

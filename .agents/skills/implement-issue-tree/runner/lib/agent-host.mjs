@@ -114,6 +114,7 @@ const MODE_OF = Object.freeze({
   'observe-pr.sh': optionMode,
   'measure-residual-bytes.sh': noMode,
   'measure-free-disk.sh': noMode,
+  'human-result.sh': noMode,
 })
 
 // label の接尾辞（ホストの再試行・モデル切り替えが付ける）。runStateAgent は `:fallback-<model>`、
@@ -139,8 +140,10 @@ export const EXEC_RULES = Object.freeze([
   rule('worktree:free-disk-bytes', 'measure-free-disk.sh', [null], 'envelope', null),
   rule('detect:external-checks', 'repo-scan.sh', ['external-checks'], 'envelope', null),
   rule('plan:skip-labels', 'repo-scan.sh', ['skip-labels'], 'envelope', null),
+  rule('plan:human-result:#\\d+', 'human-result.sh', [null], 'envelope', null),
   rule('merge:added-files(?::#\\d+)?', 'observe-pr.sh', ['added-files'], 'envelope', null),
   rule('merge:policy-paths(?::#\\d+)?', 'observe-pr.sh', ['policy-paths'], 'envelope', null),
+  rule('merge:fix-overlap(?::#\\d+)?', 'observe-pr.sh', ['fix-overlap'], 'envelope', null),
   // opt-in テスト記録ゲートは observeGate の extra.label でこの名前になる（src の observeOptinRecord）。observeGate の
   // 既定の label（merge:optin-record:#N）は使われないため表に置かない（runner-exec-rules.test.mjs が全行の到達を縛る）
   rule('optin-record-(?:verify|reverify):#\\d+', 'observe-pr.sh', ['optin-record'], 'envelope', null),
