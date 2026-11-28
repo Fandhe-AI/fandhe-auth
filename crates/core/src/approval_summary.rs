@@ -18,13 +18,12 @@
 //!    （`ADLG-7`・`HAPR-1`）。判定の関数はこの型を引数に取らず、観測の型との相互の変換も持たない。
 //!    型 [`DeclaredEnvironment`] は「エージェントの申告で、検証されていない」ことを型で分けるもので、
 //!    値の検査は行わない。
-//! 5. 申告した環境の検査（HTML の特殊文字は文字列のまま受ける・制御文字・双方向制御・ゼロ幅・BOM と
-//!    長さ超過は拒否する、という `DGRT-33` の規則）は、本体の `AgentEnv`（`TASK-412`・#3871）が
-//!    行う。長さの上限の値は `DGRT-21`（`DeviceGrantPolicy`・`TASK-417`）の側に残る。
-//!    **現状は未検査の値を受ける**: この module は検査も上限の型も持たず、
-//!    [`DeclaredEnvironment::from_unverified_declaration`] は受けた `String` をそのまま保つ。
-//!    検査の前に呼ぶと、制御文字・双方向制御・長すぎる値も要約に入る。追跡の中身は、#3871 で
-//!    この引数を `AgentEnv` の検査済みの型に替え、`String` の口をなくすこと（`TODO(#3871)`）。
+//! 5. 申告した環境は構築時に検査する（`DGRT-33` の規則）。制御文字・双方向制御・ゼロ幅・BOM・
+//!    行／段落区切りを含む値と、長さの上限を超える値は [`DeclaredEnvironmentError`] で拒否する。
+//!    HTML の特殊文字は文字列のまま受ける（出すときのエスケープは `UISF-2`）。長さの上限の値は
+//!    本体に持たず、呼び出し側が設定（`DGRT-21` の `DeviceGrantPolicy`・`TASK-417`）から渡す。
+//!    生の `String` から要約へ入る公開経路は無い。本体の `AgentEnv`（`TASK-412`・#3871）ができたら、
+//!    その検査済みの型へ合わせる（`TODO(#3871)`）。
 //! 6. 要約は出力専用で、承認・拒否の能力を持たない。確認の手順の判定は `DVUI-12`・`DVUI-13`・
 //!    `DVUI-15`・`HAPR-3` が正本で、画面は結果を受けるだけ（`UISF-14`）。
 //! 7. ユーザーコードを URL に含む案内の項目を持たない（`UISF-13`・`DGRT-2`）。ユーザーコードを
@@ -52,7 +51,7 @@
 //!
 //! ```compile_fail,E0277
 //! use fandhe_auth_core::approval_summary::{DeclaredEnvironment, StartSource};
-//! let d = DeclaredEnvironment::from_unverified_declaration("x".to_string());
+//! let d = DeclaredEnvironment::checked("x".to_string(), 64).unwrap();
 //! let _ = StartSource::from(d);
 //! ```
 //!
@@ -77,7 +76,7 @@
 //!
 //! ```compile_fail,E0277
 //! use fandhe_auth_core::approval_summary::DeclaredEnvironment;
-//! let d = DeclaredEnvironment::from_unverified_declaration("x".to_string());
+//! let d = DeclaredEnvironment::checked("x".to_string(), 64).unwrap();
 //! let _ = format!("{}", d);
 //! ```
 //!
@@ -109,7 +108,7 @@
 //! ```
 //! use std::net::{IpAddr, Ipv4Addr};
 //! use fandhe_auth_core::approval_summary::*;
-//! let d = DeclaredEnvironment::from_unverified_declaration("env".to_string());
+//! let d = DeclaredEnvironment::checked("env".to_string(), 64).unwrap();
 //! let s = StartSource::from_observed_peer(IpAddr::V4(Ipv4Addr::LOCALHOST));
 //! let t = StartedAt::from_unix_millis_utc(0);
 //! // `Debug` はある（`Display` だけが無い）。値は出ない。
@@ -205,15 +204,20 @@ pub enum Provenance {
 pub struct DeclaredEnvironment(String);
 
 impl DeclaredEnvironment {
-    /// 申告の値を、検査せずにそのまま保って作る。
+    /// 申告の値を検査して作る（`DGRT-33`）。
     ///
-    /// この関数は何も保証しない。制御文字・双方向制御・ゼロ幅・BOM の拒否（`DGRT-33`）と長さの
-    /// 上限（`DGRT-21`）は行わない。**現状は未検査の値を受ける**: 検査は本体の `AgentEnv`
-    /// （`TASK-412`・#3871）が行うが、まだ無い。検査の前に呼ぶと、検査していない値も要約に入る。
-    /// 型は「検証されていない申告」であることを示すだけで、安全な文字だけを持つことを示さない。
-    // TODO(#3871): 引数を `AgentEnv` の検査済みの型に替え、`String` の口をなくす。
-    pub fn from_unverified_declaration(text: String) -> Self {
-        Self(text)
+    /// `max_chars` は文字数（`char` の数）の上限で、設定（`DGRT-21`）から渡す。
+    /// 制御文字・双方向制御・ゼロ幅・BOM・行／段落区切りを含む値と、上限を超える値は拒否する。
+    /// HTML の特殊文字は文字列のまま受ける。
+    // TODO(#3871): `AgentEnv` の検査済みの型ができたら、その型から作る形へ合わせる。
+    pub fn checked(text: String, max_chars: usize) -> Result<Self, DeclaredEnvironmentError> {
+        if text.chars().count() > max_chars {
+            return Err(DeclaredEnvironmentError::TooLong);
+        }
+        if text.chars().any(is_display_manipulating) {
+            return Err(DeclaredEnvironmentError::ForbiddenChar);
+        }
+        Ok(Self(text))
     }
 
     /// エスケープ前の値を読む唯一の道。HTML へ出す前にエスケープする義務がある。
@@ -221,6 +225,33 @@ impl DeclaredEnvironment {
     pub fn as_unescaped_text(&self) -> &str {
         &self.0
     }
+}
+
+/// 申告した環境の検査の失敗。値は含めない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeclaredEnvironmentError {
+    /// 長さの上限を超えた。
+    TooLong,
+    /// 表示を操作しうる文字（制御・双方向制御・ゼロ幅・BOM・行／段落区切り）を含む。
+    ForbiddenChar,
+}
+
+/// 表示を操作しうる文字か（`DGRT-33`）。
+fn is_display_manipulating(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+        )
 }
 
 /// 値を出さない。自由文のログへの混入・改ざんを避ける（提案）。
@@ -366,7 +397,7 @@ mod tests {
     fn debug_does_not_leak_declared_text() {
         // UISF-12・ADLG-7: Debug は申告の自由文を出さない。
         let marker = "sentinel-text-123";
-        let d = DeclaredEnvironment::from_unverified_declaration(marker.to_string());
+        let d = DeclaredEnvironment::checked(marker.to_string(), 64).unwrap();
         assert!(!format!("{d:?}").contains(marker));
         assert!(!format!("{d:#?}").contains(marker));
         let s = ApprovalSummary::new(
@@ -379,5 +410,40 @@ mod tests {
         );
         assert!(!format!("{s:?}").contains(marker));
         assert!(!format!("{s:#?}").contains(marker));
+    }
+
+    #[test]
+    fn rejects_display_manipulating_chars() {
+        // DGRT-33: 制御・双方向制御・ゼロ幅・BOM・行／段落区切りを拒否する。
+        for c in [
+            '\u{0}', '\n', '\r', '\u{7f}', '\u{85}', '\u{202E}', '\u{202A}', '\u{2066}',
+            '\u{2069}', '\u{200E}', '\u{200B}', '\u{2060}', '\u{FEFF}', '\u{2028}', '\u{2029}',
+            '\u{061C}',
+        ] {
+            let r = DeclaredEnvironment::checked(format!("a{c}b"), 64);
+            assert_eq!(
+                r.err(),
+                Some(DeclaredEnvironmentError::ForbiddenChar),
+                "{c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_html_specials_and_plain_unicode() {
+        // DGRT-33: HTML の特殊文字は文字列のまま受ける。
+        let d = DeclaredEnvironment::checked("<b>\"x\" & 日本語 ✓</b>".to_string(), 64).unwrap();
+        assert_eq!(d.as_unescaped_text(), "<b>\"x\" & 日本語 ✓</b>");
+    }
+
+    #[test]
+    fn length_limit_is_in_chars_and_inclusive() {
+        // DGRT-21: 上限は呼び出し側の設定。境界は上限ちょうどまで許す。
+        assert!(DeclaredEnvironment::checked("あいう".to_string(), 3).is_ok());
+        assert_eq!(
+            DeclaredEnvironment::checked("あいうえ".to_string(), 3).err(),
+            Some(DeclaredEnvironmentError::TooLong)
+        );
+        assert!(DeclaredEnvironment::checked(String::new(), 0).is_ok());
     }
 }
