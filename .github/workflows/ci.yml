@@ -429,7 +429,8 @@ jobs:
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # 依存の検査の枠（TASK-6 6/10。#53）。cargo-deny・cargo-audit を版固定 + SHA256 検証で導入するだけで、検査は流さない。
-  # 緑でも DPOL-34（4 検査 + cargo-audit の合格）を満たしたことにならない。名前の「frame」は結線時に外す。
+  # 緑でも DPOL-34（4 検査 + cargo-audit の合格）を満たしたことにならない。名前の「frame」は結線時に外す見込み。
+  # context は required に個別登録済みのため、名前を変える前に利用者の指示を待つ（.claude/rules/github-actions.md の「依存の検査の拡張点」）。
   # 結線は TASK-680（前提: deny.toml の厳格版 TASK-668・監査の実行スクリプトと advisory DB の記録 TASK-679）。
   # 定期の系統の枠は scheduled.yml（#54）で、定期の監査の結線は TASK-681（#1046）。結線の契約は .claude/rules/github-actions.md の「依存の検査の拡張点」。
   # ジョブ ID は変えず、ci-complete の needs から外さない。if: による skip・continue-on-error は付けない（DPOL-34）。
@@ -504,7 +505,8 @@ jobs:
           printf '%s\n' "${PR_TITLE}" > "${msg_file}"
           bash scripts/hooks/commit-msg-check.sh "${msg_file}"
 
-  # 必須チェックの集約ジョブ。ruleset の required status checks には本ジョブのみを登録する。
+  # 必須チェックの集約ジョブ。ruleset の required status checks には本ジョブを登録し、PR の検査のジョブも個別に登録する
+  # （`.claude/rules/github-actions.md` の「必須チェックと集約ジョブ」）。
   # ジョブを追加したら必ず needs へも追加すること（漏れると未検査のままマージ可能になる）。
   # fail-closed: success 以外は失敗とし、skipped は条件付きジョブ（pr-title）が
   # 本来 skip されるべき状況（pull_request 以外のイベント）でのみ明示的に許容する。
