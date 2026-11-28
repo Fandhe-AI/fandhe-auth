@@ -164,10 +164,16 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - 利用者の承認の範囲（2026-11-19。承認したのは利用者で、AI ではない。ACPT-7）は、「`ci.yml` に PR の検査のジョブを足す PR が implement-issue-tree の G0 で止まったとき」に限る（2026-11-28 に利用者がこの範囲に絞った。それまでは「CI のジョブを足す PR」）。この範囲では次を行ってよい
     - main（Claude Code）がその PR を squash で手でマージする。条件は、全チェックの成功・mergeable・未解決のスレッドが 0。これは、ほかの規約のマージの条件（`./security.md` の未解決の高・中が 0、PR の前の `security-auditor` の監査など）に加えて満たすもので、それらを置き換えない
     - そのうえで、`ci.yml` に PR の検査のジョブとして足したジョブの context を、GitHub Actions の App で ruleset の required に追加する。strict=false と bypass が空なのを保ち、変更前の ruleset を退避し（退避先は git 管理外、例: 作業用の一時領域とし、追跡ファイルに置かない）、変更の後に読み返して照合する
-  - 上の範囲の外は、これまでどおり利用者の指示を待つ。範囲の外は、上の 2 つ以外のすべて。例: 必須チェックの削除、strict・bypass・enforcement・対象の条件の変更、ほかの規則・ほかの ruleset の変更、GitHub Actions 以外の App での登録、名前の変更に伴う context の差し替え、ジョブの追加に伴わない登録、`ci.yml` 以外の workflow（`scheduled.yml` など）のジョブの context の登録
+  - 上の範囲の外は、これまでどおり利用者の指示を待つ。範囲の外は、上の 2 つ以外のすべて（2026-11-26 の承認による手動マージは別。下の項）。例: 必須チェックの削除、strict・bypass・enforcement・対象の条件の変更、ほかの規則・ほかの ruleset の変更、GitHub Actions 以外の App での登録、名前の変更に伴う context の差し替え、ジョブの追加に伴わない登録、`ci.yml` 以外の workflow（`scheduled.yml` など）のジョブの context の登録
   - 新しい PR の検査のジョブを足すときは、`ci-complete` の `needs` と required の両方に入れる（`needs` だけでは G0 で止まりうる。required だけでは `ci-complete` の集約から漏れる）
   - `deps audit frame` は 2026-11-28 に個別に登録した（上の「`deps audit frame` の登録の記録」）。名前の変更に伴う context の差し替えは、承認の範囲の外で、利用者の指示を待つ
-  - 上の承認の範囲を除き、この規約を根拠に ruleset を変更せず、利用者の指示を待つ
+  - **G0 の source の判定で止まった PR の手動マージの承認**（2026-11-26 に利用者が出し、2026-11-28 に記録を承認した。承認したのは利用者で、AI ではない。ACPT-7）。上の 2026-11-19 の承認とは別の承認で、ruleset の変更を含まない
+    - 背景: main には組織の ruleset（required workflow を固定するもの）が効いている。implement-issue-tree の merge-gate は、repo 単位以外の ruleset があると G0 を `server-enforcement-missing`（detail は `source`）で止める。そのため `autoMerge: true` でも、すべての PR が G0 で止まる
+    - 範囲: G0 が source の判定で止めた PR を、main（Claude Code）が手で squash マージしてよい。許すのはマージだけで、required への追加を含まない（2026-11-19 の承認は、`ci.yml` に PR の検査のジョブを足す PR について、マージに加えて required への追加も許す）
+    - 条件（すべて満たす）: 全チェックの成功・未解決のレビュースレッドが 0・`security-auditor` の高・中が 0。これは、ほかの規約のマージの条件に加えて満たすもので、それらを置き換えない
+    - 手順: `gh pr merge <n> --squash --match-head-commit <sha>` で行う。確認の出力を読んでから、別のコマンドでマージする
+    - 範囲の外（改めて利用者に聞く）: CI の権限や例外の承認が要る PR（例: ジョブを足すのに `ci-complete` に入れないもの）・ruleset の変更。秘密値の漏れや検出の弱体化に当たる指摘は、上書きせずに直す
+  - 上の 2 つの承認の範囲を除き、この規約を根拠に ruleset を変更せず、利用者の指示を待つ
 - `ci-complete` は `if: always()` で全ジョブの結果を検査する fail-closed のジョブ。success 以外は失敗とし、
   skipped は明示的に許容したもの（`pr-title` の push イベント時）に限る
 - **例外: `trust-root-secret-scan.yml` は `ci-complete` の `needs` に入れない**（集約の対象の外）。組織の ruleset が固定した commit SHA で要求する workflow は
