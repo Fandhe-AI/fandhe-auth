@@ -11,7 +11,7 @@
 | `args.skillDir` | スキルディレクトリ（`scripts/` の 1 つ上）の絶対パス。人間（起動手順）が渡す。形式だけをホストが検証する |
 | `scripts/run-verified.sh` | 実行前にスクリプトの SHA-256 を照合する launcher。`bash "<skillDir>/scripts/run-verified.sh" <sha256> <name>.sh …` で起動する（実行ビットに依存しない） |
 | `scripts/measure-residual-bytes.sh` / `measure-free-disk.sh` | 測定本体。入力はパスの一覧（標準入力）または 1 件（引数）。出力は 1 行の封筒 |
-| `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail` / `push`（第 3 弾）/ `added-files`（Issue #658。下の「新規追加ファイルの衝突ゲート」節）/ `policy-paths`（Issue #760。下の「方針パスのゲート」節）/ `optin-record`（Issue #603。下の「opt-in テスト記録ゲートの観測」節）。出力は 1 行の封筒（`threads-detail` だけは外部由来の自由文を含む非信頼データで、封筒ではない）。`--wait` は有界の待機 |
+| `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail` / `review-history`（PR の全レビュースレッドの履歴。下の「レビュー履歴の取得」節）/ `push`（第 3 弾）/ `added-files`（Issue #658。下の「新規追加ファイルの衝突ゲート」節）/ `policy-paths`（Issue #760。下の「方針パスのゲート」節）/ `fix-overlap`（Issue #910。下の「同じ行への指摘の連鎖ゲート」節）/ `optin-record`（Issue #603。下の「opt-in テスト記録ゲートの観測」節）。出力は 1 行の封筒（`threads-detail` は外部由来の自由文を含む非信頼データで、封筒ではない。`review-history` は自由文を区切りの内側に出し、最終行だけが封筒）。`--wait` は有界の待機 |
 | `scripts/base-merge.sh` | 自動 base 取り込みの本体（第 3 弾）。入力は PR 番号・branch・base・期待 owner/repo（引数）。**封筒を使わない**。出力の最後の 1 行は `BASE_MERGE_RESULT {…}`（キーは `BASE_MERGE_SCHEMA` と同じ） |
 | `scripts/pr-push.sh` | pr-create と fix の起点の確立・base 取り込み・push・PR 作成（第 4 弾）。リモートの branch の有無・sha は ref 名の完全一致で決め、入れ子の ref で誤判定しない（Issue #770）。モードは `prepare` / `push` / `pr`。**封筒を使わない**。出力の最後の 1 行は `PR_PUSH_RESULT {…}` |
 | `scripts/reply-resolve.sh` | Merge ループの fix による定型の対応報告の返信と resolve（Issue #759）。**封筒を使わない**（進捗専用）。出力の最後の 1 行は `REPLY_RESOLVE_RESULT {…}`。書き込みは返信と resolve の 2 mutation だけ（静的ガードが決め打ちの 2 行だけを許可）。防ぐもの: 返信本文への未信頼入力の混入・返信失敗スレッドの resolve・`--allow` 外のスレッド・HEAD/origin/PR head 不一致での投稿。入れ子の ref による head の誤解決（完全一致で解決）・viewer の pending review（下書き）への返信の混入（Issue #769）。防がないもの: 許可リスト内の修正していないスレッドへの定型返信 |
@@ -25,9 +25,12 @@
 | `scripts/declared-deps.sh` | イシュー本文の依存宣言の機械抽出（`plan:declared-deps-N`）。入力は `--numbers N,N,…`・`--repo`（任意。空文字は使い方の誤り）・`--table`（兄弟のタスク ID の表。任意）・`--input-sha256`（必須。入力の束縛）。`gh api repos/<repo>/issues/<N> --jq <フィルタ>` の GET だけで、成功したイシューごとに 1 行 `{"number","deps","sig"}` を標準出力へ、失敗したイシューは `FAILED #N` を標準エラーへ出す。`--rate-limit` は core 枠の確認、`--print-filter` はフィルタ文字列の確認（gh を呼ばない）。**出力は封筒を使わない**: ホストはエージェントが転記した `entries` を `sig` と `collectDeclaredDeps` の検査で照合する。`sig` は `number` と `deps` だけから計算されるので、`--table`・`--repo`・番号の転記漏れは `sig` では見つからない。そこでホストが `sha256("declared-deps\n" + numbers + "\n" + repo + "\n" + table)`（`lib/declared-deps-lib.sh` の `dd_input_sha` と同じ定義。repo・table は付けないとき空文字）を `--input-sha256` に付け、スクリプトは引数から計算し直して、不一致・欠落は gh を呼ぶ前に `INPUT_MISMATCH` を標準エラーへ出して exit 2 にする（期待値は出さない）。プロンプトは exit 2 を転記ミスとして entries を空で返させ、ホストが欠落として再試行する。`--table` は 120000 文字（`DD_TABLE_MAX` = ホストの `DECLARED_DEPS_TABLE_MAX`）を超えるとホストが起動せず、欠落 → 再試行 → 停止の経路に流す。スクリプトにした目的は、3.9〜4.9 KB の jq コマンドの転記でバックスラッシュが半減する事故（`\\b` → `\b` は jq でエラーにならず単語境界が黙って効かなくなる）を、フィルタをハッシュで固定して防ぐこと |
 | `scripts/lib/declared-deps-lib.sh` | `declared-deps.sh` の jq フィルタ本体（引用符つきヒアドキュメントで置くのでエスケープは jq の 1 段だけ。切り出し前の実行時の文字列との文字単位の一致を `dev/implement-issue-tree/tests/declared-deps-script.test.mjs` が固定する）・rate_limit の jq・番号 / リポジトリ / 表の検証の関数（`dd_*`。source 専用） |
 | `scripts/repo-scan.sh` | Tree フェーズの読み取り専用の観測 2 つ（計画 C の P4。取得と検査の契約は「外部チェック観測と対象外ラベルの取得」節）。`--mode external-checks`（`detect:external-checks`）: 直近 3 件の merged PR の head の check-runs から GitHub Actions 以外の App の slug を集める。`--mode skip-labels`（`plan:skip-labels`）: ラベルごとにリポジトリ全体の open issue 番号を列挙し、`--numbers`（ツリーの open ノードの番号。昇順・重複なしのカンマ区切り・100,000 バイト以内。Issue #807）との交わりだけを返し、ラベル一覧との照合で存在しないラベルを出す。入力は `--nonce`・`--repo`（必須。省略・空文字は exit 2。Issue #808）・skip-labels のラベル（`--` の後ろ。1〜10 件）。gh は `gh pr list` と `gh api` の GET だけで、`-f` を使わずラベルはクエリ文字列へパーセントエンコードして渡す。**封筒を使う**: external-checks の payload は `apps`（`[a-z0-9-]` 64 文字以内・昇順・重複なし。重複を除いた apps が封筒の上限を超えれば exit 7。ホストが 100 件以内を検査する）・`prs`・`errs`（gh の失敗の件数。個々の失敗は無視して部分結果を返す）・`dropped`（形式不正で捨てた件数）・`inputSha256`。skip-labels の payload は `entries`（`{i, numbers}`）・`absent`・`failed`・`inputSha256`。`inputSha256` = `sha256("repo-scan\n" + mode + "\n" + repo + 残りの欄を "\n" で連結)`（skip-labels の残りの欄は `--numbers` を先頭の固定位置に、続けて各ラベル。ホストの `repoScanInputSha256` と `lib/repo-scan-lib.sh` の `rs_input_sha` が同じ定義）。ホストが自分の repo・ノード番号の集合・ラベルの並びから計算し直して照合するので、転記でラベルが欠けた・入れ替わった出力は別のラベルの結果として採られない。外部由来の文字列は、形式を検査した slug 以外は出力に出さない（標準エラーは `FAILED <添字>` だけ）。**照合に失敗したときの向き**: external-checks は apps: []（観測は参考値。マージ・push の可否に使わない）、skip-labels は取得できなかったラベルとして再試行 → なお取れなければ open ノードを全て待たせる（fail-closed）。スクリプトにした目的は、プロンプトに埋め込んだ gh + jq のコマンドの転記事故（バックスラッシュの半減・`\n` が `n` になる・引用符の欠落）で結果が黙って変わる経路をなくすこと |
+| `scripts/human-result.sh` | 前提の人の作業の結果の判定（Issue #932。節「人の作業の結果の判定」）。`--nonce`・`--repo`（必須）・`--numbers`（昇順・1〜20 件）。`gh api` の GET だけ。封筒の payload は整数と固定語彙だけ（本文・login を出さない）。exit 0 / 2 / 3 |
+| `scripts/lib/human-result-lib.sh` | `human-result.sh` のフィルタ（正規表現・文字クラスを使わず explode / implode と startswith 等だけ。gojq と jq 1.7 で同じ結果）・形式検査・入力の束縛・payload の組み立て（`hr_*`。source 専用） |
 | `scripts/lib/repo-scan-lib.sh` | `repo-scan.sh` の gh `--jq` の定義（バックスラッシュを含まない）・slug / sha / 番号 / ラベルの形式検査・番号の整列・slug の収集（昇順・重複なし）・入力の束縛・payload の正規形の組み立て（`rs_*`。source 専用） |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
 | `scripts/lib/optin-record-lib.sh` | `observe-pr.sh --mode optin-record` の判定（`optin_cmd_valid` = 宣言コマンドの許可形・`optin_record_normalize` = 本文の CR と行頭行末の空白の除去・`optin_record_counts` = 現在の HEAD の sha に対する pass と pass 以外〔fail + not-run〕のマーカー行数を固定文字列で数える。pass は行全体の一致・pass 以外は行内の部分一致。純関数・source 専用。Issue #603） |
+| `scripts/lib/fix-overlap-lib.sh` | `observe-pr.sh --mode fix-overlap` の判定（`fix_overlap_count`。compare の patch の追加行と、起点より後のコミットで付いた新しい未解決スレッドの範囲の交差を数える。純関数・source 専用。Issue #910） |
 | `scripts/lib/policy-paths-lib.sh` | `observe-pr.sh --mode policy-paths` の判定（`policy_paths_count`。方針パス = `.github/workflows/`・`.github/actions/`・CODEOWNERS 3 箇所の件数と、`--allow` に無い件数。リネームは新旧を数える。純関数・source 専用。Issue #760） |
 | `scripts/lib/added-files-lib.sh` | `observe-pr.sh --mode added-files` の判定（`added_files_numbered_dirs` / `added_files_classify`。新規追加ファイルの同じパス・同じディレクトリの同じ連番の衝突を数える純関数。Issue #658） |
 | `scripts/lib/observe-checks-lib.sh` | `observe-pr.sh --mode checks --until settled` の分類（`checks_classify`。check-run と commit status を合格 / 未完了 / 不合格の件数にする純関数。第 8 弾） |
@@ -75,7 +78,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 | 段（label） | `ret` | `fail` |
 |------|------|------|
 | `state:*` の書き込み | `line:STATE_RESULT` | `{"ok":false}` |
-| `state:load-verify` / `script-hash-precheck` / `worktree:residual-bytes` / `worktree:free-disk-bytes` / `detect:external-checks` / `plan:skip-labels` / `merge:added-files` / `merge:policy-paths` / `optin-record-(verify\|reverify):#N` | `envelope` | `null` |
+| `state:load-verify` / `script-hash-precheck` / `worktree:residual-bytes` / `worktree:free-disk-bytes` / `detect:external-checks` / `plan:skip-labels` / `merge:added-files` / `merge:policy-paths` / `merge:fix-overlap` / `optin-record-(verify\|reverify):#N` | `envelope` | `null` |
 | `plan:issue-tree-release` / `free:#N` | `exit-ok` | `{"ok":false}` |
 | `worktree:absent` / 後始末の `remove` | `line:WORKTREE_REMOVE_RESULT` | `{"ok":false,"retained":true,"worktree":""}` |
 | `worktree:sweep` | `line:WORKTREE_REMOVE_RESULT` | `{"removed":[]}` |
@@ -133,6 +136,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 | `required`（required context の不足件数） | autoMerge ラン専用の 3g。`ready` を返す前の助言的確認 | しない（発行元束縛は merge-exec (v-b) が独立に検証する。名前の存在確認は助言） |
 | `reviews`（外部 App のレビュー・check-run 件数） | cursor のレビュー到着待ち・外部 App の起動確認 | しない（merge-exec が `external-review-missing` を独立に判定する） |
 | `threads` / `threads-detail`（未解決スレッド） | unresolved-comments の判定と fix への指摘の受け渡し | しない（merge-exec が未解決スレッド数を自分で再取得する） |
+| `review-history`（PR の全スレッドの履歴） | push する fix が前の巡の指摘と箇所ごとの巡の数を知るため。手元の CLI での調査 | しない（表示専用。ホストは出力を読まず、マージ・resolve・停止の判定に使わない） |
 
 **payload は整数と ASCII の固定語彙・40 桁 16 進だけ**で、PR のコメント本文・チェック名・context 名・ログイン名のような外部由来の文字列を含めない。そのため canonical JSON の定義の差（キー順・エスケープ・非 ASCII）が問題にならず、スクリプト（`jq -cS`）とホスト（`canonicalJson`）の出力が一致することを `dev/implement-issue-tree/tests/observe-pr-host.test.mjs` が実走で固定する。`threads-detail` の自由文は非信頼データとして監視エージェントが読むだけで、プロンプトに戻す値（封筒）には入らない。
 
@@ -187,6 +191,52 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - **入力の検証**: 許可（`planPolicyPaths`）は Issue 本文を読んだ Plan エージェント由来で、コマンド行と `inputSha256` に載る。ホスト（`sanitizePolicyPaths`・`observeCommand`）とスクリプト（`--allow`）の双方で、文字集合 `[A-Za-z0-9._/-]`・先頭 `-` `/` 不可・`..` `//` 不可・20 件・重複不可を強制する。jq には `--arg` で渡す
 - **payload にパスの文字列を入れない**: 件数（`files` / `policy` / `unplanned` / `truncated`）と state の語彙だけ
 - **防がないもの**: 封筒を偽造する悪意あるエージェント（偽の「計画外 0 件」は従来の挙動に戻るだけ）、宣言済みのパスの中での過剰な変更、ファイルでない設定変更（API による ruleset 変更は既存の `REPO_SETTINGS_POLICY` が扱う）。fix を経ていない PR の Implement による計画外変更は対象外
+
+## レビュー履歴の取得（`observe-pr.sh --mode review-history`）
+
+PR の全レビュースレッド（resolve 済み・AI レビューの旧指摘・人や他エージェントのスレッドを含む）を、読み取り専用で取る。push する fix は手順 1b で次のコマンドを実行し、手元でも同じスクリプトで取れる。
+
+```sh
+bash <skillDir>/scripts/observe-pr.sh --nonce manual --mode review-history --repo OWNER/REPO --pr 123
+```
+
+- **出力は 2 部構成**: (1) `----- BEGIN UNTRUSTED DATA <nonce> …` と `----- END UNTRUSTED DATA <nonce> -----` の行に挟んだ履歴 JSON 1 行、(2) 最終行の封筒。封筒の payload は整数だけ（`totalThreads`・`fetchedThreads`・`includedThreads`・`files`・`truncated`・`filesTruncated`）で、自由文は区切りの内側にだけ出す（封筒には外部由来の文字列を入れない不変条件を保つ）。書き手は nonce を知らないので区切りを偽装できない
+- **履歴 JSON の形**: `version` / `repo` / `pr` / `total_threads` / `fetched_threads` / `included_threads` / `truncated` / `files[]`（`path`・`review_rounds`・`threads`・`resolved`・`ai_findings`。巡の数の降順）/ `files_truncated` / `threads[]`（時系列。`id`・`path`・`line`・`is_resolved`・`resolved_by`・`is_outdated`・`author`・`is_ai_finding`・`ai_reviewer`・`original_commit`・`comment`・`reply_count`・`replies[]`）。形は Fandhe-AI/actions の `ai-review/scripts/collect-review-history.mjs` の出力にそろえる。`is_ai_finding` は投稿者が `github-actions` で、本文の末尾が ai-review のマーカー行のときだけ真
+- **上限**: ページ数 10（`OBSERVE_PR_HISTORY_PAGES`）、出すスレッド数 100（`OBSERVE_PR_HISTORY_MAX_THREADS`）、整形後 JSON の文字数 30000（`OBSERVE_PR_HISTORY_MAX_CHARS`。1000〜60000）、先頭コメント 1500 文字・返信 500 文字 × 最新 3 件、`files[]` 100 件。超えたら古い側から落とし（最新 1 件は必ず残す）`truncated` を真にする。壁時計の残りが足りず 2 ページ目以降を取れないときも取得失敗ではなく `truncated`
+- **終了コード**: 0 = 取得できた / 2 = 使い方の誤り（`--wait` は取らない）/ 3 = 封筒を作れなかった / 5 = 取得失敗。取得失敗は区切りのデータを出さず `err:1`・`outcome:error` の封筒だけを出す（「スレッド 0 件」へ畳まない）
+- **保証しないこと**: 本文・ログイン名・`is_resolved`・`resolved_by` は PR の参加者が作れる非信頼データで、resolve 済みは決着を意味しない（レビュー側は自分の旧指摘を毎巡 resolve する）。履歴は P0/P1・セキュリティの指摘を対象外にする根拠にしない。ホストは出力を採用しない。文字数は jq のコードポイントで数えるため、UTF-16 で数える上流の実装と境界の数値が少しずれ得る。ホスト側の台帳（監視結果から積む履歴と巡回数）は、取得に失敗したときと再開時の代わりとして残る
+
+## 同じ行への指摘の連鎖ゲート（`observe-pr.sh --mode fix-overlap`。Issue #910）
+
+Merge ループの fix が指摘に応えて同じ行へ句を足し続けるのを、次の fix を起動する直前に止める。専用の転記エージェント（`merge:fix-overlap:#N`）が固定コマンド（`--from <起点>`）を実行し、ホストが封筒の nonce・入力のハッシュ（他のモードの 9 行に `--from` の行を足したもの）・sha256 を照合して `classifyFixOverlap` で分類する。起点は、fix を起動したラウンドの checks 封筒（`applyChecksObservation` が照合済み）の `headSha` だけで、fix の自己申告も monitor の `headSha` も使わない。重なりが連続 2 回（`SAME_LINE_STOP`）なら `blocked`（quality）。
+
+- **判定**: 新しい指摘 = 未解決・右側・`line` あり・最初のコメントの `originalCommit` が compare（起点...現在の head）のコミットに含まれるスレッド。重なり = そのスレッドの範囲 `[startLine // line, line]` が、同じパスの patch の追加行（新側の行番号）と 1 行でも交わること。行番号は fix で動くので、位置ではなく差分との重なりで見る
+- **payload**: 整数・固定語彙・40 桁 16 進と `threadIds`（重なったスレッドの ID。GitHub が発行する `[A-Za-z0-9_-]{1,100}`・20 件まで）だけ。「外部由来の自由文を含めない」の例外は threadId で、書き手が選べない ID をスクリプト（`valid_thread_id` 相当の検査）とホスト（`sanitizeThreadId`）の双方で検証する。パス・本文は入れない。止めたときのファイル名は monitor が申告した未解決一覧から threadId で引く表示専用の値（`sanitizeRepoRelPath`・`sanitizeCommentUrl` を通す）で、判定には使わない
+- **観測失敗は止めない**: policy-paths と逆向き。このゲートは収束を助けるもので、止めないときの最悪は従来の挙動（`fixCount` 6 で有界）にとどまるため。観測できなければ回数を変えず進む
+- **保証しないこと**（これらへの指摘は追加のコードで埋めず、ここに記録して受け入れる）:
+  - 行の重なりは近似。追加行（新側）とスレッドの範囲の交差だけを見る。削除だけの変更・左側のコメント・ファイル単位のコメント・patch の無いファイル・compare の上限（files 300 件）を超えた分は数えない（`truncated` に数え、従来の挙動に倒れる）
+  - 重要度（P0〜P2）は本文にあり非信頼データなので読まない。P3・nit・人のコメントも数える（過検出は止める方向にしか働かない）
+  - base 取り込みでコンフリクトを解消した行に付いた指摘も、fix の行への指摘として数え得る
+  - 起点が無いラウンド（checks 封筒が無い・照合に通らない・conflicting 経路の seed ラウンド）の fix は評価しない。指摘が観測より遅れて付いたものも数えない
+  - 回数はプロセス内だけで持ち、再開すると 0 から数える（`fixCount` の上限 6 は残る）
+  - 封筒を偽造する悪意あるエージェント（偽の「重なり 0」は従来の挙動に戻るだけ）。受け入れ条件の解釈は fix の判断で、ホストは検証しない
+
+## fix の指摘への対応の選び方（Issue #987）
+
+Merge ループの fix（push する fix）は、指摘ごとに 3 つから対応を選ぶ。1 件ずつコードを足して応えると、足したコード自体への指摘や保証の範囲を広げる指摘が巡ごとに続いて収束しないため。プロンプトの手順 2a（`fixChoiceLines`）に固定文で置く。Review ループ（push しない fix）には出さない（push も resolve も巡の数も無い）。
+
+- **当てはめる順**: 1 → 2 → 3 の順に見て、最初に当たったものを選ぶ。1 と 2 で迷えば 1。
+  1. 直す: 実際の欠陥（制御フローの誤り・fail-open・データ破壊など）はその箇所を局所的に直す
+  2. 類型ごと閉じる: 前の巡の修正で足したコード自体への指摘、保証の範囲を広げるよう求める指摘（解決先の照合・環境の端の挙動など）。P0/P1・セキュリティ上の指摘には使わない。範囲を広げたコミットの手前まで戻すか単純化し、保証しないこと・受け入れる限界を書いて push する。そのスレッドは手順 5 の resolve 対象にせず、`outOfScopeComments` に記録して人の判断に委ねる（reason は「類型ごと閉じた（戻した・限界を明記した）。resolve は人の判断に委ねる」の趣旨）。resolve してよいのは選び方 1（指摘された問題そのものを直した push）だけ
+  3. issue 化の候補: 巡の数（今回を含む。ホストが数えた値）が 3 以上の箇所への指摘で、1 にも 2 にも当たらないものは直さず `outOfScopeComments` に記録する（従来の対象外の扱いと同じ）
+- **選び方 2 の手順**: 前の巡で足したコードかどうかは、`git log` と `git diff origin/<base>...HEAD` で見るブランチの差分で判断し、スレッド本文・履歴の抜粋は根拠にしない（`REVIEW_HISTORY_POLICY` と同じ）。戻すのは新しいコミット（`git revert` か書き戻し）で、reset・rebase・amend は使わない（`pr-push.sh` はメッセージだけの書き直ししか受け付けない）。限界の書き場所はコード内コメント、次に対象リポジトリの規約・references。範囲の固定文（`fixScopePolicy`）が優先し、受け入れ条件が新しい節・決まりの追加を禁じるときや policyPaths 外の方針に当たるときは書かず、`pushed: false` と理由を返す
+- **P0/P1・セキュリティ**: 2 にも 3 にも回さない。指摘された問題そのものを直した変更を push したときだけ resolve 対象にし、限界を書くだけ・戻すだけの変更では resolve しない。限界として受け入れるときはスレッドを未解決のまま `pushed: false` と理由を返し、blocked で人の明示の承認へ回す。返信だけで閉じる経路・push せずに resolve する経路は作らない（議論コメント禁止と #564 の扱いは変えない）
+- **3 巡の案内**: 巡の数が 3 以上の path があるときだけ、境界の外に件数だけの案内を出す。path は UNTRUSTED の内側の巡の数の行に `（3 巡以上）` と印を付けて示し、境界の外へは出さない
+- **保証しないこと**:
+  - 選び方は fix の判断で、ホストは検証しない。誤分類は既存の仕組み（resolve されない対象外スレッドは `required_review_thread_resolution` で止まり blocked になる・`fixCount` の上限 6）で有界にとどまる
+  - 巡の数は monitor が申告した path から数えた助言値で、再開をまたぐのは巡の数だけ（上限 `PATH_ROUNDS_MAX`）
+  - 限界のコメントを同じ行へ足すと、上の連鎖ゲートの重なりに数えられ得る
+  - 選び方 2 で戻した後にレビュー側が同じ類型を再び指摘することはあり得る。その場合は巡の数が積まれ、選び方 3 に移る
 
 ## 外部チェック観測と対象外ラベルの取得（`repo-scan.sh`・計画 C の P4）の旧版との差と運用上の注意
 
@@ -615,5 +665,26 @@ worktree の中で git を呼ぶ前に、git を使わずファイルの読み�
 - **検出しないもの**: sha256 を自分で計算できる悪意あるエージェントによる捏造、`dependsOn`（本文を読む判断はエージェントに残る。`plan:declared-deps` の和集合が別にある）。`optinTests` は本文からの抽出をスクリプトが行うので、書き写し誤りは `optinSha256` で検出する。ただし本文の宣言そのものは非信頼データで、承認一覧との完全一致（`parseOptinTestDeclarations`）が唯一の実行許可の根拠である。したがってツリーの内容は、`optinTests` を除いて、マージ・push・削除の可否の根拠にならず、実行順と依存の入力にだけ使う。`optinTests` は承認一覧との完全一致を経て opt-in テストの実行とマージ前ゲート（PR 本文の記録の件数照合）の入力になるため、不一致は取り直し・停止にする。抽出は線形時間にしてある（値の前後の空白は正規表現ではなく explode の走査で落とす。`[ \t]*` を値の前後に置く形は jq 1.7 の Oniguruma で空白の長い行に対し retry-limit で異常終了した）。値の前後で落とす空白は ASCII の空白とタブだけで、末尾の NBSP・全角空白は `?` になり invalid（blocked）になる。
 - **失敗は fail-closed**: `gh api` の失敗は終了コードで判定し（gh は HTTP エラー本文も標準出力へ出す）、封筒を出さない。標準エラーには番号と固定語彙だけを出し、title など外部由来の文字列は出さない。title は jq → 変数 → `printf '%s'` でだけ扱い、シェルに展開・評価しない。
 - **大きなツリー（Issue #673）**: 1 回の Bash 出力は 24000 バイトまでなので、TSV が 1 ページ（20000 バイト）に収まらないときは、スクリプト自身が `mktemp -d "${TMPDIR:-/tmp}/iit-tree.XXXXXX"`（umask 077）の専用ディレクトリへ全行を `tree.tsv` として書き、封筒（`dir`・`tsvSha256` を含む）だけを標準出力へ出す（Issue #690。1 体のエージェントが全件を写しきれず停止したため）。ホストがページごとに別のエージェントで `--nonce <N> --page <P> --dir <dir>`（読み出し専用・gh を呼ばない）を実行させ、ページの封筒（`inputSha256 = sha256("fetch-tree-page\n" + tsvSha256 + "\n" + P)`・そのページの行だけのダイジェスト）を `verifyTreeFetchResult` で照合して連結し、取得時の封筒で全体を照合し、最後に `--release --dir <dir>` で片づける。エージェントが返した `dir` は信頼せず、ホストが名前検査（絶対パス・許可文字集合・`.` / `..` なし・`iit-tree.` 接頭辞）を通し単一引用符で囲んで埋め込む。ページごとの照合に通った後の全体照合の失敗は、取り直しても直らないため取得を取り直さず停止する。`payload.pages` は封筒の sha256 が束縛するので、ページの読み飛ばしは従来の `count` / `nodesSha256` の不一致として検出され、1 回の取り直しに入る。読み出しの途中でファイルが変わった場合も同じ検出クラス（`digest` 不一致）で、追加の防御は置かない。`--dir` は絶対パス・許可文字集合・`iit-tree.` 接頭辞・自分の所有・シンボリックリンクでない・中身が `tree.tsv` のみ、を検証してから使う。`--release` が持つ削除は `rm -f <dir>/tree.tsv` と `rmdir` だけで、再帰削除を持たない（静的ガードで担保）。ページ数が 30（約 4,500 ノード相当）を超えると exit 7。異常終了で残ったディレクトリは中身が issue の番号・状態・title だけで権限は 700 / 600 のため OS の一時領域の掃除に任せる。
-- **既知の限界**: 約 4,500 ノード相当（30 ページ）を超えるツリーは exit 7 になる。1 回の StructuredOutput へ写せる規模の上限は実環境で未検証。クロスリポジトリの sub-issue の扱いは従来どおり変えていない。
+- **既知の限界**: 約 4,500 ノード相当（30 ページ）を超えるツリーは exit 7 になる。ホストは exit 7 では取り直さず、当たった試行（1 回目でも、他の理由で取り直した 2 回目でも）で打ち切り（決定的な失敗のため。`exitCode` は未信頼の申告で、偽って 7 と申告されても起きるのは早期停止だけ）、停止理由にページ数・ノード数・上限と親の分け方（Phase の親など直下の子を `parent` に指定する）を出す。標準エラーの数値は未信頼の申告で、固定の形・桁数上限で数値だけを抜いて文面にだけ使う（Issue #895）。1 回の StructuredOutput へ写せる規模の上限は実環境で未検証。クロスリポジトリの sub-issue の扱いは従来どおり変えていない。
 - **`dryRun` でも `args.skillDir` が必須**（旧プロンプト経路を dryRun のためだけに残すと、書き写しの弱点を温存する二重経路になるため）。
+
+### 取得の封筒は `envelopeJson`（1 行 JSON の文字列）で受ける（Issue #893）
+
+ページ経路（pages >= 2）の封筒で、エージェントが `nonce`・`payload` の各欄・`sha256` を欄ごとに選んで写すと `payload.tsvSha256`・`dir` を落とすことがあった（実測は 20 回中 3 回。取り直しでも落として停止した例がある）。取得（page 0）の返却は `TREE_FETCH_SCHEMA` とし、封筒の欄を持たず、標準出力最終行を `envelopeJson` へ 1 文字も変えずに写させる。ホストの `parseTreeEnvelopeJson` が文字列を `{ nonce, payload, sha256 }` に戻し、従来の欄の集合の照合（#892）・`verifySignedOutput` に渡す。
+
+- 署名の定義（`sha256(nonce + "\n" + canonicalJson(payload))`）と `inputSha256` の束縛は変えない。`fetch-tree.sh` の出力も変えない。`--page` の封筒とページ読み（`TREE_SCHEMA`）も従来どおり欄で受ける。
+- parse の検査（固定語彙の理由・文字列の中身は理由にもログにも入れない）: 文字列でない・空・4096 文字超・JSON として読めない・トップの欄がちょうど `nonce`・`payload`・`sha256` でない・`payload` がオブジェクトでない・トップか `payload` に `__proto__`・`constructor`・`prototype` がある、は 1 回取り直し、2 回目も同じなら停止する。ランナーの禁止キーの検査は文字列の中までは届かないため、ホスト側で見る。
+- 旧形式の欄（`nonce`・`payload`・`sha256`）は読まない。真実の源は `envelopeJson` だけで、旧形式だけの返却は通さない（fail-closed）。
+- 文字列の途中の欠落は、欄の照合が欠けた欄の名前つきで拒否する。`sha256` を作り直していても、欄の集合が合わなければ通らない。
+- 採らなかった案: (1) `if/then` の条件付き必須は、Codex 版ランナーの検証器が対応しないキーワードで、strict の変換も全欄を必須かつ null 許容にするため、2 つの実行環境で同じ意味にならない。(2) `tsvSha256` を取得の封筒の署名対象から外す案は、ページの封筒の `inputSha256`（`fetch-tree-page\n<tsvSha256>\n<P>`）と取得時の tree.tsv との結び付きが、エージェントの申告に依存して弱まり、`dir` の欠落も防げない。
+- 限界: 偽エージェントのテストは、実際のモデルでの欠落率が下がる証拠ではない。導入後の実ランで観測する。sha256 を自分で計算できるエージェントの捏造を防がない前提は変わらない。
+
+## 人の作業の結果の判定（`human-result.sh`・Issue #932）
+
+反映の issue の前提にある人の作業（`owner:human`）の結果を、本文の文章ではなくスクリプトとホストの決まった処理で読む。Plan が本文を言い換えても判定の式は変わらない。
+
+- 規則: 候補は「書き手が assignee」かつ「`author_association` が OWNER / MEMBER / COLLABORATOR」かつ「1 行目が空白・装飾（`>` `#` `*` `_` `` ` `` `~` `-` `+` `|`）を除いて `結果` + コロン（`:` `：` `﹕` `︓`）で始まる」コメント。最新（id 最大）の 1 件だけを採り、生の 1 行目が `結果: 成功` / `結果: 失敗` / `結果: 未実施` と完全一致すれば success / failure / not-done、それ以外の報告は malformed。古い成功へはフォールバックしない。検出は緩く、成功の受理は厳密にする。
+- 照合の範囲: `owner:human` のラベル名は ASCII の大文字小文字を区別せずに照合する（GitHub のラベル名の扱いと create-issue-tree に揃える）。全角などの類似文字や `owner:joint` は一致させない。login は英数字・ハイフン・アンダースコア（EMU の name_shortcode）を許す。
+- エンジン非依存: gh 内蔵の gojq と jq 1.7 は文字クラスへの Unicode 空白の入り方が違う。フィルタは正規表現関数・文字クラス・`\s` 等を使わず、コードポイントの明示列挙（空白の集合は U+0009 U+000B U+000C U+0020 U+0085 U+00A0 U+1680 U+2000〜U+200D U+2028 U+2029 U+202F U+205F U+2060 U+3000 U+FEFF）と startswith / rtrimstr / split だけで書く。静的検査と、先頭タブ・装飾・BOM・Unicode の空白の回帰テストで固定する。
+- ホスト: 成功以外・取得失敗・契約違反・前提 20 件超は着手せず `blocked`（halt 非カウント）で待たせる（fail-closed）。成功したコメントは id だけを Plan へ渡し、本文は非信頼データとして読ませる。
+- 限界（保証しないこと）: (1) 封筒は転記ミスの検出で、sha256 を自分で計算できるエージェントの捏造は防がない（他の封筒と同じ立場）。(2) 同じ `gh` 認証を使う構成では、エージェントも assignee・MEMBER として書けるので、assignee による限定は「人が書いたこと」を保証しない。(3) 判定は着手時点の 1 回だけで、判定後に Plan が読むまでの間のコメントの編集は検出しない。(4) assignee の付け替えで、過去の報告の採否が変わる。(5) 承認など人の判断そのものが要る結果は、人が反映まで確認する。

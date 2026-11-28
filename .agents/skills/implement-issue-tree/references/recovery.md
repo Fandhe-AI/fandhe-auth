@@ -435,10 +435,58 @@ fail-closed で停止する」節を参照）。latch が原因で `blocked` の
 `args.optinTestCommands` の要素自体が許可形式外の場合はラン起動時にエラーで停止するため
 （実装は起動しない）、`args.optinTestCommands` の当該要素を修正してから再実行する。
 
+### ツリー取得で止まったときの切り分け
+
+ツリー取得（`fetch-tree.sh` の封筒を取得エージェントが返す経路）で止まったときに、どの返却のどの欄が違うかを自分で確かめる手順。
+
+**前提。** 取得エージェント（`plan:issue-tree` / `plan:issue-tree-retry`）は、封筒の `pages` が 2 以上なら TSV 行を出さない。このとき `nodes: []` が正しい返却である。ノードはホストが別に起動するページ読みのエージェント（`plan:issue-tree-page-<P>`。取り直しは `-retry`）が返す。したがって「取得エージェントが空で返した」は原因ではない。
+
+**停止の文面。**
+
+| 文面 | 意味 |
+|------|------|
+| ツリー取得の封筒の欄が合わない: 封筒に <欄> が無い（転記漏れ） | ルート取得で封筒の欄が欠けた（封筒の必須欄を検査する版から出る。それより前の版では下の `sha256` に見える） |
+| ツリー取得の封筒が不正（封筒の 1 行 JSON（envelopeJson）が…） | `envelopeJson` が空・JSON でない・形が違う（取得の返却を `envelopeJson` で受ける版から出る） |
+| （試行 N）ツリー取得の検査値が一致しない（<理由>） | ルート取得の検査失敗。ページ読みは「（ページ P・試行 N）」が付く。1 回だけ取り直し、2 回目も落ちたら停止する |
+| ツリー取得のページを連結した結果が取得時の検査値と一致しない（<理由>） | 各ページの照合を通ったあとの全体照合での失敗。取り直さない |
+| fetch-tree.sh が失敗（exit N: …） | スクリプト自身の失敗。終了コードは `script-trust-model.md` の「ツリー取得」節を参照 |
+
+**理由の対応表。**
+
+| 理由 | 何が違うか | 主な原因 |
+|------|-----------|---------|
+| `sha256` | 封筒の `sha256` が `nonce` と payload から計算し直した値と合わない | payload の欄の欠落・値の書き換え・`sha256` の写し誤り。ページ読みでは 7 欄の欠落もここに出る |
+| `digest` | `structSha256`・`taskIdSha256`・`optinSha256` のどれかが `nodes` から計算し直した値と違う | 構造 5 欄・title 先頭のタスク ID・optinTests の書き写し誤り。title だけの違いは停止せず警告で続行する。連結後の `digest` は `tree.tsv` が読み出しの途中で変わったことを指す |
+| `count` | `payload.count` と `nodes` の件数が違う | 行の脱落・追加。連結後の `count` はページの読み飛ばしを指す |
+| `missing` | `nonce`・`payload`・`sha256` の形が不完全 | ページ読みの返却で起きる |
+| `nonce` | 別の呼び出しの封筒を返した | 封筒の流用 |
+| `input` | 別の入力の出力を返した | ルート・リポジトリ・ページ番号・`tsvSha256` が違う呼び出しの出力 |
+
+型の理由（`形式（#N）`）は封筒の照合より前の型検査で出る。
+
+**確かめ方。**
+
+1. ジャーナルで返却の欄名を見る。ジャーナルは Workflow を起動したセッションの `subagents/workflows/<runId>/journal.jsonl` にある。`result` 行には label が無いので、同じ `key` を持つ `started` 行の label と結ぶ（`-s` が要る）。
+
+   ```bash
+   jq -sc '(map(select(.type=="started") | {(.key): {label, agentId}}) | add // {}) as $s | .[] | select(.type=="result" and (($s[.key].label // "") | startswith("plan:issue-tree"))) | .result as $r | {label: $s[.key].label, agentId: $s[.key].agentId, failure: (($r | type) == "object" and ($r.failure // "") != ""), nodes: ($r.nodes? | if type == "array" then length else null end), form: (if ($r | type) != "object" then "none" elif $r | has("envelopeJson") then "envelopeJson" elif $r | has("payload") then "payload" else "other" end), payloadKeys: ((if ($r.envelopeJson? | type) == "string" then ($r.envelopeJson | try fromjson catch null | .payload?) else $r.payload? end) | if type == "object" then keys else null end)}' 'subagents/workflows/<runId>/journal.jsonl'
+   ```
+
+   - `form` が `envelopeJson` なら `envelopeJson` を返す版の取得の返却、`payload` なら旧版の取得かページ読みの返却。`failure: true` はスクリプト失敗の申告。
+   - `nodes` の件数と `payloadKeys` を `fetch-tree.sh` の封筒の欄と比べる。1 ページの取得は 8 欄（`count`・`inputSha256`・`nodesSha256`・`optinSha256`・`pages`・`repo`・`structSha256`・`taskIdSha256`）、ページ経路の取得は上の 8 欄に `dir`・`tsvSha256` を足した 10 欄、ページ読み（`--page`）は 7 欄（`count`・`inputSha256`・`nodesSha256`・`optinSha256`・`page`・`structSha256`・`taskIdSha256`）。
+   - label は前方一致なので `-retry`・`-page-<P>`・`-release` の行も出る（`-release` は `form: other`）。label で読み分ける。
+2. 取得エージェントの transcript（同じディレクトリの `agent-<agentId>.jsonl`。agentId は手順 1 の出力）で、Bash の出力（標準出力の最終行の封筒）の payload と、StructuredOutput の入力（`envelopeJson` か `payload`）を手で比べる。Bash の出力に欄があり StructuredOutput に無ければ、エージェントの転記漏れである。Bash の出力の時点で欄が無ければ、スクリプトとホスト（生成物）の版ずれを疑う。
+3. resume の再生を再確認と取り違えない。同じ args の `resumeFromRunId` は取得エージェントの返却をジャーナルから再生するので、通知の `subagent_tokens 0` は原因の再確認にならない。取得を呼び直すには `args.treeFetchEpoch` を前回より大きい整数にして再開するか、新しいランで起動する（[args-reference.md](args-reference.md) の `treeFetchEpoch` 節）。
+
+封筒の欄の転記漏れは確率的に起きる（版・モデルで変わる）。1 回目で落ちても取り直しで通ることがあり、2 回続けば停止する。取り直しで通ったことを理由に検査を緩めない。
+
+**注意。** 上の jq は欄名・件数・真偽だけを出し、値（title・`dir`・nonce・sha256）は出さない。ジャーナルと transcript にはイシューの title などの非信頼データと nonce が入るので、Issue や PR へ貼るのは欄名だけにする。ジャーナルの形式（`started` / `result` 行と `key` による対応）は Workflow ランタイムの版に依存する。検査値の意味と限界は [script-trust-model.md](script-trust-model.md) を参照。
+
 ### 状態ファイルについて
 
 - パス: `_/issue-trees/<親イシュー番号>.json`（メインリポルート相対）
 - `_/` は git 管理外のローカルディレクトリ（`.gitignore` 対象）であり、状態ファイルは git にコミットされない
 - 同一セッション内での再開は Workflow ツールの `resumeFromRunId` パラメータも利用できる（Workflow ツールが journal から自動再開する）
+  - ツリー取得の検査で止まった run は、同じ args では取得の返却が再生されて同じ理由で止まる。`args.treeFetchEpoch` を前回より大きい整数にして再開すると取得だけを呼び直す（[args-reference.md](args-reference.md) の `treeFetchEpoch` 節）
 - サンプル: `skills/implement-issue-tree/sample/state-example.json` を参照
 

@@ -10,9 +10,17 @@
 # 役割: 数え方は以前、SKILL.md の文章の手順としてエージェントが gh と jq を組み立てて数えていた。依存の読み方が
 #       implement-issue-tree とずれる余地と、取得の失敗を「依存なし」と取り違える余地があったため、スクリプトへ移した。
 #
-# 使い方: human-blockers.sh --root <n> --repo <host>/<owner>/<repo>
+# 使い方: human-blockers.sh --root <n> --repo <host>/<owner>/<repo> [--max-bytes <b> [--offset <k>]]
+#         human-blockers.sh --root <n> --repo <host>/<owner>/<repo> --rejected
 #   --root  ルート issue 番号（正整数）
 #   --repo  対象リポジトリ。Step 5 の状態ファイルのヘッダの repo と同じ形（host は名前と任意のポート）
+#   --max-bytes  ページ分割モード。1 ページに出す人手 issue の行の合計バイト数の上限（各行の UTF-8 のバイト数 + 改行 1）。
+#                1024〜1000000 の整数。渡さないときは全行を 1 回で出す（従来の出力とバイト単位で同じ）。エージェントの
+#                Bash ツールの出力上限（24,000 バイト）を超えて末尾の件数行が読めなくなるのを避けるために使う
+#   --offset     ページの開始位置（並べた行の 0 始まりの番号）。--max-bytes が無いときは指定できない（exit 1）。省略時は 0
+#   --rejected   別モード（Issue #923）。人手 issue ではなく、却下・取りやめで閉じた前提（下の「--rejected モード」）を数える。
+#                --max-bytes を足すと前提の行を 1 ページの上限バイト数で切り、最後の行に offset=・shown=・next= を足す
+#                （--offset は --max-bytes と一緒に指定する。人手の行のページ分割と同じ規則）。引数なしの出力はバイト単位で変わらない
 #
 # 数え方:
 #   0. ルート: sub_issues を辿る前に issues/<root> を 1 回読み、下の「個別の issue の応答の照合」と同じ REPO_DEF で
@@ -65,6 +73,22 @@
 #   PR とみなして止める側に倒す）。ルート自身は 0 で照合する（sub_issues の要素には親を識別する欄が無く、1 の list_subs では
 #   ルートが対象リポジトリの issue かを確かめられないため）。
 #
+# --rejected モード（Issue #923）: implement-issue-tree は、前提の issue が not planned・duplicate で閉じられていると（承認の却下など）
+#   その前提に依存する open な issue を blocked にして着手しない。この棚卸しは、同じ判定で止まる open な issue を事前に見つける。
+#   ツリー（上の 1）の closed な issue の state_reason と、open な issue の deps（上の 2）のうちツリー外で closed な前提の
+#   state_reason（issues/<n> の同じ応答から読む。呼び出しは増やさない）を使い、前提ごとに 1 行の JSON
+#     {"prereq":d,"reason":"not_planned|duplicate|other","dependents":[…]}
+#   を前提の番号の昇順で出し（dependents は昇順の open な issue の番号。1 行に 100 件までで、超える前提は同じ prereq の行を続けて出す。
+#   --max-bytes・--offset の単位はこの行）、最後に result=ok root=<n> rejected=<前提の数> repo=<…> を出す。
+#   state_reason が completed・null・空の closed は解消済みで出さない。それ以外の値は other（implement-issue-tree も未解消として止める）。
+#   自分の祖先・ルート自身への依存は implement-issue-tree が待たないので数えない（ただしツリー内の祖先に限る。限界は次の段落）。題名・本文は出さない。sub-issue と issues/<n> の
+#   state_reason の欄が無い・文字列でも null でもないときは exit 3（欄の欠落を解消済みとして数えない）。ツリー外の前提が PR のときは
+#   このモードでは数えずに飛ばす（PR は issue の close の理由を持たない）。書き込みはしない。
+#   限界（Issue #1000）: ルートより上の祖先（ルートを sub-issue に持つ issue など）への依存は数える。このスクリプトはルートより上を辿らず、
+#   自分の祖先の判定はツリー内の親の連鎖でしか行わないので、ルートの祖先はツリー外の前提として読まれる。そのため not planned・duplicate で
+#   閉じたルートの祖先を前提に書いた open な issue は、implement-issue-tree が待たないのに行として出る（過剰に出る側の限界。上の open の表の
+#   説明の「ルートの祖先は waiting_outside に出る」と同じ食い違い）。祖先を読む gh の呼び出しを足すと複雑さが増えるので見分けない。
+#
 # 出力（stdout）: 人手 issue ごとに 1 行の JSON {"number":n,"title":"…","advances":k,"waiting_on":[…],"waiting_outside":[…]} を、
 #   waiting_on と waiting_outside がどちらも空のもの → どちらかが空でないもの、その中で advances の多い順、同じなら番号の小さい順に出し、最後に
 #   result=ok root=<n> open=<ツリーの open issue 数> humans=<人手 issue 数> repo=<渡された --repo のまま> を出す（humans=0 なら JSON の行は無い）。
@@ -81,6 +105,16 @@
 #              応答が 1 件のオブジェクトでない〕。失敗した issue を依存なし・前提なし・
 #              人手でないとして続けない）
 #   エラーは stderr へ出す。
+#   ページ分割モード（--max-bytes あり）の追加: 1 は --max-bytes・--offset の誤り。3 は --offset が人手 issue 数以上（offset > 0。
+#   数えている間にツリーが変わった可能性があるので offset 0 からやり直す。stdout は空）。
+#
+# ページ分割: --max-bytes を渡すと、並べた行（上の並び）のうち --offset 番目から、合計が上限を超える手前までを出す。残りがあれば
+#   最低 1 行は出すので、1 行だけで上限を超える行は、その行だけのページになる（限界）。最終行は 2 行になり、
+#     result=ok root=<n> open=<o> humans=<全体の人手 issue 数> repo=<渡された --repo のまま> offset=<k> shown=<このページの行数> next=<k+shown | end>
+#     sig=<全行の指紋>
+#   sig は並べた全行（このページだけではない）を連結した文字列の指紋で、ページを取り直す間にツリーが変わったことを見つけるためのもの
+#   （改ざんの検知ではない）。ページごとに GitHub を読み直すので、読み取りの回数はページ数倍になる（ファイルは作らない）。
+#   humans=0・offset=0 は shown=0 next=end で成功する。--max-bytes を渡さないときの出力は従来と同じ。
 #
 # 依存の抽出フィルタ: このスクリプトの実体と同じディレクトリ（SCRIPT_DIR。symlink を辿った先で、tree-lib.sh と同じ基準）の
 #   declared-deps-filter.jq を読んで使う。中身は同じ版の implement-issue-tree の scripts/declared-deps.sh --print-filter（兄弟の
@@ -131,17 +165,35 @@ die() {
   exit "${code}"
 }
 
-USAGE='使い方: human-blockers.sh --root <n> --repo <host>/<owner>/<repo>'
+USAGE='使い方: human-blockers.sh --root <n> --repo <host>/<owner>/<repo> [--max-bytes <b> [--offset <k>]] | --rejected'
 
 ROOT_NUMBER=''
 REPO=''
 HAVE_ROOT=0
 HAVE_REPO=0
+MAX_BYTES=''
+OFFSET=''
+HAVE_MAX=0
+HAVE_OFFSET=0
+REJECTED=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --root | --repo)
+    --rejected)
+      [[ "${REJECTED}" -eq 0 ]] || die 1 "--rejected は 1 回だけ。${USAGE}"
+      REJECTED=1
+      shift
+      ;;
+    --root | --repo | --max-bytes | --offset)
       [[ $# -ge 2 ]] || die 1 "$1 に値がありません。${USAGE}"
-      if [[ "$1" == "--root" ]]; then
+      if [[ "$1" == "--max-bytes" ]]; then
+        [[ "${HAVE_MAX}" -eq 0 ]] || die 1 "--max-bytes は 1 回だけ。${USAGE}"
+        MAX_BYTES="$2"
+        HAVE_MAX=1
+      elif [[ "$1" == "--offset" ]]; then
+        [[ "${HAVE_OFFSET}" -eq 0 ]] || die 1 "--offset は 1 回だけ。${USAGE}"
+        OFFSET="$2"
+        HAVE_OFFSET=1
+      elif [[ "$1" == "--root" ]]; then
         [[ "${HAVE_ROOT}" -eq 0 ]] || die 1 "--root は 1 回だけ。${USAGE}"
         ROOT_NUMBER="$2"
         HAVE_ROOT=1
@@ -159,6 +211,14 @@ done
 # host は名前と任意のポート（GHES の host:port。Step 5 のスクリプト・検証のフェンスと同じ形）
 [[ "${REPO}" =~ ^[A-Za-z0-9.-]+(:[0-9]{1,5})?/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$ ]] \
   || die 1 "--repo は <host>/<owner>/<repo> の形で指定する。${USAGE}"
+if [[ "${HAVE_MAX}" -eq 1 ]]; then
+  [[ "${MAX_BYTES}" =~ ^[1-9][0-9]{3,6}$ && "${MAX_BYTES}" -ge 1024 && "${MAX_BYTES}" -le 1000000 ]] \
+    || die 1 "--max-bytes は 1024〜1000000 の整数で指定する。${USAGE}"
+  [[ "${HAVE_OFFSET}" -eq 0 ]] && OFFSET=0
+  [[ "${OFFSET}" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die 1 "--offset は 0 以上の整数（先頭の 0 なし）で指定する。${USAGE}"
+else
+  [[ "${HAVE_OFFSET}" -eq 0 ]] || die 1 "--offset は --max-bytes と一緒に指定する。${USAGE}"
+fi
 HOST="${REPO%%/*}"
 SLUG="${REPO#*/}"
 case "${SLUG##*/}" in
@@ -259,11 +319,12 @@ while [[ -n "${QUEUE}" ]]; do
   SUBS=$(list_subs "${N}" "${HOST}" "${SLUG}") || die 3 "#${N} の sub-issues を取得できません。"
   # 応答の形が想定外なら（番号・state・題名・ラベルの型）ここで止める。ラベルは人手の判定の必須の入力なので、欠落・null・false を
   # 空の配列として読まない（ラベルの無い issue の応答は空の配列）
-  NEW=$({ printf '%s\n' "${NODES}"; printf '%s' "${SUBS}"; } | jq -c -s '.[0] + [.[1][]
+  NEW=$({ printf '%s\n' "${NODES}"; printf '%s' "${SUBS}"; } | jq -c -s --argjson n "${N}" --arg rej "${REJECTED}" '.[0] + [.[1][]
       | if type == "object" and (.number | type) == "number" and (.state == "open" or .state == "closed")
           and (.title | type) == "string" and (.labels | type) == "array"
           and all(.labels[]; type == "object" and (.name | type) == "string")
-        then {number, state, title, labels: [.labels[].name | ascii_downcase]}
+          and ($rej == "0" or (has("state_reason") and ((.state_reason | type) == "string" or .state_reason == null)))
+        then {number, state, title, labels: [.labels[].name | ascii_downcase], parent: $n, reason: .state_reason}
         else error("sub-issue の要素の形が想定外") end]') \
     || die 3 "#${N} の sub-issues の応答を読めません。"
   KIDS=$(printf '%s' "${SUBS}" | jq -r '.[].number') || die 3 "#${N} の sub-issues の番号を読めません。"
@@ -313,12 +374,12 @@ HUMAN_DEF='def human: .state == "open" and any(.labels[]; . == "owner:human" or 
 # ---- 2b. 人手 issue の前提のうちツリー外のもの（state を読む）----
 # ツリー内は closed を含む NODES 全体で判定する（closed のツリー内の前提をツリー外として読まない）。番号ごとに 1 回だけ読む
 # shellcheck disable=SC2016  # jq の $ 変数
-OUTSIDE_NUMS=$({ printf '%s\n' "${NODES}"; printf '%s' "${DEPS}"; } | jq -r -s "${HUMAN_DEF}"'
+OUTSIDE_NUMS=$({ printf '%s\n' "${NODES}"; printf '%s' "${DEPS}"; } | jq -r -s --arg rej "${REJECTED}" --arg root "${ROOT_NUMBER}" "${HUMAN_DEF}"'
     .[0] as $nodes | .[1:] as $deps
     | [$nodes[].number] as $all
     | [$nodes[] | select(human) | .number] as $humans
-    | [$deps[] | .number as $x | select(any($humans[]; . == $x))
-        | .deps[] | select(. != $x) | select(. as $d | any($all[]; . == $d) | not)]
+    | [$deps[] | .number as $x | select($rej == "1" or any($humans[]; . == $x))
+        | .deps[] | select(. != $x) | select($rej == "0" or . != ($root | tonumber)) | select(. as $d | any($all[]; . == $d) | not)]
     | unique | .[]') \
   || die 3 "ツリー外の前提の番号を読めません。"
 OUTSIDE=''
@@ -328,7 +389,9 @@ for N in ${OUTSIDE_NUMS}; do
   # 有無も同じ呼び出しで読み、PR なら止める（読み取りは番号ごとに 1 回のまま）
   # repository_url も同じ呼び出しで読み、番号より先に対象リポジトリの issue であることを確かめる（移管された issue は
   # リダイレクトで移管先の応答になる。冒頭コメントの「個別の issue の応答の照合」）
-  OUT=$(gh api --hostname "${HOST}" "repos/${SLUG}/issues/${N}" --jq '{number, state, pr: has("pull_request"), repository_url}') \
+  OUT_JQ='{number, state, pr: has("pull_request"), repository_url}'
+  [[ "${REJECTED}" -eq 0 ]] || OUT_JQ='{number, state, state_reason, sr: has("state_reason"), pr: has("pull_request"), repository_url}'
+  OUT=$(gh api --hostname "${HOST}" "repos/${SLUG}/issues/${N}" --jq "${OUT_JQ}") \
     || die 3 "ツリー外の前提 #${N} の state を取得できません。前提なしとして続けません。"
   # shellcheck disable=SC2016  # jq の $ 変数
   WHY=$(printf '%s\n' "${OUT}" | jq -r -s --argjson n "${N}" --arg slug "${SLUG}" "${REPO_DEF}"'
@@ -340,16 +403,20 @@ for N in ${OUTSIDE_NUMS}; do
     || die 3 "ツリー外の前提 #${N} の応答を ${REPO} の issue として照合できません（jq の失敗）。前提なしとして続けません。"
   [[ "${WHY}" == "ok" ]] \
     || die 3 "ツリー外の前提 #${N} の応答を ${REPO} の issue #${N} と確かめられません（${WHY:-判定結果が空}）。前提なしとして続けません。移管された issue なら、その前提を書いた人手 issue の本文の \`## 前提\` を直してください。"
-  LINE=$(printf '%s\n' "${OUT}" | jq -c -s --argjson n "${N}" '
+  LINE=$(printf '%s\n' "${OUT}" | jq -c -s --argjson n "${N}" --arg rej "${REJECTED}" '
       if length == 1 and (.[0] | type) == "object" and .[0].number == $n and (.[0].state == "open" or .[0].state == "closed")
         and (.[0].pr == true or .[0].pr == false)
-      then {number: .[0].number, state: .[0].state, pr: .[0].pr}
+        and ($rej == "0" or (.[0].sr == true and ((.[0].state_reason | type) == "string" or .[0].state_reason == null)))
+      then {number: .[0].number, state: .[0].state, pr: .[0].pr, reason: .[0].state_reason}
       else error("ツリー外の前提の応答の形が想定外") end') \
     || die 3 "ツリー外の前提 #${N} の応答が想定の形ではありません。前提なしとして続けません。"
   # jq の失敗を空文字のまま「PR でない」として続けない（fail-open）。yes / no 以外は止める
   IS_PR=$(printf '%s' "${LINE}" | jq -r 'if .pr == true then "yes" elif .pr == false then "no" else error("pr") end') \
     || die 3 "ツリー外の前提 #${N} が PR かどうかを判定できません。前提なしとして続けません。"
   case "${IS_PR}" in yes | no) ;; *) die 3 "ツリー外の前提 #${N} が PR かどうかの判定結果が想定外です。前提なしとして続けません。" ;; esac
+  if [[ "${IS_PR}" == "yes" && "${REJECTED}" -eq 1 ]]; then
+    continue
+  fi
   if [[ "${IS_PR}" == "yes" ]]; then
     # この前提を書いた人手 issue の番号だけを示す（題名・本文は出さない）
     # shellcheck disable=SC2016  # jq の $ 変数
@@ -360,10 +427,69 @@ for N in ${OUTSIDE_NUMS}; do
         | unique | map("#\(.)") | join("、")') || WRITERS='（特定できません）'
     die 3 "人手 issue ${WRITERS} の前提 #${N} は PR です。前提には issue の番号を書きます。その人手 issue の本文の \`## 前提\` を直してください。前提なしとして続けません。"
   fi
-  LINE=$(printf '%s' "${LINE}" | jq -c '{number, state}') || die 3 "ツリー外の前提の集約に失敗しました。"
+  LINE=$(printf '%s' "${LINE}" | jq -c '{number, state, reason}') || die 3 "ツリー外の前提の集約に失敗しました。"
   OUTSIDE="${OUTSIDE}${LINE}"$'\n'
 done
 OUTSIDE_JSON=$(printf '%s' "${OUTSIDE}" | jq -c -s '.') || die 3 "ツリー外の前提の集約に失敗しました。"
+
+# ---- --rejected: 却下・取りやめで閉じた前提と、それに依存する open な issue（Issue #923）----
+# 入力の 1 件目が NODES（reason = sub_issues の state_reason、parent = 親の番号）、2 件目がツリー外の前提の [{number, state, reason}]、
+# 3 件目以降が open な issue ごとの {number, deps}。closed の前提のうち reason が completed・null・空以外のものだけを前提ごとに集める。
+# 自分の祖先への依存は implement-issue-tree が待たないので数えない（親の番号の連鎖で判定）
+if [[ "${REJECTED}" -eq 1 ]]; then
+  # shellcheck disable=SC2016  # jq の $ 変数
+  REJ=$({ printf '%s\n' "${NODES}"; printf '%s\n' "${OUTSIDE_JSON}"; printf '%s' "${DEPS}"; } | jq -c -s '
+      def cls($r): (($r // "") | ascii_downcase) as $x
+        | if $x == "" or $x == "completed" then null
+          elif $x == "not_planned" or $x == "duplicate" then $x else "other" end;
+      .[0] as $nodes | .[1] as $outs | .[2:] as $deps
+      | ($nodes | map({key: (.number | tostring), value: .parent}) | from_entries) as $par
+      | ([$nodes[] | select(.state == "closed") | {key: (.number | tostring), value: cls(.reason)}]
+          + [$outs[] | select(.state == "closed") | {key: (.number | tostring), value: cls(.reason)}] | from_entries) as $why
+      | def anc($x; $d): ([$x | recurse($par[tostring]; . != null)] | index($d)) != null;
+      [$deps[] | .number as $x | .deps[] | select(. != $x) | select($why[tostring] != null)
+        | select(anc($x; .) | not) | {prereq: ., reason: $why[tostring], x: $x}]
+      | group_by(.prereq) | map({prereq: .[0].prereq, reason: .[0].reason, dependents: ([.[].x] | unique)})
+      | sort_by(.prereq)
+      | .[] | . as $g | ($g.dependents | length) as $len
+      | range(0; ([$len, 1] | max); 100) as $i
+      | {prereq: $g.prereq, reason: $g.reason, dependents: $g.dependents[$i:$i + 100]}') \
+    || die 3 "却下・取りやめで閉じた前提の数え上げに失敗しました。"
+  COUNT=0
+  ROWS=0
+  if [[ -n "${REJ}" ]]; then
+    COUNT=$(printf '%s\n' "${REJ}" | jq -s 'map(.prereq) | unique | length') || die 3 "前提の行を数えられません。"
+    ROWS=$(printf '%s\n' "${REJ}" | jq -s 'length') || die 3 "前提の行を数えられません。"
+    [[ "${HAVE_MAX}" -eq 1 ]] || printf '%s\n' "${REJ}"
+  fi
+  if [[ "${HAVE_MAX}" -eq 0 ]]; then
+    echo "result=ok root=${ROOT_NUMBER} rejected=${COUNT} repo=${REPO}"
+    exit 0
+  fi
+  # ページ分割（--max-bytes あり）。人手の行のページ分割と同じ規則で、offset 番目から上限を超える手前までを出す
+  if [[ "${OFFSET}" -gt 0 && "${OFFSET}" -ge "${ROWS}" ]]; then
+    die 3 "--offset ${OFFSET} が前提の行数 ${ROWS} 以上です。offset 0 からやり直してください。"
+  fi
+  RSHOWN=$(printf '%s\n' "${REJ}" | jq -Rn --arg o "${OFFSET}" --arg m "${MAX_BYTES}" '
+      [inputs | select(length > 0)] as $l | ($o | tonumber) as $o | ($m | tonumber) as $m
+      | reduce $l[$o:][] as $x ({n: 0, b: 0, stop: false};
+          if .stop then .
+          else (($x | utf8bytelength) + 1) as $s
+            | if .n > 0 and .b + $s > $m then .stop = true else .n += 1 | .b += $s end
+          end)
+      | .n') || die 3 "ページに載せる行数を求められません。"
+  [[ "${RSHOWN}" =~ ^[0-9]+$ ]] || die 3 "ページに載せる行数が想定の形ではありません。"
+  if [[ "${RSHOWN}" -gt 0 ]]; then
+    RPAGE=$(printf '%s\n' "${REJ}" | jq -Rrn --arg o "${OFFSET}" --arg n "${RSHOWN}" \
+      '($o | tonumber) as $o | ($n | tonumber) as $n | [inputs | select(length > 0)] | .[$o:$o + $n][]') || die 3 "ページの行を切り出せません。"
+    [[ -n "${RPAGE}" ]] || die 3 "ページの行が空です。"
+    printf '%s\n' "${RPAGE}"
+  fi
+  RNEXT=$((OFFSET + RSHOWN))
+  if [[ "${RNEXT}" -ge "${ROWS}" ]]; then RNEXT=end; fi
+  echo "result=ok root=${ROOT_NUMBER} rejected=${COUNT} repo=${REPO} offset=${OFFSET} shown=${RSHOWN} next=${RNEXT}"
+  exit 0
+fi
 
 # ---- 3・4. 辺と人手 issue ごとの数え上げ（1 つの jq に標準入力で渡す）----
 # 入力の 1 件目が NODES、2 件目がツリー外の前提の [{number, state}]、3 件目以降が open な issue ごとの {number, deps}。
@@ -404,6 +530,36 @@ OPEN_COUNT=$(printf '%s' "${NODES}" | jq '[.[] | select(.state == "open")] | len
 HUMANS=0
 if [[ -n "${RESULT}" ]]; then
   HUMANS=$(printf '%s\n' "${RESULT}" | jq -s 'length') || die 3 "人手 issue の行を数えられません。"
-  printf '%s\n' "${RESULT}"
 fi
-echo "result=ok root=${ROOT_NUMBER} open=${OPEN_COUNT} humans=${HUMANS} repo=${REPO}"
+if [[ "${HAVE_MAX}" -eq 0 ]]; then
+  [[ -z "${RESULT}" ]] || printf '%s\n' "${RESULT}"
+  echo "result=ok root=${ROOT_NUMBER} open=${OPEN_COUNT} humans=${HUMANS} repo=${REPO}"
+  exit 0
+fi
+# ページ分割モード。開始位置が人手 issue の数以上なら、数えている間にツリーが変わった可能性があるので何も出さず止める
+if [[ "${OFFSET}" -gt 0 && "${OFFSET}" -ge "${HUMANS}" ]]; then
+  die 3 "--offset ${OFFSET} が人手 issue 数 ${HUMANS} 以上です。数えている間にツリーが変わった可能性があるので、offset 0 からやり直してください。"
+fi
+SHOWN=$(printf '%s\n' "${RESULT}" | jq -Rn --arg o "${OFFSET}" --arg m "${MAX_BYTES}" '
+    [inputs | select(length > 0)] as $l | ($o | tonumber) as $o | ($m | tonumber) as $m
+    | reduce $l[$o:][] as $x ({n: 0, b: 0, stop: false};
+        if .stop then .
+        else (($x | utf8bytelength) + 1) as $s
+          | if .n > 0 and .b + $s > $m then .stop = true else .n += 1 | .b += $s end
+        end)
+    | .n') || die 3 "ページに載せる行数を求められません。"
+[[ "${SHOWN}" =~ ^[0-9]+$ ]] || die 3 "ページに載せる行数が想定の形ではありません。"
+SIG=$(printf '%s' "${RESULT}" | jq -Rs 'explode | reduce .[] as $c (0; (. * 31 + $c) % 2147483647)') \
+  || die 3 "全行の指紋を求められません。"
+[[ "${SIG}" =~ ^[0-9]+$ ]] || die 3 "全行の指紋が想定の形ではありません。"
+if [[ "${SHOWN}" -gt 0 ]]; then
+  # sed などの外部コマンドに頼らず jq で行を切り出す。失敗したら result=ok を出さずに止める（行が欠けたまま成功にしない）
+  PAGE=$(printf '%s\n' "${RESULT}" | jq -Rrn --arg o "${OFFSET}" --arg n "${SHOWN}" \
+    '($o | tonumber) as $o | ($n | tonumber) as $n | [inputs | select(length > 0)] | .[$o:$o + $n][]') || die 3 "ページの行を切り出せません。"
+  [[ -n "${PAGE}" ]] || die 3 "ページの行が空です。"
+  printf '%s\n' "${PAGE}"
+fi
+NEXT=$((OFFSET + SHOWN))
+if [[ "${NEXT}" -ge "${HUMANS}" ]]; then NEXT=end; fi
+echo "result=ok root=${ROOT_NUMBER} open=${OPEN_COUNT} humans=${HUMANS} repo=${REPO} offset=${OFFSET} shown=${SHOWN} next=${NEXT}"
+echo "sig=${SIG}"
