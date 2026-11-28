@@ -75,7 +75,7 @@ description: >
 | `e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネス（`crates/e2e-harness`）の Chrome の仮想 authenticator の E2E（`#[ignore]`）の明示の入口。chromedriver 必須・CI 外（TASK-6）。結果は〔仮想〕で実機・Safari に数えない。名前は暫定 |
 | `e2e-firefox` | `scripts/e2e-firefox.sh` | ハーネス（`crates/e2e-harness`）の Firefox の仮想 authenticator の E2E（`#[ignore]`）の明示の入口。geckodriver・Firefox 必須・CI 外（TASK-6）。結果は〔仮想〕で実機・Safari に数えない。名前は暫定 |
 | `load-trial` | `scripts/load-trial.sh` | ハーネス（`crates/load-harness`）の小さな試し実行（`trial_run`）の明示の入口。Docker 不要・CI 外（TASK-12 10/10）。一致 0 件は失敗（AUDB-6 の向き）。記録は試験の一時ディレクトリに書かれ成功時に消えるため、`--show-output` で本文を標準出力に出す。本文は試験が秘密値の照合を通した後に固定の開始行・終了行で挟んで出し、入口は集計行が合格 1 件（無視 0 件）かつ区画がちょうど 1 件のときだけ区画の中身を出して 0 を返す（集計行の不一致のときは捕捉した出力を再掲せず固定の文言だけを出して 1。試験の捕捉を外す `RUST_TEST_NOCAPTURE` は子プロセスへ渡さない。区画が 1 件でない・開始行が終了行より後・区画が空または記録の形式の行が無いときは固定の文言（件数を含む）を出して 1。失敗時は捕捉した出力を再掲しない）。stub の結果を実物に数えない（`A-2026-10-28-9`）。名前は暫定 |
-| `ci-timing` | `scripts/ci-timing.sh report` | 読み取りのみ（GitHub の REST の GET だけ。`gh api` に `-f`・`-F`・`-X`・`--input` を渡さない）。gh の認証・jq・ネットワーク必須・CI 外。許可した列（runner の名前・label・step・URL・ブランチ名は出さない）だけを集計し、0 件の取得は失敗（TASK-6 9/10・#56）。名前は暫定 |
+| `ci-timing` | `scripts/ci-timing.sh report` | 読み取りのみ（GitHub の REST の GET だけ。`gh api` に `-f`・`-F`・`-X`・`--input` を渡さない）。gh の認証・jq・ネットワーク必須・CI 外。許可した列（runner の名前・step・URL・ブランチ名と jobs API の `labels` の欄は出さない。ジョブ名に含まれる matrix の値は出る）だけを集計し、0 件の取得は失敗（TASK-6 9/10・#56）。名前は暫定 |
 
 派生リポジトリでターゲットを足す場合の契約:
 

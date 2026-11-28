@@ -28,7 +28,8 @@ spec の本文は写さない。
 | `conclusion` | 未完了は `-` |
 | `created_epoch`・`started_epoch`・`completed_epoch` | UTC の秒。欠けは `-` |
 
-runner の名前・group・label・step・URL・ブランチ名は出さない。
+runner の名前・group・step・URL・ブランチ名と、jobs API の `labels` の欄は出さない（ジョブ名に含まれる matrix の値は出る）。
+Markdown へ出すとき、ジョブ名など外から来た文字列は `|`・`[`・`]`・`<`・`>`・`` ` `` を `\` で逃がす。
 
 集計（`scripts/ci-timing.sh summary`。Markdown。単位は整数の秒）:
 
@@ -56,7 +57,7 @@ scripts/ci-timing.sh fetch --workflow ci.yml --event push --branch main --limit 
 - `origin/main`: `f9aa8586eff49057d90b86272616edd437d07353`
 - ツール: gh 2.103.3、jq 1.8.1
 - 各系統の直近 30 件までの完了した実行（`--limit 30`）
-
+- 下の集計は、スクリプトの出力の見出しを 1 段下げ、ヘッダの 3 行（取得・`origin/main`・ツール）を日本語に直して貼った（数値は出力のまま）。
 
 ### ci.yml / pull_request
 
@@ -150,6 +151,7 @@ scripts/ci-timing.sh fetch --workflow ci.yml --event push --branch main --limit 
 - `cancelled` の実行・ジョブは時間の集計から除いている（PR の concurrency による取り消しを含む）。
 - 標本の件数が系統とジョブで違う。PR の系統は成功・失敗の実行が少ない。
 - 記録した時点のジョブの構成に限る。ジョブを足したら取り直す。
+- `pull_request` の系統は、PR の側で書き換えた定義の実行（PR を出した人が選んだジョブ名・所要時間）を含みうる。取得は fork や作成者で絞っていない。
 - `ci.yml` の push の `PR title` は push では走らないため、全件が除外になる。
 
 ## 6. 判定の欄

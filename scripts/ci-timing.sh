@@ -13,9 +13,11 @@
 # 終了コード: 0 = 成功、2 = 誤用、または取得・検査ができない（0 件の取得も 2。空の記録を成功にしない）。
 #   report は 0 件の系統も「0 runs」と記録して最後まで出し、全系統が空、または ci.yml・ai-review.yml の系統が空なら 2 を返す。
 #   0 件を許すのは定期系（scheduled.yml・update-external.yml）だけ。
-# 出す列は許可リストに限る（runner の名前・label・step・URL・ブランチ名は出さない。SECR-23。実機の名前を書かない規約）。
-# 認証は gh の既存の資格情報をそのまま使う。トークンを読まず・出さず・環境変数へ書かない。宛先は gh の既定の GitHub だけ。
+# 出す列は許可リストに限る（runner の名前・`labels` の欄・step・URL・ブランチ名は出さない。SECR-23。実機の名前を書かない規約）。
+# ジョブ名に含まれる matrix の値は出る。ジョブ名など外から来た文字列は Markdown へ出すとき | [ ] < > ` を逃がす。
+# 認証は gh の既存の資格情報をそのまま使う。トークンを読まず・出さず・環境変数へ書かない。宛先は gh の設定が指す host・repo（report の冒頭に解決した repo を出す）。
 set -euo pipefail
+ORIG_PWD="$(pwd)"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
@@ -111,7 +113,11 @@ parse_opts() {
       *)
         case " ${allowed} " in *" file "*) ;; *) die "unexpected argument" ;; esac
         [ -z "${OPT_FILE}" ] || die "unexpected argument"
-        OPT_FILE="$1"
+        # cd の後でも同じファイルを指すよう、相対パスは起動時の cwd で絶対パスにする。
+        case "$1" in
+          /*) OPT_FILE="$1" ;;
+          *) OPT_FILE="${ORIG_PWD}/$1" ;;
+        esac
         shift
         ;;
     esac
@@ -178,7 +184,7 @@ function sortarr(a, n,   i, j, v) {
   for (i = 2; i <= n; i++) { v = a[i]; for (j = i - 1; j >= 1 && a[j] > v; j--) a[j + 1] = a[j]; a[j + 1] = v }
 }
 function pct(a, n, p,   k) { k = int((p * n + 99) / 100); if (k < 1) k = 1; return a[k] }
-function esc(s) { gsub(/\|/, "\\|", s); return s }
+function esc(s) { gsub(/[][|<>`]/, "\\\\&", s); return s }
 {
   if (NF != 10) bad("column count")
   for (i = 8; i <= 10; i++) if ($i !~ /^([0-9]+|-)$/) bad("epoch")
@@ -256,6 +262,7 @@ cmd_report() {
   echo "# CI timing report"
   echo ""
   echo "- fetched (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "- repo (resolved by gh): $(gh api 'repos/{owner}/{repo}' --jq .full_name 2> /dev/null || echo unknown)"
   echo "- origin/main: $(git rev-parse origin/main 2> /dev/null || echo unknown)"
   echo "- tools: $(gh --version 2> /dev/null | head -n 1), $(jq --version 2> /dev/null)"
   for spec in "ci.yml pull_request -" "ci.yml push main" "ai-review.yml pull_request -" "scheduled.yml workflow_dispatch -" "update-external.yml schedule -"; do

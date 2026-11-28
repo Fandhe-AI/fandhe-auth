@@ -138,6 +138,9 @@ cat > "${ct_bin}/gh" << 'EOF'
 #!/bin/sh
 # 偽の gh。引数を記録し、FAKE_GH_MODE で応答を変える。
 printf '%s\n' "$*" >> "${FAKE_GH_LOG}"
+case "$*" in
+  "api repos/{owner}/{repo} "*) echo "example-owner/example-repo"; exit 0 ;;
+esac
 case "${FAKE_GH_MODE}" in
   fail) exit 1 ;;
   empty) echo '{"workflow_runs":[]}' ;;
@@ -172,12 +175,48 @@ if [ "${ct_runs_calls}" = "1" ] && [ "${ct_jobs_calls}" = "1" ]; then
 else
   fail "ci-timing: fetch reads runs once and jobs of success/failure runs only" "runs=${ct_runs_calls} jobs=${ct_jobs_calls}"
 fi
-# gh api の -f・-F は POST に変わる。GET だけを使う回帰
-ct_nonget="$(grep -Ec '(^| )(-f|-F|-X|--method|--input|--field|--raw-field)( |$)' "${ct_log}" || true)"
+# gh api の -f・-F は POST に変わる。GET だけを使う回帰（gh repo view・graphql は POST /graphql なので同じく検出する）
+ct_re='(^| )(-[fFX]|--method|--input|--field|--raw-field|(-H|--header)[ =]?X-HTTP-Method-Override|repo view|api graphql)'
+ct_nonget="$(grep -Eic "${ct_re}" "${ct_log}" || true)"
 if [ "${ct_nonget}" = "0" ]; then
   pass "ci-timing: fetch uses GET only"
 else
   fail "ci-timing: fetch uses GET only" "non-GET flags in ${ct_nonget} call(s)"
 fi
+
+# report: 解決した repo を冒頭に出す（REST の GET。fetch と同じ解決）。ジョブ名の Markdown の記号を逃がす
+: > "${ct_log}"
+ct_rep="$(PATH="${ct_bin}:${PATH}" FAKE_GH_MODE=ok FAKE_GH_LOG="${ct_log}" FAKE_GH_JOBS="${ct_in}/jobs.json" "${HOOK_BASH}" "${ct}" report 2>&1 < /dev/null)" || true
+case "${ct_rep}" in
+  *"- repo (resolved by gh): example-owner/example-repo"*) pass "ci-timing: report shows the resolved repo" ;;
+  *) fail "ci-timing: report shows the resolved repo" "${ct_rep}" ;;
+esac
+ct_nonget="$(grep -Eic "${ct_re}" "${ct_log}" || true)"
+if [ "${ct_nonget}" = "0" ]; then
+  pass "ci-timing: report uses GET only"
+else
+  fail "ci-timing: report uses GET only" "non-GET flags in ${ct_nonget} call(s)"
+fi
+# 値をくっつけた形（-XPOST 等）も検出する正規表現であること
+ct_missed=0
+for ct_s in 'repo view --json nameWithOwner' 'api graphql' 'api x -HX-HTTP-Method-Override:POST' 'api x --header=x-http-method-override:POST' 'api x -XPOST' 'api x --method=POST' 'api x -Fk=v' 'api x -fk=v' 'api x -H X-HTTP-Method-Override:POST'; do
+  printf '%s\n' "${ct_s}" | grep -Eiq "${ct_re}" || ct_missed=$((ct_missed + 1))
+done
+if [ "${ct_missed}" = "0" ]; then
+  pass "ci-timing: non-GET detector catches attached forms"
+else
+  fail "ci-timing: non-GET detector catches attached forms" "missed ${ct_missed}"
+fi
+# 相対パスの FILE も、スクリプト内の cd の後で同じファイルを指す
+ct_rel="$(cd "${ct_in}" && "${HOOK_BASH}" "${ct}" summary one.tsv 2>&1 < /dev/null)" || true
+case "${ct_rel}" in
+  *"| w.yml / e | j | 1 / 0 | 7 | 7 | 7 | 0 | 0 | 0 |"*) pass "ci-timing: summary accepts a relative path" ;;
+  *) fail "ci-timing: summary accepts a relative path" "${ct_rel}" ;;
+esac
+# 外から来たジョブ名の | [ ] < > を逃がす
+# shellcheck disable=SC2016 # バッククォートはそのままの文字列で、シェルに展開させない
+printf 'w.yml\te\t1\t1\tabc\ta|[b](u)<i>`c`\tsuccess\t100\t100\t107\n' > "${ct_in}/esc.tsv"
+# shellcheck disable=SC2016 # 同上
+ct_run "summary: escapes markdown characters in job names" 0 '| w.yml / e | a\|\[b\](u)\<i\>\`c\` | 1 / 0 |' summary "${ct_in}/esc.tsv"
 
 finish "part 13"
