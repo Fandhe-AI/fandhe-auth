@@ -43,11 +43,14 @@ PROD_DIRS=(core secret db-tests client plugin-oidc backend)
 TEST_ONLY_DIRS=(hub-stub console-stub it-harness e2e-harness load-harness trial-deps)
 
 CONSTS='6a09e667|bb67ae85|3c6ef372|a54ff53a|510e527f|9b05688c|1f83d9ab|5be0cd19|428a2f98|67452301|efcdab89|98badcfe|10325476|c3d2e1f0|f3bcc908|cbbb9d5d|61707865|3320646e|79622d32|6b206574|9e3779b9|243f6a88|0ffffffc0fffffff|800000000000808a|ffffffff00000001|0x63, *0x7c, *0x77, *0x7b'
-ASM='\b(asm|global_asm|naked_asm)!|#\[naked\]|\b(core|std)::arch\b'
+# 語境界は BSD grep（macOS）が \b を解さないため、POSIX ERE の文字クラスで書く。
+BL='(^|[^[:alnum:]_])'
+BR='([^[:alnum:]_]|$)'
+ASM="${BL}(asm|global_asm|naked_asm)!|#\\[naked\\]|${BL}(core|std)::arch${BR}"
 TRAITS='RngCore|CryptoRng|CryptoRngCore|SeedableRng|BlockCipher|BlockEncrypt|BlockDecrypt|StreamCipher|KeyInit|KeyIvInit|UniversalHash|Digest|DynDigest|FixedOutput|Mac'
-C4RE="^[[:space:]]*(unsafe[[:space:]]+)?impl(<[^>]*>)?[[:space:]]+([A-Za-z0-9_]+::)*(${TRAITS})(<.*>)?[[:space:]]+for\\b"
+C4RE="^[[:space:]]*(unsafe[[:space:]]+)?impl(<[^>]*>)?[[:space:]]+([A-Za-z0-9_]+::)*(${TRAITS})(<.*>)?[[:space:]]+for${BR}"
 WORDS='sha1|sha256|sha384|sha512|sha3|md5|hmac|hkdf|pbkdf2|argon2|scrypt|bcrypt|aes|chacha20|poly1305|ed25519|x25519|p256|p384|secp256k1|ecdsa|ecdh|rsa|keccak|blake2|blake3|siphash|xorshift|xoshiro|pcg32|lcg|mt19937|totp|hotp|gcm'
-N1RE="\\b(fn|struct|enum|trait|mod|type|const|static|macro_rules!)[[:space:]]+([A-Za-z0-9]+_)*(${WORDS})(_[A-Za-z0-9]+)*\\b"
+N1RE="${BL}(fn|struct|enum|trait|mod|type|const|static|macro_rules!)[[:space:]]+([A-Za-z0-9]+_)*(${WORDS})(_[A-Za-z0-9]+)*${BR}"
 
 # run_grep <出力先> <規則> <file> <grep の引数>...: 標準入力を grep し、一致した行を `規則<TAB>file:行` で出力先へ足す。
 # grep の終了コードが 0（一致）・1（なし）以外なら検査不能（2）で止める。
