@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps lib-deps no-vendored crypto-scan audit-cfg audit-cfg-nofetch pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps lib-deps no-vendored crypto-scan audit-cfg audit-cfg-nofetch pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial ci-timing
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -30,7 +30,7 @@ setup: ## Git hooks を有効化し .env を雛形から作成する（再実行
 check: ## editorconfig-checker + shellcheck（ソースは変更しない）。直接: scripts/check.sh
 	@scripts/check.sh
 
-test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git が基本。part 12 の lib-deps だけ cargo が要り、無ければローカルは SKIP、CI では失敗）。直接: scripts/hooks/test-hooks.sh
+test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git が基本。part 12 の lib-deps だけ cargo、part 13 の ci-timing だけ jq が要り、無ければローカルは SKIP、CI では失敗）。直接: scripts/hooks/test-hooks.sh
 	@scripts/hooks/test-hooks.sh
 
 # secret-scan は暫定の名前（人が確定する）。scripts/secret-scan-ci.sh（--tracked --summary と scan-canary 相当）は CI の secret scan ジョブが呼ぶ（#51。TASK-6）。
@@ -103,3 +103,7 @@ e2e-firefox: ## ハーネスの Firefox の E2E（geckodriver・Firefox 必須�
 # load-trial は暫定の名前（人が確定する）。計測・負荷のハーネスの小さな試し実行の明示の入口。CI には載せない（同じ試験は make test に入っている。TASK-12 10/10）。
 load-trial: ## 計測・負荷のハーネスの小さな試し実行（Docker 不要・stub が相手・記録の本文を標準出力に出す・0 件は失敗。CI 外）。直接: scripts/load-trial.sh
 	@scripts/load-trial.sh
+
+# ci-timing は暫定の名前（人が確定する）。CI の中では流さない（TASK-6 9/10。#56）。
+ci-timing: ## CI のジョブごとの実行時間の記録を取る（読み取りのみ。gh の認証・jq・ネットワークが要る。CI 外）。直接: scripts/ci-timing.sh report
+	@scripts/ci-timing.sh report
