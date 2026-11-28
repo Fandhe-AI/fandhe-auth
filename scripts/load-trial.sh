@@ -35,7 +35,7 @@ if [ "${rc}" -ne 0 ]; then
   echo "error: load trial test failed (the output is not printed; run the test directly to inspect)" >&2
   exit 1
 fi
-# 捕捉した出力 ${out} は、here-string（一時ファイルへ書き出す実装がある。macOS 標準の bash 3.2 等。TMPDIR に依る）に渡さず、printf（組み込み）からパイプで awk へ渡す（SECR-23）。
+# 捕捉した出力 ${out} は、here-string（bash 5.1 未満〔macOS 標準の bash 3.2 等〕、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルへ書き出す）に渡さず、printf（組み込み）からパイプで awk へ渡す（SECR-23）。
 # 抽出・集計の awk は入力を最後まで読む（途中で終わる grep -q・head をパイプの途中に置かない。pipefail の下で SIGPIPE を失敗と取り違えない）。
 if ! printf '%s\n' "${out}" | awk '/^test result: ok\. 1 passed; 0 failed; 0 ignored;/ {found = 1} END {exit !found}'; then
   # 捕捉した出力は、同じ接頭辞で始まる本文の行を含みうるため一切再掲しない（固定の文言だけ。SECR-23）

@@ -116,6 +116,7 @@ check_member_classification() {
       log "error: workspace member not classified (add to PROD_PKGS or TEST_ONLY_PKGS): ${name}; cannot inspect"
       exit 2
     fi
+  # here-string（bash 5.1 未満、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6203）。
   done <<<"${out}"
 }
 
@@ -148,6 +149,7 @@ count_rule() {
       R2) case "${line}" in 'openssl feature "vendored"' | 'openssl feature "vendored" '*) n=$((n + 1)) ;; esac ;;
       R3) case "${line}" in 'openssl-src v'*) n=$((n + 1)) ;; esac ;;
     esac
+  # here-string（bash 5.1 未満、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6203）。
   done <<<"${tree}" || return 2
   echo "${n}"
 }
@@ -247,6 +249,7 @@ count_openssl_sys() {
     case "${seen}" in *$'\n'"${key}"$'\n'*) continue ;; esac
     seen="${seen}${key}"$'\n'
     n=$((n + 1))
+  # here-string（bash 5.1 未満、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6203）。
   done <<<"$1"
   echo "${n}"
 }
