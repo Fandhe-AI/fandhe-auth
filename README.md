@@ -144,7 +144,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make help` | `scripts/help.sh` | 操作の一覧を表示する |
 | `make doctor` | `scripts/doctor.sh` | 開発環境を診断する |
 | `make setup` | `scripts/setup.sh` | Git hooks 有効化と `.env` 雛形の配置 |
-| `make check` | `scripts/check.sh` | editorconfig-checker + shellcheck（ソースは変更しない） |
+| `make check` | `scripts/check.sh` | editorconfig-checker + shellcheck + 暗号の自作の走査（`make crypto-scan` と同じ。ソースは変更しない） |
 | `make fmt` | `cargo fmt --all` | rustfmt で整形を適用する（ソースを書き換える） |
 | `make lint` | `scripts/lint.sh` | rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向きの検査 + vendored の検査（CI の `lint` ジョブと同じ契約） |
 | `make crate-deps` | `scripts/check-crate-deps.sh` | crate 間の依存の向きを許可表と照合する（TASK-663 で拡張予定。外部の禁止 crate は `make lib-deps`） |
@@ -161,7 +161,7 @@ workspace の members は 11 crate で、ルートの `Cargo.toml` に明示し�
 | `make secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定。`.env` 系の名前の検査は全パスに掛かり、本文の走査の除外は、検出器の repo の `skills-lock.json` に登録された `.agents/skills/<名前>/` だけで、本文の走査にだけ効く〔`*.lock`・`.claude/skills/` は除外しない。#6000。登録名のディレクトリの下は既存ファイルへの追記・新規ファイル・リネームによる移動も走査されない残る限界で、TASK-6・#6000 で追跡し人のレビューで確かめる〕。ローカルの走査（検出器と走査対象が同じ checkout）では、HEAD にコミット済みの一覧・作業ツリーの一覧・index の一覧のすべてに登録された名前（共通部分）だけを除外し、一部にしか無い名前は走査する。CI では保護された main の検出器の一覧の名前だけを使い、PR の head の一覧から名前を足さない（head の index の一覧は検証し、不正なら 2。除外は検出器の一覧と head の index の一覧の共通部分だけで、PR が登録を削除した名前は走査する）。index は走査の最初に固定し、走査中に変われば 2。`secret scan (tracked files)` ジョブが `scripts/secret-scan-ci.sh` 経由で呼ぶ〔#51〕。名前は暫定） |
 | `make scan-canary` | `scripts/secret-scan-canary.sh` | `make secret-scan` の陰性対照（ダミーで検出器が 1 を返し、`--summary` の集計行が期待と完全に一致し、ダミー値が出力に無いことを確かめる。何も変更しない。名前は暫定） |
 | `make test-hooks` | `scripts/hooks/test-hooks.sh`（入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-core.sh`・`test-hooks-lib.sh`・`test-hooks-sc-lib.sh`） | フックスクリプト自体の回帰テスト（一時 git リポジトリで検出・許可ケースを検証。bash + git が基本。part 12〔lib-deps〕だけ cargo が要り、無ければローカルは TAP の `# SKIP`、CI では失敗。作業場所は repo の `target/` の下） |
-| `make crypto-scan` | `scripts/check-crypto-primitives.sh` | 暗号の基本処理を自前で実装した箇所を発見的に走査する（`LIB-21`・`DPOL-4`・`DPOL-47`・`TASK-715` 3/4）。対象は `crates/` の追跡ファイルと未追跡の無視されていないファイル。合否は本番メンバー（core・secret・db-tests・client・plugin-oidc・backend）の C1〜C5（暗号定数・インラインアセンブリ・ネイティブのソース・暗号 trait の自前実装・rotate と wrapping の併存）で、試験専用メンバーと N1・N2 は参考の警告。分類が表に無いメンバーは検査不能（2）。限界は記録 `docs/records/task-715-crypto-deps.md` を参照。名前は暫定 |
+| `make crypto-scan` | `scripts/check-crypto-primitives.sh` | 暗号の基本処理を自前で実装した箇所を発見的に走査する（`LIB-21`・`DPOL-4`・`DPOL-47`・`TASK-715` 3/4。`make check` からも呼ばれる＝4/4）。対象は `crates/` の追跡ファイルと未追跡の無視されていないファイル。合否は本番メンバー（core・secret・db-tests・client・plugin-oidc・backend）の C1〜C5（暗号定数・インラインアセンブリ・ネイティブのソース・暗号 trait の自前実装・rotate と wrapping の併存）で、試験専用メンバーと N1・N2 は参考の警告。分類が表に無いメンバーは検査不能（2）。限界は記録 `docs/records/task-715-crypto-deps.md` を参照。名前は暫定 |
 
 ## 開発・検証用 DB
 
@@ -195,7 +195,7 @@ Linux・macOS（標準の bash 3.2 を含む）について実行します。`sc
 
 | ワークフロー | 内容 |
 |---|---|
-| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`test-hooks-bash32`: macOS 標準の bash 3.2 での同じ回帰テスト（別ジョブ）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`build-test`: `make build` と `make test`（Rust の workspace のビルドと試験。ubuntu-latest）。`lint`: `make lint`（rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向き + vendored の検査。ubuntu-latest）。`it-db-ci`: `make it-db-ci`（DB を使う結合試験の枠。Docker はハーネスが起動する。ubuntu-latest）。`deps-audit`: cargo-deny・cargo-audit の版を固定し、SHA256 を検証して導入するだけの枠（検査は未結線で TASK-680）。`ci-complete`: 全ジョブ結果の集約 |
+| `ci.yml` | `check`: ローカル・hooks と同じ `make check` を実行する（暗号の自作の走査を含む。editorconfig-checker / shellcheck はバージョン固定 + SHA256 検証で導入）。`test-hooks`: フックスクリプト自体の回帰テスト（`make test-hooks`。ubuntu-latest・macos-latest）。`test-hooks-bash32`: macOS 標準の bash 3.2 での同じ回帰テスト（別ジョブ）。`pr-title`: PR タイトルを commit-msg フックと同じスクリプトで検証する（squash merge でコミット件名になるため）。`build-test`: `make build` と `make test`（Rust の workspace のビルドと試験。ubuntu-latest）。`lint`: `make lint`（rustfmt の差分検査 + clippy `-D warnings` + crate 間の依存の向き + vendored の検査。ubuntu-latest）。`it-db-ci`: `make it-db-ci`（DB を使う結合試験の枠。Docker はハーネスが起動する。ubuntu-latest）。`deps-audit`: cargo-deny・cargo-audit の版を固定し、SHA256 を検証して導入するだけの枠（検査は未結線で TASK-680）。`ci-complete`: 全ジョブ結果の集約 |
 | `ai-review.yml` | Fandhe-AI/actions の ai-review（codex）による PR 自動レビュー。Actions variable `CODEX_HOME_DIR` が未設定の間は skip される |
 | `scheduled.yml` | 定期の実行の系統の枠（現状は手動起動 `workflow_dispatch` のみ。`pull_request`・`push` は持たない）。schedule の起動は、例外の見直しの後に TASK-681 で追加する予定。頻度の上限は規約の「日次以下」のままで、候補は日次、時刻とあわせて暫定。決めるのは TASK-681。検査は未結線で、緑でも DPOL-35 を満たしたことにはならない（TASK-681） |
 | `update-external.yml` | エージェントスキル（`skills-lock.json`）と submodule（`.gitmodules`）の日次自動追従 PR。secrets は org の `SUBMODULE_PAT` を使う（`SKILLS_PAT` 未登録時は共通側が `SUBMODULE_PAT` へフォールバック）。作成する PR には `dependencies` / `automated` ラベルが付く |

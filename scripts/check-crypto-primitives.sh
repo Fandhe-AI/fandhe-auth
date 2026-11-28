@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # 暗号の基本処理（ハッシュ・署名・鍵導出・乱数・楕円曲線演算・XML 署名）を自前で実装した箇所が 0 件であることを走査する（TASK-715 (3/4)・LIB-21）。
 # DPOL-4・DPOL-47 を緩めない: 暗号は保守されている既存 crate を使い、自作しない。この走査は発見的で、人のレビュー（TASK-83）の代わりにならない（CG-2）。
-# 検査を外す引数・環境変数・例外の許可リストは作らない（DPOL-30〜32）。呼び出し元: `make crypto-scan`。
-# TODO(TASK-715): 4/4（#5170）で make check 相当の検査・CI から呼ぶ。
+# 検査を外す引数・環境変数・例外の許可リストは作らない（DPOL-30〜32）。呼び出し元: `make crypto-scan`・`scripts/check.sh`（`make check`。CI の check ジョブ。TASK-715 4/4）。
 #
 # 走査の対象: `git ls-files --cached --others --exclude-standard -- crates/` の全ファイル（target/ などの無視された生成物は入らない）。
 #   合否に入る範囲は本番メンバー（PROD_DIRS）。試験専用メンバー（TEST_ONLY_DIRS。trial-deps/fuzz を含む）は参考の警告だけで、合否に入れない。
