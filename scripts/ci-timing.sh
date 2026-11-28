@@ -87,7 +87,7 @@ parse_opts() {
         case "$1" in
           --workflow)
             check_name workflow "$2"
-            case "$2" in */*) die "invalid workflow" ;; esac
+            case "$2" in */* | .*) die "invalid workflow" ;; esac
             OPT_WF="$2"
             ;;
           --event)
@@ -157,6 +157,8 @@ fetch_rows() {
   for id in ${ids}; do
     case "${id}" in '' | *[!0-9]*) die "unexpected run id" ;; esac
     gh api "repos/{owner}/{repo}/actions/runs/${id}/jobs?per_page=100" > "${jobs_json}" 2> /dev/null || die "gh api failed (jobs)"
+    # 1 ページ（100 件）に収まらない実行は、静かに欠落させず失敗にする。
+    jq -e '(.total_count // 0) <= (.jobs | length)' "${jobs_json}" > /dev/null || die "jobs exceed one page (per_page=100); not supported"
     jq -r --arg wf "${OPT_WF}" --arg ev "${OPT_EV}" "${ROWS_FILTER}" "${jobs_json}" || die "cannot parse the jobs JSON"
   done
 }

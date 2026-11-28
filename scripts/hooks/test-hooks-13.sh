@@ -122,6 +122,7 @@ ct_run "summary: empty input is exit 2" 2 "empty input" summary "${ct_in}/empty.
 printf '{broken' > "${ct_in}/broken.json"
 ct_run "rows: broken JSON is exit 2" 2 "cannot parse" rows "${ct_in}/broken.json"
 ct_run "fetch: path traversal workflow is exit 2" 2 "invalid workflow" fetch --workflow ../x --event push
+ct_run "fetch: dot-leading workflow is exit 2" 2 "invalid workflow" fetch --workflow .. --event push
 ct_run "fetch: slash workflow is exit 2" 2 "invalid workflow" fetch --workflow a/b --event push
 ct_run "fetch: space in workflow is exit 2" 2 "invalid workflow" fetch --workflow "a b" --event push
 ct_run "fetch: limit 0 is exit 2" 2 "invalid --limit" fetch --workflow ci.yml --event push --limit 0
