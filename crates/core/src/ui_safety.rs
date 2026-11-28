@@ -4,6 +4,10 @@
 //! 公開の道を置かず、作る道は [`SafeHtml::escape_text`] と [`html_literal!`] の 2 つだけにする
 //! （UISF-2・UISF-18・UISF-19 の型の部分。LGUI-14）。
 //!
+//! 限界: `html_literal!` が内部で呼ぶ `__from_literal` は `pub` で、`&'static str` を渡せるため
+//! （`Box::leak` 等で）実行時の文字列からも作れてしまう。型の上では塞げず、直接呼ぶ箇所は
+//! ソース走査で担保する前提とする。走査は本 crate の型では未実装。
+//!
 //! 持たないもの: 描画・テンプレート・HTTP 応答・CSP の付与（LIB-1・LIB-3・A-2026-10-30-11。実行は Hub の
 //! `ASCR`）。I/O・時刻・乱数も持たない（DPOL-1）。
 //!
@@ -101,7 +105,8 @@ impl SafeHtml {
         self.inner.into_owned()
     }
 
-    /// [`html_literal!`] だけが呼ぶ。直接呼ばない（走査の対象。`#[doc(hidden)]` は守りではない）。
+    /// [`html_literal!`] だけが呼ぶ。直接呼ばない。`&'static str` を受けるため、型の上では実行時の
+    /// 文字列（`Box::leak` 等）も渡せる。守りは `#[doc(hidden)]` ではなくソース走査に依る。
     #[doc(hidden)]
     pub const fn __from_literal(markup: &'static str) -> SafeHtml {
         SafeHtml {
@@ -127,7 +132,7 @@ impl fmt::Debug for SafeHtml {
 #[macro_export]
 macro_rules! html_literal {
     ($markup:literal) => {{
-        const MARKUP: &'static str = $markup;
+        const MARKUP: &str = $markup;
         $crate::ui_safety::SafeHtml::__from_literal(MARKUP)
     }};
 }
@@ -180,6 +185,19 @@ mod tests {
         let mut b = SafeHtml::escape_text("");
         b.push_text("a&b");
         assert_eq!(b, SafeHtml::escape_text("a&b"));
+        // 連結の結果でも Eq が成り立つ
+        let mut c = SafeHtml::escape_text("a");
+        c.push(SafeHtml::escape_text("<"));
+        assert_eq!(c, SafeHtml::escape_text("a<"));
+    }
+
+    #[test]
+    fn empty_and_non_ascii() {
+        assert_eq!(SafeHtml::escape_text("").as_str(), "");
+        assert_eq!(
+            SafeHtml::escape_text("日本語😀<é>").as_str(),
+            "日本語😀&lt;é&gt;"
+        );
     }
 
     #[test]
