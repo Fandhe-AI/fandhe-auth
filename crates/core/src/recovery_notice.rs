@@ -12,8 +12,9 @@
 //!
 //! 通知の内容の規則（設計）:
 //! 1. 通知の値は種類だけを持ち、要求ごとに変わる値を持たない。
-//! 2. `UISF-11` が名指す 4 種の値（[`RecoverySecretKind`]）は運べない。自由文・バイト列の
-//!    フィールドも、それらを受け取るコンストラクタ・変換も持たない。
+//! 2. [`RecoverySecretKind`] の 4 種の値は運べない。自由文・バイト列のフィールドも、それらを
+//!    受け取るコンストラクタ・変換も持たない。これは TASK-775 の設計（〔提案〕）で、
+//!    `UISF-11` の原文（4 種の値をブラウザ側のストレージに置かない）とは別の規則である。
 //! 3. `Debug` は固定で `Display` は実装しない（`SECR-11`・`SECR-12`・`SECR-23`）。
 //! 4. 組込み先は未知の列挙子を「注記を出さない」側へ倒さない。注記の欠けを安全側と見なさない
 //!    （`UISF-15`）。
@@ -25,8 +26,13 @@
 /// 復旧と招待の画面が出す固定の注記の種類。
 ///
 /// 値を持たない列挙で、`Display`・`From<&str>`・`FromStr`・`Default` は実装しない
-/// （`UISF-11`・`SECR-23`）。`#[non_exhaustive]` のため、組込み先は wildcard の腕が要るが、
-/// 未知の列挙子を「注記なし」にしてはならない（`UISF-15`）。
+/// （通知の内容の規則 2。`SECR-23`）。
+///
+/// # 組込み先への要求
+///
+/// `#[non_exhaustive]`（`LIB-22`）のため、組込み先の `match` は wildcard の腕が要る。
+/// その腕で注記を出さない側に倒してはならない。未知の列挙子は注記を出す側に倒す
+/// （`UISF-15`。規則 4）。外すかどうかは人の判断で、ここでは外さない。
 ///
 /// ```compile_fail
 /// use fandhe_auth_core::recovery_notice::RecoveryNotice;
@@ -40,6 +46,16 @@
 ///
 /// ```compile_fail
 /// use fandhe_auth_core::recovery_notice::RecoveryNotice;
+/// let _ = "x".parse::<RecoveryNotice>();
+/// ```
+///
+/// ```compile_fail
+/// use fandhe_auth_core::recovery_notice::RecoveryNotice;
+/// let _ = RecoveryNotice::default();
+/// ```
+///
+/// ```compile_fail
+/// use fandhe_auth_core::recovery_notice::RecoveryNotice;
 /// let n = RecoveryNotice::VaultKeyNotRestored;
 /// match n {
 ///     RecoveryNotice::VaultKeyNotRestored => {}
@@ -47,6 +63,7 @@
 /// ```
 // TODO(#5832): 復旧の完了の本人への通知（IRUI-16。配送は AEVT-38）を同じ型に足すかを人が決める。
 // TODO(#5832): 本体が UISF-25 の文言を定数で持つかは未決（現状は持たない。表示は ASCR-58）。
+// TODO(#5837): wildcard の腕で注記を出さない側に倒さないこと（UISF-15）を契約テストで確かめる。
 // TODO(#5835): 注記を出す画面と段の列挙（UISF-15）との結び付け。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -55,7 +72,8 @@ pub enum RecoveryNotice {
     VaultKeyNotRestored,
 }
 
-/// ブラウザ側のストレージにも通知の内容にも入れない値の種類（`UISF-11`・`SECR-23`）。
+/// 通知の内容に入れない値の種類。`UISF-11` が名指す 4 種の値（ブラウザ側のストレージに置かない）と
+/// 同じ 4 種を、通知の内容の規則 2（設計。〔提案〕）でも運ばない値として一覧にする（`SECR-23`）。
 ///
 /// 値そのものは持たず、種類の名前だけを表す。秘密値の型は `fandhe-auth-secret` の 1 つだけ
 /// （`SECR-31`）。後続の走査・契約テスト（#5836・#5837）が引く一覧として [`Self::ALL`] を置く。
@@ -73,7 +91,7 @@ pub enum RecoverySecretKind {
 }
 
 impl RecoverySecretKind {
-    /// `UISF-11` が名指す 4 種の一覧。
+    /// 4 種の一覧。列挙子を足したら、ここと試験の網羅の `match` を同じ変更で更新する。
     pub const ALL: [Self; 4] = [
         Self::InviteValue,
         Self::BootstrapValue,
@@ -86,22 +104,41 @@ impl RecoverySecretKind {
 mod tests {
     use super::*;
 
-    // UISF-11: 前提=通知の型、操作=大きさを測る、期待=値を隠し持つ余地が無い（フィールド無しの列挙）
+    // 通知の内容の規則 1・2（設計）: 単位の形の列挙子だけであることを、wildcard なしの match で固定する。
+    // 列挙子を足す・値を持つ形にすると、この match がコンパイルで落ちる。
     #[test]
-    fn uisf_11_notice_carries_no_payload() {
-        assert!(core::mem::size_of::<RecoveryNotice>() <= 1);
-    }
-
-    // UISF-11: 前提=4 種の一覧、操作=組を比べる、期待=4 種が互いに異なる
-    #[test]
-    fn uisf_11_secret_kinds_are_four_and_distinct() {
-        let all = RecoverySecretKind::ALL;
-        assert_eq!(all.len(), 4);
-        for (i, a) in all.iter().enumerate() {
-            for b in &all[i + 1..] {
-                assert_ne!(a, b);
+    fn notice_variants_are_unit_shaped() {
+        fn shape(n: RecoveryNotice) {
+            match n {
+                RecoveryNotice::VaultKeyNotRestored => {}
             }
         }
+        shape(RecoveryNotice::VaultKeyNotRestored);
+    }
+
+    // 通知の内容の規則 2（設計）: 網羅の match で列挙子ごとの番号を持ち、ALL が 0..len を重複なく
+    // 覆うことを確かめる。列挙子を足すと match がコンパイルで落ち、番号の更新で ALL の漏れも落ちる。
+    #[test]
+    fn secret_kinds_all_matches_exhaustive_variants() {
+        const fn ordinal(k: RecoverySecretKind) -> usize {
+            match k {
+                RecoverySecretKind::InviteValue => 0,
+                RecoverySecretKind::BootstrapValue => 1,
+                RecoverySecretKind::RecoveryCode => 2,
+                RecoverySecretKind::ReinviteValue => 3,
+            }
+        }
+        // 最後の番号 + 1。列挙子を足したらここも更新し、ALL の要素数と食い違えば落ちる。
+        const COUNT: usize = ordinal(RecoverySecretKind::ReinviteValue) + 1;
+        let all = RecoverySecretKind::ALL;
+        assert_eq!(all.len(), COUNT);
+        let mut seen = [false; COUNT];
+        for k in all {
+            let o = ordinal(k);
+            assert!(o < COUNT && !seen[o]);
+            seen[o] = true;
+        }
+        assert!(seen.iter().all(|s| *s));
     }
 
     // SECR-23: 前提=Debug 出力、操作=整形、期待=列挙子の名前だけ
