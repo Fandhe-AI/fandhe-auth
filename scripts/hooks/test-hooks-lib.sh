@@ -126,18 +126,6 @@ if [ -n "${EXTRA_LIST_ENTRY:-}" ]; then
     exit 0
   fi
 fi
-# ORDER_U0_FILE: -U0 の呼び出し（本文の差分）にだけ `-O<file>` を足し、区画の並びを一覧（--name-only）の並びからずらす。
-# diff.orderFile の設定は --name-only にも効くため、一覧と区画の不一致は設定では作れない（#6144）
-if [ -n "${ORDER_U0_FILE:-}" ]; then
-  has_u0=0
-  for arg in "$@"; do
-    [ "${arg}" = "-U0" ] && has_u0=1
-  done
-  if [ "${has_u0}" -eq 1 ]; then
-    "${REAL_GIT}" -c "diff.orderFile=${ORDER_U0_FILE}" "$@"
-    exit $?
-  fi
-fi
 # MAX_GIT_ARG_BYTES: 各引数の長さ + 1 + ポインタ 8 バイトの合計が上限を超える呼び出しを、macOS の E2BIG の代わりに失敗させる（#6053）
 if [ -n "${MAX_GIT_ARG_BYTES:-}" ]; then
   arg_total=0
@@ -176,6 +164,16 @@ for arg in "$@"; do
     exit 128
   fi
 done
+# ORDER_U0_FILE: -U0 の呼び出し（本文の差分）にだけ `-c diff.orderFile=<file>` を足し、区画の並びを一覧（--name-only）の並びからずらす。
+# diff.orderFile の設定は --name-only にも効くため、一覧と区画の不一致は設定では作れない（#6144）。
+# 上の MAX_GIT_ARG_BYTES・TMP_MARKER・FAIL_GIT_* の各シムと併用できるよう、最後の exec の直前に置く（途中で exit しない）。
+if [ -n "${ORDER_U0_FILE:-}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "-U0" ]; then
+      exec "${REAL_GIT}" -c "diff.orderFile=${ORDER_U0_FILE}" "$@"
+    fi
+  done
+fi
 exec "${REAL_GIT}" "$@"
 EOF
 chmod +x "${shim_dir}/git"

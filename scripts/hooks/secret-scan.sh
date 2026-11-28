@@ -1498,8 +1498,9 @@ if [ "${dropped_count}" -gt 0 ]; then
   fi
 fi
 # 主の差分から落とす、外れた名前の区画のヘッダ（`diff --git ...` の行そのもの）。引用されるパス（制御文字・二重引用符・バックスラッシュ。
-# core.quotePath=false でも引用される）は、一覧の生のパスとヘッダが一致せず登録名の判定では突き合わせられないが、同じ git の
-# 同じ設定が両方の差分へ同じ文字列で書くため、ヘッダ全体の一致で「diff.dropped にも同じ区画がある」ことを確かめられる。
+# core.quotePath=false でも引用される）は、ヘッダの文字列が一覧の生のパスと同じ形ではないが、同じ git の
+# 同じ設定が両方の差分へ同じ文字列で書くため、ヘッダ全体の一致で「diff.dropped にも同じ区画がある」ことを確かめられる
+# （登録名の判定は生のパスで行い、引用形のヘッダは git_diff_header で組んで突き合わせる）。
 # 一致しない区画は落とさない（走査する側に倒す。二重に数えても検出は漏れない）。ヘッダに NUL は入らない。
 if ! tr -d '\000' < "${tmp_dir}/diff.dropped" | LC_ALL=C awk '/^diff --git /' > "${tmp_dir}/dropped-headers"; then
   echo "secret-scan: failed to normalize diff; aborting" >&4
@@ -1549,20 +1550,20 @@ fi
 
 # 登録名の下の区画を落とす（#6053）。除外は正規化の流れの中（パイプ）で行い、除外対象の本文は一時ファイルに書かず、git からパイプの中だけで流す（#6143）。
 # 出力先の一時ファイルは、パイプ全体（pipefail）の成功を `if !` で確かめるまで読まない。
-# 区画の数が一覧のファイル数と違えば（git の出力と一覧の対応が崩れている）検査不能（2）にする。
+# 区画の数も印の行数も一覧のファイル数と違えば（git の出力と一覧の対応が崩れている。改行を含むパスの印が複数行に割れた場合を含む）検査不能（2）にする。
 # 落とす区画のヘッダは、一覧の n 番目のパスから git_diff_header で組んだ期待するヘッダとバイト単位で一致するときだけ落とす
 # （不変条件。落とす向きに崩さない）。
 #   1. 登録名の判定は生の -z のパスの区画だけで行う。引用形は判定に使わない。
 #   2. 引用されるヘッダは必ず `diff --git "a/` で始まり、引用されないヘッダは決してそう始まらない（`"` で始まるパスは必ず引用される）。
 #      引用は単射のため、期待するヘッダと一致する別のパスの区画は無い。
-#   3. 一致しない区画（diff.orderFile 等の順序の変更・git の規則の食い違い）は落とさず走査する（2 にはしない）。
+#   3. 一致しない区画（一覧と本文の差分で並びが食い違ったとき〔`-O` を本文の差分の呼び出しにだけ付けた場合など〕・git の規則の食い違い）は落とさず走査する（2 にはしない）。
 #      将来の git と規則が食い違っても、誤検知の側に倒れ、見逃しにはならない。
 filter_sections() {
   if [ "${body_skip_filter}" -eq 1 ]; then
     # ファイル名は `-v` で渡さない（値のバックスラッシュがエスケープとして解釈され、TMPDIR にバックスラッシュがあると
     # 振り分けが外れる）。環境変数で渡し、ENVIRON から読む。
     SS_F1="${tmp_dir}/skip-flags" SS_F2="${tmp_dir}/dropped-headers" LC_ALL=C awk -v want="${skip_total}" '
-      FILENAME == ENVIRON["SS_F1"] { flag[FNR] = $0; next }
+      FILENAME == ENVIRON["SS_F1"] { flag[FNR] = $0; nflag++; next }
       FILENAME == ENVIRON["SS_F2"] { dh[$0] = 1; next }
       /^diff --git / {
         sec++
@@ -1571,7 +1572,7 @@ filter_sections() {
         if ($0 in dh) drop = 1
       }
       !drop { print }
-      END { if (sec != want) exit 3 }
+      END { if (sec != want || nflag + 0 != want) exit 3 }
     ' "${tmp_dir}/skip-flags" "${tmp_dir}/dropped-headers" -
   else
     cat

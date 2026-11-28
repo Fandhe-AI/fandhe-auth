@@ -451,6 +451,17 @@ if [ "${rc}" -eq 1 ]; then
 else
   fail "secret-scan: an unlisted fixed diagnostic in the detector is caught by the allowlist check" "check exit ${rc}"
 fi
+# 陰性対照（逆向き）: 許可リストの先頭の 1 行のリテラルを検出器の複製から取り除くと、古い行の残りとして照合に失敗する（#6170）
+diag_first="$(secret_scan_fixed_diagnostics | head -n 1)"
+diag_stub2="${work_dir}/diag-stub2.sh"
+LC_ALL=C grep -avF -- "\"${diag_first}\"" "${SECRET_SCAN}" > "${diag_stub2}" || true
+rc=0
+check_diag_sync "${diag_stub2}" || rc=$?
+if [ -n "${diag_first}" ] && [ "${rc}" -eq 1 ]; then
+  pass "secret-scan: an allowlist line missing from the detector is caught by the allowlist check"
+else
+  fail "secret-scan: an allowlist line missing from the detector is caught by the allowlist check" "check exit ${rc}"
+fi
 
 # ---- 除外の一覧の大きさと引数の長さ（#6053）
 # 登録名ごとの exclude を並べると、有効な一覧（64 KiB 以内）でも引数が macOS の上限を超えて git を起動できなくなる。
@@ -704,7 +715,7 @@ for qp in true false; do
   new_repo; stage_lock
   git config core.quotePath "${qp}"
   blob="$(printf 'x = %s\n' "${token}" | git hash-object -w --stdin)"
-  mixed_names=("caf$(printf '\303\251')\"z.md" "a$(printf '\177')b.md" "a$(printf '\t')b.md" "a$(printf '\n')b.md")
+  mixed_names=("caf$(printf '\303\251')\"z.md" "a$(printf '\177')b.md" "a$(printf '\t')b.md" "a"$'\n'"b.md")
   for nm in "${mixed_names[@]}"; do
     printf '100644 %s 0\t.agents/skills/vendored-a/%s\0' "${blob}" "${nm}" | git update-index --add -z --index-info
   done
