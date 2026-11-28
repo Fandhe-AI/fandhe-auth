@@ -421,6 +421,26 @@ const OBSERVE_ACCEPT_DEADLINE: Duration = Duration::from_secs(30);
 /// accept のポーリング間隔。短く保ち、受理前に接続が待ち行列に残る窓を広げない。
 const OBSERVE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
+/// 上流の accept を期限付きで待つ補助（期限なしの `accept()` は、接続が来ないと試験が止まる。AUDB-6・#6170）。
+/// 期限までに受理できなければ固定の文で失敗させる。受理した接続は blocking に戻す（BSD 系の O_NONBLOCK の継承対策）。
+fn accept_within(up: &TcpListener, deadline: Duration) -> TcpStream {
+    up.set_nonblocking(true).unwrap();
+    let limit = Instant::now() + deadline;
+    loop {
+        match up.accept() {
+            Ok((c, _)) => {
+                c.set_nonblocking(false).unwrap();
+                return c;
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+                assert!(Instant::now() < limit, "upstream accept timed out");
+                thread::sleep(OBSERVE_POLL_INTERVAL);
+            }
+            Err(e) => panic!("upstream accept failed: {:?}", e.kind()),
+        }
+    }
+}
+
 /// 上流の接続を 1 本だけ受け、閉じられるまでの受信バイト数を数える。
 /// accept は非ブロッキングで `accept_deadline` までポーリングし、期限までに受理できなければ `NotAccepted` を返す
 /// （受理されないまま `join` で止まる経路を作らない。判定は失敗。ORST-17・AUDB-6・#6040）。
@@ -695,7 +715,7 @@ fn generation_check_waits_for_upstream_accept() {
     assert_eq!(p.refused_count(), 0, "refused before accept sync");
     assert_eq!(p.accepted_count(), 0, "relayed before accept sync");
     assert_eq!(stall.accept_sync_exit(), None, "left sync before notify");
-    let (mut c, _) = up.accept().unwrap();
+    let mut c = accept_within(&up, OBSERVE_ACCEPT_DEADLINE);
     stall.notify_upstream_accepted();
     assert!(
         wait_until(|| p.upstream_connected_count() == 1 && p.generation_refused_count() == 1),
@@ -721,7 +741,7 @@ fn stop_returns_while_held_at_accept_sync_point() {
     stall.release();
     assert!(stall.wait_accept_sync_entered(Duration::from_secs(5)));
     // 通知は送らず、停止の前に上流側の accept だけを完了させてストリームを保つ（閉じた後の accept を避ける）。
-    let (mut c, _) = up.accept().unwrap();
+    let mut c = accept_within(&up, OBSERVE_ACCEPT_DEADLINE);
     let started = Instant::now();
     p.stop();
     assert!(

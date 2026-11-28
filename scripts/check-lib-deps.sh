@@ -130,9 +130,10 @@ build_feature_args() {
     log "error: PROD_FEATURES must be comma-separated <crate>/<feature>; cannot inspect"
     exit 2
   fi
-  local item feats=""
-  local IFS=,
-  for item in $1; do
+  # glob の文字（`*`・`?`・`[`）は形式の検査を通るため、語分割ではなく read で配列に分ける（cwd のファイル名へ展開させない。#6170）。
+  local item feats="" items
+  IFS=, read -r -a items <<< "$1"
+  for item in "${items[@]}"; do
     if [ "${item%%/*}" = "$2" ]; then
       feats="${feats:+${feats},}${item#*/}"
     fi
@@ -145,9 +146,9 @@ build_feature_args() {
 check_feature_targets() {
   [ -z "$1" ] && return 0
   build_feature_args "$1" "${BODY_PKGS[0]}"
-  local item name p ok
-  local IFS=,
-  for item in $1; do
+  local item name p ok items
+  IFS=, read -r -a items <<< "$1"
+  for item in "${items[@]}"; do
     name="${item%%/*}"
     ok=0
     for p in "${BODY_PKGS[@]}"; do

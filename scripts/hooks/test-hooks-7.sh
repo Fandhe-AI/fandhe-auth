@@ -211,8 +211,11 @@ else
   chmod 000 "${vend_fx}/.cargo"
   if [ ! -x "${vend_fx}/.cargo" ]; then
     vendored_case "NG: .cargo without search permission is cannot-inspect before cargo runs" 2 "cannot read .cargo config" none
+  elif [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    # CI で権限が効かない利用者になると V2 が黙って素通りするため、失敗にする（#6170）
+    fail "vendored: .cargo without search permission is cannot-inspect before cargo runs" "search permission is not enforced for this user in CI"
   else
-    echo "ok - vendored: .cargo permission case skipped (search permission not enforced for this user)"
+    echo "ok - vendored: .cargo without search permission # SKIP search permission not enforced for this user (not counted as a pass)"
   fi
   chmod u+rwx "${vend_fx}/.cargo"
 fi
@@ -660,7 +663,7 @@ audit_minbin() {
 audit_fx
 audit_minbin none
 audit_case "OK: minimal PATH with all required commands exits 0" 0 PATH="${audit_root}/minbin"
-for missing_cmd in grep tr find git; do
+for missing_cmd in grep tr find git dirname; do
   audit_minbin "${missing_cmd}"
   audit_case "error: ${missing_cmd} missing from PATH exits 2" 2 PATH="${audit_root}/minbin"
   audit_has "record: reason (${missing_cmd} not found)" "required command not found on PATH: ${missing_cmd}"
@@ -717,6 +720,57 @@ audit_has "record: reason (cannot count advisories, find)" "cannot count advisor
 audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; echo "ignored-file" > "${audit_root}/home/.cargo/advisory-db/.gitignore"; git -C "${audit_root}/home/.cargo/advisory-db" add .gitignore; git -C "${audit_root}/home/.cargo/advisory-db" commit -q -m "chore: ignore"; echo x > "${audit_root}/home/.cargo/advisory-db/ignored-file"
 audit_case "error: no-fetch stage with an ignored file exits 2" 2
 audit_has "record: reason (has changes, ignored)" "has changes"
+
+# git の上書きの陰性対照: DB 側の設定（未追跡を隠す・fsmonitor）で status の結果を変えられない（#6170）
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; git -C "${audit_root}/home/.cargo/advisory-db" config status.showUntrackedFiles no; echo x > "${audit_root}/home/.cargo/advisory-db/untracked-file"
+audit_case "error: no-fetch stage sees an untracked file despite status.showUntrackedFiles=no" 2
+audit_has "record: reason (has changes, showUntrackedFiles)" "has changes"
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+printf '#!/bin/sh\ntouch "%s/fsmonitor-called"\nprintf "\\0"\n' "${audit_root}" > "${audit_root}/fsm.sh"; chmod +x "${audit_root}/fsm.sh"
+git -C "${audit_root}/home/.cargo/advisory-db" config core.fsmonitor "${audit_root}/fsm.sh"
+# 陽性対照: 同じ fixture で上書き無しの git status を流すと hook が呼ばれて印が作られる。呼ばれない git では下の陰性対照が意味を持たない
+git -C "${audit_root}/home/.cargo/advisory-db" status --porcelain > /dev/null 2>&1 || true
+if [ -e "${audit_root}/fsmonitor-called" ]; then
+  fsm_control=1
+  rm -f "${audit_root}/fsmonitor-called"
+else
+  fsm_control=0
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "audit-config: the fsmonitor hook is invoked by a plain git status (positive control)" "git did not call core.fsmonitor in CI"
+  else
+    echo "ok - audit-config: the fsmonitor hook is invoked by a plain git status (positive control) # SKIP git did not call core.fsmonitor here (not counted as a pass)"
+  fi
+fi
+audit_case "OK: no-fetch stage does not call the advisory-db core.fsmonitor" 0
+if [ "${fsm_control}" -eq 0 ]; then :; elif [ ! -e "${audit_root}/fsmonitor-called" ]; then pass "audit-config: the advisory-db core.fsmonitor is not invoked"; else fail "audit-config: the advisory-db core.fsmonitor is not invoked" "marker file exists"; fi
+# 継いだ GIT_DIR・GIT_WORK_TREE・GIT_INDEX_FILE で別の repo を見ない
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+mkdir "${audit_root}/other"; (cd "${audit_root}/other" && git -c init.defaultBranch=main init -q && git -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "chore: other")
+audit_case "OK: no-fetch stage ignores an inherited GIT_DIR" 0 GIT_DIR="${audit_root}/other/.git"
+audit_stage=fetch
+# 継いだ git の向きを消さないと件数が変わる fixture（陽性対照つき）。
+#   追跡かつ無視された nested の audit.toml: 正しい読みは追跡（-c）で 1 件。GIT_DIR・GIT_INDEX_FILE が別の（空の）index を指すと、無視された未追跡になり 0 件。
+#   未追跡の nested の audit.toml: 正しい読みは未追跡（-o）で 1 件。GIT_WORK_TREE が別の作業ツリーを指すと 0 件。
+audit_nested_tracked_ignored() {
+  audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml
+  printf 'crates/x/.cargo/audit.toml\n' > .gitignore
+  git add -f crates/x/.cargo/audit.toml .gitignore && git -c user.name=t -c user.email=t@example.invalid commit -q -m "chore: tracked ignored"
+  mkdir "${audit_root}/other"; (cd "${audit_root}/other" && git -c init.defaultBranch=main init -q && git -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "chore: other")
+}
+audit_nested_tracked_ignored
+audit_case "NG: tracked ignored nested .cargo/audit.toml is counted (positive control)" 1
+audit_has "record: nested count (tracked ignored)" "(tracked or untracked): 1"
+audit_case "NG: nested .cargo/audit.toml is counted despite an inherited GIT_DIR" 1 GIT_DIR="${audit_root}/other/.git"
+audit_has "record: nested count with inherited GIT_DIR" "(tracked or untracked): 1"
+audit_case "NG: nested .cargo/audit.toml is counted despite an inherited GIT_INDEX_FILE" 1 GIT_INDEX_FILE="${audit_root}/other/empty-index"
+audit_has "record: nested count with inherited GIT_INDEX_FILE" "(tracked or untracked): 1"
+audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml
+mkdir "${audit_root}/other"
+audit_case "NG: untracked nested .cargo/audit.toml is counted (positive control)" 1
+audit_has "record: nested count (untracked)" "(tracked or untracked): 1"
+audit_case "NG: nested .cargo/audit.toml is counted despite an inherited GIT_WORK_TREE" 1 GIT_WORK_TREE="${audit_root}/other"
+audit_has "record: nested count with inherited GIT_WORK_TREE" "(tracked or untracked): 1"
+audit_stage=no-fetch
 
 audit_fx
 audit_case "error: no-fetch stage without advisory-db exits 2" 2
