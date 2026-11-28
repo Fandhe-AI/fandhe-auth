@@ -6,6 +6,7 @@
 # 基本の外部依存は bash と git。part 13（ci-timing）は jq も要り、無ければ CI では失敗、ローカルでは skip する。msrv・install-msrv の節は cargo・jq・tomllib を持つ python3（3.11 以上）も要し、
 # 前提が足りなければ CI（CI か GITHUB_ACTIONS が設定されている）では失敗、ローカルでは skip する。
 # secret-scan の /dev/tcp 風のパスの試験（part 8 の T10）も python3 と bash の /dev/tcp のリダイレクトを要し、前提の扱いは同じ（CI では失敗、ローカルでは skip）。
+# 中断の試験（part 11。shellcheck-staged）の HUP の回は、HUP を trap できるシェルを前提とし、無ければ CI では失敗、ローカルでは skip する。
 # vendored（check-openssl-vendored.sh）の節は tomllib を持つ python3（3.11 以上）を要し、前提が無ければ CI では失敗、ローカルでは skip する。
 # crate-deps の節は cargo が無ければ skip する。フックではなく CI で実行する（.claude/rules/git-hooks.md）。
 #
@@ -28,6 +29,8 @@
 # 検出させる例示値はすべて実行時に組み立て、本ファイル自体のコミットが secret-scan に
 # 検知されないようにする（実体は test-hooks-lib.sh）。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib.sh
 source "${HOOKS_DIR}/../lib.sh"

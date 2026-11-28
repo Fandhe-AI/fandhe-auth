@@ -211,8 +211,11 @@ else
   chmod 000 "${vend_fx}/.cargo"
   if [ ! -x "${vend_fx}/.cargo" ]; then
     vendored_case "NG: .cargo without search permission is cannot-inspect before cargo runs" 2 "cannot read .cargo config" none
+  elif [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    # CI で権限が効かない利用者になると V2 が黙って素通りするため、失敗にする（#6170）
+    fail "vendored: .cargo without search permission is cannot-inspect before cargo runs" "search permission is not enforced for this user in CI"
   else
-    echo "ok - vendored: .cargo permission case skipped (search permission not enforced for this user)"
+    echo "ok - vendored: .cargo without search permission # SKIP search permission not enforced for this user (not counted as a pass)"
   fi
   chmod u+rwx "${vend_fx}/.cargo"
 fi
@@ -660,7 +663,7 @@ audit_minbin() {
 audit_fx
 audit_minbin none
 audit_case "OK: minimal PATH with all required commands exits 0" 0 PATH="${audit_root}/minbin"
-for missing_cmd in grep tr find git; do
+for missing_cmd in grep tr find git dirname; do
   audit_minbin "${missing_cmd}"
   audit_case "error: ${missing_cmd} missing from PATH exits 2" 2 PATH="${audit_root}/minbin"
   audit_has "record: reason (${missing_cmd} not found)" "required command not found on PATH: ${missing_cmd}"
@@ -718,6 +721,57 @@ audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; echo "ignored-file" 
 audit_case "error: no-fetch stage with an ignored file exits 2" 2
 audit_has "record: reason (has changes, ignored)" "has changes"
 
+# git の上書きの陰性対照: DB 側の設定（未追跡を隠す・fsmonitor）で status の結果を変えられない（#6170）
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; git -C "${audit_root}/home/.cargo/advisory-db" config status.showUntrackedFiles no; echo x > "${audit_root}/home/.cargo/advisory-db/untracked-file"
+audit_case "error: no-fetch stage sees an untracked file despite status.showUntrackedFiles=no" 2
+audit_has "record: reason (has changes, showUntrackedFiles)" "has changes"
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+printf '#!/bin/sh\ntouch "%s/fsmonitor-called"\nprintf "\\0"\n' "${audit_root}" > "${audit_root}/fsm.sh"; chmod +x "${audit_root}/fsm.sh"
+git -C "${audit_root}/home/.cargo/advisory-db" config core.fsmonitor "${audit_root}/fsm.sh"
+# 陽性対照: 同じ fixture で上書き無しの git status を流すと hook が呼ばれて印が作られる。呼ばれない git では下の陰性対照が意味を持たない
+git -C "${audit_root}/home/.cargo/advisory-db" status --porcelain > /dev/null 2>&1 || true
+if [ -e "${audit_root}/fsmonitor-called" ]; then
+  fsm_control=1
+  rm -f "${audit_root}/fsmonitor-called"
+else
+  fsm_control=0
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "audit-config: the fsmonitor hook is invoked by a plain git status (positive control)" "git did not call core.fsmonitor in CI"
+  else
+    echo "ok - audit-config: the fsmonitor hook is invoked by a plain git status (positive control) # SKIP git did not call core.fsmonitor here (not counted as a pass)"
+  fi
+fi
+audit_case "OK: no-fetch stage does not call the advisory-db core.fsmonitor" 0
+if [ "${fsm_control}" -eq 0 ]; then :; elif [ ! -e "${audit_root}/fsmonitor-called" ]; then pass "audit-config: the advisory-db core.fsmonitor is not invoked"; else fail "audit-config: the advisory-db core.fsmonitor is not invoked" "marker file exists"; fi
+# 継いだ GIT_DIR・GIT_WORK_TREE・GIT_INDEX_FILE で別の repo を見ない
+audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
+mkdir "${audit_root}/other"; (cd "${audit_root}/other" && git -c init.defaultBranch=main init -q && git -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "chore: other")
+audit_case "OK: no-fetch stage ignores an inherited GIT_DIR" 0 GIT_DIR="${audit_root}/other/.git"
+audit_stage=fetch
+# 継いだ git の向きを消さないと件数が変わる fixture（陽性対照つき）。
+#   追跡かつ無視された nested の audit.toml: 正しい読みは追跡（-c）で 1 件。GIT_DIR・GIT_INDEX_FILE が別の（空の）index を指すと、無視された未追跡になり 0 件。
+#   未追跡の nested の audit.toml: 正しい読みは未追跡（-o）で 1 件。GIT_WORK_TREE が別の作業ツリーを指すと 0 件。
+audit_nested_tracked_ignored() {
+  audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml
+  printf 'crates/x/.cargo/audit.toml\n' > .gitignore
+  git add -f crates/x/.cargo/audit.toml .gitignore && git -c user.name=t -c user.email=t@example.invalid commit -q -m "chore: tracked ignored"
+  mkdir "${audit_root}/other"; (cd "${audit_root}/other" && git -c init.defaultBranch=main init -q && git -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "chore: other")
+}
+audit_nested_tracked_ignored
+audit_case "NG: tracked ignored nested .cargo/audit.toml is counted (positive control)" 1
+audit_has "record: nested count (tracked ignored)" "(tracked or untracked): 1"
+audit_case "NG: nested .cargo/audit.toml is counted despite an inherited GIT_DIR" 1 GIT_DIR="${audit_root}/other/.git"
+audit_has "record: nested count with inherited GIT_DIR" "(tracked or untracked): 1"
+audit_case "NG: nested .cargo/audit.toml is counted despite an inherited GIT_INDEX_FILE" 1 GIT_INDEX_FILE="${audit_root}/other/empty-index"
+audit_has "record: nested count with inherited GIT_INDEX_FILE" "(tracked or untracked): 1"
+audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml
+mkdir "${audit_root}/other"
+audit_case "NG: untracked nested .cargo/audit.toml is counted (positive control)" 1
+audit_has "record: nested count (untracked)" "(tracked or untracked): 1"
+audit_case "NG: nested .cargo/audit.toml is counted despite an inherited GIT_WORK_TREE" 1 GIT_WORK_TREE="${audit_root}/other"
+audit_has "record: nested count with inherited GIT_WORK_TREE" "(tracked or untracked): 1"
+audit_stage=no-fetch
+
 audit_fx
 audit_case "error: no-fetch stage without advisory-db exits 2" 2
 audit_has "record: reason (advisory-db is missing)" "advisory-db is missing"
@@ -737,5 +791,54 @@ audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"; echo "x" > "${audit_
 audit_case "error: no-fetch stage with an untracked advisory exits 2" 2
 audit_has "record: reason (has changes)" "has changes"
 audit_stage=fetch
+
+# ---- scripts/*.sh の DIR の解決は CDPATH に左右されない（#6173）
+# 実物の repo のルートでは起動しない。停止の検査（引数・環境変数の拒否）が壊れたとき、part 7 の再帰・.env の作成・docker・rustup の
+# 起動が実物の repo に及ばないよう、scripts/ の複製（work_dir 内。パスで解決するため git は要らない）の上で起動する。
+cdpath_src="${HOOKS_DIR}/../.."
+cdpath_root="${work_dir}/cdpath-repo"
+mkdir -p "${cdpath_root}"
+cp -R "${cdpath_src}/scripts" "${cdpath_root}/scripts"
+# `./` を付けない相対パスで起動する（付けると CDPATH が効かず偽の合格になる）。
+# 合格は「終了コード 2」と「そのスクリプトの停止の文言が出る」の両方（到達先の取り違え・source の失敗を合格にしない）。
+cdpath_case() { # name expected-text env-and-command...
+  local name="$1" want="$2" rc=0 out
+  shift 2
+  out="$(cd "${cdpath_root}" && env CDPATH=. "$@" 2>&1)" || rc=$?
+  if [ "${rc}" -eq 2 ] && printf '%s' "${out}" | grep -qF -- "${want}" && ! printf '%s' "${out}" | grep -q 'No such file or directory'; then
+    pass "cdpath: ${name} resolves DIR under CDPATH=."
+  else
+    fail "cdpath: ${name} resolves DIR under CDPATH=." "expected exit 2 with '${want}' and no source failure, got ${rc}" "output: ${out}"
+  fi
+}
+for cdpath_s in check-crate-deps check dev-pg-check doctor e2e-chrome e2e-firefox help it-db-ci it-db lint setup hooks/test-hooks; do
+  cdpath_case "${cdpath_s}.sh" "usage: " "${HOOK_BASH}" "scripts/${cdpath_s}.sh" --cdpath-probe
+done
+# msrv.sh は引数 2 つで require_cmd より前に usage で止まる
+cdpath_case "msrv.sh" "usage: msrv.sh" "${HOOK_BASH}" scripts/msrv.sh --cdpath-probe --cdpath-probe
+# install-msrv.sh は RUSTUP_DIST_SERVER が（空でも）設定されていると rustup の前に止まる
+cdpath_case "install-msrv.sh" "must not be set" RUSTUP_DIST_SERVER= "${HOOK_BASH}" scripts/install-msrv.sh
+# test-hooks-core.sh・test-hooks-lib.sh は part から source される。相対パスで source し、HOOKS_DIR が 1 行の絶対パスに解決されることを確かめる
+cdpath_hooks="$(cd "${cdpath_root}/scripts/hooks" && pwd)"
+for cdpath_s in core lib; do
+  cdpath_rc=0
+  cdpath_out="$(cd "${cdpath_root}" && CDPATH=. "${HOOK_BASH}" -c "source scripts/hooks/test-hooks-${cdpath_s}.sh && printf '%s' \"\${HOOKS_DIR}\"" 2>&1)" || cdpath_rc=$?
+  if [ "${cdpath_rc}" -eq 0 ] && [ "${cdpath_out}" = "${cdpath_hooks}" ]; then
+    pass "cdpath: test-hooks-${cdpath_s}.sh resolves HOOKS_DIR under CDPATH=."
+  else
+    fail "cdpath: test-hooks-${cdpath_s}.sh resolves HOOKS_DIR under CDPATH=." "expected exit 0 and HOOKS_DIR=${cdpath_hooks}, got ${cdpath_rc}" "output: ${cdpath_out}"
+  fi
+done
+# 陰性対照: 修正前の help.sh は CDPATH=. で lib.sh を読めず 1 で落ちる（試験が CDPATH を効かせている証拠）
+mkdir -p "${work_dir}/cdpath-old/scripts"
+cp "${cdpath_src}/scripts/lib.sh" "${work_dir}/cdpath-old/scripts/lib.sh"
+sed '/^unset CDPATH$/d' "${cdpath_src}/scripts/help.sh" > "${work_dir}/cdpath-old/scripts/help.sh"
+cdpath_rc=0
+cdpath_out="$(cd "${work_dir}/cdpath-old" && CDPATH=. "${HOOK_BASH}" scripts/help.sh --cdpath-probe 2>&1)" || cdpath_rc=$?
+if [ "${cdpath_rc}" -eq 1 ] && printf '%s' "${cdpath_out}" | grep -q 'No such file or directory'; then
+  pass "cdpath: negative control (without unset CDPATH the source fails)"
+else
+  fail "cdpath: negative control (without unset CDPATH the source fails)" "expected exit 1 with a source failure, got ${cdpath_rc}" "output: ${cdpath_out}"
+fi
 
 finish "part 7"

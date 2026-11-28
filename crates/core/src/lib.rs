@@ -13,4 +13,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod screen_access;
+
 // TODO(TASK-659): 状態遷移とポリシーの実装、時刻・乱数・ID の受け渡しの型を決めて置く。

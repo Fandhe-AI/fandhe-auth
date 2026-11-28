@@ -9,6 +9,8 @@
 #
 # 変数・関数は source した側の part が参照するため、単独で未使用に見える定義には、宣言ごとに理由付きの disable を置く。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./test-hooks-core.sh
 source "${HOOKS_DIR}/test-hooks-core.sh"
@@ -126,18 +128,6 @@ if [ -n "${EXTRA_LIST_ENTRY:-}" ]; then
     exit 0
   fi
 fi
-# ORDER_U0_FILE: -U0 の呼び出し（本文の差分）にだけ `-O<file>` を足し、区画の並びを一覧（--name-only）の並びからずらす。
-# diff.orderFile の設定は --name-only にも効くため、一覧と区画の不一致は設定では作れない（#6144）
-if [ -n "${ORDER_U0_FILE:-}" ]; then
-  has_u0=0
-  for arg in "$@"; do
-    [ "${arg}" = "-U0" ] && has_u0=1
-  done
-  if [ "${has_u0}" -eq 1 ]; then
-    "${REAL_GIT}" -c "diff.orderFile=${ORDER_U0_FILE}" "$@"
-    exit $?
-  fi
-fi
 # MAX_GIT_ARG_BYTES: 各引数の長さ + 1 + ポインタ 8 バイトの合計が上限を超える呼び出しを、macOS の E2BIG の代わりに失敗させる（#6053）
 if [ -n "${MAX_GIT_ARG_BYTES:-}" ]; then
   arg_total=0
@@ -176,6 +166,16 @@ for arg in "$@"; do
     exit 128
   fi
 done
+# ORDER_U0_FILE: -U0 の呼び出し（本文の差分）にだけ `-c diff.orderFile=<file>` を足し、区画の並びを一覧（--name-only）の並びからずらす。
+# diff.orderFile の設定は --name-only にも効くため、一覧と区画の不一致は設定では作れない（#6144）。
+# 上の MAX_GIT_ARG_BYTES・TMP_MARKER・FAIL_GIT_* の各シムと併用できるよう、最後の exec の直前に置く（途中で exit しない）。
+if [ -n "${ORDER_U0_FILE:-}" ]; then
+  for arg in "$@"; do
+    if [ "${arg}" = "-U0" ]; then
+      exec "${REAL_GIT}" -c "diff.orderFile=${ORDER_U0_FILE}" "$@"
+    fi
+  done
+fi
 exec "${REAL_GIT}" "$@"
 EOF
 chmod +x "${shim_dir}/git"
@@ -242,6 +242,7 @@ check_scan() {
       fail "secret-scan: ${desc}" "secret value leaked to output"
       return 0
     fi
+  # here-string（bash 5.1 未満、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルを使う）: 中身は試験の中で実行時に組み立てた秘密値の形の例示値（実際の秘密値ではない）。SECR-23 の該当の判定は人が行う（#6203）。
   done <<< "${leak_needles}"
   pass "secret-scan: ${desc}"
 }
