@@ -4,9 +4,9 @@
 //! 公開の道を置かず、作る道は [`SafeHtml::escape_text`] と [`html_literal!`] の 2 つだけにする
 //! （UISF-2・UISF-18・UISF-19 の型の部分。LGUI-14）。
 //!
-//! 限界: `html_literal!` が内部で呼ぶ `__from_literal` は `pub` で、`&'static str` を渡せるため
-//! （`Box::leak` 等で）実行時の文字列からも作れてしまう。型の上では塞げず、直接呼ぶ箇所は
-//! ソース走査で担保する前提とする。走査は本 crate の型では未実装。
+//! 実行時の文字列を包む道は置かない。`html_literal!` が内部で呼ぶ `SafeHtml::__from_markup` は
+//! 型引数の関連定数（`Markup::TEXT`）からだけ値を取る。関連定数はコンパイル時に決まる値しか持てず、
+//! 実行時の文字列（`Box::leak` 等）は渡せない（`&'static str` を直接受ける関数は置かない）。
 //!
 //! 持たないもの: 描画・テンプレート・HTTP 応答・CSP の付与（LIB-1・LIB-3・A-2026-10-30-11。実行は Hub の
 //! `ASCR`）。I/O・時刻・乱数も持たない（DPOL-1）。
@@ -49,6 +49,27 @@ use std::fmt;
 /// use fandhe_auth_core::html_literal;
 /// let s = String::from("<p>");
 /// let _ = html_literal!(s);
+/// ```
+///
+/// 実行時の文字列を `&'static str` にして直接包む道は無い。
+///
+/// ```compile_fail
+/// use fandhe_auth_core::ui_safety::SafeHtml;
+/// let input = String::from("<script>");
+/// let _ = SafeHtml::__from_literal(Box::leak(input.into_boxed_str()));
+/// ```
+///
+/// 関連定数に実行時の値は入れられない。
+///
+/// ```compile_fail
+/// use fandhe_auth_core::ui_safety::{Markup, SafeHtml};
+/// fn f(input: String) -> SafeHtml {
+///     struct M;
+///     impl Markup for M {
+///         const TEXT: &'static str = input.leak();
+///     }
+///     SafeHtml::__from_markup::<M>()
+/// }
 /// ```
 #[must_use]
 #[derive(Clone, PartialEq, Eq)]
@@ -105,14 +126,21 @@ impl SafeHtml {
         self.inner.into_owned()
     }
 
-    /// [`html_literal!`] だけが呼ぶ。直接呼ばない。`&'static str` を受けるため、型の上では実行時の
-    /// 文字列（`Box::leak` 等）も渡せる。守りは `#[doc(hidden)]` ではなくソース走査に依る。
+    /// [`html_literal!`] だけが呼ぶ。マークアップは型引数 `M` の関連定数から取るため、
+    /// コンパイル時に決まる値だけが入る（実行時の文字列は関連定数に入れられない）。
     #[doc(hidden)]
-    pub const fn __from_literal(markup: &'static str) -> SafeHtml {
+    pub const fn __from_markup<M: Markup>() -> SafeHtml {
         SafeHtml {
-            inner: Cow::Borrowed(markup),
+            inner: Cow::Borrowed(M::TEXT),
         }
     }
+}
+
+/// [`html_literal!`] が生成する型が実装する。関連定数でコンパイル時の文字列だけを受ける。
+#[doc(hidden)]
+pub trait Markup {
+    /// コンパイル時に決まるマークアップ。
+    const TEXT: &'static str;
 }
 
 impl fmt::Debug for SafeHtml {
@@ -132,8 +160,11 @@ impl fmt::Debug for SafeHtml {
 #[macro_export]
 macro_rules! html_literal {
     ($markup:literal) => {{
-        const MARKUP: &str = $markup;
-        $crate::ui_safety::SafeHtml::__from_literal(MARKUP)
+        struct M;
+        impl $crate::ui_safety::Markup for M {
+            const TEXT: &'static str = $markup;
+        }
+        $crate::ui_safety::SafeHtml::__from_markup::<M>()
     }};
 }
 
