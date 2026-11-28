@@ -11,17 +11,18 @@
 # 規則（合否 = 1 件でも違反）:
 #   C1: 既知の暗号定数（SHA-1/2・MD5 の IV と K[0]、ChaCha/Salsa の sigma、黄金比の定数、Poly1305 の clamp、Keccak の RC、P-256 の素数の断片、AES の S-box の先頭）。
 #       判定の前に `_` を除き、大小文字を区別しない。
-#   C2: インラインアセンブリ・アーキテクチャ固有の命令（asm!・global_asm!・naked_asm!・#[naked]・core::arch・std::arch）
-#   C3: Rust 以外のネイティブのソース（*.c *.h *.cc *.cpp *.cxx *.hh *.hpp *.hxx *.inc *.cu *.m *.mm *.s *.S *.asm）が crate の中にあること
-#   C4: 暗号の trait の自前の実装（RngCore・CryptoRng・BlockCipher・StreamCipher・Digest・Mac 等への impl ... for）
+#   C2: インラインアセンブリ・アーキテクチャ固有の命令（asm!・global_asm!・naked_asm!・#[naked]・#[unsafe(naked)]・core::arch・std::arch・`core::{arch::…}`・`std::{arch::…}`・入れ子の波括弧の後ろの `core::{mem::{self}, arch}`。波括弧の後ろは同じ行の `arch` の語まで見る）
+#   C3: Rust 以外のネイティブのソース（*.c *.h *.cc *.cpp *.cxx *.hh *.hpp *.hxx *.inc *.cu *.m *.mm *.s *.S *.asm、コンパイル済みの *.o *.a *.so *.dylib *.lib *.obj *.ll *.bc）が crate の中にあること
+#   C4: 暗号の trait の自前の実装（RngCore・CryptoRng・BlockCipher・StreamCipher・Digest・Mac・Signer・Verifier・PasswordHasher 等への impl ... for。先頭の `::` も許す）
 #   C5: 同じファイルに rotate_left/rotate_right と wrapping_add/sub/mul が併存すること（ハッシュ・ストリーム暗号のラウンドの典型）
 # 参考（警告のみ。合否に入れない）:
 #   N1: 定義の名前に暗号の基本処理の名前が `_` 区切りの語として入ること（既存 crate を包む関数も当たりうるので人が確かめる）
 #   N2: build.rs の存在（ネイティブのコードの組み込みの入口になりうる）。本番メンバーだけ数える
 #   試験専用メンバーの検出は、規則に関わらず「test-only」の警告として別に数える。
-# 限界: 名前を変えた実装・10 進や別表現の定数・マクロで生成したコードは見落としうる。XML 署名は SAML の Plugin（段階 2）の側で、まだ crate が無い。
+# 限界: 名前を変えた実装・10 進や別表現の定数・マクロで生成したコードは見落としうる。C1 は `*.rs` だけを見るため、`include!`・`#[path]` で
+#   取り込まれる別拡張子のファイルは見えない。C4 は行単位の grep のため、複数行にまたがる `impl` は拾えない。XML 署名は SAML の Plugin（段階 2）の側で、まだ crate が無い。
 #
-# 実行のたびに自己試験（陽性対照 S1〜S8・陰性対照 S9・S10）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陽性対照 S1〜S7・S11・S13〜S23、陰性対照 S8〜S10、grep の誤用 S12。番号は欠けを含む）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は規則 ID・件数・相対パス:行だけ（絶対パスは出さない）。終了コード: 0 = 合格、1 = 違反（または自己試験の失敗）、2 = 検査不能（fail-closed）。
 set -euo pipefail
 unset CDPATH
@@ -46,9 +47,9 @@ CONSTS='6a09e667|bb67ae85|3c6ef372|a54ff53a|510e527f|9b05688c|1f83d9ab|5be0cd19|
 # 語境界は BSD grep（macOS）が \b を解さないため、POSIX ERE の文字クラスで書く。
 BL='(^|[^[:alnum:]_])'
 BR='([^[:alnum:]_]|$)'
-ASM="${BL}(asm|global_asm|naked_asm)!|#\\[naked\\]|${BL}(core|std)::arch${BR}"
-TRAITS='RngCore|CryptoRng|CryptoRngCore|SeedableRng|BlockCipher|BlockEncrypt|BlockDecrypt|StreamCipher|KeyInit|KeyIvInit|UniversalHash|Digest|DynDigest|FixedOutput|Mac'
-C4RE="^[[:space:]]*(unsafe[[:space:]]+)?impl(<[^>]*>)?[[:space:]]+([A-Za-z0-9_]+::)*(${TRAITS})(<.*>)?[[:space:]]+for${BR}"
+ASM="${BL}(asm|global_asm|naked_asm)!|#\\[naked\\]|#\\[unsafe\\(naked\\)\\]|${BL}(core|std)::arch${BR}|${BL}(core|std)::\\{.*${BL}arch${BR}"
+TRAITS='RngCore|CryptoRng|CryptoRngCore|SeedableRng|BlockCipher|BlockEncrypt|BlockDecrypt|StreamCipher|KeyInit|KeyIvInit|UniversalHash|Digest|DynDigest|FixedOutput|Mac|Signer|Verifier|PasswordHasher'
+C4RE="^[[:space:]]*(unsafe[[:space:]]+)?impl(<[^>]*>)?[[:space:]]+(::)?([A-Za-z0-9_]+::)*(${TRAITS})(<.*>)?[[:space:]]+for${BR}"
 WORDS='sha1|sha256|sha384|sha512|sha3|md5|hmac|hkdf|pbkdf2|argon2|scrypt|bcrypt|aes|chacha20|poly1305|ed25519|x25519|p256|p384|secp256k1|ecdsa|ecdh|rsa|keccak|blake2|blake3|siphash|xorshift|xoshiro|pcg32|lcg|mt19937|totp|hotp|gcm'
 N1RE="${BL}(fn|struct|enum|trait|mod|type|const|static|macro_rules!)[[:space:]]+([A-Za-z0-9]+_)*(${WORDS})(_[A-Za-z0-9]+)*${BR}"
 
@@ -131,7 +132,7 @@ scan_names() {
 # scan_native <出力先> <path>: C3。ファイル名の拡張子で判定する。
 scan_native() {
   case "$2" in
-    *.c | *.h | *.cc | *.cpp | *.cxx | *.hh | *.hpp | *.hxx | *.inc | *.cu | *.m | *.mm | *.s | *.S | *.asm) printf 'C3\t%s:1\n' "$2" >>"$1" ;;
+    *.c | *.h | *.cc | *.cpp | *.cxx | *.hh | *.hpp | *.hxx | *.inc | *.cu | *.m | *.mm | *.s | *.S | *.asm | *.o | *.a | *.so | *.dylib | *.lib | *.obj | *.ll | *.bc) printf 'C3\t%s:1\n' "$2" >>"$1" ;;
   esac
 }
 
@@ -182,6 +183,14 @@ selftest() {
   mk s7.rs 'fn sha256_digest() {}'
   mk s8.rs 'fn r(a: u32) -> u32 { a.rotate_left(7) }'
   mk 'x|;e id;#&\1 y.rs' 'const IV: u32 = 0x6a09e667;'
+  mk s13.rs 'use core::{arch::x86_64::_mm_pause, mem};'
+  mk s19.rs 'use std::{arch::asm, mem};'
+  mk s20.rs 'use core::{mem::{self}, arch};'
+  mk s14.rs '#[unsafe(naked)] extern "C" fn f() {}'
+  mk s15.rs 'impl ::rand_core::RngCore for Foo {}'
+  mk s16.rs 'impl Signer for Foo {}'
+  mk s17.rs 'impl Verifier for Foo {}'
+  mk s18.rs 'impl PasswordHasher for Foo {}'
   mk s9.rs 'fn clock_reversal_is_error() {} fn unparsable() {} // Signer'
   scan_rs "${out}" "${t}/s1.rs"
   expect_count S1 C1 pos "${out}"
@@ -211,6 +220,39 @@ selftest() {
   : >"${out}"
   scan_rs "${out}" "${t}/s8.rs"
   expect_count S8 C5 neg "${out}"
+  : >"${out}"
+  scan_native "${out}" "${t}/x.o"
+  expect_count S21 C3 pos "${out}"
+  : >"${out}"
+  scan_native "${out}" "${t}/x.hpp"
+  expect_count S22 C3 pos "${out}"
+  : >"${out}"
+  scan_native "${out}" "${t}/x.dylib"
+  expect_count S23 C3 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s13.rs"
+  expect_count S13 C2 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s19.rs"
+  expect_count S19 C2 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s20.rs"
+  expect_count S20 C2 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s14.rs"
+  expect_count S14 C2 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s15.rs"
+  expect_count S15 C4 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s16.rs"
+  expect_count S16 C4 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s17.rs"
+  expect_count S17 C4 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s18.rs"
+  expect_count S18 C4 pos "${out}"
   : >"${out}"
   scan_rs "${out}" "${t}/s9.rs"
   scan_names "${out}" "${t}/s9.rs"
@@ -253,21 +295,19 @@ for m in ${MEMBERS}; do
   fi
 done
 
-LIST="$(mktemp)" || {
-  log "error: cannot create temp file; cannot inspect"
+# 一時ファイルは実行者専用の mktemp -d の中に置く（run_grep の `${out}.grep` のような予測できる名前を共有の一時領域へ作らない。CWE-59）。
+WORK="$(mktemp -d)" || {
+  log "error: cannot create temp dir; cannot inspect"
   exit 2
 }
-OUT="$(mktemp)" || {
-  rm -f -- "${LIST}"
-  log "error: cannot create temp file; cannot inspect"
+LIST="${WORK}/list"
+OUT="${WORK}/out"
+TMP="${WORK}/tmp"
+trap 'rm -rf -- "${WORK}"' EXIT
+if ! { : >"${LIST}" && : >"${OUT}" && : >"${TMP}"; }; then
+  log "error: cannot create temp files; cannot inspect"
   exit 2
-}
-TMP="$(mktemp)" || {
-  rm -f -- "${LIST}" "${OUT}"
-  log "error: cannot create temp file; cannot inspect"
-  exit 2
-}
-trap 'rm -f -- "${LIST}" "${OUT}" "${TMP}"' EXIT
+fi
 git ls-files -z --cached --others --exclude-standard -- crates/ >"${LIST}" || {
   log "error: git ls-files failed; cannot inspect"
   exit 2
@@ -275,6 +315,7 @@ git ls-files -z --cached --others --exclude-standard -- crates/ >"${LIST}" || {
 
 prod_n=0
 test_n=0
+nonreg_n=0
 while IFS= read -r -d '' p; do
   case "${p}" in
     *[[:cntrl:]]*)
@@ -292,7 +333,14 @@ while IFS= read -r -d '' p; do
     log "error: file under unclassified crates/${top}; cannot inspect"
     exit 2
   fi
-  [ -f "${p}" ] || continue
+  # `[ -f ]` が偽のパスは走査できない。件数だけを警告で出す（合否は変えない。2 にするかは人が決める）。
+  # 対象: FIFO・ディレクトリ等の通常でないファイル、壊れたリンク、index にあって作業ツリーから消えたファイル。
+  # `[ -f ]` はリンクの先をたどるため、通常のファイルを指すリンクは走査に入る。
+  # 追跡先の issue は未起票（#6168 は取り込み済みの PR で、追跡先ではない）。
+  if [ ! -f "${p}" ]; then
+    [ "${scope}" != prod ] || nonreg_n=$((nonreg_n + 1))
+    continue
+  fi
   if [ "${scope}" = prod ]; then
     prod_n=$((prod_n + 1))
     scan_native "${OUT}" "${p}"
@@ -319,6 +367,10 @@ while IFS= read -r -d '' p; do
     sed 's/^/T:/' "${TMP}" >>"${OUT}"
   fi
 done <"${LIST}"
+
+if [ "${nonreg_n}" -gt 0 ]; then
+  log "warn: ${nonreg_n} non-regular tracked path(s) in production scope skipped"
+fi
 
 non_empty "${prod_n}" || {
   log "error: no files in the production scope; cannot inspect"
