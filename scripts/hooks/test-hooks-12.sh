@@ -9,6 +9,45 @@ source "$(dirname "${BASH_SOURCE[0]}")/test-hooks-core.sh"
 
 cd "${work_dir}"
 
+# (A) plugin・hub の表の試験（TASK-714 (2/8)・LIB-2）。cargo 不要。実のスクリプトを source して実の表を照合する。
+# 行を消す・緩めるとここが落ちる。当たってはならない名前（本体・近い名前）も固定する。
+ld_tbl() {
+  (
+    # shellcheck source=../check-lib-deps.sh
+    source "${HOOKS_DIR}/../check-lib-deps.sh"
+    match_forbidden "$1" || true
+  )
+}
+ld_expect() {
+  local want="$1" n got
+  shift
+  for n in "$@"; do
+    got="$(ld_tbl "${n}")"
+    if [ "${got}" = "${want}" ]; then
+      pass "lib-deps table: ${n} -> '${want}'"
+    else
+      fail "lib-deps table: ${n} -> '${want}'" "got '${got}'"
+    fi
+  done
+}
+ld_expect plugin fandhe-auth-plugin-oidc fandhe-auth-plugin-saml openidconnect oauth2 samael
+ld_expect hub fandhe-auth-backend fandhe-auth-db-pg fandhe-auth-db-fandhe fandhe-auth-db-migrate fandhe-auth-server fandhe-auth-db \
+  fandhe-backend fandhe-backend-core fandhe-backend-http fandhe-backend-plugin-jwt fandhe-service-hub fandhe-service-hub-x
+ld_expect "" fandhe-auth-core fandhe-auth-secret fandhe-auth-db-tests fandhe-auth-client fandhe-auth-plugin openidconnect-x fandhe-backendx
+# 表が本体の crate 自身に当たるなら検査不能（2）
+ld_rc=0
+(
+  # shellcheck source=../check-lib-deps.sh
+  source "${HOOKS_DIR}/../check-lib-deps.sh"
+  FORBIDDEN=('x|prefix|fandhe-auth-')
+  require_body_not_forbidden
+) > /dev/null 2>&1 || ld_rc=$?
+if [ "${ld_rc}" -eq 2 ]; then
+  pass "lib-deps table: body crate hit is cannot-inspect (2)"
+else
+  fail "lib-deps table: body crate hit is cannot-inspect (2)" "got ${ld_rc}"
+fi
+
 if ! command -v cargo > /dev/null 2>&1; then
   if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
     fail "lib-deps: cargo is required in CI" "missing prerequisite"
@@ -75,6 +114,21 @@ ld_write core ""
 ld_write client '[dependencies]
 mid = { path = "../mid" }'
 ld_run "NG: transitive dependency" 1 "violation: fandhe-auth-client -> ${ld_bad}"
+ld_write client ""
+# (4a) core が plugin の crate に normal で依存（TASK-714 (2/8)）
+ld_write plugin-oidc ""
+ld_write core '[dependencies]
+fandhe-auth-plugin-oidc = { path = "../plugin-oidc" }'
+ld_run "NG: plugin crate dependency" 1 "violation: fandhe-auth-core -> fandhe-auth-plugin-oidc [plugin]"
+ld_write core ""
+# (4b) client が中間 crate 経由で hub の crate に推移的に依存
+ld_write db-pg ""
+mkdir -p "${ld_fx}/crates/mid-hub/src"
+printf '[package]\nname = "mid-hub"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\nfandhe-auth-db-pg = { path = "../db-pg" }\n' > "${ld_fx}/crates/mid-hub/Cargo.toml"
+: > "${ld_fx}/crates/mid-hub/src/lib.rs"
+ld_write client '[dependencies]
+mid-hub = { path = "../mid-hub" }'
+ld_run "NG: transitive hub crate dependency" 1 "violation: fandhe-auth-client -> fandhe-auth-db-pg [hub]"
 ld_write client ""
 # (5) 対象の crate を 1 つ外す
 rm -rf "${ld_fx}/crates/secret"

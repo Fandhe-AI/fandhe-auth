@@ -2,7 +2,7 @@
 # 本体の段階 1 の crate の通常の依存に、禁止の crate が 0 件であることを `cargo tree` で検査する（TASK-714 (1/8)・LIB-2・DPOL-1）。
 # 本体（core・secret・db-tests・client）は、外部ログイン Plugin・Hub の crate・接続先ごとの SDK・HTTP のサーバー側の枠組み・
 # DB ドライバー・非同期ランタイムに依存しない（LIB-2。DPOL-1 を維持する。A-2026-10-30-2）。この検査はその機械的な入れ物で、
-# 禁止の一覧（FORBIDDEN）の中身の充足は #5159〜#5161、CI への搭載（scripts/lint.sh への結線）は #5164、手順の文書は #5165 が担う。
+# 禁止の一覧（FORBIDDEN）の中身の充足は #5159（plugin・hub。本 issue で見直し。〔提案〕・人の確認待ち）・#5160（sdk）・#5161（http・db・runtime）、CI への搭載（scripts/lint.sh への結線）は #5164、手順の文書は #5165 が担う。
 # 検査を外す引数・環境変数は作らない（DPOL-30〜32）。呼び出し元: `make lib-deps`（名前は暫定で、人が確定する）。
 #
 # 走査（合否）: BODY_PKGS の crate ごとに `cargo tree --locked -p <crate> -e features,normal,build --target all --prefix none` を流し、
@@ -35,16 +35,23 @@ BODY_PKGS=(
 )
 
 # 禁止の表（〔提案〕・暫定）。区分: plugin・hub・sdk・http・db・runtime。区分ごとの見直しは #5159（plugin・hub）・#5160（sdk）・#5161（http・db・runtime）。
+# plugin・hub の行の集合は #5159 で見直した〔提案〕で、決めるのは人（ACPT-7）。足した行は PoC-15 の deps_check.py の一覧・
+# spec の名指し・DPOL-7 に出典を持つ。LIB-2 の「SAML の実装」は plugin の区分の samael の行で持つ（ほかの実装の名前は未確認のため足さない）。
+# fandhe-backend- の区分の名前（hub か http か）の見直しは #5161 に委ねる。
 FORBIDDEN=(
   'plugin|prefix|fandhe-auth-plugin-'
   'plugin|exact|openidconnect'
+  'plugin|exact|oauth2'
   'plugin|exact|samael'
   'hub|exact|fandhe-auth-backend'
   'hub|exact|fandhe-auth-db-pg'
   'hub|exact|fandhe-auth-db-fandhe'
   'hub|exact|fandhe-auth-db-migrate'
   'hub|exact|fandhe-auth-server'
+  'hub|exact|fandhe-auth-db'
   'hub|exact|fandhe-backend'
+  'hub|prefix|fandhe-backend-'
+  'hub|prefix|fandhe-service-hub'
   'sdk|exact|aws-config'
   'sdk|prefix|aws-sdk-'
   'sdk|prefix|google-cloud-'
@@ -85,6 +92,18 @@ require_table() {
     log "error: forbidden table is empty; cannot inspect"
     exit 2
   fi
+}
+
+# require_body_not_forbidden: 表が検査対象の本体の crate 自身に当たる誤った設定は検査不能（2）。名前の一覧は持たず BODY_PKGS から導く。
+# 当たったままだと本体が常に違反になるか、行の整理で黙って緩む取り違えが起きるため、止めて気付かせる。
+require_body_not_forbidden() {
+  local p
+  for p in "${BODY_PKGS[@]}"; do
+    if match_forbidden "${p}" > /dev/null; then
+      log "error: forbidden table matches an inspected body crate (${p}); cannot inspect"
+      exit 2
+    fi
+  done
 }
 
 # match_forbidden <crate 名>: 表に当たれば区分を出して 0、当たらなければ 1。完全一致は exact の行だけ、前方一致は prefix の行だけ。
@@ -377,6 +396,7 @@ main() {
     require_cmd "${c}" || exit 2
   done
   require_table
+  require_body_not_forbidden
   if ! cd "${ROOT_DIR}" 2>/dev/null; then
     log "error: cannot enter repository root; cannot inspect"
     exit 2
