@@ -32,7 +32,11 @@ ld_expect() {
 }
 ld_expect plugin fandhe-auth-plugin-oidc fandhe-auth-plugin-saml openidconnect oauth2 samael
 ld_expect hub fandhe-auth-backend fandhe-auth-db-pg fandhe-auth-db-fandhe fandhe-auth-db-migrate fandhe-auth-server fandhe-auth-db \
-  fandhe-backend fandhe-backend-core fandhe-backend-http fandhe-backend-plugin-jwt fandhe-service-hub fandhe-service-hub-x
+  fandhe-service-hub fandhe-service-hub-x
+ld_expect http axum axum-core actix-web actix-http rocket warp poem salvo hyper hyper-util tower-http fandhe-backend fandhe-backend-core fandhe-backend-http fandhe-backend-plugin-jwt
+ld_expect db sqlx sqlx-core sqlx-postgres tokio-postgres postgres diesel rusqlite libsqlite3-sys sea-orm mysql mysql_async redis mongodb deadpool-postgres bb8
+ld_expect runtime tokio tokio-util tokio-macros async-std smol actix-rt glommio monoio futures-executor
+ld_expect "" http-body futures-core futures-util async-trait tokiox sqlxx pin-project-lite
 ld_expect sdk aws-config aws-sdk-s3 aws-sdk-sts google-cloud-storage google-apis-common yup-oauth2 gcp_auth egg-mode facebook facebook-graph twitter twitter-v2 azure_core azure_identity
 ld_expect "" aws-lc-rs aws-lc-sys aws-configx googletest yup-oauth2-x gcp_auth_x azure ring jsonwebtoken
 ld_expect "" fandhe-auth-core fandhe-auth-secret fandhe-auth-db-tests fandhe-auth-client fandhe-auth-plugin openidconnect-x fandhe-backendx
@@ -157,6 +161,24 @@ printf '[package]\nname = "aws-lc-rs"\nversion = "0.0.0"\nedition = "2021"\n' > 
 ld_write client '[dependencies]
 aws-lc-rs = { path = "../aws-lc-rs" }'
 ld_run "OK: aws-lc-rs is not sdk" 0
+ld_write client ""
+# (4f) db-tests が http の crate に normal で直接依存（TASK-714 (4/8)）
+mkdir -p "${ld_fx}/crates/axum/src"
+printf '[package]\nname = "axum"\nversion = "0.0.0"\nedition = "2021"\n' > "${ld_fx}/crates/axum/Cargo.toml"
+: > "${ld_fx}/crates/axum/src/lib.rs"
+ld_write db-tests '[dependencies]
+axum = { path = "../axum" }'
+ld_run "NG: direct http dependency" 1 "violation: fandhe-auth-db-tests -> axum [http]"
+ld_write db-tests ""
+# (4g) client が中間 crate 経由で db の crate に推移的に依存
+mkdir -p "${ld_fx}/crates/sqlx-postgres/src" "${ld_fx}/crates/mid-db/src"
+printf '[package]\nname = "sqlx-postgres"\nversion = "0.0.0"\nedition = "2021"\n' > "${ld_fx}/crates/sqlx-postgres/Cargo.toml"
+: > "${ld_fx}/crates/sqlx-postgres/src/lib.rs"
+printf '[package]\nname = "mid-db"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\nsqlx-postgres = { path = "../sqlx-postgres" }\n' > "${ld_fx}/crates/mid-db/Cargo.toml"
+: > "${ld_fx}/crates/mid-db/src/lib.rs"
+ld_write client '[dependencies]
+mid-db = { path = "../mid-db" }'
+ld_run "NG: transitive db dependency" 1 "violation: fandhe-auth-client -> sqlx-postgres [db]"
 ld_write client ""
 # (5) 対象の crate を 1 つ外す
 rm -rf "${ld_fx}/crates/secret"
