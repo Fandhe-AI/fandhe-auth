@@ -702,14 +702,14 @@ fn matcher_detects_every_form_mixed_into_output() {
     assert_eq!(count_jwt_like(b"eyJabc.def.ghi"), 0);
 }
 
-/// 登録簿から取った 16 進の文字列（固定語彙の外。文字種の規則には合う）は、値の名前・出典・区間名として記録に出せない
+/// 登録簿の乱数の値と同じ作りで新しく作った 16 進の文字列（固定語彙の外。文字種の規則には合う。登録簿の値そのものは使わない）は、値の名前・出典・区間名として記録に出せない
 /// （SECR-23・#6038。語彙は crate の固定の定数で、呼び出し元は足せない）。設定由来の値を一律に拒否するわけではなく、
 /// 固定語彙に一致する文字列（`p99_target` 等）は由来を問わず通る。この試験は、語彙外の 16 進の文字列を名前・出典に渡すと拒否され、
 /// 区間名にした対象は 1 回も呼ばれない（実行の前の拒否と呼び出し 0 件。記録のファイルの未作成までは確かめない）。
 /// 以前はここで「語彙にも入れた 16 進の値が書き出される」ことを陽性対照にしていたが、その経路を塞いだため
 /// 拒否の試験に置き換えた。照合の検出力は陽性対照 1（`matcher_detects_every_form_mixed_into_output`）で見る。
 #[test]
-fn registry_hex_strings_outside_vocabulary_are_rejected_as_names() {
+fn random_hex_strings_outside_vocabulary_are_rejected_as_names() {
     // 登録簿の乱数の値（`canary_registry_and_config` の先頭 4 件）と同じ作り（`random_value` の 16 進）で作る。
     // 登録簿は経由しない（秘密値の型から文字列を取り出して持たない。SECR-16）。
     let candidates: Vec<String> = (0..3).map(|_| hex(&random_value(), false)).collect();

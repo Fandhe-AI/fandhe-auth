@@ -10,6 +10,8 @@
 # fail-closed）で止める。cargo・jq・python3 が無いときも 2。
 # 出力は Cargo.toml の表記のまま（`1.100` のように 2 部分のことがある）。パッチ版の補いは install-msrv.sh が行う。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"

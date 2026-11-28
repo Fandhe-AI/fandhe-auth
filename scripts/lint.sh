@@ -4,6 +4,8 @@
 # --all-features は使わない（DPOL-31）。CI の lint ジョブが `make lint` 経由で呼ぶ（TASK-6）。
 # 呼び出し元: `make lint`。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
