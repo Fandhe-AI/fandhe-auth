@@ -33,6 +33,8 @@ ld_expect() {
 ld_expect plugin fandhe-auth-plugin-oidc fandhe-auth-plugin-saml openidconnect oauth2 samael
 ld_expect hub fandhe-auth-backend fandhe-auth-db-pg fandhe-auth-db-fandhe fandhe-auth-db-migrate fandhe-auth-server fandhe-auth-db \
   fandhe-backend fandhe-backend-core fandhe-backend-http fandhe-backend-plugin-jwt fandhe-service-hub fandhe-service-hub-x
+ld_expect sdk aws-config aws-sdk-s3 aws-sdk-sts google-cloud-storage google-apis-common yup-oauth2 gcp_auth egg-mode facebook facebook-graph twitter twitter-v2 azure_core azure_identity
+ld_expect "" aws-lc-rs aws-lc-sys aws-configx googletest yup-oauth2-x gcp_auth_x azure ring jsonwebtoken
 ld_expect "" fandhe-auth-core fandhe-auth-secret fandhe-auth-db-tests fandhe-auth-client fandhe-auth-plugin openidconnect-x fandhe-backendx
 # 表が本体の crate 自身に当たるなら検査不能（2）
 ld_rc=0
@@ -129,6 +131,32 @@ printf '[package]\nname = "mid-hub"\nversion = "0.0.0"\nedition = "2021"\n[depen
 ld_write client '[dependencies]
 mid-hub = { path = "../mid-hub" }'
 ld_run "NG: transitive hub crate dependency" 1 "violation: fandhe-auth-client -> fandhe-auth-db-pg [hub]"
+ld_write client ""
+# (4c) core が sdk の crate に normal で直接依存（TASK-714 (3/8)）
+mkdir -p "${ld_fx}/crates/aws-sdk-s3/src"
+printf '[package]\nname = "aws-sdk-s3"\nversion = "0.0.0"\nedition = "2021"\n' > "${ld_fx}/crates/aws-sdk-s3/Cargo.toml"
+: > "${ld_fx}/crates/aws-sdk-s3/src/lib.rs"
+ld_write core '[dependencies]
+aws-sdk-s3 = { path = "../aws-sdk-s3" }'
+ld_run "NG: direct sdk dependency" 1 "violation: fandhe-auth-core -> aws-sdk-s3 [sdk]"
+ld_write core ""
+# (4d) secret が中間 crate 経由で sdk の crate に推移的に依存
+mkdir -p "${ld_fx}/crates/yup-oauth2/src" "${ld_fx}/crates/mid-sdk/src"
+printf '[package]\nname = "yup-oauth2"\nversion = "0.0.0"\nedition = "2021"\n' > "${ld_fx}/crates/yup-oauth2/Cargo.toml"
+: > "${ld_fx}/crates/yup-oauth2/src/lib.rs"
+printf '[package]\nname = "mid-sdk"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\nyup-oauth2 = { path = "../yup-oauth2" }\n' > "${ld_fx}/crates/mid-sdk/Cargo.toml"
+: > "${ld_fx}/crates/mid-sdk/src/lib.rs"
+ld_write secret '[dependencies]
+mid-sdk = { path = "../mid-sdk" }'
+ld_run "NG: transitive sdk dependency" 1 "violation: fandhe-auth-secret -> yup-oauth2 [sdk]"
+ld_write secret ""
+# (4e) client が近い名前（暗号の実装）の crate に依存しても誤検出しない
+mkdir -p "${ld_fx}/crates/aws-lc-rs/src"
+printf '[package]\nname = "aws-lc-rs"\nversion = "0.0.0"\nedition = "2021"\n' > "${ld_fx}/crates/aws-lc-rs/Cargo.toml"
+: > "${ld_fx}/crates/aws-lc-rs/src/lib.rs"
+ld_write client '[dependencies]
+aws-lc-rs = { path = "../aws-lc-rs" }'
+ld_run "OK: aws-lc-rs is not sdk" 0
 ld_write client ""
 # (5) 対象の crate を 1 つ外す
 rm -rf "${ld_fx}/crates/secret"

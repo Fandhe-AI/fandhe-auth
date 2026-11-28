@@ -2,7 +2,7 @@
 # 本体の段階 1 の crate の通常の依存に、禁止の crate が 0 件であることを `cargo tree` で検査する（TASK-714 (1/8)・LIB-2・DPOL-1）。
 # 本体（core・secret・db-tests・client）は、外部ログイン Plugin・Hub の crate・接続先ごとの SDK・HTTP のサーバー側の枠組み・
 # DB ドライバー・非同期ランタイムに依存しない（LIB-2。DPOL-1 を維持する。A-2026-10-30-2）。この検査はその機械的な入れ物で、
-# 禁止の一覧（FORBIDDEN）の中身の充足は #5159（plugin・hub。本 issue で見直し。〔提案〕・人の確認待ち）・#5160（sdk）・#5161（http・db・runtime）、CI への搭載（scripts/lint.sh への結線）は #5164、手順の文書は #5165 が担う。
+# 禁止の一覧（FORBIDDEN）の中身の充足は #5159（plugin・hub。本 issue で見直し。〔提案〕・人の確認待ち）・#5160（sdk。本 issue で見直し。〔提案〕・人の確認待ち）・#5161（http・db・runtime）、CI への搭載（scripts/lint.sh への結線）は #5164、手順の文書は #5165 が担う。
 # 検査を外す引数・環境変数は作らない（DPOL-30〜32）。呼び出し元: `make lib-deps`（名前は暫定で、人が確定する）。
 #
 # 走査（合否）: BODY_PKGS の crate ごとに `cargo tree --locked -p <crate> -e features,normal,build --target all --prefix none` を流し、
@@ -38,6 +38,10 @@ BODY_PKGS=(
 # plugin・hub の行の集合は #5159 で見直した〔提案〕で、決めるのは人（ACPT-7）。足した行は PoC-15 の deps_check.py の一覧・
 # spec の名指し・DPOL-7 に出典を持つ。LIB-2 の「SAML の実装」は plugin の区分の samael の行で持つ（ほかの実装の名前は未確認のため足さない）。
 # fandhe-backend- の区分の名前（hub か http か）の見直しは #5161 に委ねる。
+# sdk の行の集合は #5160 で見直した〔提案〕で、決めるのは人（ACPT-7）。出典は LIB-2（接続先ごとの SDK）・PLG-27（Google の SDK に依存しない）・
+# PoC-15 の deps_check.py の一覧（google-・yup-oauth2・gcp_auth・egg-mode・facebook・twitter）。google-cloud- は google- に広げた（当たる範囲は狭まらない）。
+# 接頭辞 aws- は使わない: aws-lc-rs・aws-lc-sys は暗号の実装（DPOL-4・DPOL-47）で、誤って当たる。aws-config・aws-sdk- 経由で AWS の SDK は検出できる。
+# 配送事業者の SDK は TASK-765（AMTH-14）・TASK-761（AMTH-1）に委ねる。plugin-oidc の依存の検査（PLG-27）は TASK-739。
 FORBIDDEN=(
   'plugin|prefix|fandhe-auth-plugin-'
   'plugin|exact|openidconnect'
@@ -54,7 +58,12 @@ FORBIDDEN=(
   'hub|prefix|fandhe-service-hub'
   'sdk|exact|aws-config'
   'sdk|prefix|aws-sdk-'
-  'sdk|prefix|google-cloud-'
+  'sdk|prefix|google-'
+  'sdk|exact|yup-oauth2'
+  'sdk|exact|gcp_auth'
+  'sdk|exact|egg-mode'
+  'sdk|prefix|facebook'
+  'sdk|prefix|twitter'
   'sdk|prefix|azure_'
   'http|exact|axum'
   'http|exact|axum-core'
