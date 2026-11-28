@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # scripts/*.sh が共有するヘルパー。直接実行せず source して使う:
+#   unset CDPATH  # DIR の解決より前に外す（#6173）
 #   DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   source "${DIR}/lib.sh"
 #

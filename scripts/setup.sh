@@ -4,6 +4,8 @@
 # - .env が無い場合のみ .env.example から作成する（既存の .env は上書きしない）
 # ツール本体の導入は行わない（不足時は doctor.sh の結果に従って手動で導入する）。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"

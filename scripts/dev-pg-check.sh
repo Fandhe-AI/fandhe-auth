@@ -8,6 +8,8 @@
 # 終了コード: 0 = 全項目 ok、1 = 失敗あり、2 = 誤用。
 # compose の project 名は COMPOSE_PROJECT_NAME で固有にでき、並列の検証と衝突させない。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
