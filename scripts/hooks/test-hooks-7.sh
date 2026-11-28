@@ -728,17 +728,48 @@ audit_has "record: reason (has changes, showUntrackedFiles)" "has changes"
 audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
 printf '#!/bin/sh\ntouch "%s/fsmonitor-called"\nprintf "\\0"\n' "${audit_root}" > "${audit_root}/fsm.sh"; chmod +x "${audit_root}/fsm.sh"
 git -C "${audit_root}/home/.cargo/advisory-db" config core.fsmonitor "${audit_root}/fsm.sh"
+# 陽性対照: 同じ fixture で上書き無しの git status を流すと hook が呼ばれて印が作られる。呼ばれない git では下の陰性対照が意味を持たない
+git -C "${audit_root}/home/.cargo/advisory-db" status --porcelain > /dev/null 2>&1 || true
+if [ -e "${audit_root}/fsmonitor-called" ]; then
+  fsm_control=1
+  rm -f "${audit_root}/fsmonitor-called"
+else
+  fsm_control=0
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "audit-config: the fsmonitor hook is invoked by a plain git status (positive control)" "git did not call core.fsmonitor in CI"
+  else
+    echo "ok - audit-config: the fsmonitor hook is invoked by a plain git status (positive control) # SKIP git did not call core.fsmonitor here (not counted as a pass)"
+  fi
+fi
 audit_case "OK: no-fetch stage does not call the advisory-db core.fsmonitor" 0
-if [ ! -e "${audit_root}/fsmonitor-called" ]; then pass "audit-config: the advisory-db core.fsmonitor is not invoked"; else fail "audit-config: the advisory-db core.fsmonitor is not invoked" "marker file exists"; fi
+if [ "${fsm_control}" -eq 0 ]; then :; elif [ ! -e "${audit_root}/fsmonitor-called" ]; then pass "audit-config: the advisory-db core.fsmonitor is not invoked"; else fail "audit-config: the advisory-db core.fsmonitor is not invoked" "marker file exists"; fi
 # 継いだ GIT_DIR・GIT_WORK_TREE・GIT_INDEX_FILE で別の repo を見ない
 audit_fx; audit_db "${audit_root}/home/.cargo/advisory-db"
 mkdir "${audit_root}/other"; (cd "${audit_root}/other" && git -c init.defaultBranch=main init -q && git -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "chore: other")
 audit_case "OK: no-fetch stage ignores an inherited GIT_DIR" 0 GIT_DIR="${audit_root}/other/.git"
 audit_stage=fetch
-audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml
-mkdir "${audit_root}/other"; (cd "${audit_root}/other" && git -c init.defaultBranch=main init -q && git -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "chore: other")
+# 継いだ git の向きを消さないと件数が変わる fixture（陽性対照つき）。
+#   追跡かつ無視された nested の audit.toml: 正しい読みは追跡（-c）で 1 件。GIT_DIR・GIT_INDEX_FILE が別の（空の）index を指すと、無視された未追跡になり 0 件。
+#   未追跡の nested の audit.toml: 正しい読みは未追跡（-o）で 1 件。GIT_WORK_TREE が別の作業ツリーを指すと 0 件。
+audit_nested_tracked_ignored() {
+  audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml
+  printf 'crates/x/.cargo/audit.toml\n' > .gitignore
+  git add -f crates/x/.cargo/audit.toml .gitignore && git -c user.name=t -c user.email=t@example.invalid commit -q -m "chore: tracked ignored"
+  mkdir "${audit_root}/other"; (cd "${audit_root}/other" && git -c init.defaultBranch=main init -q && git -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "chore: other")
+}
+audit_nested_tracked_ignored
+audit_case "NG: tracked ignored nested .cargo/audit.toml is counted (positive control)" 1
+audit_has "record: nested count (tracked ignored)" "(tracked or untracked): 1"
 audit_case "NG: nested .cargo/audit.toml is counted despite an inherited GIT_DIR" 1 GIT_DIR="${audit_root}/other/.git"
 audit_has "record: nested count with inherited GIT_DIR" "(tracked or untracked): 1"
+audit_case "NG: nested .cargo/audit.toml is counted despite an inherited GIT_INDEX_FILE" 1 GIT_INDEX_FILE="${audit_root}/other/empty-index"
+audit_has "record: nested count with inherited GIT_INDEX_FILE" "(tracked or untracked): 1"
+audit_fx; mkdir -p crates/x/.cargo; printf '%s\n' "${audit_ignore_toml}" > crates/x/.cargo/audit.toml
+mkdir "${audit_root}/other"
+audit_case "NG: untracked nested .cargo/audit.toml is counted (positive control)" 1
+audit_has "record: nested count (untracked)" "(tracked or untracked): 1"
+audit_case "NG: nested .cargo/audit.toml is counted despite an inherited GIT_WORK_TREE" 1 GIT_WORK_TREE="${audit_root}/other"
+audit_has "record: nested count with inherited GIT_WORK_TREE" "(tracked or untracked): 1"
 audit_stage=no-fetch
 
 audit_fx

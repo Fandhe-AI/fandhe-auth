@@ -454,7 +454,9 @@ fi
 # 陰性対照（逆向き）: 許可リストの先頭の 1 行のリテラルを検出器の複製から取り除くと、古い行の残りとして照合に失敗する（#6170）
 diag_first="$(secret_scan_fixed_diagnostics | head -n 1)"
 diag_stub2="${work_dir}/diag-stub2.sh"
-LC_ALL=C grep -avF -- "\"${diag_first}\"" "${SECRET_SCAN}" > "${diag_stub2}" || true
+grep_rc=0
+LC_ALL=C grep -avF -- "\"${diag_first}\"" "${SECRET_SCAN}" > "${diag_stub2}" || grep_rc=$?
+if [ "${grep_rc}" -gt 1 ]; then fail "secret-scan: building the stub without the first allowlist literal" "grep exit ${grep_rc}"; fi
 rc=0
 check_diag_sync "${diag_stub2}" || rc=$?
 if [ -n "${diag_first}" ] && [ "${rc}" -eq 1 ]; then

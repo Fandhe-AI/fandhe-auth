@@ -23,7 +23,7 @@
 # 限界: 名前を変えた実装・10 進や別表現の定数・マクロで生成したコードは見落としうる。C1 は `*.rs` だけを見るため、`include!`・`#[path]` で
 #   取り込まれる別拡張子のファイルは見えない。C4 は行単位の grep のため、複数行にまたがる `impl` は拾えない。XML 署名は SAML の Plugin（段階 2）の側で、まだ crate が無い。
 #
-# 実行のたびに自己試験（陽性対照 S1〜S8・S11・S13〜S20、陰性対照 S8〜S10、grep の誤用 S12。番号は欠けを含む）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陽性対照 S1〜S7・S11・S13〜S23、陰性対照 S8〜S10、grep の誤用 S12。番号は欠けを含む）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は規則 ID・件数・相対パス:行だけ（絶対パスは出さない）。終了コード: 0 = 合格、1 = 違反（または自己試験の失敗）、2 = 検査不能（fail-closed）。
 set -euo pipefail
 unset CDPATH
@@ -220,7 +220,13 @@ selftest() {
   expect_count S8 C5 neg "${out}"
   : >"${out}"
   scan_native "${out}" "${t}/x.o"
-  expect_count S13 C3 pos "${out}"
+  expect_count S21 C3 pos "${out}"
+  : >"${out}"
+  scan_native "${out}" "${t}/x.hpp"
+  expect_count S22 C3 pos "${out}"
+  : >"${out}"
+  scan_native "${out}" "${t}/x.dylib"
+  expect_count S23 C3 pos "${out}"
   : >"${out}"
   scan_rs "${out}" "${t}/s13.rs"
   expect_count S13 C2 pos "${out}"
@@ -325,7 +331,10 @@ while IFS= read -r -d '' p; do
     log "error: file under unclassified crates/${top}; cannot inspect"
     exit 2
   fi
-  # 通常のファイルでない追跡物（リンク・FIFO 等）は走査できない。件数だけを警告で出す（合否は変えない。2 にするかは人が決める）。
+  # `[ -f ]` が偽のパスは走査できない。件数だけを警告で出す（合否は変えない。2 にするかは人が決める）。
+  # 対象: FIFO・ディレクトリ等の通常でないファイル、壊れたリンク、index にあって作業ツリーから消えたファイル。
+  # `[ -f ]` はリンクの先をたどるため、通常のファイルを指すリンクは走査に入る。
+  # 追跡先の issue は未起票（#6168 は取り込み済みの PR で、追跡先ではない）。
   if [ ! -f "${p}" ]; then
     [ "${scope}" != prod ] || nonreg_n=$((nonreg_n + 1))
     continue
