@@ -2,7 +2,7 @@
 # 本体の段階 1 の crate の通常の依存に、禁止の crate が 0 件であることを `cargo tree` で検査する（TASK-714 (1/8)・LIB-2・DPOL-1）。
 # 本体（core・secret・db-tests・client）は、外部ログイン Plugin・Hub の crate・接続先ごとの SDK・HTTP のサーバー側の枠組み・
 # DB ドライバー・非同期ランタイムに依存しない（LIB-2。DPOL-1 を維持する。A-2026-10-30-2）。この検査はその機械的な入れ物で、
-# 禁止の一覧（FORBIDDEN）の中身の充足は #5159（plugin・hub。本 issue で見直し。〔提案〕・人の確認待ち）・#5160（sdk。本 issue で見直し。〔提案〕・人の確認待ち）・#5161（http・db・runtime）、CI への搭載（scripts/lint.sh への結線）は #5164、手順の文書は #5165 が担う。
+# 禁止の一覧（FORBIDDEN）の中身の充足は #5159（plugin・hub。本 issue で見直し。〔提案〕・人の確認待ち）・#5160（sdk。本 issue で見直し。〔提案〕・人の確認待ち）・#5161（http・db・runtime。本 issue で見直し。〔提案〕・人の確認待ち）、CI への搭載（scripts/lint.sh への結線）は #5164、手順の文書は #5165 が担う。
 # 検査を外す引数・環境変数は作らない（DPOL-30〜32）。呼び出し元: `make lib-deps`（名前は暫定で、人が確定する）。
 #
 # 走査（合否）: BODY_PKGS の crate ごとに `cargo tree --locked -p <crate> -e features,normal,build --target all --prefix none` を流し、
@@ -37,10 +37,17 @@ BODY_PKGS=(
 # 禁止の表（〔提案〕・暫定）。区分: plugin・hub・sdk・http・db・runtime。区分ごとの見直しは #5159（plugin・hub）・#5160（sdk）・#5161（http・db・runtime）。
 # plugin・hub の行の集合は #5159 で見直した〔提案〕で、決めるのは人（ACPT-7）。足した行は PoC-15 の deps_check.py の一覧・
 # spec の名指し・DPOL-7 に出典を持つ。LIB-2 の「SAML の実装」は plugin の区分の samael の行で持つ（ほかの実装の名前は未確認のため足さない）。
-# fandhe-backend- の区分の名前（hub か http か）の見直しは #5161 に委ねる。
+# fandhe-backend・fandhe-backend- の区分は #5161 で hub から http へ移した（fandhe-backend は HTTP のサーバー側の枠組みで、DPOL-1 は HTTP サーバーと別に名指しする）。
+# 当たる範囲は変わらず、出力の区分名だけが変わる。fandhe-auth-backend（段階 2 の接続部品）は hub のまま。
 # sdk の行の集合は #5160 で見直した〔提案〕で、決めるのは人（ACPT-7）。出典は LIB-2（接続先ごとの SDK）・PLG-27（Google の SDK に依存しない）・
 # PoC-15 の deps_check.py の一覧（google-・yup-oauth2・gcp_auth・egg-mode・facebook・twitter）。google-cloud- は google- に広げた（当たる範囲は狭まらない）。
 # 接頭辞 aws- は使わない: aws-lc-rs・aws-lc-sys は暗号の実装（DPOL-4・DPOL-47）で、誤って当たる。aws-config・aws-sdk- 経由で AWS の SDK は検出できる。
+# http・db・runtime の行の集合は #5161 で見直した〔提案〕で、決めるのは人（ACPT-7）。足した行（deadpool-postgres・bb8・glommio・monoio・futures-executor）は
+# PoC-15 の deps_check.py の一覧に出典を持つ。bb8 は汎用の接続プールでドライバーそのものではなく、futures-executor は実行器で、futures の facade crate を
+# 既定の feature で使うと入る（本体が futures を使うなら default-features = false が要る）。区分への当てはめは人の確認待ち。
+# HTTP クライアント（reqwest 等）は LIB-2 の区分（サーバー側の枠組み）の外で、名前の一覧は TASK-668 に委ねるため足さない（HOST-7・HOST-9・DPOL-46）。
+# 出典の無い既存の行（salvo・libsqlite3-sys・sea-orm・redis・mongodb）は緩める向きになるため消さず、出典の確認を人に委ねる。
+# 照合は先勝ちのため、db の tokio-postgres は runtime の tokio- より上に置く。async-trait・futures-core・futures-util は当たらない（dyn の取り方の選定を塞がない）。
 # 配送事業者の SDK は TASK-765（AMTH-14）・TASK-761（AMTH-1）に委ねる。plugin-oidc の依存の検査（PLG-27）は TASK-739。
 FORBIDDEN=(
   'plugin|prefix|fandhe-auth-plugin-'
@@ -53,8 +60,6 @@ FORBIDDEN=(
   'hub|exact|fandhe-auth-db-migrate'
   'hub|exact|fandhe-auth-server'
   'hub|exact|fandhe-auth-db'
-  'hub|exact|fandhe-backend'
-  'hub|prefix|fandhe-backend-'
   'hub|prefix|fandhe-service-hub'
   'sdk|exact|aws-config'
   'sdk|prefix|aws-sdk-'
@@ -76,6 +81,8 @@ FORBIDDEN=(
   'http|exact|hyper'
   'http|exact|hyper-util'
   'http|exact|tower-http'
+  'http|exact|fandhe-backend'
+  'http|prefix|fandhe-backend-'
   'db|exact|sqlx'
   'db|prefix|sqlx-'
   'db|exact|tokio-postgres'
@@ -88,11 +95,16 @@ FORBIDDEN=(
   'db|exact|mysql_async'
   'db|exact|redis'
   'db|exact|mongodb'
+  'db|exact|deadpool-postgres'
+  'db|exact|bb8'
   'runtime|exact|tokio'
   'runtime|prefix|tokio-'
   'runtime|exact|async-std'
   'runtime|exact|smol'
   'runtime|exact|actix-rt'
+  'runtime|exact|glommio'
+  'runtime|exact|monoio'
+  'runtime|exact|futures-executor'
 )
 
 # require_table: 表が空なら検査不能（2）。空の表のまま常に合格になる状態を防ぐ。
