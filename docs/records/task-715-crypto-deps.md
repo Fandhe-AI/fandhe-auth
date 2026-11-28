@@ -301,11 +301,11 @@
 
 - 受入基準は 3 点: (a) `make check` に当たる検査の中で走査が必ず走る、(b) 結線後の実行結果を記録する、(c) `DPOL-4`・`DPOL-47` を緩めない（走査を外す道・例外の仕組みを足さない）。根拠は `LIB-21`・`DPOL-4`・`DPOL-47`。
 - 結線先: `scripts/check.sh` の末尾から `scripts/check-crypto-primitives.sh` を呼ぶ。CI では必須の `check` ジョブが `make check` を呼ぶため、`ci.yml` とジョブ名は変えていない。
-- 走査の規則・分類・自己試験は変えていない（3/4 の節のとおり）。
+- 結線の後に走査を 2 回直した。`d53c99a` で ASM・C4RE・N1RE の語境界を `\b` から POSIX ERE の文字クラス（`BL`・`BR`）に書き換えた（`\b` を解さない grep の実装がありうるため。macOS の BSD grep での実行は未検証）。`be60de1` で C2 の grouped import（`use core::{…, arch}`）の検出を直した。分類（C1〜C5・N1・N2）と本番・試験専用の区分は変えていない。S19・S20 は main の `2a52326`（#6193）で入ったもので、base の取り込みでこの PR に来た（この PR で足したものではない）。この PR で自己試験に足したのは、陰性対照 S24〜S26（C2 の語境界）だけ。
 
 ### 2. 基準
 
-- base: `origin/main` の `8fbed4b`。
+- base: `origin/main` との merge-base `1e87b310aa7e6aa522385ba9c0087688236a0144`（`git merge-base HEAD origin/main` で確かめた）。実行の対象は head の `be60de1` に S24〜S26 の追加（未コミット）を載せた作業ツリー。
 - 実行環境: GNU bash 5.3.9、ugrep 7.8.4（`grep`）。ローカルは linux。
 
 ### 3. 結線の内容
@@ -316,25 +316,27 @@
 
 ### 4. 実行したコマンド
 
-- `make check`: 終了コード 0。ログは editorconfig-checker、shellcheck、crypto-scan の順。`selftest ok`、C1〜C5 は各 0、N1・N2（本番）は各 0。
-- `scripts/check.sh foo`: 終了コード 2（引数を拒む）。
-- 陽性の実地確認: 未追跡の一時ファイル `crates/core/src/zz_probe.rs` に C1 の定数を書いて `make check` → C1 が 1 件、make の終了コード 2。`scripts/check.sh` の直接実行は終了コード 1。確認後に削除した。
-- `make crypto-scan`: 終了コード 0。
-- `make test-hooks`: 終了コード 0。`# passed: 771, failed: 0`。
-- `make help` と `scripts/help.sh` の `check`・`crypto-scan` の説明の内容が一致することを目で確認した。
+- `make check`: 終了コード 0。ログは editorconfig-checker、shellcheck、crypto-scan の順。`selftest ok`、C1〜C5 は各 0、N1・N2（本番）は各 0、`scanned: production files 20, test-only files 131; violations 0`。
+- 陽性の実地確認: 未追跡の一時ファイル `crates/core/src/zz_probe.rs` に C1 の定数を書いて `make check` → C1 が 1 件（`production files 21; violations 1`）、make の終了コード 2。`scripts/check.sh` の直接実行は終了コード 1。確認後に削除し、作業ツリーに残っていないことを `git status` で確かめた。
+- `make test-hooks`: 終了コード 0。`# passed: 790, failed: 0`。
+- 陰性対照 S24（`my_asm!`）・S25（`core::archive`）・S26（`use core::{march, mem};`）の変異試験: ASM の最初の `BL` を外すと S24、`core|std::arch` の `BR` を外すと S25、grouped import の `[^[:alnum:]_]` を外すと S26 が `C2 false positive` で落ちた。確認後に元へ戻し、差分が無いことを確かめた。
+- `make help` は終了コード 0。説明の一致は 4/4 の初回に目で確かめた（今回は `check`・`crypto-scan` の説明を変えていない）。
 
 ### 5. 結果
 
-- 合否の範囲の検出: 0 件（走査したファイル: 本番 19・試験専用 131）。
-- 参考の警告: 試験専用メンバーで 4 件（N1: `crates/hub-stub/tests/assertion.rs:277`、`crates/trial-deps/tests/dpol14_rsa_pkcs8.rs` の 20・59・77 行）。3/4 の 1 件から増えた事実だけを書き、評価はしない。
-- CI の `check` ジョブ（ubuntu・GNU grep）での実行結果: 未検証（PR の CI で確かめる）。macOS（BSD grep）でのローカル実行: 未検証。
+- 合否の範囲の検出: 0 件（走査したファイル: 本番 20・試験専用 131）。
+- 参考の警告: 試験専用メンバーで 4 件（N1: `crates/hub-stub/tests/assertion.rs:277`、`crates/trial-deps/tests/dpol14_rsa_pkcs8.rs` の 20・59・77 行）。評価はしない。
+- CI（head `be60de1`、run 46125015043・ubuntu）の `check` ジョブ: 成功。ログに `selftest ok`、C1〜C5 は各 0、`production files 20, test-only files 131; violations 0`、警告は上と同じ 4 件。同 run の `hook script tests`（ubuntu・macos・macOS bash 3.2）・`lint`・`build + test` も成功。run 46122215318 は取り消し。
+- 上の CI は S24〜S26 を足す前の head の結果。足した後の CI は未実行（push 後に確認）。macOS の BSD grep での走査の直接の実行は未検証（追跡先: #6207。`hook script tests` の macos ジョブは `make test-hooks` で、`make check` ではない）。
 
 ### 6. 人が決めること
+
+各項目の追跡先: #6207
 
 - 載せ先（`check` か `lint` か）の最終の判定。
 - ジョブ名 `make check (editorconfig-checker + shellcheck)` に走査を出すか（必須チェックの登録名の変更を伴う。設定は変えていない）。
 - 試験専用の crate を合否に含めるか、N1・N2 を合否に上げるか、例外を許す仕組みの要否（3/4 から持ち越し）。
-- CI は PR の head のスクリプトを走らせるため、PR 自身が走査や `check.sh` を書き換えうる。信頼済みの検出器の方式が要るか。
+- CI は PR の head のスクリプトを走らせるため、PR 自身が走査や `check.sh` を書き換えうる。信頼済みの検出器の方式が要るか（追跡先: #6207）。
 
 ### 7. 判定
 

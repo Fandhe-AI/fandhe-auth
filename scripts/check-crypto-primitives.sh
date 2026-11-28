@@ -22,7 +22,7 @@
 # 限界: 名前を変えた実装・10 進や別表現の定数・マクロで生成したコードは見落としうる。C1 は `*.rs` だけを見るため、`include!`・`#[path]` で
 #   取り込まれる別拡張子のファイルは見えない。C4 は行単位の grep のため、複数行にまたがる `impl` は拾えない。XML 署名は SAML の Plugin（段階 2）の側で、まだ crate が無い。
 #
-# 実行のたびに自己試験（陽性対照 S1〜S7・S11・S13〜S23、陰性対照 S8〜S10、grep の誤用 S12。番号は欠けを含む）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陽性対照 S1〜S7・S11・S13〜S23、陰性対照 S8〜S10・S24〜S26、grep の誤用 S12。番号は欠けを含む）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は規則 ID・件数・相対パス:行だけ（絶対パスは出さない）。終了コード: 0 = 合格、1 = 違反（または自己試験の失敗）、2 = 検査不能（fail-closed）。
 set -euo pipefail
 unset CDPATH
@@ -44,7 +44,7 @@ PROD_DIRS=(core secret db-tests client plugin-oidc backend)
 TEST_ONLY_DIRS=(hub-stub console-stub it-harness e2e-harness load-harness trial-deps)
 
 CONSTS='6a09e667|bb67ae85|3c6ef372|a54ff53a|510e527f|9b05688c|1f83d9ab|5be0cd19|428a2f98|67452301|efcdab89|98badcfe|10325476|c3d2e1f0|f3bcc908|cbbb9d5d|61707865|3320646e|79622d32|6b206574|9e3779b9|243f6a88|0ffffffc0fffffff|800000000000808a|ffffffff00000001|0x63, *0x7c, *0x77, *0x7b'
-# 語境界は BSD grep（macOS）が \b を解さないため、POSIX ERE の文字クラスで書く。
+# 語境界は、grep の実装によって \b を解さない環境がありうる（BSD grep〔macOS〕では未検証）ため、POSIX ERE の文字クラスで書く。
 BL='(^|[^[:alnum:]_])'
 BR='([^[:alnum:]_]|$)'
 ASM="${BL}(asm|global_asm|naked_asm)!|#\\[naked\\]|#\\[unsafe\\(naked\\)\\]|${BL}(core|std)::arch${BR}|${BL}(core|std)::\\{(.*[^[:alnum:]_])?arch${BR}"
@@ -191,6 +191,9 @@ selftest() {
   mk s16.rs 'impl Signer for Foo {}'
   mk s17.rs 'impl Verifier for Foo {}'
   mk s18.rs 'impl PasswordHasher for Foo {}'
+  mk s24.rs 'fn f() { my_asm!("nop"); }'
+  mk s25.rs 'use core::archive;'
+  mk s26.rs 'use core::{march, mem};'
   mk s9.rs 'fn clock_reversal_is_error() {} fn unparsable() {} // Signer'
   scan_rs "${out}" "${t}/s1.rs"
   expect_count S1 C1 pos "${out}"
@@ -253,6 +256,15 @@ selftest() {
   : >"${out}"
   scan_rs "${out}" "${t}/s18.rs"
   expect_count S18 C4 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s24.rs"
+  expect_count S24 C2 neg "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s25.rs"
+  expect_count S25 C2 neg "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s26.rs"
+  expect_count S26 C2 neg "${out}"
   : >"${out}"
   scan_rs "${out}" "${t}/s9.rs"
   scan_names "${out}" "${t}/s9.rs"
