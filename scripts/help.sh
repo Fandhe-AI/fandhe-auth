@@ -19,7 +19,7 @@ cat <<'EOF'
   doctor      scripts/doctor.sh              開発環境を診断する（読み取りのみ。何も導入・修復しない）
   setup       scripts/setup.sh               Git hooks 有効化と .env 雛形の配置（再実行しても安全）
   check       scripts/check.sh               editorconfig-checker + shellcheck + 暗号の自作の走査（crypto-scan。ソースは変更しない）
-  test-hooks  scripts/hooks/test-hooks.sh    フックスクリプト自体の回帰テスト（bash + git が基本。part 12 の lib-deps だけ cargo が要り、無ければローカルは SKIP、CI では失敗）
+  test-hooks  scripts/hooks/test-hooks.sh    フックスクリプト自体の回帰テスト（bash + git が基本。part 12 の lib-deps だけ cargo、part 13 の ci-timing だけ jq が要り、無ければローカルは SKIP、CI では失敗）
   secret-scan scripts/hooks/secret-scan.sh --tracked   追跡ファイル全体の秘密情報の混入検査（検査のみ。値は出さず件数で判定）
   scan-canary scripts/secret-scan-canary.sh   secret-scan の陰性対照（ダミーで検出器が 1 を返し、集計行が期待と完全に一致し、ダミー値が出ないことを確かめる。何も変更しない）
   build       cargo build --workspace --locked   workspace 全体をビルドする（--locked。--all-features は使わない）
@@ -38,6 +38,7 @@ cat <<'EOF'
   e2e-chrome  scripts/e2e-chrome.sh          ハーネスの Chrome の E2E（chromedriver 必須・#[ignore] の試験を流す。CI 外）
   e2e-firefox scripts/e2e-firefox.sh         ハーネスの Firefox の E2E（geckodriver・Firefox 必須（記録のある組み合わせは Firefox 156〜158 + geckodriver 0.37.1。詳細は scripts/e2e-firefox.sh）・#[ignore] の試験を流す。CI 外）
   load-trial  scripts/load-trial.sh          計測・負荷のハーネスの小さな試し実行（Docker 不要・stub が相手・記録の本文を標準出力に出す・0 件は失敗。CI 外）
+  ci-timing   scripts/ci-timing.sh report    CI のジョブごとの実行時間の記録を取る（読み取りのみ。gh の認証・jq・ネットワークが要る。CI 外）
 
 CI 向けに直接実行するコマンド:
 

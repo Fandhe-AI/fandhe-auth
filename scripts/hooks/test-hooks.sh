@@ -3,7 +3,7 @@
 #
 # 一時ディレクトリに使い捨ての git リポジトリを作り、secret-scan.sh の検出・許可ケースと
 # commit-msg-check.sh の OK / NG ケースを実際のスクリプトで検証する。
-# 基本の外部依存は bash と git。msrv・install-msrv の節は cargo・jq・tomllib を持つ python3（3.11 以上）も要し、
+# 基本の外部依存は bash と git。part 13（ci-timing）は jq も要り、無ければ CI では失敗、ローカルでは skip する。msrv・install-msrv の節は cargo・jq・tomllib を持つ python3（3.11 以上）も要し、
 # 前提が足りなければ CI（CI か GITHUB_ACTIONS が設定されている）では失敗、ローカルでは skip する。
 # secret-scan の /dev/tcp 風のパスの試験（part 8 の T10）も python3 と bash の /dev/tcp のリダイレクトを要し、前提の扱いは同じ（CI では失敗、ローカルでは skip）。
 # 中断の試験（part 11。shellcheck-staged）の HUP の回は、HUP を trap できるシェルを前提とし、無ければ CI では失敗、ローカルでは skip する。
@@ -37,7 +37,7 @@ source "${HOOKS_DIR}/../lib.sh"
 
 reject_args "$(basename "$0")" "$@"
 
-parts="1 2 3 4 5 6 7 8 9 10 11 12"
+parts="1 2 3 4 5 6 7 8 9 10 11 12 13"
 
 # parts が実在する part のファイル（test-hooks-<数字>.sh）と一致しなければ失敗にする（足した part の起動漏れ・消した part の素通りを防ぐ）
 part_files=0

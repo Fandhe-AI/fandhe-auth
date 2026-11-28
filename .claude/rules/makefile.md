@@ -56,7 +56,7 @@ description: >
 | `doctor` | `scripts/doctor.sh` | 読み取りのみ。何も導入・更新・修復しない。必須ツール欠落時は非 0 |
 | `setup` | `scripts/setup.sh` | 冪等（再実行しても安全）。`lefthook install` と `.env` 雛形の配置のみで、既存の `.env` は上書きしない。ツール本体は導入しない |
 | `check` | `scripts/check.sh` | ソースを変更しない（自動修正しない）。editorconfig-checker + shellcheck + crypto-scan（`scripts/check-crypto-primitives.sh`。TASK-715 4/4）。CI の `check` ジョブと同一 |
-| `test-hooks` | `scripts/hooks/test-hooks.sh`（入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-lib.sh`） | 一時 git リポジトリで検証し作業ツリーを変更しない。依存は bash + git が基本で、part 12（lib-deps）だけ cargo が要る（無ければローカルは TAP の `# SKIP`、CI では失敗。作業場所は repo の `target/` の下）。CI の `test-hooks` ジョブと同一 |
+| `test-hooks` | `scripts/hooks/test-hooks.sh`（入口。本体は `test-hooks-N.sh`、共有部は `test-hooks-lib.sh`） | 一時 git リポジトリで検証し作業ツリーを変更しない。依存は bash + git が基本で、part 12（lib-deps）だけ cargo、part 13（ci-timing）だけ jq が要る（無ければローカルは TAP の `# SKIP`、CI では失敗。part 12 の作業場所は repo の `target/` の下）。CI の `test-hooks` ジョブと同一 |
 | `secret-scan` | `scripts/hooks/secret-scan.sh --tracked` | 検査のみ。追跡ファイル全体の秘密情報の混入を規則表で検査し、規則 ID ごとの件数・合計・ファイル名だけを出す（値は出さない）。0 件で 0・検出で 1・検査不能で 2。CI の `secret scan (tracked files)` ジョブは `scripts/secret-scan-ci.sh` 経由で本検出器を呼ぶ（#51。TASK-6）。名前は暫定 |
 | `scan-canary` | `scripts/secret-scan-canary.sh` | 検査のみ。元の index・作業ツリー・object store を変えない。実行時に組み立てたダミーを足した一時 index で、検出器が 1 を返し、`--summary` の出力が許可した集計行の集合と完全に一致し（余計な行があれば失敗）、ダミーの値が出力に無ければ 0。検出能力の異常は 1、検出器が検査不能（2 等）・準備や読み取りの失敗は 2。元のリポジトリの hooks は起動しない。CI の `secret scan (tracked files)` ジョブは `scripts/secret-scan-ci.sh` 経由で本検出器を呼ぶ（#51。TASK-6）。名前は暫定 |
 | `build` | `cargo build --workspace --locked`（直書き） | ソースを変更しない。`--locked` で `Cargo.lock` の外を解決しない。`--all-features` は付けない（DPOL-31）。CI の `build-test` ジョブと同一（TASK-6）。名前は暫定 |
@@ -75,6 +75,7 @@ description: >
 | `e2e-chrome` | `scripts/e2e-chrome.sh` | ハーネス（`crates/e2e-harness`）の Chrome の仮想 authenticator の E2E（`#[ignore]`）の明示の入口。chromedriver 必須・CI 外（TASK-6）。結果は〔仮想〕で実機・Safari に数えない。名前は暫定 |
 | `e2e-firefox` | `scripts/e2e-firefox.sh` | ハーネス（`crates/e2e-harness`）の Firefox の仮想 authenticator の E2E（`#[ignore]`）の明示の入口。geckodriver・Firefox 必須・CI 外（TASK-6）。結果は〔仮想〕で実機・Safari に数えない。名前は暫定 |
 | `load-trial` | `scripts/load-trial.sh` | ハーネス（`crates/load-harness`）の小さな試し実行（`trial_run`）の明示の入口。Docker 不要・CI 外（TASK-12 10/10）。一致 0 件は失敗（AUDB-6 の向き）。記録は試験の一時ディレクトリに書かれ成功時に消えるため、`--show-output` で本文を標準出力に出す。本文は試験が秘密値の照合を通した後に固定の開始行・終了行で挟んで出し、入口は集計行が合格 1 件（無視 0 件）かつ区画がちょうど 1 件のときだけ区画の中身を出して 0 を返す（集計行の不一致のときは捕捉した出力を再掲せず固定の文言だけを出して 1。試験の捕捉を外す `RUST_TEST_NOCAPTURE` は子プロセスへ渡さない。区画が 1 件でない・開始行が終了行より後・区画が空または記録の形式の行が無いときは固定の文言（件数を含む）を出して 1。失敗時は捕捉した出力を再掲しない）。stub の結果を実物に数えない（`A-2026-10-28-9`）。名前は暫定 |
+| `ci-timing` | `scripts/ci-timing.sh report` | 読み取りのみ（GitHub の REST の GET だけ。`gh api` に `-f`・`-F`・`-X`・`--input` を渡さない）。gh の認証・jq・ネットワーク必須・CI 外。許可した列（runner の名前・step・URL・ブランチ名と jobs API の `labels` の欄は出さない。ジョブ名に含まれる matrix の値は出る）だけを集計し、0 件の取得は失敗（TASK-6 9/10・#56）。名前は暫定 |
 
 派生リポジトリでターゲットを足す場合の契約:
 

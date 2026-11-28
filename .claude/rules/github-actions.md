@@ -512,11 +512,13 @@ PR 本文に次を確認したことを書く。
 
 ## 所要時間の計測方法
 
+ジョブごとの実行時間は `make ci-timing`（`scripts/ci-timing.sh report`。TASK-6 9/10・#56）で取る。GET だけの読み取りで、
+`gh` の認証・`jq`・ネットワークが要り、CI の中では流さない。記録の形式・集計の定義（待ちと実行の分離）・初回の記録は
+`docs/records/task-6-ci-timing.md` を正とし、ここに二重に定義しない。結果は `TASK-66`（時間の予算。利用者が決める）の入力になる。
+手で見るときの最小の例（記録の形式の正ではない）:
+
 ```bash
-# ワークフロー単位の実行時間（作成〜更新）。直近 30 件
 gh run list --workflow ci.yml --limit 30 --json databaseId,conclusion,createdAt,updatedAt,event
-# ジョブ単位の開始・終了
-gh run view <run-id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt, .completedAt] | @tsv'
 ```
 
 ### 棚卸し結果（2026-10-11）
