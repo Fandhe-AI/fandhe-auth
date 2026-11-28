@@ -2,7 +2,8 @@
 # tree-lib.sh — イシューツリーの実ツリー取得と表セル無害化の共通ヘルパー（source 専用）
 #
 # 呼び出し元: create-root-body.sh（Step 6 新規作成経路）と merge-root-body.sh（Step 6 --root 経路）、
-#           human-blockers.sh（Step 7 の人手 issue の数え方。list_subs と CELL だけを使う）。
+#           human-blockers.sh（Step 7 の人手 issue の数え方。list_subs と CELL だけを使う）、
+#           list-decision-issues.sh（Step 1。list_subs を使う）、create-phase-issues.sh（Step 5。list_subs だけを使う）。
 # 写し: update-issue-tree の scripts/ に同じ内容の写しがある（そちらの human-blockers.sh が読む）。このファイルを変えたら、
 #       human-blockers.sh の冒頭コメントの「写し」の cp で写し直す（一致は上流の dev/update-issue-tree/tests/human-queue.test.mjs が確かめる）。
 # 役割: sub_issues API のページング取得・open 子孫の再帰集計・issue タイトルの表セル無害化・
@@ -70,14 +71,16 @@ list_subs() {
 
 # 指定 issue の全子孫のうち open な issue 件数を再帰で数えて stdout へ出す。Step 5 は sub-issue への
 # 追加分解を許すため、直下だけでなく 3 階層目より深い open issue も総件数に含める。
-# 失敗時は非ゼロ。depth は循環・異常な深さへの安全弁（超過は失敗扱い）
+# 失敗時は非ゼロ。使い方: count_open_desc <n> [<host> <owner/repo> [<depth>]]。host と owner/repo は list_subs へ
+# 全階層で引き継ぐ（渡さないと孫以降が {owner}/{repo} の解決先＝別リポジトリの同番号から取得され得る）。
+# depth は循環・異常な深さへの安全弁（超過は失敗扱い）
 count_open_desc() {
-  local n="$1" depth="${2:-0}" subs open c cnum
+  local n="$1" host="${2:-}" slug="${3:-}" depth="${4:-0}" subs open c cnum
   [[ "${depth}" =~ ^[0-9]+$ ]] && [[ "${depth}" -le 20 ]] || return 1
-  subs=$(list_subs "${n}") || return 1
+  subs=$(list_subs "${n}" ${host:+"${host}" "${slug}"}) || return 1
   open=$(printf '%s' "${subs}" | jq '[.[] | select(.state == "open")] | length') || return 1
   for cnum in $(printf '%s' "${subs}" | jq -r '.[].number'); do
-    c=$(count_open_desc "${cnum}" $((depth + 1))) || return 1
+    c=$(count_open_desc "${cnum}" "${host}" "${slug}" $((depth + 1))) || return 1
     open=$((open + c))
   done
   printf '%s' "${open}"

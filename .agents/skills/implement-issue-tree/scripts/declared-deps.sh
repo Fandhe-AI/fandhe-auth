@@ -8,8 +8,8 @@
 #
 # 役割: プロンプトに埋め込まれていた gh api + jq の長いコマンドを、スクリプトへ切り出したもの。エージェントが 3.9〜4.9 KB の
 #       コマンドを転記する際にバックスラッシュが半減する事故（`\\b` → `\b`。jq ではエラーにならずバックスペースとして通り、単語境界の判定が
-#       黙って false になる）を、フィルタ本体を lib/declared-deps-lib.sh に置いてハッシュで固定することで防ぐ。フィルタの意味は
-#       切り出し前と同一（tests/declared-deps-script.test.mjs が、切り出し前の文字列との文字単位の一致を固定する）。
+#       黙って false になる）を、フィルタ本体を lib/declared-deps-lib.sh に置いてハッシュで固定することで防ぐ。フィルタの文字列は
+#       固定した基準と同一（tests/declared-deps-script.test.mjs が、基準の文字列との文字単位の一致を固定する。#940 で HTML コメントの除外を足して基準を更新）。
 # モード:
 #   --numbers N,N,…   各イシューの本文を `gh api repos/<repo>/issues/<N>`（REST の core 枠。GraphQL 枠を消費しない）で 1 件ずつ読み、
 #                     jq で整数だけに正規化した 1 行の JSON を標準出力へ出す: {"number": N, "deps": [...], "sig": S}。

@@ -43,13 +43,15 @@
 #   4  一時ディレクトリ・ファイルの作成、読み出し、--dir の検証の失敗
 #   5  gh の失敗・応答が想定外の形（終了コードで判定する。gh は HTTP エラー本文も標準出力へ出すため内容では判定しない）
 #   6  不完全（取得した子の件数が subIssuesTotal と一致しない・番号の重複）
-#   7  出力が大きすぎる（ページ数が MAX_PAGES を超える。1 回の転記の現実的な限界として止める）
+#   7  出力が大きすぎる（ページ数が MAX_PAGES を超える。1 回の転記の現実的な限界として止める。
+#      ページ数超過のときは標準エラーにページ数・上限・総ノード数と親の分け方の案内を出す）
 #   標準エラーには固定語彙と番号だけを出す（title など外部由来の文字列は出さない）。
 # 副作用: gh api GET のみ。ページ数が 2 以上のときだけ TMPDIR（無ければ /tmp）に専用ディレクトリ iit-tree.XXXXXX を
 #         1 つ作り（umask 077）、全行を tree.tsv に書く。削除は --release だけで、tree.tsv の rm -f と rmdir しか行わない
 #         （再帰削除を持たない）。--dir は名前・所有者・シンボリックリンクでないこと・中身を検証してから使う。
 #         メインや隔離 worktree には何も置かない。異常終了で残ったディレクトリは OS の一時領域の掃除に任せる。
 # 限界: 約 4,500 ノード相当（MAX_PAGES = 30 ページ）を超えるツリーは exit 7 で止まる。
+#       対処は、最上位の親ではなく Phase の親など直下の子を親にして分けて実行すること。
 # 互換: macOS（BSD userland・bash 3.2）と Linux（GNU）。
 
 set -u
@@ -214,7 +216,7 @@ struct_sha=$(printf '%s\n' "${rows}" | ft_struct_digest) || { echo "fetch-tree: 
 task_sha=$(printf '%s\n' "${rows}" | ft_task_id_digest) || { echo "fetch-tree: タスク ID のダイジェストを作れなかった" >&2; exit 3; }
 optin_sha=$(printf '%s\n' "${rows}" | ft_optin_digest) || { echo "fetch-tree: opt-in 宣言のダイジェストを作れなかった" >&2; exit 3; }
 pages=$(printf '%s\n' "${rows}" | ft_page_count "${PAGE_BYTES}") || { echo "fetch-tree: ページ数を数えられなかった" >&2; exit 4; }
-[ "${pages}" -le "${MAX_PAGES}" ] || { echo "fetch-tree: ツリーが大きすぎる（${pages} ページ > ${MAX_PAGES}）" >&2; exit 7; }
+[ "${pages}" -le "${MAX_PAGES}" ] || { echo "fetch-tree: ツリーが大きすぎる（${pages} ページ > 上限 ${MAX_PAGES}・${count} ノード）。取り直しても解消しない。親を直下の子（Phase の親など）に分けて実行する" >&2; exit 7; }
 out_dir=""
 # tree.tsv 全体（各行 + 改行）の SHA-256。--page の封筒の入力の束縛に使う
 tsv_sha=$(printf '%s\n' "${rows}" | so_sha256) || { echo "fetch-tree: tsv のハッシュを計算できなかった" >&2; exit 3; }
