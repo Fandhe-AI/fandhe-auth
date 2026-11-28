@@ -24,7 +24,7 @@
 #
 # 使い方:
 #   ./reassign-sub-issue.sh --issue <対象 issue 番号> --new-parent <新親 issue 番号> \
-#     [--old-parent <旧親 issue 番号>] [--repo <owner/name>]
+#     [--old-parent <旧親 issue 番号>] [--repo <owner/name>] [--allow-creation-marker]
 #
 # --repo は対象 issue（--issue）の所在を指す。親（--old-parent / --new-parent）の所在では
 # ない。--repo は対象 issue の GET だけでなく DELETE / POST を含む全 API パスを切り替える
@@ -36,6 +36,15 @@
 # このケースだけ stderr に `reason=cross-repository-parent` の安定マーカー行を追加で出す
 # （呼び出し側が exit 2 の中で「中断すべきか」「記録して次へ進むべきか」を機械的に判定
 # できるようにするため。skills/update-issue-tree/SKILL.md の終了コード表を参照）。
+#
+# 起票途中の孤児の保護（Issue #921）: create-issue-tree の起票スクリプトは作った issue の本文の先頭に
+# `<!-- create-issue-tree:node ` で始まるマーカーを置く。孤児経路（--old-parent 省略・実測でも親なし）で対象の
+# 本文にそのマーカーがあれば、起票が途中で止まった可能性があるため何も書き込まずに exit 12 で止まる
+# （stdout 最終行 result=creation-in-progress・stderr に reason=creation-marker）。sub が揃わない child を Phase へ
+# 紐付けると実装候補になるため。--allow-creation-marker は、呼び出し側が別枠の確認で issue 番号を挙げた明示の承認を
+# 得たものだけに付ける。--old-parent を付けた経路（closed 親下の issue）では検査しない。--allow-creation-marker と
+# --old-parent の同時指定は引数の誤り（exit 1）。body が判定できない形（キー欠落・文字列でも null でもない）は exit 2。
+# 検出は緩く、本文のどこかにリテラルがあれば該当とする（迷えば紐付けない側）。
 #
 # 終了コードと stdout 最終行（result=<state> ...）は skills/update-issue-tree/SKILL.md の
 # 「付け替えスクリプトの呼び出し規約」節を正とする。呼び出し側は非ゼロ終了を 1 件も握り潰さず、
@@ -52,7 +61,8 @@ REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
 
 usage() {
   cat >&2 <<'EOF'
-使い方: reassign-sub-issue.sh --issue <n> --new-parent <n> [--old-parent <n>] [--repo <owner/name>]
+使い方: reassign-sub-issue.sh --issue <n> --new-parent <n> [--old-parent <n>] [--repo <owner/name>] [--allow-creation-marker]
+  --allow-creation-marker は、孤児の本文に create-issue-tree の起票マーカーがあっても付け替える明示の承認があるときだけ付ける。
   --repo は対象 issue（--issue）の所在。親（--old-parent / --new-parent）の所在ではない。
 EOF
 }
@@ -61,6 +71,7 @@ ISSUE=""
 NEW_PARENT=""
 OLD_PARENT=""
 REPO_ARG=""
+ALLOW_CREATION_MARKER=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,6 +91,10 @@ while [[ $# -gt 0 ]]; do
         --repo) REPO_ARG="$2" ;;
       esac
       shift 2
+      ;;
+    --allow-creation-marker)
+      ALLOW_CREATION_MARKER=1
+      shift
       ;;
     -h|--help)
       usage
@@ -109,6 +124,11 @@ if ! [[ "${NEW_PARENT}" =~ ${NUM_RE} ]]; then
 fi
 if [[ -n "${OLD_PARENT}" ]] && ! [[ "${OLD_PARENT}" =~ ${NUM_RE} ]]; then
   echo "エラー: --old-parent は正の整数で指定する（例: 42）" >&2
+  exit 1
+fi
+
+if [[ "${ALLOW_CREATION_MARKER}" == 1 && -n "${OLD_PARENT}" ]]; then
+  echo "エラー: --allow-creation-marker は孤児経路（--old-parent 省略）専用で、--old-parent と同時に指定できない" >&2
   exit 1
 fi
 
@@ -896,6 +916,26 @@ if [[ -n "${CURRENT_PARENT}" ]]; then
     echo "エラー: 実測した現在の親 #${CURRENT_PARENT} が指定された --old-parent #${OLD_PARENT} と異なる。承認外の親子関係を壊さないため中止する" >&2
     echo "対処: 現在の親 #${CURRENT_PARENT} をユーザーへ提示して承認を得たうえで --old-parent ${CURRENT_PARENT} で再実行する" >&2
     exit 6
+  fi
+fi
+
+# 起票途中の孤児の保護（Issue #921）。孤児経路（--old-parent 省略かつ実測でも親なし）だけが対象。
+# 追加の API 呼び出しは無く、取得済みの ISSUE_JSON の body を判定する。判定できない応答は fail-closed で exit 2
+if [[ -z "${OLD_PARENT}" && -z "${CURRENT_PARENT}" ]]; then
+  if ! HAS_MARKER=$(printf '%s' "${ISSUE_JSON}" | jq -r '
+      if (type == "object" and has("body") | not) then error("body キーが無い")
+      elif .body == null then "no"
+      elif (.body | type) == "string" then (if (.body | contains("<!-- create-issue-tree:node")) then "yes" else "no" end)
+      else error("body が文字列でも null でもない") end' 2>/dev/null); then
+    echo "エラー: イシュー #${ISSUE} の本文（body）を判定できない。起票途中かどうか不明なため何も変更せず中止する" >&2
+    exit 2
+  fi
+  if [[ "${HAS_MARKER}" == "yes" && "${ALLOW_CREATION_MARKER}" != 1 ]]; then
+    echo "エラー: イシュー #${ISSUE} の本文に create-issue-tree の起票マーカーがある。起票が途中で止まった孤児の可能性があるため、何も変更せず中止する" >&2
+    echo "対処: 状態ファイルが残っていれば create-issue-tree の Step 5 を同じ spec と状態ファイルで再実行する。確認のうえ付け替えるなら --allow-creation-marker を付けて再実行する" >&2
+    echo "reason=creation-marker" >&2
+    emit_result "creation-in-progress"
+    exit 12
   fi
 fi
 

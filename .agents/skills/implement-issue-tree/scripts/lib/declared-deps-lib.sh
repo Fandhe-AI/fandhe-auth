@@ -12,12 +12,17 @@
 # エスケープの階層: フィルタは引用符つきヒアドキュメント（<<'JQ'）で置く。シェルは本文を一切解釈しないので、ここに書いたバックスラッシュは
 #       そのまま jq（gojq。gh api --jq）の文字列リテラルの入力になる。したがって jq の文字列の `\\b` は正規表現の `\b`（単語境界）、
 #       `\\x27` は正規表現の単一引用符、`\\x60` はバッククォート、`\t` はタブを表す。JavaScript の String.raw 時代と文字は同一で、
-#       tests/declared-deps-script.test.mjs が切り出し前（origin/main）の実行時の文字列との文字単位の一致を固定する。
+#       tests/declared-deps-script.test.mjs が固定した基準の文字列（tests/fixtures）との文字単位の一致を固定する（基準は切り出し前の文字列から出発し、#940 で HTML コメントの除外を足して更新した）。
 #       フィルタは単一引用符もバッククォートも \uXXXX も含まない（Claude Code がツール入力中の \uXXXX を実行前に文字へ戻す事故があった。
 #       Issue #716）。正規表現の特殊文字や記号はここで書き換えず、dd_filter の出力で確かめる。
 # フィルタの構造: 兄弟のタスク ID の表（ホストが作る {"f":{…},"n":{…}}。Issue #657）は、フィルタの途中に JSON のリテラルとして
 #       埋め込む（gh api --jq は --argjson を持たないため）。リテラルは dd_valid_table が許可した文字だけ（英大文字・数字・- ・
 #       引用符・コロン・カンマ・括弧）なので、単一引用符・バックスラッシュ・バッククォートは入らない。
+# HTML コメント（Issue #940）: 依存を抽出する前に `<!-- … -->`（複数行可）を除く。コメントの中は見出し・項目・フェンス・バッククォート・引用を構文として
+#       解釈せず、`-->` だけを探す。コメントの中の行は空行として扱う（段落を区切り、依存節の状態は保つ）。フェンスの中・引用行・同じ行のインラインコードの
+#       中の `<!--` は開始にしない。コードスパンは段落（空行・見出し・引用・リスト項目・フェンスで区切る）の改行をまたげるため、`<!--` を含む行は、同じ段落の前の行（状態の buf）と後ろの行（先読み）をつないだ文字列でコードスパンを求める。コメントを 1 つ除くたびに、除いたあとの文字列でコードスパンを求め直す（コメントの中のバッククォートが後ろのコメントの開始を隠さない）。リスト項目・見出しの開始行には前の段落の buf を渡さない（コードスパンはブロック境界をまたがない）。閉じていないコメントは本文の末尾まで除く
+#       （jq の error にすると declared-deps.sh が FAILED になりツリー全体が止まるため。取りこぼしは Tree エージェントの dependsOn との和集合で補われる）。
+#       文字位置は split と文字単位のスライスで求める（index / indices はバイト単位と文字単位が jq の版で食い違い得るため使わない）。
 # 契約: どの関数も exit せず、git・gh・ネットワークを呼ばない。結果は stdout と return 値で返す。
 #       source 元のシェル状態を壊さないため set -e / set -u / trap / exit は置かない。二重 source は無害。
 # 互換: macOS（BSD userland・bash 3.2）と Linux（GNU・busybox）。連想配列・mapfile・GNU 専用フラグを使わない。
@@ -33,11 +38,20 @@ def run: "(#[0-9]+(?:(?:[ \t,、/]|and|および|及び)+#[0-9]+)*)";
 def inline: gsub("(?i)(?:\\b(?:not|no longer|never)\\b|n\\x27t)(?:[ \t]+[A-Za-z]+)?[ \t]+(?:depends on|blocked by)[ \t]*:?[ \t]*" + run; "") | [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];
 def neg: test("(?i)関連|参考|参照|任意|なし|不要|\\b(related|see also|optional|none|no longer|not|never|unnecessary)\\b|n\\x27t");
 def fenceof: (capture("^[ ]{0,3}(?<f>\\x60{3,}|~{3,})") | .f) // null;
-def stripcode: . as $s | [match("\\x60+"; "g") | {o: .offset, l: .length}] as $r
+def codespans: . as $s | [match("\\x60+"; "g") | {o: .offset, l: .length}] as $r
 | def go($i): if $i >= ($r | length) then []
 else (first(range($i + 1; $r | length) | select($r[.].l == $r[$i].l)) // null) as $j
 | if $j == null then go($i + 1) else [[$r[$i].o, $r[$j].o + $r[$j].l]] + go($j + 1) end end;
-go(0) as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + ($s[$x[0]:$x[1]] | gsub("[^\n]"; "")) + .[$x[1]:]);
+go(0);
+def stripcode: . as $s | codespans as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + ($s[$x[0]:$x[1]] | gsub("[^\n]"; "")) + .[$x[1]:]);
+def maskcode: . as $s | codespans as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + ($s[$x[0]:$x[1]] | gsub("[^\n]"; " ")) + .[$x[1]:]);
+def uncomment($pre; $post; $from): . as $l | ($pre | length) as $n | ($pre + $l + "\n" + $post | maskcode | .[$n:$n + ($l | length)]) as $m | ($m[$from:] | split("<!--")) as $p | if ($p | length) < 2 then {t: $l, open: false}
+else ($from + ($p[0] | length)) as $i | ($l[$i + 4:] | split("-->")) as $q
+| if ($q | length) < 2 then {t: $l[:$i], open: true}
+else ($i + 4 + ($q[0] | length) + 3) as $e | ($l[:$i] + $l[$e:]) | uncomment($pre; $post; $i) end end;
+def ahead($L; $k): (first(range($k + 1; $L | length) | select($L[.] | sub("\r$"; "") | test("^[ ]{0,3}>|^[ \t]*$|^[ ]{0,3}#{1,6}([ \t]|$)|^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]|^[ ]{0,3}(?:\\x60{3,}|~{3,})"))) // ($L | length)) as $e | [$L[$k + 1:$e][] | sub("\r$"; "")] | join("\n");
+def cu(pre; post): . as $l | if contains("<!--") | not then {t: $l, open: false} else uncomment(pre; post; 0) end;
+def bound: test("^[ ]{0,3}#{1,6}([ \t]|$)|^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]");
 def linehead: [scan("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + run) | .[0] | refs[]];
 def idend: "(?:[^A-Za-z0-9_-]|$)";
 def sibpat($id): "(?:前の?工程|前段)[ \t]*[（(][ \t]*" + $id + "[ \t]*[）),、]"
@@ -50,6 +64,13 @@ def sibrefs($me; $insec; $prev): . as $t | if ($me.s | length) == 0 or ($t | neg
 | $hit + (if $prev and $me.p > 0 and ($t | prevword) then [$me.p] else [] end) end;
 def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline) | .in as $insec | .me as $me | .d += ($t | sibrefs($me; $insec; true));
 def flush: if (.buf | length) == 0 then . else (.buf | join("\n") | stripcode | split("\n")) as $ls | reduce $ls[] as $t (.; extract($t)) | .buf = [] end;
+def classify($l): if ($l | test("^[ ]{0,3}>")) or ($l | test("^[ \t]*$")) then flush
+elif ($l | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then flush
+| .in = ($l | stripcode | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))
+| .d += ($l | stripcode | inline)
+| .me as $me | .d += ($l | stripcode | sibrefs($me; false; false))
+elif ($l | test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]")) then flush | .buf = [$l]
+else .buf += [$l] end;
 .number as $self |
 JQ
 # フィルタの後半（表のリテラルの直後から）。最後の行は sig を計算する式（{number, deps} に .sig を足す。
@@ -57,20 +78,17 @@ JQ
 IFS= read -r -d '' DD_JQ_TAIL <<'JQ' || true
 as $T | ($T.n[($self | tostring)] // [null, 0]) as $nn
 | {s: [($T.f[$nn[0] // ""] // [])[] | select(.[1] != $self)], p: ($nn[1] // 0)} as $me |
-(.body // "") | split("\n")
-| (reduce .[] as $raw ({in: false, fence: null, buf: [], d: [], me: $me};
-($raw | sub("\r$"; "")) as $l
+(.body // "") | split("\n") as $L
+| (reduce range(0; $L | length) as $k ({in: false, fence: null, cmt: false, buf: [], d: [], me: $me};
+($L[$k] | sub("\r$"; "")) as $l | (.buf | join("\n") + "\n") as $pre
 | ($l | fenceof) as $f
-| if .fence != null then
+| if .cmt then
+(if ($l | contains("-->")) then ($l | split("-->")) as $q | .cmt = false | ($l[($q[0] | length) + 3:] | cu($pre; ahead($L; $k))) as $u | classify($u.t) | .cmt = $u.open else flush end)
+elif .fence != null then
 (if $f != null and ($f[0:1] == .fence[0:1]) and (($f | length) >= (.fence | length)) and ($l | test("^[ ]{0,3}[\\x60~]+[ \t]*$")) then .fence = null else . end)
 elif $f != null then flush | .fence = $f
 elif ($l | test("^[ ]{0,3}>")) or ($l | test("^[ \t]*$")) then flush
-elif ($l | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then flush
-| .in = ($l | stripcode | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))
-| .d += ($l | stripcode | inline)
-| .me as $me | .d += ($l | stripcode | sibrefs($me; false; false))
-elif ($l | test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]")) then flush | .buf = [$l]
-else .buf += [$l]
+else ($l | cu(if $l | bound then "" else $pre end; ahead($L; $k))) as $u | classify($u.t) | .cmt = $u.open
 end) | flush)
 | .d | map(select(. > 0)) | unique)} |
 .sig = ((((.number * 7919) % 1000000007) + ([.deps | to_entries[] | (((.key + 1) * .value * 104729) % 1000000007)] | add // 0)) % 1000000007)
