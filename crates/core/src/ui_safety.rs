@@ -1,12 +1,19 @@
 //! 画面が守る安全条件（区分「画面」）のうち、HTML の出力の型 `SafeHtml` を持つ。
 //!
-//! 役割: HTML として外へ出してよい値を型で区別する。エスケープ前の文字列から `SafeHtml` を作る
-//! 公開の道を置かず、作る道は [`SafeHtml::escape_text`] と [`html_literal!`] の 2 つだけにする
-//! （UISF-2・UISF-18・UISF-19 の型の部分。LGUI-14）。
+//! 役割: HTML として外へ出してよい値を型で区別する。エスケープ前の実行時の文字列から `SafeHtml` を作る
+//! 公開の道を置かず、実行時の値が入る道は [`SafeHtml::escape_text`]・[`SafeHtml::push_text`]（どちらも
+//! エスケープする）だけにする。コンパイル時の定数が入る道は [`html_literal!`] を想定する。
+//! 根拠は UISF-2・UISF-18 の型の部分（申告値・利用者の入力のエスケープ）。UISF-19 はスクリプトが
+//! `textContent` で描く形で、この型の対象外。LGUI-14 は将来の利用先（誤りの画面）で、ここでは扱わない。
 //!
-//! 実行時の文字列を包む道は置かない。`html_literal!` が内部で呼ぶ `SafeHtml::__from_markup` は
-//! 型引数の関連定数（`Markup::TEXT`）からだけ値を取る。関連定数はコンパイル時に決まる値しか持てず、
-//! 実行時の文字列（`Box::leak` 等）は渡せない（`&'static str` を直接受ける関数は置かない）。
+//! 型で閉じているのは実行時の値だけである。コンパイル時の定数は、`html_literal!` の外の手書きの
+//! `impl Markup`・`SafeHtml::__from_markup`（どちらも `doc(hidden)` の公開項目）の直接の呼び出しからも入る。
+//! そのため「作る道は 2 つだけ」とは言えず、`html_literal!` 以外の入口が使われていないことは後続の走査で見る
+//! （TODO(#5796): TASK-771 (2/8) の走査で `Markup` の実装と `__from_markup` の呼び出しを数える）。
+//!
+//! 実行時の文字列を包む道は置かない。`SafeHtml::__from_markup` は型引数の関連定数（`Markup::TEXT`）からだけ
+//! 値を取る。関連定数はコンパイル時に決まる値しか持てず、実行時の文字列（`Box::leak` 等）は渡せない
+//! （`&'static str` を直接受ける関数は置かない）。
 //!
 //! 持たないもの: 描画・テンプレート・HTTP 応答・CSP の付与（LIB-1・LIB-3・A-2026-10-30-11。実行は Hub の
 //! `ASCR`）。I/O・時刻・乱数も持たない（DPOL-1）。
@@ -14,15 +21,20 @@
 //! 呼ばれ方: 組込み先（Hub）の画面の描画は `SafeHtml` を受け、`String` から HTML を組み立てない。
 //! 外へ渡す入口は [`SafeHtml::as_str`]・[`SafeHtml::into_string`] だけにする。
 //!
-//! 名前 `SafeHtml` は spec 上の仮称で、module 名 `ui_safety`・マクロ名 `html_literal!` は提案（人の確認待ち）。
+//! 名前 `SafeHtml` は spec 上の仮称で、置き場・module 名 `ui_safety`・マクロ名 `html_literal!` は提案（人の確認待ち）。
 //! UISF-2 は検討中のまま。この型は「申告値のエスケープ」の型の部分に沿うだけで、SSR のソース検査・
 //! ブラウザでの確認は別の作業で残る。
 //!
 //! # エスケープが有効な文脈
 //!
-//! 有効なのは要素のテキストと、引用符で囲んだ属性値だけ。引用符なしの属性値・URL（`href`・`src` の
-//! scheme）・`<script>`/`<style>` の中・イベントハンドラ属性・コメントに利用者の値を入れることは、
-//! この型では守れない。
+//! `SafeHtml` は HTML のテキストと、引用符で囲んだ属性値の文脈だけのエスケープを保証する。
+//! `<script>`/`<style>` の中・引用符なしの属性値・URL（`href`・`src` の scheme）・イベントハンドラ属性・
+//! コメントの文脈の安全は型では保証しない。引用符で囲んでも、`style` 属性（中身は CSS の文脈）や
+//! `srcdoc` 等の値が HTML・CSS・JS として解釈される属性は、エスケープでは守れない。型は出力の文脈を区別しないため、組込み先は型だけを根拠に
+//! それらの文脈へ利用者の値を出さない。
+//!
+//! 開発者がリテラルで書くインラインスクリプトは、型では止められない。止めるのは走査と CSP である
+//! （走査は TODO(#5799): TASK-771 (5/8)。CSP の付与の実行は Hub の `ASCR`。要求値は CSRF-28）。
 
 use std::borrow::Cow;
 use std::fmt;
@@ -51,12 +63,49 @@ use std::fmt;
 /// let _ = html_literal!(s);
 /// ```
 ///
-/// 実行時の文字列を `&'static str` にして直接包む道は無い。
+/// 実装しない trait の陰性対照。`Display`・`Deref`・`Default`・`From<&'static str>`・`Into<String>`。
 ///
 /// ```compile_fail
 /// use fandhe_auth_core::ui_safety::SafeHtml;
-/// let input = String::from("<script>");
-/// let _ = SafeHtml::__from_literal(Box::leak(input.into_boxed_str()));
+/// let x = SafeHtml::escape_text("a");
+/// let _ = format!("{}", x);
+/// ```
+///
+/// ```compile_fail
+/// use fandhe_auth_core::ui_safety::SafeHtml;
+/// let x = SafeHtml::escape_text("a");
+/// let _ = x.to_string();
+/// ```
+///
+/// ```compile_fail
+/// use fandhe_auth_core::ui_safety::SafeHtml;
+/// let x = SafeHtml::escape_text("a");
+/// let _: &str = &*x;
+/// ```
+///
+/// ```compile_fail
+/// use fandhe_auth_core::ui_safety::SafeHtml;
+/// let _ = SafeHtml::default();
+/// ```
+///
+/// ```compile_fail
+/// use fandhe_auth_core::ui_safety::SafeHtml;
+/// let _: SafeHtml = "<p>".into();
+/// ```
+///
+/// ```compile_fail
+/// use fandhe_auth_core::ui_safety::SafeHtml;
+/// let x = SafeHtml::escape_text("a");
+/// let _: String = x.into();
+/// ```
+///
+/// 陽性対照: 同じ入口（`escape_text`・`as_str`・`into_string`）は使える。
+///
+/// ```
+/// use fandhe_auth_core::ui_safety::SafeHtml;
+/// let x = SafeHtml::escape_text("<a>");
+/// assert_eq!(x.as_str(), "&lt;a&gt;");
+/// assert_eq!(x.into_string(), "&lt;a&gt;");
 /// ```
 ///
 /// 関連定数に実行時の値は入れられない。
@@ -126,8 +175,9 @@ impl SafeHtml {
         self.inner.into_owned()
     }
 
-    /// [`html_literal!`] だけが呼ぶ。マークアップは型引数 `M` の関連定数から取るため、
+    /// [`html_literal!`] が呼ぶ。マークアップは型引数 `M` の関連定数から取るため、
     /// コンパイル時に決まる値だけが入る（実行時の文字列は関連定数に入れられない）。
+    /// `doc(hidden)` だが公開で、直接呼ぶ道は型では塞げない（走査で見る。TODO(#5796)）。
     #[doc(hidden)]
     pub const fn __from_markup<M: Markup>() -> SafeHtml {
         SafeHtml {
