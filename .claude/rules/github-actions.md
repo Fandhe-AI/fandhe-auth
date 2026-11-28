@@ -205,10 +205,35 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - 利用者の承認の範囲（2026-11-19。承認したのは利用者で、AI ではない。ACPT-7）は、「`ci.yml` に PR の検査のジョブを足す PR が implement-issue-tree の G0 で止まったとき」に限る（2026-11-28 に利用者がこの範囲に絞った。それまでは「CI のジョブを足す PR」）。この範囲では次を行ってよい
     - main（Claude Code）がその PR を squash で手でマージする。条件は、全チェックの成功・mergeable・未解決のスレッドが 0。これは、ほかの規約のマージの条件（`./security.md` の未解決の高・中が 0、PR の前の `security-auditor` の監査など）に加えて満たすもので、それらを置き換えない
     - そのうえで、`ci.yml` に PR の検査のジョブとして足したジョブの context を、GitHub Actions の App で ruleset の required に追加する。strict=false と bypass が空なのを保ち、変更前の ruleset を退避し（退避先は git 管理外、例: 作業用の一時領域とし、追跡ファイルに置かない）、変更の後に読み返して照合する
-  - 上の範囲の外は、これまでどおり利用者の指示を待つ。範囲の外は、上の 2 つ以外のすべて。例: 必須チェックの削除、strict・bypass・enforcement・対象の条件の変更、ほかの規則・ほかの ruleset の変更、GitHub Actions 以外の App での登録、名前の変更に伴う context の差し替え、ジョブの追加に伴わない登録、`ci.yml` 以外の workflow（`scheduled.yml` など）のジョブの context の登録
+  - 上の範囲の外は、これまでどおり利用者の指示を待つ。範囲の外は、上の 2 つ以外のすべて（2026-11-26 の承認による手動マージは別。下の項）。例: 必須チェックの削除、strict・bypass・enforcement・対象の条件の変更、ほかの規則・ほかの ruleset の変更、GitHub Actions 以外の App での登録、名前の変更に伴う context の差し替え、ジョブの追加に伴わない登録、`ci.yml` 以外の workflow（`scheduled.yml` など）のジョブの context の登録
   - 新しい PR の検査のジョブを足すときは、`ci-complete` の `needs` と required の両方に入れる（`needs` だけでは G0 で止まりうる。required だけでは `ci-complete` の集約から漏れる）
   - `deps audit frame` は 2026-11-28 に個別に登録した（上の「`deps audit frame` の登録の記録」）。名前の変更に伴う context の差し替えは、承認の範囲の外で、利用者の指示を待つ
-  - 上の承認の範囲を除き、この規約を根拠に ruleset を変更せず、利用者の指示を待つ
+  - **G0 の source の判定で止まった PR の手動マージの承認**（利用者が 2026-11-26 に承認し、2026-11-28 に条件を足した。承認したのは利用者で、AI ではない。ACPT-7）。上の 2026-11-19 の承認とは別の承認で、ruleset の変更を含まない
+    - 背景: main には組織の ruleset（required workflow を固定するもの）が効いている。implement-issue-tree の merge-gate は、repo 単位以外の ruleset があると G0 を `server-enforcement-missing`（detail は `source`）で止める。そのため `autoMerge: true` でも、すべての PR が G0 で止まる。
+      source で止まった時点では、source の判定より後の G0 の判定（bypass・スレッド解消の強制・外部チェックの束縛・client-only・発行元）と、その後の段は評価されない（`merge-gate.sh` の g0 の段。rules の取得と no-required-checks の判定は source より先）。下の (a)〜(h) は、そのうち確かめられるものを main が代わりに確かめるための条件で、確かめられない残りは (h) の注記に書く
+    - 承認の内容（2026-11-26）: G0 が source の判定で止めた PR を、main（Claude Code）が手で squash マージしてよい。許すのはマージだけで、required への追加を含まない。元の条件は次の 3 つ
+      - 全チェックの成功
+      - 未解決のレビュースレッドが 0
+      - `security-auditor` の高・中が 0（AI の監査の結果で、安全の確定ではない。CG-2・TASK-83）
+    - 条件の追加（2026-11-28。PR #6183 への codex の P1〔2 巡〕を受けて、利用者が足した）: 元の 3 つに加えて、マージの直前に main が読んで確かめ、すべて満たす。ほかの規約のマージの条件を置き換えない
+      - (a) repo 単位の ruleset の enforcement が active で、bypass が空であること
+      - (b) required の各 (integration_id, context) について、その App が head に出した最新の check-run が completed で、conclusion が success であること。integration_id が数値で登録されていない context があれば、確かめられない条件として扱う（下の停止の規則に当たる）
+      - (c) OPEN で、mergeable が MERGEABLE であること
+      - (d) head に対する cursor[bot] のレビューに CHANGES_REQUESTED が 0 であること。件数は問わない。Bugbot は指摘が無いときはレビューを付けず check-run だけを出す（main が #6178〜#6180 で観察した）。「レビュー 1 件以上」を求めない差は、利用者が決めた
+      - (e) repo 単位の ruleset で `required_review_thread_resolution` が true であること
+      - (f) `apps/cursor` の id が、required の `Cursor Bugbot` の integration_id と一致すること。値は規約に書かず、読んで照合する
+      - (g) head の check-run と commit status のうち required に無いものは、(h) の workflow の規則が求める `trust-root-secret-scan.yml` の workflow run のジョブだけで、どれも成功していること
+      - (h) `rules/branches/main` に出る Repository 以外の規則は、`trust-root-secret-scan.yml` を固定の commit で求める workflow の規則だけであること。その ruleset が repo 側の API で読め、enforcement が active、bypass_actors が空、current_user_can_bypass が never であること。bypass_actors が権限で伏せられうるかは確かめていない（残り）
+    - 停止の規則（2026-11-28。利用者が決めた）
+      - 次のどれかに当たれば、手でマージせず利用者に聞く
+        - マージの直前に view の段（base が main・draft でない・OPEN）を確かめ直し、合わない
+        - neutral・skipped の結論がある（成功に数えない）
+        - 確かめられない条件がある（取得の失敗を含む）
+    - 手順: `gh pr merge <n> --squash --match-head-commit <sha>` で行う。`<sha>` は、元の 3 つと (a)〜(h) をすべて確かめた head の SHA とする。確認の出力を読んでから、別のコマンドでマージする
+    - 範囲の外（改めて利用者に聞く）: CI の権限や例外の承認が要る PR（例: ジョブを足すのに `ci-complete` に入れないもの）・ruleset の変更。秘密値の漏れや検出の弱体化に当たる指摘は、上書きせずに直す
+    - 未定（決めるのは利用者）: この (a)〜(h) と停止の規則を、2026-11-19 の承認による手動マージにも当てるか
+  - この節の承認のうち、ruleset の変更（required への追加）を許すのは、上の 2026-11-19 の承認だけである。2026-11-26 の承認は ruleset の変更を含まない。手動マージについての許しは、2 つの承認それぞれの範囲のままとする。
+    この節の承認とは別に、組織の ruleset の固定先の例外（「秘密情報の検査ジョブ」の節。`D-2026-11-22-8` の (3)(f)）と、個別の指示による登録がある。登録の記録は、上の `hook script tests (macOS bash 3.2)` の登録と「`deps audit frame` の登録の記録」の 2 件で、過去の登録の記録である。今後の登録の根拠にしないのは main の読みである。登録はどれも利用者のその都度の指示によるもので、指示が無いときは行わない。組織の ruleset の固定先の例外は、「秘密情報の検査ジョブ」の節の条件に従う。対象を固定先の変更だけに限るのは main の読みである（その節の (3)(f) を引く行）。それらは各記録に従う。これらのほかは、この規約を根拠に ruleset を変更せず、利用者の指示を待つ
 - `ci-complete` は `if: always()` で全ジョブの結果を検査する fail-closed のジョブ。success 以外は失敗とし、
   skipped は明示的に許容したもの（`pr-title` の push イベント時）に限る
 - **例外: `trust-root-secret-scan.yml` は `ci-complete` の `needs` に入れない**（集約の対象の外）。組織の ruleset が固定した commit SHA で要求する workflow は
