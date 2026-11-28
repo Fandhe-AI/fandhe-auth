@@ -121,6 +121,11 @@ struct Observation {
 }
 
 /// 1 つのシナリオ。モードを見ない。注入は `inject` に宣言した段だけを通して行う（見本）。
+/// `InstanceFaultHandle::sigterm` が使う `/bin/kill` の有無（`fault_instance.rs` と同じ確認）。
+fn sigterm_available() -> bool {
+    cfg!(unix) && Path::new("/bin/kill").exists()
+}
+
 fn scenario(
     tl: FaultTimeline,
     upstream_port: u16,
@@ -194,17 +199,25 @@ fn scenario(
     {
         use fandhe_auth_it_harness::fault::InstanceFaultHandle;
         use std::process::Command;
-        let mut term = InstanceFaultHandle::spawn(Command::new("sleep").arg("30"))?;
         let mut kill = InstanceFaultHandle::spawn(Command::new("sleep").arg("30"))?;
-        tl.inject(
-            &[step(FaultKind::InstanceSigterm, FaultPhase::Applied)],
-            |tl| term.sigterm(tl),
-        )?;
+        // SIGTERM は固定パスの /bin/kill で送る。無い環境（最小コンテナ等）ではこの段だけ飛ばす。
+        let term = if sigterm_available() {
+            let mut term = InstanceFaultHandle::spawn(Command::new("sleep").arg("30"))?;
+            tl.inject(
+                &[step(FaultKind::InstanceSigterm, FaultPhase::Applied)],
+                |tl| term.sigterm(tl),
+            )?;
+            Some(term)
+        } else {
+            None
+        };
         tl.inject(
             &[step(FaultKind::InstanceSigkill, FaultPhase::Applied)],
             |tl| kill.sigkill(tl),
         )?;
-        term.shutdown();
+        if let Some(term) = term {
+            term.shutdown();
+        }
         kill.shutdown();
     }
 
@@ -360,15 +373,22 @@ fn count_lines(body: &str, prefix: &str) -> usize {
     body.lines().filter(|l| l.starts_with(prefix)).count()
 }
 
-#[cfg(unix)]
-const EXPECTED_EVENTS: usize = 14;
-#[cfg(not(unix))]
-const EXPECTED_EVENTS: usize = 12;
+/// Unix は 14 件。`/bin/kill` が無ければ SIGTERM の 1 件を除いた 13 件。Unix 以外は 12 件。
+fn expected_events() -> usize {
+    if !cfg!(unix) {
+        12
+    } else if sigterm_available() {
+        14
+    } else {
+        13
+    }
+}
 
 /// 主試験。`make test` で流れる。本文は出さない（環境変数・`--nocapture` に依らない）。
 #[test]
 fn small_fault_trial_writes_baseline_and_fault_records() {
     let trial = run_trial();
+    let expected_events = expected_events();
     let (b, f) = (trial.pair.baseline(), trial.pair.fault());
     let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
     let (nb, nf) = (name(&trial.files.0), name(&trial.files.1));
@@ -387,20 +407,20 @@ fn small_fault_trial_writes_baseline_and_fault_records() {
 
     // 注入あり: 件数が期待どおり・未解除 0 件・8 種（Unix 以外は 6 種）の名前が 1 回以上出る。
     assert!(trial.fault_body.contains("run_mode: fault\n"));
-    assert_eq!(f.events().len(), EXPECTED_EVENTS);
+    assert_eq!(f.events().len(), expected_events);
     assert!(
         trial
             .fault_body
-            .contains(&format!("injection_count: {EXPECTED_EVENTS}\n"))
+            .contains(&format!("injection_count: {expected_events}\n"))
     );
     assert_eq!(f.unreleased_count(), 0);
     assert!(trial.fault_body.contains("unreleased_count: 0\n"));
     for c in FaultCategory::CATALOG {
-        let expected = !(cfg!(not(unix))
-            && matches!(
-                c,
-                FaultCategory::InstanceSigterm | FaultCategory::InstanceSigkill
-            ));
+        let expected = match c {
+            FaultCategory::InstanceSigterm => sigterm_available(),
+            FaultCategory::InstanceSigkill => cfg!(unix),
+            _ => true,
+        };
         let seen = trial
             .fault_body
             .lines()
