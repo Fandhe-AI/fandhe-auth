@@ -108,6 +108,7 @@ pub enum StyleSrcMode {
 }
 
 /// CSP の指令と値の組の入れ物。必須の指令の組み立てと検査は #5805 で足す。
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContentSecurityPolicy {
     directives: Vec<(CspDirective, Vec<CspSource>)>,
