@@ -50,6 +50,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `.mcp.json` | Claude Code のプロジェクト共有 MCP サーバー定義（ベースは空） |
 | `docs/spec/` | 仕様・フェーズ文書（private の submodule。前述の「仕様」） |
 | `docs/security-review/` | 人のセキュリティレビュー（`TASK-83`）の資料・記録票（`TASK-82`）。範囲の各行と対応ビヘイビア ID の表など |
+| `docs/human-evaluation/` | 人の評価（`TASK-127`）の手順書。観察と評価は人が行い、AI・自動処理に代えない |
 | `docs/records/` | TASK ごとの確認・走査の記録（判定は人が記録する） |
 | `docs/interim/` | 暫定の実装の置き場と差し替え対象の台帳（`TASK-9`） |
 | `docs/stubs/` | 検証用 stub（`TASK-7`・`TASK-8`）の振る舞いと実物との差の文書 |
