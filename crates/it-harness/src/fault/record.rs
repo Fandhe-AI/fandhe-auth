@@ -494,6 +494,20 @@ impl fmt::Debug for FaultFinishFailure {
     }
 }
 
+impl fmt::Display for FaultFinishFailure {
+    /// 理由の文言だけを出す。タイムラインの中身は出さない（SECR-23〜27）。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for FaultFinishFailure {
+    /// `Box<dyn Error>` へ載せて `?` で返せるようにする（TASK-13 の 8/8）。理由は `source` で辿れる。
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// 障害注入の記録。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultRecord {
@@ -628,6 +642,20 @@ mod tests {
 
     fn stub_delay() -> FaultKind {
         FaultKind::hub_stub_delay(HubStubPort::Jwks, Duration::from_millis(5)).unwrap()
+    }
+
+    /// 確定の失敗は `Box<dyn Error>` へ変換でき、文言は理由と一致し、`source` が理由を返す（TASK-13 の 8/8）。
+    #[test]
+    fn finish_failure_is_an_error() {
+        let failure = tl().finish(UtcTimestamp::from_unix_seconds(2)).unwrap_err();
+        let expected = failure.error.to_string();
+        let boxed: Box<dyn std::error::Error> = failure;
+        assert_eq!(boxed.to_string(), expected);
+        assert!(boxed.source().is_some());
+        assert_eq!(
+            format!("{boxed:?}"),
+            "FaultFinishFailure { error: NoInjectionInFaultRun, .. }"
+        );
     }
 
     /// 位置は Hub の stub の事象だけに付く。

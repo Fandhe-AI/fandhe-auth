@@ -16,7 +16,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps lib-deps no-vendored crypto-scan audit-cfg audit-cfg-nofetch pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial
+.PHONY: help doctor setup check test-hooks secret-scan scan-canary build test fmt lint crate-deps lib-deps no-vendored crypto-scan audit-cfg audit-cfg-nofetch pg-check it-db it-db-ci e2e-chrome e2e-firefox load-trial fault-trial
 
 help: ## このヘルプを表示する（Make 非依存の一覧: scripts/help.sh）
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36mmake %-11s\033[0m %s\n", $$1, $$2}' $(firstword $(MAKEFILE_LIST))
@@ -103,3 +103,7 @@ e2e-firefox: ## ハーネスの Firefox の E2E（geckodriver・Firefox 必須�
 # load-trial は暫定の名前（人が確定する）。計測・負荷のハーネスの小さな試し実行の明示の入口。CI には載せない（同じ試験は make test に入っている。TASK-12 10/10）。
 load-trial: ## 計測・負荷のハーネスの小さな試し実行（Docker 不要・stub が相手・記録の本文を標準出力に出す・0 件は失敗。CI 外）。直接: scripts/load-trial.sh
 	@scripts/load-trial.sh
+
+# fault-trial は暫定の名前（人が確定する）。障害注入のハーネスの試し実行の明示の入口。CI には載せない（同じ試験の主試験は make test に入っている。TASK-13 8/8）。
+fault-trial: ## 障害注入のハーネスの試し実行（Docker 不要・基準線と注入ありの 2 つの記録の本文を標準出力に出す・0 件は失敗。CI 外）。直接: scripts/fault-trial.sh
+	@scripts/fault-trial.sh

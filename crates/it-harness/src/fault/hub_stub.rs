@@ -108,6 +108,20 @@ impl<W: Wait> fmt::Debug for HubStubFinishFailure<W> {
     }
 }
 
+impl<W: Wait> fmt::Display for HubStubFinishFailure<W> {
+    /// 理由の文言だけを出す。注入器・タイムラインの中身は出さない（SECR-23〜27）。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl<W: Wait> std::error::Error for HubStubFinishFailure<W> {
+    /// `FaultFinishFailure` と並びをそろえる（TASK-13 の 8/8）。理由は `source` で辿れる。
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// 受け口の呼び出しの誤り。内側へ委ねる前に実行の一致を確かめるので、別の実行の呼び出しは内側のログに入らない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubStubCallError {
