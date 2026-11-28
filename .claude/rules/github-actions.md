@@ -84,7 +84,7 @@ TASK-680 が結線するときの契約は次のとおり。値は spec の ID �
     - cwd は lockfile ごとに固定する（`-f` で渡す lockfile のディレクトリの設定は読まれない。DPOL-34）。
     - ガードの出力の行を監査の記録に含める（様式は TASK-679 で決める。DPOL-33・DPOL-34）。
 6. 4 検査と cargo-audit の 5 つがすべて成功したときだけ緑にする（DPOL-34）。結線までの緑は道具の導入の成功だけを表し、DPOL-34 の合格ではない。
-    結線したらジョブ名から「frame」を外す（このジョブは必須チェックに個別登録されておらず、`ci-complete` の `needs` を通してだけ効くので、名前の変更は登録に影響しない。2026-11-28 の読み取り。個別に登録するかは「必須チェックと集約ジョブ」の節のとおり未定。個別に登録した後に名前を変えるときは、同じ節のとおり ruleset も同時に更新する）。
+    結線したらジョブ名から「frame」を外す見込みである（TASK-680 で名前が変わりうる）。ただし、このジョブの context は 2026-11-28 に ruleset の required へ個別に登録した（「必須チェックと集約ジョブ」の節）。名前を変えると、登録済みの古い context の削除と新しい context の追加になり、利用者の承認の範囲（同節）の外である。名前を変える PR を作る前に利用者の指示を待つ。
 7. 同じ入口を定期の実行（`scheduled.yml`・TASK-681）からも呼べる形に保つ（DPOL-35）。
 8. 道具の版は `env` の版と SHA256 を同時に更新する。現在の版は暫定で、人が確定する。
 9. 公開ログには版・件数・advisory ID 程度だけを出し、秘密値は出さない（SECR-23）。
@@ -105,7 +105,7 @@ TASK-680 が結線するときの契約は次のとおり。値は spec の ID �
 `macos-latest` を使う（GitHub ホステッドのため runner 方針には反しない。分単価が高いので他ジョブには広げない）。
 `test-hooks` の matrix は Homebrew の bash で 1 回、bash 3.2 は別ジョブ `test-hooks-bash32`（check 名は
 `hook script tests (macOS bash 3.2)`）で 1 回流す。2 回を 1 ジョブに入れると runner の遅い日に 15 分の上限へ届くため（#6149）。
-matrix の check 名は ruleset の必須チェックに登録済みで変えない。新しいジョブは `ci-complete` の `needs` に入れ、PR の検査のジョブは必須チェックにも個別に登録する（「必須チェックと集約ジョブ」の節。`deps audit frame` を個別に登録するかは未定。同じ節）。上限は
+matrix の check 名は ruleset の必須チェックに登録済みで変えない。新しいジョブは `ci-complete` の `needs` に入れ、PR の検査のジョブは必須チェックにも個別に登録する（「必須チェックと集約ジョブ」の節）。上限は
 どちらも 15 分のまま。
 
 ### 例外 2: `ai-review.yml` の review ジョブ（public で self-hosted）
@@ -151,19 +151,23 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
       `make check (editorconfig-checker + shellcheck)`・`hook script tests (ubuntu-latest)`・`hook script tests (macos-latest)`・`hook script tests (macOS bash 3.2)`・
       `make build + make test`・`make lint (rustfmt + clippy + crate-deps)`・`secret scan (tracked files)`・`make it-db-ci (DB integration frame)`
     - 別の App で登録: `Cursor Bugbot`
-  - `deps audit frame (tool install only; checks wired in TASK-680)` は個別には登録されておらず、`ci-complete` の `needs` を通してだけ効く
+  - `deps audit frame (tool install only; checks wired in TASK-680)` は、この読み取りの時点では個別には登録されておらず、`ci-complete` の `needs` を通してだけ効いた（記録時点の文。2026-11-28 に登録した。下の項）
   - `hook script tests (macOS bash 3.2)` は、利用者の承認と指示で、main が API で ruleset に足し、読み返して照合した（2026-11-28）
+- **`deps audit frame` の登録の記録**（2026-11-28。利用者の決定と指示。AI による読み取りで、人の判定ではない）
+  - `deps audit frame (tool install only; checks wired in TASK-680)` を、ruleset の required に GitHub Actions の App で足した。足したのは main で、API で行い、読み返して照合した
+  - required は 15 件になった。strict=false と bypass が空なのは変わっていない
+  - この登録は利用者の個別の指示による。下の承認の範囲（G0 で止まった CI のジョブ追加の PR）を広げるものではない
 - **2026-11-28 の規則の変更**（利用者の決定。実際の登録に合わせて直す。ruleset から外す方向にはしない）。上の 2026-11-22 の記録の時点の規則
   「`ci.yml` のジョブを required に個別登録せず、集約ジョブ `ci-complete` だけを登録する」は、次の規則で置き換える
   - `ci-complete` を required に登録する
   - 加えて、`ci.yml` の PR の検査のジョブも required に個別に登録する。理由は、implement-issue-tree の自動マージの G0 が、合格の判定に使うチェックの context が required であることを要求するため。
   - 利用者の承認の範囲（2026-11-19。承認したのは利用者で、AI ではない。ACPT-7）は、「CI のジョブを足す PR が implement-issue-tree の G0 で止まったとき」に限る。この範囲では次を行ってよい
-    - main（Claude Code）がその PR を squash で手でマージする。条件は、全チェックの成功・mergeable・未解決のスレッドが 0
-    - そのうえで、足したジョブの context を、GitHub Actions の App で ruleset の required に追加する。strict=false と bypass が空なのを保ち、変更前の ruleset を退避し、変更の後に読み返して照合する
-  - 上の範囲の外は、これまでどおり利用者の指示を待つ。範囲の外とは、必須チェックの削除、strict・bypass の変更、ほかの ruleset の変更、ジョブの追加に伴わない登録のこと
+    - main（Claude Code）がその PR を squash で手でマージする。条件は、全チェックの成功・mergeable・未解決のスレッドが 0。これは、ほかの規約のマージの条件（`./security.md` の未解決の高・中が 0、PR の前の `security-auditor` の監査など）に加えて満たすもので、それらを置き換えない
+    - そのうえで、足したジョブの context を、GitHub Actions の App で ruleset の required に追加する。strict=false と bypass が空なのを保ち、変更前の ruleset を退避し（退避先は git 管理外、例: 作業用の一時領域とし、追跡ファイルに置かない）、変更の後に読み返して照合する
+  - 上の範囲の外は、これまでどおり利用者の指示を待つ。範囲の外は、上の 2 つ以外のすべて。例: 必須チェックの削除、strict・bypass・enforcement・対象の条件の変更、ほかの規則・ほかの ruleset の変更、GitHub Actions 以外の App での登録、名前の変更に伴う context の差し替え、ジョブの追加に伴わない登録
   - 新しい PR の検査のジョブを足すときは、`ci-complete` の `needs` と required の両方に入れる（`needs` だけでは G0 で止まりうる。required だけでは `ci-complete` の集約から漏れる）
-  - 個別に登録するかが未定のジョブ: `deps audit frame`（未定。判断は利用者）
-  - 上の承認の範囲を除き、ruleset の変更は利用者の指示を待つ。この規約から ruleset を変更しない
+  - `deps audit frame` は 2026-11-28 に個別に登録した（上の「`deps audit frame` の登録の記録」）。名前の変更に伴う context の差し替えは、承認の範囲の外で、利用者の指示を待つ
+  - 上の承認の範囲を除き、ruleset の変更は利用者の指示を待つ。この規約を根拠に ruleset を変更しない
 - `ci-complete` は `if: always()` で全ジョブの結果を検査する fail-closed のジョブ。success 以外は失敗とし、
   skipped は明示的に許容したもの（`pr-title` の push イベント時）に限る
 - **例外: `trust-root-secret-scan.yml` は `ci-complete` の `needs` に入れない**（集約の対象の外）。組織の ruleset が固定した commit SHA で要求する workflow は
@@ -273,7 +277,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
     - 例外: `trust-root-secret-scan.yml`。(a) 先行配置の期間と、(b) 組織の ruleset が workflow のファイルを固定して要求する間は、`ci.yml` に入れられない（要求されうる）（「必須チェックと集約ジョブ」の例外）
 2. 追加したジョブを `ci-complete` の `needs` に必ず加える（漏れると未検査のままマージ可能になる）。条件付きで skip
     するジョブは、許容する条件を `ci-complete` の jq 式に明示する
-    - `ci.yml` の PR の検査のジョブは、必須チェックにも個別に登録する（2026-11-28 の変更。「必須チェックと集約ジョブ」の節）。登録は ruleset の変更で、上の承認の範囲（G0 で止まった CI のジョブ追加の PR）を除き、利用者の指示を待つ（`deps audit frame` を個別に登録するかは未定。同じ節）。登録するまで PR の自動マージの G0 で止まりうる
+    - `ci.yml` の PR の検査のジョブは、必須チェックにも個別に登録する（2026-11-28 の変更。「必須チェックと集約ジョブ」の節）。登録は ruleset の変更で、上の承認の範囲（G0 で止まった CI のジョブ追加の PR）を除き、利用者の指示を待つ。登録するまで PR の自動マージの G0 で止まりうる
     - 例外: `scheduled.yml` は `needs` に入れない（PR を検査しない。利用者が承認済み。2026-11-26。範囲は `workflow_dispatch` だけで動く間）
     - 例外: `trust-root-secret-scan.yml` は `needs` に入れない。(a)・(b) の期間の間だけ（「必須チェックと集約ジョブ」の節の例外）
 3. 処理は `make <target>` / `scripts/*.sh` を呼ぶ。CI 側に複数行のロジックを書かない
