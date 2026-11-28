@@ -27,7 +27,7 @@ doctor: ## 開発環境を診断する（読み取りのみ・何も導入しな
 setup: ## Git hooks を有効化し .env を雛形から作成する（再実行可）。直接: scripts/setup.sh
 	@scripts/setup.sh
 
-check: ## editorconfig-checker + shellcheck（ソースは変更しない）。直接: scripts/check.sh
+check: ## editorconfig-checker + shellcheck + 暗号の自作の走査（crypto-scan。ソースは変更しない）。直接: scripts/check.sh
 	@scripts/check.sh
 
 test-hooks: ## scripts/hooks/ のフックスクリプト自体の回帰テスト（bash + git が基本。part 12 の lib-deps だけ cargo が要り、無ければローカルは SKIP、CI では失敗）。直接: scripts/hooks/test-hooks.sh
@@ -74,8 +74,8 @@ audit-cfg: ## cargo-audit が読む設定が無いこと（承認済みは無し
 audit-cfg-nofetch: ## audit-cfg の取得なしの段（cargo-audit --no-fetch の前。advisory-db の状態の検査を加える。検査のみ）。直接: scripts/check-audit-config.sh no-fetch
 	@scripts/check-audit-config.sh no-fetch
 
-# crypto-scan は暫定の名前（人が確定する）。LIB-21・DPOL-4・DPOL-47・TASK-715 (3/4)。
-crypto-scan: ## 自作の暗号処理の走査（合否は本番メンバーの C1〜C5。試験専用 crate と N1・N2 は参考の警告。発見的で人のレビューの代わりにならない。検査のみ）。直接: scripts/check-crypto-primitives.sh
+# crypto-scan は暫定の名前（人が確定する）。check からも呼ばれる（TASK-715 4/4）。LIB-21・DPOL-4・DPOL-47・TASK-715 (3/4)。
+crypto-scan: ## 自作の暗号処理の走査（合否は本番メンバーの C1〜C5。試験専用 crate と N1・N2 は参考の警告。発見的で人のレビューの代わりにならない。make check からも呼ばれる。検査のみ）。直接: scripts/check-crypto-primitives.sh
 	@scripts/check-crypto-primitives.sh
 
 # pg-check は暫定の名前（人が確定する）。起動・停止の make ターゲットは置かない

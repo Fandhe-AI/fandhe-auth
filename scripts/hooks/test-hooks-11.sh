@@ -91,7 +91,8 @@ sc_orphan_signal() {
 # 中断（TERM・HUP）では、起動済みのバッチの shellcheck まで止め、2 で終わる（止めずに孫の shellcheck を残さない）。
 # 偽の shellcheck が pid を書いて眠っている間に親へ信号を送り、終わった後にその pid のプロセスが残っていないことを確かめる
 # INT は試験しない（背景で起動したシェルでは INT が無視された状態で始まり、trap できない）。
-# HUP を trap できないシェルでは、30 秒待たずに注記を出して飛ばす。
+# HUP を trap できないシェルでは、30 秒待たない。CI（CI か GITHUB_ACTIONS が設定）では前提の欠けとして失敗にし、
+# ローカルでは TAP の `# SKIP`（合格に数えない）で飛ばす（試験が黙って消えないようにする。AUDB-6 の趣旨）。
 for sc_sig in TERM HUP TERM-STOPPED; do
   sc_stop_child=0
   if [ "${sc_sig}" = "TERM-STOPPED" ]; then
@@ -102,7 +103,11 @@ for sc_sig in TERM HUP TERM-STOPPED; do
     sc_label="a ${sc_sig}"
   fi
   if [ "${sc_sig}" = "HUP" ] && [ "$("${HOOK_BASH}" -c 'trap "exit 7" HUP; kill -HUP $$; exit 0' > /dev/null 2>&1; echo $?)" != "7" ]; then
-    echo "NOTE: skipping the HUP stop test (HUP cannot be trapped in this shell)"
+    if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+      fail "shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2" "missing prerequisite: HUP cannot be trapped in this shell (required in CI)"
+    else
+      echo "ok - shellcheck-staged: ${sc_label} stops the running shellcheck and exits 2 # SKIP HUP cannot be trapped in this shell (not counted as a pass)"
+    fi
     continue
   fi
   sc_pidfile="${work_dir}/sc.pid"

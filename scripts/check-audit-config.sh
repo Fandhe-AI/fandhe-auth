@@ -30,6 +30,7 @@
 #            `--no-fetch` が 0 件の advisory を読み込んで走査を進める。
 #   限界（TASK-679 で追う。DPOL-33・DPOL-34）: HOME の差し替えと偽の git リポジトリ（作業ツリー・advisory 1 件以上・変更なしを満たす偽の DB）は防げない。
 #            DB の git の設定・index の細工（skip-worktree・assume-unchanged・sparse-checkout 等）も偽の git リポジトリと同じ種類で防げない
+#            （DB 側の `filter.*` と `.gitattributes` の組で git status の中から外部コマンドが走り得ることも同じ種類。#6170）
 #            （git status は core.fsmonitor を空にし、未追跡・無視されたファイルを全て出し、--no-optional-locks で index を書かない指定で流す）。
 #            取得と取得なしの実行が同じ DB を使うことの保証、DB の commit の記録の様式は TASK-679 の入口で決める。
 #
@@ -37,17 +38,20 @@
 # 終了コード: 0 合格 / 1 違反 / 2 検査不能（fail-closed）。`make` 経由では GNU Make が 1 も 2 に変える。
 set -euo pipefail
 unset CDPATH
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=./lib.sh
-source "${DIR}/lib.sh"
-
 # lib.sh の require_cmd は 1 つの名前しか見ず、欠けると 1（違反）で終わるため使わない。1 つずつ確かめ、欠ければ検査不能の 2 で止める。
-for required_cmd in git grep tr find; do
+# 後の DIR の解決が dirname を使うため、確認は DIR の解決と lib.sh の読み込みより前に置く（欠けても 2 になる。#6170）。
+for required_cmd in git grep tr find dirname; do
   if ! command -v "${required_cmd}" > /dev/null 2>&1; then
     echo "error: required command not found on PATH: ${required_cmd}" >&2
     exit 2
   fi
 done
+# 継いだ git の向き先は、repo の一覧（手順 4）と advisory-db の status の両方を別の repo へ向けさせ得るため消す（#6170）。
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./lib.sh
+source "${DIR}/lib.sh"
+
 # 段の名前は必須。無い・未知なら誤用として 2 で止める。
 if [ "$#" -ne 1 ]; then
   echo "usage: $(basename "$0") fetch|no-fetch" >&2

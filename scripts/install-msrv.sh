@@ -12,6 +12,8 @@
 # （公式の配布元だけを使う条件。.claude/rules/github-actions.md のチェックリスト 9 の例外）。
 # 終了コード: 誤用・環境の誤り（rustup 等が無い・版を読めない・配布元の設定・版の不一致・GITHUB_ENV への書き込みの失敗）は 2。rustup の失敗はその終了コード。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"

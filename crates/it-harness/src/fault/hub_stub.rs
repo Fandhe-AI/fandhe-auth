@@ -255,8 +255,10 @@ mod sealed {
     /// 外の crate が作れない印（名前を出せず、作る口もこの module の外へ出さない）。
     /// 総称の境界（`impl BoundReceiver<R>`）経由でメソッドを呼べても、印を作れないので `&mut R` を取り出せない。
     ///
-    /// `Default`・`Clone`・`Copy` 等を派生しない（足すと外の crate が `Default::default()` 等で印を作れ、
-    /// `&mut R` を取り出せる。`BoundReceiver` の `compile_fail` の doctest が検出する）。
+    /// `Default` を派生しない（足すと外の crate が `Default::default()` で印を作れ、`&mut R` を取り出せる。
+    /// `BoundReceiver` の陰性対照 2 の `compile_fail` の doctest が検出するのは `Default` だけ）。`Clone`・`Copy` は
+    /// 既にある印を要るので外の crate からは悪用できないが、`From` 等の別の生成の口を足した場合は doctest の範囲の外で、
+    /// 人のレビューで確かめる。
     pub struct Token(());
 
     impl Token {
@@ -283,6 +285,18 @@ mod sealed {
 /// use fandhe_auth_it_harness::fault::BoundReceiver;
 /// fn leak<R>(b: &mut impl BoundReceiver<R>) -> &mut R {
 ///     unimplemented!()
+/// }
+/// ```
+///
+/// 陽性対照 2（陰性対照 1・2 が前提とする `receiver_mut` の名前が今も在り、印を作らない参照だけならコンパイルが通る。
+/// メソッドを改名すると、陰性対照は別の理由で落ち続けて空振りするが、この対照が落ちて気付ける）:
+///
+/// ```
+/// use fandhe_auth_it_harness::fault::BoundReceiver;
+/// fn names<R>(b: &mut impl BoundReceiver<R>) {
+///     let _f = |t| {
+///         let _ = b.receiver_mut(t);
+///     };
 /// }
 /// ```
 ///

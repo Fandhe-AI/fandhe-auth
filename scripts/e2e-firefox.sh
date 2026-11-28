@@ -10,6 +10,8 @@
 # 追加の pref を渡す口は無く、足りない版は登録操作の前に失敗する。その場合は上の組み合わせへ上げて試し、結果を人が記録する。
 # 前提: unix（Linux・macOS 等。geckodriver をプロセスグループで起動・停止するため）。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
