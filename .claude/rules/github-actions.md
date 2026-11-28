@@ -153,7 +153,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
     - 別の App で登録: `Cursor Bugbot`
   - `deps audit frame (tool install only; checks wired in TASK-680)` は、この読み取りの時点では個別には登録されておらず、`ci-complete` の `needs` を通してだけ効いた（記録時点の文。2026-11-28 に登録した。下の項）
   - `hook script tests (macOS bash 3.2)` は、利用者の承認と指示で、main が API で ruleset に足し、読み返して照合した（2026-11-28）
-- **`deps audit frame` の登録の記録**（2026-11-28。利用者の決定と指示。AI による読み取りで、人の判定ではない）
+- **`deps audit frame` の登録の記録**（2026-11-28。登録は利用者の決定と指示による。実行と読み返しの照合は main（AI）で、人の判定ではない）
   - `deps audit frame (tool install only; checks wired in TASK-680)` を、ruleset の required に GitHub Actions の App で足した。足したのは main で、API で行い、読み返して照合した
   - required は 15 件になった。strict=false と bypass が空なのは変わっていない
   - この登録は利用者の個別の指示による。下の承認の範囲（G0 で止まった CI のジョブ追加の PR）を広げるものではない
@@ -167,7 +167,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - 上の範囲の外は、これまでどおり利用者の指示を待つ。範囲の外は、上の 2 つ以外のすべて。例: 必須チェックの削除、strict・bypass・enforcement・対象の条件の変更、ほかの規則・ほかの ruleset の変更、GitHub Actions 以外の App での登録、名前の変更に伴う context の差し替え、ジョブの追加に伴わない登録
   - 新しい PR の検査のジョブを足すときは、`ci-complete` の `needs` と required の両方に入れる（`needs` だけでは G0 で止まりうる。required だけでは `ci-complete` の集約から漏れる）
   - `deps audit frame` は 2026-11-28 に個別に登録した（上の「`deps audit frame` の登録の記録」）。名前の変更に伴う context の差し替えは、承認の範囲の外で、利用者の指示を待つ
-  - 上の承認の範囲を除き、ruleset の変更は利用者の指示を待つ。この規約を根拠に ruleset を変更しない
+  - 上の承認の範囲を除き、この規約を根拠に ruleset を変更せず、利用者の指示を待つ
 - `ci-complete` は `if: always()` で全ジョブの結果を検査する fail-closed のジョブ。success 以外は失敗とし、
   skipped は明示的に許容したもの（`pr-title` の push イベント時）に限る
 - **例外: `trust-root-secret-scan.yml` は `ci-complete` の `needs` に入れない**（集約の対象の外）。組織の ruleset が固定した commit SHA で要求する workflow は
@@ -223,7 +223,8 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - ruleset から呼ばれた実行かどうかを、PR が書けない情報で見分けられるかは未確認（未試験）。ログの中身（`workflow sha:` の行など、workflow 自身が出す行）は根拠にしない。
     ruleset の判定が同じ名前の check を数えないことは、`D-2026-11-22-8` の (3)(a) に挙げた範囲は合格。範囲外と未試験の点は上の 2026-11-22 の記述のとおり（#5985 で追跡）
 - ジョブ名（`name:`）・ジョブ ID・reusable workflow を呼ぶジョブ ID（`codex`）を変えると check 名が変わる。
-  required に登録済みの名前を変える場合は ruleset 側も同時に更新する（更新漏れは「永久に pending」でマージ不能になる）
+  required に登録済みの名前を変える場合は、ruleset 側の同時の更新が要る（更新漏れは「永久に pending」でマージ不能になる）。
+  ruleset の変更は利用者の指示を待つ（「必須チェックと集約ジョブ」の節）
 
 ## 発火条件の方針
 
