@@ -14,7 +14,10 @@
 //!    （`DGRT-3`）。組込み先は申告の項目を観測の項目と別の欄に出し、「検証されていない」ことを示す
 //!    ラベルを付ける（`UISF-12`）。
 //! 3. ラベルの文言は本体に持たない（Hub `ASCR-40`）。PoC の文言も定数にしない。
-//! 4. 申告した環境は表示専用の自由文で、判定（承認の可否・scope・有効期限）の入力にしない
+//! 4. 申告した環境は表示専用の自由文で、長さの上限（設定で受ける。値は本体で決めない）を超える値と、
+//!    表示を操作・隠す文字（制御文字・双方向制御・ゼロ幅等）を含む値は構築で拒否する
+//!    （[`DeclaredEnvironment::from_agent_declaration`]。`UISF-12`・`LGUI-14`）。
+//!    判定（承認の可否・scope・有効期限）の入力にしない
 //!    （`ADLG-7`・`HAPR-1`）。判定の関数はこの型を引数に取らず、観測の型との相互の変換も持たない。
 //! 5. 要約は出力専用で、承認・拒否の能力を持たない。確認の手順の判定は `DVUI-12`・`DVUI-13`・
 //!    `DVUI-15`・`HAPR-3` が正本で、画面は結果を受けるだけ（`UISF-14`）。
@@ -35,14 +38,16 @@
 //! # 申告と観測の取り違えを型で拒む
 //!
 //! ```compile_fail
-//! use fandhe_auth_core::approval_summary::{DeclaredEnvironment, StartSource};
-//! let d = DeclaredEnvironment::from_agent_declaration("x".to_string());
+//! use fandhe_auth_core::approval_summary::{DeclaredEnvironment, DeclaredEnvironmentLimits, StartSource};
+//! let l = DeclaredEnvironmentLimits::new(16);
+//! let d = DeclaredEnvironment::from_agent_declaration("x".to_string(), l).unwrap();
 //! let _ = StartSource::from(d);
 //! ```
 //!
 //! ```compile_fail
-//! use fandhe_auth_core::approval_summary::DeclaredEnvironment;
-//! let d = DeclaredEnvironment::from_agent_declaration("x".to_string());
+//! use fandhe_auth_core::approval_summary::{DeclaredEnvironment, DeclaredEnvironmentLimits};
+//! let l = DeclaredEnvironmentLimits::new(16);
+//! let d = DeclaredEnvironment::from_agent_declaration("x".to_string(), l).unwrap();
 //! let _ = format!("{}", d);
 //! ```
 //!
@@ -74,7 +79,11 @@
 //!     "client".to_string(),
 //!     "client-id".to_string(),
 //!     vec!["read".to_string()],
-//!     DeclaredEnvironment::from_agent_declaration("env".to_string()),
+//!     DeclaredEnvironment::from_agent_declaration(
+//!         "env".to_string(),
+//!         DeclaredEnvironmentLimits::new(16),
+//!     )
+//!     .unwrap(),
 //!     StartedAt::from_unix_millis_utc(0),
 //!     StartSource::from_observed_peer(IpAddr::V4(Ipv4Addr::LOCALHOST)),
 //! );
@@ -138,6 +147,47 @@ pub enum Provenance {
     AgentDeclared,
 }
 
+/// 申告した環境の検査の設定。上限の数値は設定で受け、本体は既定値を持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredEnvironmentLimits {
+    max_chars: usize,
+}
+
+impl DeclaredEnvironmentLimits {
+    /// 許す最大の文字数（Unicode のスカラー値の数）で作る。
+    pub const fn new(max_chars: usize) -> Self {
+        Self { max_chars }
+    }
+}
+
+/// 申告した環境の検査の失敗。値そのものは載せない（文字の種類は載せる）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeclaredEnvironmentError {
+    /// 上限を超えている。
+    TooLong,
+    /// 表示を操作・隠す文字を含む。
+    ForbiddenChar(char),
+}
+
+/// 表示の順序の操作・不可視・制御の文字か。
+fn is_display_manipulating(c: char) -> bool {
+    c.is_control() // C0・C1・DEL（改行・タブも含む）
+        || matches!(
+            c,
+            '\u{00AD}' // soft hyphen
+            | '\u{061C}' // ALM
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}' // ゼロ幅・LRM・RLM
+            | '\u{2028}'..='\u{202E}' // 行・段落区切り・双方向制御
+            | '\u{2060}'..='\u{206F}' // word joiner・不可視演算子・双方向 isolate
+            | '\u{FE00}'..='\u{FE0F}' // variation selectors
+            | '\u{FEFF}' // BOM・ZWNBSP
+            | '\u{FFF9}'..='\u{FFFB}' // interlinear annotation
+            | '\u{E0000}'..='\u{E007F}' // tag characters
+        )
+}
+
 /// エージェントが申告した環境。表示専用の自由文で、判定に使わない（`ADLG-7`）。
 ///
 /// 攻撃者が選べる値なので、HTML へ出す前に必ずエスケープする（`LGUI-14`・`UISF-2`）。
@@ -147,9 +197,20 @@ pub struct DeclaredEnvironment(String);
 
 impl DeclaredEnvironment {
     /// エージェントの申告から作る唯一の道。
-    // TODO(#5841): 長さ・文字の検査を足す。
-    pub fn from_agent_declaration(text: String) -> Self {
-        Self(text)
+    ///
+    /// 長さ（文字数）が `limits` の上限を超える値、表示を操作・隠す文字を含む値は拒否する。
+    /// 上限の数値は呼び出し側が設定で渡す（本体は既定値を持たない）。
+    pub fn from_agent_declaration(
+        text: String,
+        limits: DeclaredEnvironmentLimits,
+    ) -> Result<Self, DeclaredEnvironmentError> {
+        if let Some(c) = text.chars().find(|c| is_display_manipulating(*c)) {
+            return Err(DeclaredEnvironmentError::ForbiddenChar(c));
+        }
+        if text.chars().count() > limits.max_chars {
+            return Err(DeclaredEnvironmentError::TooLong);
+        }
+        Ok(Self(text))
     }
 
     /// エスケープ前の値を読む唯一の道。HTML へ出す前にエスケープする義務がある。
@@ -271,6 +332,73 @@ mod tests {
     use std::collections::HashSet;
     use std::net::Ipv4Addr;
 
+    fn limits() -> DeclaredEnvironmentLimits {
+        DeclaredEnvironmentLimits::new(32)
+    }
+
+    #[test]
+    fn declared_length_boundary() {
+        // 上限ちょうどは受け、1 文字超過は拒否（文字数で数える）。
+        let ok = "a".repeat(32);
+        assert!(DeclaredEnvironment::from_agent_declaration(ok, limits()).is_ok());
+        let over = "a".repeat(33);
+        assert_eq!(
+            DeclaredEnvironment::from_agent_declaration(over, limits()).unwrap_err(),
+            DeclaredEnvironmentError::TooLong
+        );
+        let multibyte = "あ".repeat(32);
+        assert!(DeclaredEnvironment::from_agent_declaration(multibyte, limits()).is_ok());
+        let zero = DeclaredEnvironmentLimits::new(0);
+        assert!(DeclaredEnvironment::from_agent_declaration(String::new(), zero).is_ok());
+        assert!(DeclaredEnvironment::from_agent_declaration("a".into(), zero).is_err());
+    }
+
+    #[test]
+    fn declared_rejects_display_manipulating_chars() {
+        let forbidden = [
+            '\u{0000}',
+            '\u{0007}',
+            '\u{000A}',
+            '\u{001B}',
+            '\u{007F}',
+            '\u{0085}',
+            '\u{009F}',
+            '\u{00AD}',
+            '\u{061C}',
+            '\u{200B}',
+            '\u{200C}',
+            '\u{200D}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{202A}',
+            '\u{202B}',
+            '\u{202C}',
+            '\u{202D}',
+            '\u{202E}',
+            '\u{2060}',
+            '\u{2066}',
+            '\u{2067}',
+            '\u{2068}',
+            '\u{2069}',
+            '\u{FEFF}',
+            '\u{E0041}',
+        ];
+        for c in forbidden {
+            let t = format!("a{c}b");
+            assert_eq!(
+                DeclaredEnvironment::from_agent_declaration(t, limits()).unwrap_err(),
+                DeclaredEnvironmentError::ForbiddenChar(c),
+                "U+{:04X}",
+                c as u32
+            );
+        }
+        // 通常の文字（空白・日本語・記号）は受ける。
+        let ok = "Linux x86_64 日本語";
+        assert!(DeclaredEnvironment::from_agent_declaration(ok.into(), limits()).is_ok());
+    }
+
     #[test]
     fn items_are_five_and_distinct() {
         // UISF-24: 項目は 5 件で互いに異なる。
@@ -301,7 +429,7 @@ mod tests {
     fn debug_does_not_leak_declared_text() {
         // UISF-12・ADLG-7: Debug は申告の自由文を出さない。
         let marker = "sentinel-text-123";
-        let d = DeclaredEnvironment::from_agent_declaration(marker.to_string());
+        let d = DeclaredEnvironment::from_agent_declaration(marker.to_string(), limits()).unwrap();
         assert!(!format!("{d:?}").contains(marker));
         assert!(!format!("{d:#?}").contains(marker));
         let s = ApprovalSummary::new(
