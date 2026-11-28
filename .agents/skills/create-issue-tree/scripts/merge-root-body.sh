@@ -7,7 +7,9 @@
 #       いたため、マージ処理を本スクリプトへ切り出した（Issue #556。新規作成経路は create-root-body.sh）。
 #       先行 Phase の表・自由記述は保持し、今回の Phase 行とセクションだけを実ツリーから生成して差し替える。
 #
-# 使い方: merge-root-body.sh --root <n> --granularity <Nh> --phase <N> --phase-number <n>
+# 使い方: merge-root-body.sh --root <n> --granularity <Nh> --phase <N> --phase-number <n> [--repo <host/owner/repo>]
+#   --repo  対象リポジトリ（任意）。渡すと gh issue view・edit と sub_issues の取得をそのリポジトリへ明示する（Step 5 が状態ファイルに
+#           記録したリポジトリ）。省略時は gh の {owner}/{repo} の解決に従う
 #         引数が無ければ環境変数 ROOT_NUMBER / GRANULARITY / PHASE / PHASE_NUMBER を使う。
 #
 # Step 3 雛形との対応（追記位置の契約）:
@@ -46,7 +48,7 @@
 # `[ ... ] && break` 等の -e 非互換パターンも含むため、失敗は `|| die` で明示処理する。単体実行用で source しない。
 set -uo pipefail
 
-USAGE='使い方: merge-root-body.sh --root <n> --granularity <Nh> --phase <N> --phase-number <n>'
+USAGE='使い方: merge-root-body.sh --root <n> --granularity <Nh> --phase <N> --phase-number <n> [--repo <host/owner/repo>]'
 
 die() {
   local code="$1"
@@ -59,15 +61,17 @@ ROOT_NUMBER="${ROOT_NUMBER:-}"
 GRANULARITY="${GRANULARITY:-}"
 PHASE="${PHASE:-}"
 PHASE_NUMBER="${PHASE_NUMBER:-}"
+REPO=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --root | --granularity | --phase | --phase-number)
+    --root | --granularity | --phase | --phase-number | --repo)
       [[ $# -ge 2 ]] || die 1 "$1 に値がありません。${USAGE}"
       case "$1" in
         --root) ROOT_NUMBER="$2" ;;
         --granularity) GRANULARITY="$2" ;;
         --phase) PHASE="$2" ;;
         --phase-number) PHASE_NUMBER="$2" ;;
+        --repo) REPO="$2" ;;
       esac
       shift 2
       ;;
@@ -79,6 +83,14 @@ done
 # PHASE は awk の正規表現へ入るため、数字以外は API 呼び出し前に拒否する
 [[ "${PHASE}" =~ ^[0-9]+$ ]] || die 1 "--phase（PHASE）は数字で指定してください。"
 [[ "${PHASE_NUMBER}" =~ ^[1-9][0-9]*$ ]] || die 1 "--phase-number（PHASE_NUMBER）は正整数で指定してください。"
+# --repo は gh の引数・API のパスへ入れる前に形式を確かめる。ホスト・owner/repo は list_subs へ、--repo は gh issue view・edit へ渡す
+LS_ARGS=()
+GH_REPO_ARGS=()
+if [[ -n "${REPO}" ]]; then
+  [[ "${REPO}" =~ ^[A-Za-z0-9.-]+(:[0-9]{1,5})?/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$ ]] || die 1 "--repo は host/owner/repo の形式で指定してください。"
+  LS_ARGS=("${REPO%%/*}" "${REPO#*/}")
+  GH_REPO_ARGS=(--repo "${REPO}")
+fi
 
 # gh・jq の欠落はライブラリ読み込み失敗と区別して前提不備（exit 2）にする
 command -v gh >/dev/null 2>&1 || die 2 "gh が見つかりません。"
@@ -92,7 +104,7 @@ SEC_FILE=''
 CHK_FILE=''
 trap 'rm -f "${SEC_FILE}" "${CHK_FILE}"' EXIT
 
-CURRENT_BODY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body') \
+CURRENT_BODY=$(gh issue view "${ROOT_NUMBER}" ${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"} --json body --jq '.body') \
   || die 1 "ルート issue #${ROOT_NUMBER} の本文を取得できません。中止します。"
 
 # <!-- granularity: Nh --> マーカーは常に GRANULARITY で先頭へ 1 行だけ書き直す。
@@ -103,9 +115,9 @@ rc=0; CURRENT_BODY=$(printf '%s\n' "${CURRENT_BODY}" | grep -vE '^<!-- granulari
 NEW_BODY="$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; printf '%s\n' "${CURRENT_BODY}")"
 
 # 今回の Phase 行（PHASE_ROW）と「### Phase N: ...」セクション（PHASE_SECTION）を実ツリーから生成する
-PTITLE=$(gh issue view "${PHASE_NUMBER}" --json title --jq ".title | ${CELL}") \
+PTITLE=$(gh issue view "${PHASE_NUMBER}" ${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"} --json title --jq ".title | ${CELL}") \
   || die 1 "Phase 親 #${PHASE_NUMBER} を取得できません。中止します。"
-ALL_CHILDREN=$(list_subs "${PHASE_NUMBER}") \
+ALL_CHILDREN=$(list_subs "${PHASE_NUMBER}" ${LS_ARGS[@]+"${LS_ARGS[@]}"}) \
   || die 1 "Phase 親 #${PHASE_NUMBER} の sub-issues を取得できません。中止します。"
 # jq が失敗（API 応答の形が想定外）したまま空値で Phase 行・セクションを作ると、既存本文を誤内容で
 # 上書きし得るため、変換ごとに終了コードと値の形を確認して失敗時は本文未更新で中止する（fail-closed）
@@ -128,7 +140,7 @@ for j in $(seq 0 $((DIRECT - 1))); do
     || die 1 "子 issue の番号が正整数ではありません。ルート本文は更新しません。"
   CTITLE=$(printf '%s' "${CHILDREN}" | jq -er --argjson j "${j}" ".[\$j].title | ${CELL}") \
     || die 1 "#${CNUM} のタイトルを取得できません。ルート本文は更新しません。"
-  GRAND_OPEN=$(count_open_desc "${CNUM}") \
+  GRAND_OPEN=$(count_open_desc "${CNUM}" ${LS_ARGS[@]+"${LS_ARGS[@]}"}) \
     || die 1 "#${CNUM} の子孫を取得できません。中止します。"
   TOTAL=$((TOTAL + GRAND_OPEN))
   if [ "${GRAND_OPEN}" -ge 1 ]; then DECOMP='sub-issue あり'; else DECOMP='-'; fi
@@ -140,7 +152,7 @@ done
 for CNUM in ${CLOSED_NUMS}; do
   [[ "${CNUM}" =~ ^[1-9][0-9]*$ ]] \
     || die 1 "closed の子 issue の番号が正整数ではありません。ルート本文は更新しません。"
-  GRAND_OPEN=$(count_open_desc "${CNUM}") \
+  GRAND_OPEN=$(count_open_desc "${CNUM}" ${LS_ARGS[@]+"${LS_ARGS[@]}"}) \
     || die 1 "#${CNUM} の子孫を取得できません。中止します。"
   TOTAL=$((TOTAL + GRAND_OPEN))
 done
@@ -316,5 +328,5 @@ rc=0; grep -qE "${TREE_PLACEHOLDER_RE}" "${CHK_FILE}" || rc=$?
 
 # 検査を通った NEW_BODY を、検査直後に（本文を変更せず）そのまま gh issue edit へ渡す。
 # 本文は stdin 経由で渡し、一時ファイルを作らない。失敗時は gh issue edit 自身の終了コードを伝播する
-printf '%s\n' "${NEW_BODY}" | gh issue edit "${ROOT_NUMBER}" --body-file - || exit $?
+printf '%s\n' "${NEW_BODY}" | gh issue edit "${ROOT_NUMBER}" ${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"} --body-file - || exit $?
 echo "result=merged root=${ROOT_NUMBER} phase=${PHASE}"
