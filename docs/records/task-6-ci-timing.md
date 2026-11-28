@@ -29,7 +29,7 @@ spec の本文は写さない。
 | `created_epoch`・`started_epoch`・`completed_epoch` | UTC の秒。欠けは `-` |
 
 runner の名前・group・step・URL・ブランチ名と、jobs API の `labels` の欄は出さない（ジョブ名に含まれる matrix の値は出る）。
-Markdown へ出すとき、ジョブ名など外から来た文字列は `|`・`[`・`]`・`<`・`>`・`` ` `` を `\` で逃がす。
+Markdown へ出すとき、ジョブ名など外から来た文字列は `\`・`|`・`[`・`]`・`<`・`>`・`` ` `` を `\` で逃がす（先に `\` を逃がす）。TSV の `@tsv` が二重にした `\` は、集計の前に元へ戻す。
 
 集計（`scripts/ci-timing.sh summary`。Markdown。単位は整数の秒）:
 

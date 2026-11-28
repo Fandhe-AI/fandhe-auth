@@ -14,9 +14,11 @@
 #   report は 0 件の系統も「0 runs」と記録して最後まで出し、全系統が空、または ci.yml・ai-review.yml の系統が空なら 2 を返す。
 #   0 件を許すのは定期系（scheduled.yml・update-external.yml）だけ。
 # 出す列は許可リストに限る（runner の名前・`labels` の欄・step・URL・ブランチ名は出さない。SECR-23。実機の名前を書かない規約）。
-# ジョブ名に含まれる matrix の値は出る。ジョブ名など外から来た文字列は Markdown へ出すとき | [ ] < > ` を逃がす。
+# ジョブ名に含まれる matrix の値は出る。ジョブ名など外から来た文字列は Markdown へ出すとき \ | [ ] < > ` を逃がす。
 # 認証は gh の既存の資格情報をそのまま使う。トークンを読まず・出さず・環境変数へ書かない。宛先は gh の設定が指す host・repo（report の冒頭に解決した repo を出す）。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す。
+unset CDPATH
 ORIG_PWD="$(pwd)"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
@@ -184,14 +186,15 @@ function sortarr(a, n,   i, j, v) {
   for (i = 2; i <= n; i++) { v = a[i]; for (j = i - 1; j >= 1 && a[j] > v; j--) a[j + 1] = a[j]; a[j + 1] = v }
 }
 function pct(a, n, p,   k) { k = int((p * n + 99) / 100); if (k < 1) k = 1; return a[k] }
-function esc(s) { gsub(/[][|<>`]/, "\\\\&", s); return s }
+function unesc(s) { gsub(/\\\\/, "\\", s); return s }
+function esc(s) { gsub(/\\/, "\\\\", s); gsub(/[][|<>`]/, "\\\\&", s); return s }
 {
   if (NF != 10) bad("column count")
   for (i = 8; i <= 10; i++) if ($i !~ /^([0-9]+|-)$/) bad("epoch")
   n++
   sys = $1 " / " $2
   jk = sys SUBSEP $6
-  jobset[jk] = 1; jsys[jk] = sys; jname[jk] = $6
+  jobset[jk] = 1; jsys[jk] = sys; jname[jk] = unesc($6)
   if (($7 == "success" || $7 == "failure") && isnum($8) && isnum($9) && isnum($10) && $10 + 0 >= $9 + 0 && $9 + 0 >= $8 + 0) {
     c = ++cnt[jk]
     ex[jk, c] = $10 - $9
