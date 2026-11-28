@@ -168,12 +168,13 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
   - 新しい PR の検査のジョブを足すときは、`ci-complete` の `needs` と required の両方に入れる（`needs` だけでは G0 で止まりうる。required だけでは `ci-complete` の集約から漏れる）
   - `deps audit frame` は 2026-11-28 に個別に登録した（上の「`deps audit frame` の登録の記録」）。名前の変更に伴う context の差し替えは、承認の範囲の外で、利用者の指示を待つ
   - **G0 の source の判定で止まった PR の手動マージの承認**（2026-11-26 に利用者が出し、2026-11-28 に記録を承認した。承認したのは利用者で、AI ではない。ACPT-7）。上の 2026-11-19 の承認とは別の承認で、ruleset の変更を含まない
-    - 背景: main には組織の ruleset（required workflow を固定するもの）が効いている。implement-issue-tree の merge-gate は、repo 単位以外の ruleset があると G0 を `server-enforcement-missing`（detail は `source`）で止める。そのため `autoMerge: true` でも、すべての PR が G0 で止まる
+    - 背景: main には組織の ruleset（required workflow を固定するもの）が効いている。implement-issue-tree の merge-gate は、repo 単位以外の ruleset があると G0 を `server-enforcement-missing`（detail は `source`）で止める。そのため `autoMerge: true` でも、すべての PR が G0 で止まる。source の判定は G0 の中で bypass・スレッド解消の強制・外部チェックの束縛・client-only・発行元の束縛と未発行の判定より前にあり、source で止まった時点では、これらの判定は評価されていない（`merge-gate.sh` の g0 の段）
     - 範囲: G0 が source の判定で止めた PR を、main（Claude Code）が手で squash マージしてよい。許すのはマージだけで、required への追加を含まない（2026-11-19 の承認は、`ci.yml` に PR の検査のジョブを足す PR について、マージに加えて required への追加も許す）
-    - 条件（すべて満たす）: 全チェックの成功・未解決のレビュースレッドが 0・`security-auditor` の高・中が 0。これは、ほかの規約のマージの条件に加えて満たすもので、それらを置き換えない
-    - 手順: `gh pr merge <n> --squash --match-head-commit <sha>` で行う。確認の出力を読んでから、別のコマンドでマージする
+    - 条件（すべて満たす）: 全チェックの成功・未解決のレビュースレッドが 0・`security-auditor` の高・中が 0。これは、ほかの規約のマージの条件に加えて満たすもので、それらを置き換えない。`security-auditor` の高・中が 0 は AI の監査の結果で、安全の確定ではない（CG-2・TASK-83）
+    - 手順: `gh pr merge <n> --squash --match-head-commit <sha>` で行う。`<sha>` は、上の条件（全チェックの成功・未解決のスレッド 0・`security-auditor` の高・中が 0）をすべて確かめた head の SHA とする。確認の出力を読んでから、別のコマンドでマージする
     - 範囲の外（改めて利用者に聞く）: CI の権限や例外の承認が要る PR（例: ジョブを足すのに `ci-complete` に入れないもの）・ruleset の変更。秘密値の漏れや検出の弱体化に当たる指摘は、上書きせずに直す
-  - 上の 2 つの承認の範囲を除き、この規約を根拠に ruleset を変更せず、利用者の指示を待つ
+  - ruleset の変更（required への追加）を許す承認は、上の 2026-11-19 の承認だけである。2026-11-26 の承認は ruleset の変更を含まない。手動マージについての許しは、2 つの承認それぞれの範囲のままとする。
+    これらを除き、この規約を根拠に ruleset を変更せず、利用者の指示を待つ
 - `ci-complete` は `if: always()` で全ジョブの結果を検査する fail-closed のジョブ。success 以外は失敗とし、
   skipped は明示的に許容したもの（`pr-title` の push イベント時）に限る
 - **例外: `trust-root-secret-scan.yml` は `ci-complete` の `needs` に入れない**（集約の対象の外）。組織の ruleset が固定した commit SHA で要求する workflow は
