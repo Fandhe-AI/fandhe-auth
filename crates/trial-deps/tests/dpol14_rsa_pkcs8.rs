@@ -2,7 +2,8 @@
 //! DER で渡すと署名に失敗し、PEM で渡すと成功することの試験（TASK-667 (3/4)・#319）。
 //!
 //! 〔仮想〕の確認で、spec の「確定」ではない（ACPT-7）。「実装が PEM の形を使う」ことの確認は
-//! TASK-667 (4/4)・#320 の範囲で、`tests/dpol14_pem_form.rs` が走査で守る。
+//! TASK-667 (4/4)・#320 の範囲で、`tests/dpol14_pem_form.rs` が DER の形が無いことを走査で守る。
+//! PEM の形を使う確認は未検証（TASK-347）。
 //! 鍵は実行時に生成し、鍵・DER・PEM・トークンを出力に出さない（SECR-23）。
 
 use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};

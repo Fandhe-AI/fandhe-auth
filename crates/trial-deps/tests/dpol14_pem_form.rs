@@ -12,7 +12,15 @@
 //!   期待を緩めて通さない（AUDB-6）。観測を更新するのは人の確認の後だけ。
 //!
 //! 〔仮想〕の確認で、spec の「確定」ではない。文字列の走査で、人のレビュー（TASK-83）の代わりにならない。
-//! 走査の限界: マクロが生成する識別子は見えない。`/* */` の中は誤検出の側に倒す。
+//! 走査の限界:
+//! - マクロが生成する識別子は見えない。
+//! - 行頭が `//` の行だけを飛ばす。`/* */` の中の行頭が `//` でない行は読むため、誤検出の側に倒す。
+//!   一方、行頭が `//` の行は `/* */` の中にあっても飛ばすので、ブロックコメント内のその形の実コードは見落とす。
+//! - `.rs` 以外のファイル（文書・テンプレート・生成物等）は見ない。
+//! - 引き継ぎの印は `from_rsa_pem` という名前だけを見る。`jsonwebtoken` を経ない RS256 の鍵の
+//!   読み込み（`aws-lc-rs` の直接の呼び出しなど）は拾わない。
+//! - 除くディレクトリは `.git` と `crates/<x>/target` の直下だけ（ビルド成果物）。
+//!
 //! `DecodingKey::from_rsa_der` も拾う（fail-closed。公開鍵の用途で要る場面が出たら人が見直す）。
 //! この試験は `tests/` にあり、lib の「ファイルを直接呼ばない」定めの外にある。
 //! 出力は相対パス・行番号・件数だけ（SECR-23）。
@@ -21,8 +29,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// 本番メンバー。`scripts/check-crypto-primitives.sh` の `PROD_DIRS`、
-/// `scripts/check-openssl-vendored.sh` の `PROD_PKGS` と同じ分類に保つ。
+/// 本番メンバー。`scripts/check-crypto-primitives.sh` の `PROD_DIRS` と同じ分類に保つ
+/// （`dpol14_classification_matches_scripts` が照合する）。
 const PROD_DIRS: [&str; 6] = [
     "core",
     "secret",
@@ -31,7 +39,7 @@ const PROD_DIRS: [&str; 6] = [
     "plugin-oidc",
     "backend",
 ];
-/// 試験専用メンバー。同上（`TEST_ONLY_DIRS`・`TEST_ONLY_PKGS`）。
+/// 試験専用メンバー。同上（`TEST_ONLY_DIRS`）。
 const TEST_ONLY_DIRS: [&str; 6] = [
     "hub-stub",
     "console-stub",
@@ -88,16 +96,24 @@ fn find_ident(src: &str, ident: &str) -> Vec<usize> {
     hits
 }
 
-fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+/// 走査から除くディレクトリか（repo ルートからの相対パス）。
+/// `.git` と、crate 直下のビルド成果物 `crates/<x>/target` だけを除く。
+/// `src/target/` のような同名のモジュールは除かない。
+fn skip_dir(rel_path: &str) -> bool {
+    let parts: Vec<&str> = rel_path.split('/').collect();
+    parts.last() == Some(&".git")
+        || (parts.len() == 3 && parts[0] == "crates" && parts[2] == "target")
+}
+
+fn collect_rs(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(dir).expect("directory must be readable");
     for e in entries {
         let p = e.expect("entry must be readable").path();
         if p.is_dir() {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "target" || name == ".git" {
+            if skip_dir(&rel(root, &p)) {
                 continue;
             }
-            collect_rs(&p, out);
+            collect_rs(root, &p, out);
         } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
             out.push(p);
         }
@@ -115,7 +131,7 @@ fn rel(root: &Path, p: &Path) -> String {
 fn all_sources() -> Vec<(String, String)> {
     let root = repo_root();
     let mut files = Vec::new();
-    collect_rs(&root.join("crates"), &mut files);
+    collect_rs(&root, &root.join("crates"), &mut files);
     let mut v: Vec<(String, String)> = files
         .iter()
         .map(|p| {
@@ -125,6 +141,37 @@ fn all_sources() -> Vec<(String, String)> {
         .collect();
     v.sort();
     v
+}
+
+/// 除外の対照。ビルド成果物だけを除き、`src/target/` のようなモジュールは走査に残す。
+#[test]
+fn dpol14_skip_dir_only_excludes_crate_level_target() {
+    assert!(skip_dir("crates/core/target"));
+    assert!(skip_dir("crates/core/.git"));
+    assert!(!skip_dir("crates/core/src/target"));
+    assert!(!skip_dir("crates/core/tests/target"));
+    assert!(!skip_dir("crates/core/target/debug/x"));
+    assert!(!skip_dir("crates/target"));
+    assert!(!skip_dir("crates/core/src"));
+}
+
+/// 走査の対照（作業ツリー）。`crates/<x>/src/target/` の `.rs` は拾い、`crates/<x>/target/` は拾わない。
+/// 試験用の作業領域（`CARGO_TARGET_TMPDIR`）に鍵を含まない空のファイルだけを作る。
+#[test]
+fn dpol14_walk_keeps_nested_target_named_directories() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("dpol14_walk");
+    let _ = fs::remove_dir_all(&root);
+    let kept = root.join("crates/x/src/target");
+    let skipped = root.join("crates/x/target/debug");
+    fs::create_dir_all(&kept).expect("create kept dir");
+    fs::create_dir_all(&skipped).expect("create skipped dir");
+    fs::write(kept.join("a.rs"), "").expect("write a.rs");
+    fs::write(skipped.join("b.rs"), "").expect("write b.rs");
+    let mut files = Vec::new();
+    collect_rs(&root, &root.join("crates"), &mut files);
+    let rels: Vec<String> = files.iter().map(|p| rel(&root, p)).collect();
+    assert_eq!(rels, vec!["crates/x/src/target/a.rs".to_string()]);
+    let _ = fs::remove_dir_all(&root);
 }
 
 /// 陽性対照（実ファイル）。3/4 の試験は DER の形を使うので、走査器が当てられることを示す。
@@ -252,16 +299,20 @@ fn dpol14_classification_matches_scripts() {
 #[test]
 fn dpol14_observation_no_production_rs256_key_loading_yet() {
     let mut found = Vec::new();
+    let mut scanned_prod = 0usize;
     for (path, src) in all_sources() {
         let in_prod = PROD_DIRS
             .iter()
             .any(|d| path.starts_with(&format!("crates/{d}/")));
         if in_prod {
+            scanned_prod += 1;
             for n in find_ident(&src, PEM_IDENT) {
                 found.push(format!("{path}:{n}"));
             }
         }
     }
+    // 空振りで通さない: 本番のソースを 1 件以上走査している
+    assert!(scanned_prod > 0, "no production sources scanned");
     assert!(
         found.is_empty(),
         "RS256 key loading appeared in production code ({}). A human must verify DPOL-14 / TASK-667 (4/4) (PKCS#8 PEM passed to from_rsa_pem) and then update this observation. See TASK-347.",

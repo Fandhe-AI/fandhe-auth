@@ -14,7 +14,7 @@
   - `TASK-500`: 陽性対照、つまり検出力の確認（`AAUD-30`・`AAUD-31`）
   - `TASK-511`: `SECR-11` の property test（`prop_debug`）と fuzz
   - `TASK-667` (3/4): `DPOL-14` の試験（`tests/dpol14_rsa_pkcs8.rs`）。引き取り先は RS256 の署名の実装を置く本番の crate とその TASK で、spec 上の番号は未定（置き場は人が確定する）。
-  - `TASK-667` (4/4): `tests/dpol14_pem_form.rs`。`crates/` に `from_rsa_der` が無いことの走査（ガード）と、本番に `from_rsa_pem` が現れたら人の確認を促す観測。本番に RS256 の鍵の読み込みはまだ無く、PEM の形を使う確認は未検証。引き取りは `TASK-347`（#439）と読んだ（書き手の読みで、人が確定する）
+  - `TASK-667` (4/4): `tests/dpol14_pem_form.rs`。`crates/` に `from_rsa_der` が無いことの走査（ガード）と、本番に `from_rsa_pem` という名前が現れたら人の確認を促す観測（`jsonwebtoken` を経ない RS256 の鍵の読み込み〔`aws-lc-rs` の直接の呼び出しなど〕は拾わない）。本番に RS256 の鍵の読み込みはまだ無く、PEM の形を使う確認は未検証。引き取りは `TASK-347`（#439）と読んだ（書き手の読みで、人が確定する）
   - `SECR-29` の例外: この crate の試験の型（`prop_debug` の入力の型・`SECR-23` の試験の捕獲の型）は、crate を消すまで `SECR-10`・`SECR-29` の一覧の対象外（`D-2026-11-20-14` の (4)(e)）。
     条件は `.claude/rules/secret-values.md` の例外の箇条に従う: 秘密値の型を包まない。`prop_debug` の `Input` は `Debug` が固定の文字列である間。捕獲の型 5 つは `Debug` を実装しない間。条件を外れた型は一覧に戻す
   - `TASK-518`: `log` crate を経由した記録も本番の `SECR-23` の試験で捕まえる（`D-2026-11-20-14` の (4)(f)。この crate は直さない）
