@@ -134,6 +134,10 @@ impl Upstream {
 /// 解放済みの停止点を通り抜ける接続は、到達にも離れた理由にも数えない（ORST-17）。
 /// 離れた理由は直近の値ではなく、転送器へ渡してから一度でも期限切れがあれば `Expired` と読む
 /// （先の期限切れを、後の保持の `Released`・`Stopped` で隠さない。ORST-17・AUDB-6）。
+///
+/// 受理の同期点（[`UpstreamStall::with_upstream_accept_sync`]）の 3 項目（受理の時刻・入った印・出口）も、転送器へ渡すときに戻し、
+/// 拒否された渡し（使用中・解放済み）では消さない。ただし出口（[`AcceptSyncExit`]）は直近の 1 件だけを持つ。1 つの束縛の中で
+/// 同期点を複数回通ると、先の `Expired` を後の出口が上書きして隠し得る（複数の接続を通す試験は未対応。#6170 で限界として記録）。
 #[derive(Clone, Default)]
 pub struct UpstreamStall {
     inner: Arc<StallInner>,
@@ -374,6 +378,7 @@ impl UpstreamStall {
     /// 転送器に渡す時に呼ぶ。解放済み、または使用中（別の転送器に束縛済み）なら `None`（渡せない。
     /// このとき状態は一切変えない）。そうでなければ、前の使用の到達・離れた理由・期限切れの印を戻し、今回の到達だけを
     /// `wait_entered` が待てるようにして束縛を返す（ORST-17・AUDB-6）。確認と設定は同じロックの下で行う。
+    /// 受理の同期点の受理の時刻・入った印・出口も戻す（拒否のときは戻さない）。
     fn rebind(&self) -> Option<StallBinding> {
         let mut g = self
             .inner
@@ -2167,6 +2172,27 @@ mod tests {
             stall.rebind().is_some(),
             "free after the binding is dropped"
         );
+    }
+
+    /// 拒否された `rebind` は、受理の同期点の 3 項目（入った印・出口・受理の時刻）も消さない（ORST-17・AUDB-6。#6170）。
+    #[test]
+    fn rejected_rebind_keeps_accept_sync_state() {
+        let s = UpstreamStall::with_upstream_accept_sync();
+        let b = s.rebind().expect("first bind");
+        s.notify_upstream_accepted();
+        s.hold_until_accepted_for(&AtomicBool::new(false), Duration::from_millis(50));
+        assert!(s.wait_accept_sync_entered(Duration::from_millis(1)));
+        assert_eq!(s.accept_sync_exit(), Some(AcceptSyncExit::Accepted));
+        let accepted_at = s.inner.state.lock().unwrap().accepted_at;
+        assert!(accepted_at.is_some());
+        assert!(s.rebind().is_none(), "in use");
+        assert!(
+            s.wait_accept_sync_entered(Duration::from_millis(1)),
+            "entered mark kept"
+        );
+        assert_eq!(s.accept_sync_exit(), Some(AcceptSyncExit::Accepted));
+        assert_eq!(s.inner.state.lock().unwrap().accepted_at, accepted_at);
+        drop(b);
     }
 
     /// 同時の `rebind` は高々 1 つだけ通る（確認と設定は同じロック。確率的な試験）。
