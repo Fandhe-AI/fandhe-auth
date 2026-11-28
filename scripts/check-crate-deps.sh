@@ -10,6 +10,8 @@
 # TODO(TASK-714): 禁止の表の充足（#5159〜#5161）と CI への搭載（#5164）
 # TODO(TASK-663): RP 向け crate・共有型・画面の crate の DB 非依存（DPOL-7）の検査を足す
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
@@ -76,6 +78,7 @@ members_out="$(cargo tree "${TREE_ARGS[@]}" --workspace --depth 0)"
 members=()
 while IFS= read -r line; do
   [ -n "${line}" ] && members+=("${line%% *}")
+# here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6173）。
 done <<<"${members_out}"
 
 if [ "${#members[@]}" -eq 0 ]; then
@@ -97,6 +100,7 @@ for member in "${members[@]}"; do
   prod_deps=" "
   while IFS= read -r pline; do
     [ -n "${pline}" ] && prod_deps="${prod_deps}${pline%% *} "
+  # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6173）。
   done <<<"${prod_out}"
   while IFS= read -r line; do
     [ -n "${line}" ] || continue
@@ -125,6 +129,7 @@ for member in "${members[@]}"; do
       log "error: forbidden dependency: ${member} -> ${dep}"
       violations=$((violations + 1))
     fi
+  # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6173）。
   done <<<"${deps_out}"
 done
 

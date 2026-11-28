@@ -9,6 +9,8 @@
 #
 # 変数・関数は source した側の part が参照するため、単独で未使用に見える定義には、宣言ごとに理由付きの disable を置く。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./test-hooks-core.sh
 source "${HOOKS_DIR}/test-hooks-core.sh"
@@ -242,6 +244,7 @@ check_scan() {
       fail "secret-scan: ${desc}" "secret value leaked to output"
       return 0
     fi
+  # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は試験の中で実行時に組み立てた秘密値の形の例示値（実際の秘密値ではない）。SECR-23 の該当の判定は人が行う（#6173）。
   done <<< "${leak_needles}"
   pass "secret-scan: ${desc}"
 }

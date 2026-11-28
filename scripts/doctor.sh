@@ -2,6 +2,8 @@
 # 開発環境の診断のみを行う。導入・更新・修復は一切しない。
 # 必須ツールが欠けていれば非 0 で終了し、次の行動は呼び出し元（人・`make doctor`）が決める。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"

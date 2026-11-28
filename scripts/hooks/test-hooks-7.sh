@@ -738,4 +738,35 @@ audit_case "error: no-fetch stage with an untracked advisory exits 2" 2
 audit_has "record: reason (has changes)" "has changes"
 audit_stage=fetch
 
+# ---- scripts/*.sh の DIR の解決は CDPATH に左右されない（#6173）
+# `./` を付けない相対パスで起動する（付けると CDPATH が効かず偽の合格になる）。reject_args（2）まで届けば lib.sh は読めている。
+cdpath_root="${HOOKS_DIR}/../.."
+for cdpath_s in check-crate-deps check dev-pg-check doctor e2e-chrome e2e-firefox help it-db-ci it-db lint setup hooks/test-hooks; do
+  cdpath_rc=0
+  cdpath_out="$(cd "${cdpath_root}" && CDPATH=. "${HOOK_BASH}" "scripts/${cdpath_s}.sh" --cdpath-probe 2>&1)" || cdpath_rc=$?
+  if [ "${cdpath_rc}" -eq 2 ] && ! printf '%s' "${cdpath_out}" | grep -q 'No such file or directory'; then
+    pass "cdpath: ${cdpath_s}.sh resolves DIR under CDPATH=."
+  else
+    fail "cdpath: ${cdpath_s}.sh resolves DIR under CDPATH=." "expected exit 2 without a source failure, got ${cdpath_rc}" "output: ${cdpath_out}"
+  fi
+done
+cdpath_rc=0
+cdpath_out="$(cd "${cdpath_root}" && RUSTUP_DIST_SERVER='' CDPATH=. "${HOOK_BASH}" scripts/install-msrv.sh 2>&1)" || cdpath_rc=$?
+if [ "${cdpath_rc}" -eq 2 ] && ! printf '%s' "${cdpath_out}" | grep -q 'No such file or directory'; then
+  pass "cdpath: install-msrv.sh resolves DIR under CDPATH=."
+else
+  fail "cdpath: install-msrv.sh resolves DIR under CDPATH=." "expected exit 2, got ${cdpath_rc}" "output: ${cdpath_out}"
+fi
+# 陰性対照: 修正前の help.sh は CDPATH=. で lib.sh を読めず 1 で落ちる（試験が CDPATH を効かせている証拠）
+mkdir -p "${work_dir}/cdpath-old/scripts"
+cp "${cdpath_root}/scripts/lib.sh" "${work_dir}/cdpath-old/scripts/lib.sh"
+sed '/^unset CDPATH$/d' "${cdpath_root}/scripts/help.sh" > "${work_dir}/cdpath-old/scripts/help.sh"
+cdpath_rc=0
+cdpath_out="$(cd "${work_dir}/cdpath-old" && CDPATH=. "${HOOK_BASH}" scripts/help.sh --cdpath-probe 2>&1)" || cdpath_rc=$?
+if [ "${cdpath_rc}" -eq 1 ] && printf '%s' "${cdpath_out}" | grep -q 'No such file or directory'; then
+  pass "cdpath: negative control (without unset CDPATH the source fails)"
+else
+  fail "cdpath: negative control (without unset CDPATH the source fails)" "expected exit 1 with a source failure, got ${cdpath_rc}" "output: ${cdpath_out}"
+fi
+
 finish "part 7"

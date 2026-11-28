@@ -114,6 +114,7 @@ find_violations() {
     case "${seen}" in *$'\n'"${name}"$'\n'*) continue ;; esac
     seen="${seen}${name}"$'\n'
     echo "${name}|${cat}"
+  # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6173）。
   done <<<"$1"
 }
 
@@ -188,6 +189,7 @@ pkg_tree() {
   t="$(run_tree "${dir}" "${mode}" -p "${pkg}" ${FA[@]+"${FA[@]}"} "$@")" || exit 2
   while IFS= read -r line; do
     case "${line}" in "${pkg} v"[0-9]*) found=1 ;; esac
+  # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6173）。
   done <<<"${t}"
   if [ "${found}" -eq 0 ]; then
     log "error: root package line missing in tree (${pkg}); cannot inspect"
@@ -403,6 +405,7 @@ main() {
       n="$(printf '%s\n' "${viol}" | wc -l | tr -d ' ')"
       while IFS= read -r v; do
         log "violation: ${pkg} -> ${v%%|*} [${v#*|}]"
+      # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は find_violations の出力（crate 名と区分）で、秘密値は含まない見込み。SECR-23 の該当の判定は人が行う（#6173）。
       done <<<"${viol}"
     fi
     log "scan ${pkg}: ${n}"
