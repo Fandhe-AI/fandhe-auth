@@ -36,6 +36,7 @@ cat <<'EOF'
   e2e-chrome  scripts/e2e-chrome.sh          ハーネスの Chrome の E2E（chromedriver 必須・#[ignore] の試験を流す。CI 外）
   e2e-firefox scripts/e2e-firefox.sh         ハーネスの Firefox の E2E（geckodriver・Firefox 必須（記録のある組み合わせは Firefox 156〜158 + geckodriver 0.37.1。詳細は scripts/e2e-firefox.sh）・#[ignore] の試験を流す。CI 外）
   load-trial  scripts/load-trial.sh          計測・負荷のハーネスの小さな試し実行（Docker 不要・stub が相手・記録の本文を標準出力に出す・0 件は失敗。CI 外）
+  fault-trial scripts/fault-trial.sh         障害注入のハーネスの試し実行（Docker 不要・基準線と注入ありの 2 つの記録の本文を標準出力に出す・0 件は失敗。CI 外）
 
 CI 向けに直接実行するコマンド:
 
