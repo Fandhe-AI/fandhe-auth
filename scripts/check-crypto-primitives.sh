@@ -47,7 +47,7 @@ CONSTS='6a09e667|bb67ae85|3c6ef372|a54ff53a|510e527f|9b05688c|1f83d9ab|5be0cd19|
 # 語境界は BSD grep（macOS）が \b を解さないため、POSIX ERE の文字クラスで書く。
 BL='(^|[^[:alnum:]_])'
 BR='([^[:alnum:]_]|$)'
-ASM="${BL}(asm|global_asm|naked_asm)!|#\\[naked\\]|#\\[unsafe\\(naked\\)\\]|${BL}(core|std)::arch${BR}|${BL}(core|std)::\\{.*${BL}arch${BR}"
+ASM="${BL}(asm|global_asm|naked_asm)!|#\\[naked\\]|#\\[unsafe\\(naked\\)\\]|${BL}(core|std)::arch${BR}|${BL}(core|std)::\\{(.*[^[:alnum:]_])?arch${BR}"
 TRAITS='RngCore|CryptoRng|CryptoRngCore|SeedableRng|BlockCipher|BlockEncrypt|BlockDecrypt|StreamCipher|KeyInit|KeyIvInit|UniversalHash|Digest|DynDigest|FixedOutput|Mac|Signer|Verifier|PasswordHasher'
 C4RE="^[[:space:]]*(unsafe[[:space:]]+)?impl(<[^>]*>)?[[:space:]]+(::)?([A-Za-z0-9_]+::)*(${TRAITS})(<.*>)?[[:space:]]+for${BR}"
 WORDS='sha1|sha256|sha384|sha512|sha3|md5|hmac|hkdf|pbkdf2|argon2|scrypt|bcrypt|aes|chacha20|poly1305|ed25519|x25519|p256|p384|secp256k1|ecdsa|ecdh|rsa|keccak|blake2|blake3|siphash|xorshift|xoshiro|pcg32|lcg|mt19937|totp|hotp|gcm'
