@@ -232,7 +232,7 @@ if [ "${total}" -gt 0 ]; then
       parsed[got_lines]="${wc_size}"
     fi
     got_lines=$((got_lines + 1))
-  # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は wc -c の出力（staged の *.sh の大きさとファイル名）。SECR-23 の該当の判定は人が行う（#6173）。
+  # here-string（bash 5.1 未満、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルを使う）: 中身は wc -c の出力（staged の *.sh の大きさとファイル名）。SECR-23 の該当の判定は人が行う（#6203）。
   done <<< "${wc_out}"
   if [ "${numeric}" -eq 1 ] && [ "${got_lines}" -eq "${want_lines}" ]; then
     i=0

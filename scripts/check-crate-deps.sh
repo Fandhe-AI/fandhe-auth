@@ -78,7 +78,7 @@ members_out="$(cargo tree "${TREE_ARGS[@]}" --workspace --depth 0)"
 members=()
 while IFS= read -r line; do
   [ -n "${line}" ] && members+=("${line%% *}")
-# here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6173）。
+# here-string（bash 5.1 未満、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6203）。
 done <<<"${members_out}"
 
 if [ "${#members[@]}" -eq 0 ]; then
@@ -100,7 +100,7 @@ for member in "${members[@]}"; do
   prod_deps=" "
   while IFS= read -r pline; do
     [ -n "${pline}" ] && prod_deps="${prod_deps}${pline%% *} "
-  # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6173）。
+  # here-string（bash 5.1 未満、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6203）。
   done <<<"${prod_out}"
   while IFS= read -r line; do
     [ -n "${line}" ] || continue
@@ -129,7 +129,7 @@ for member in "${members[@]}"; do
       log "error: forbidden dependency: ${member} -> ${dep}"
       violations=$((violations + 1))
     fi
-  # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6173）。
+  # here-string（bash 5.1 未満、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルを使う）: 中身は cargo tree の stdout（crate 名・版・feature 名・path 依存のローカルの絶対パス）で、秘密値の登録簿の値は含まない見込み。SECR-23 の該当の判定は人が行う（#6203）。
   done <<<"${deps_out}"
 done
 

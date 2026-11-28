@@ -244,7 +244,7 @@ check_scan() {
       fail "secret-scan: ${desc}" "secret value leaked to output"
       return 0
     fi
-  # here-string（bash 3.2 等は TMPDIR の一時ファイルを使う）: 中身は試験の中で実行時に組み立てた秘密値の形の例示値（実際の秘密値ではない）。SECR-23 の該当の判定は人が行う（#6173）。
+  # here-string（bash 5.1 未満、または入力がパイプの容量を超えるときは TMPDIR の一時ファイルを使う）: 中身は試験の中で実行時に組み立てた秘密値の形の例示値（実際の秘密値ではない）。SECR-23 の該当の判定は人が行う（#6203）。
   done <<< "${leak_needles}"
   pass "secret-scan: ${desc}"
 }

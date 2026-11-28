@@ -739,28 +739,46 @@ audit_has "record: reason (has changes)" "has changes"
 audit_stage=fetch
 
 # ---- scripts/*.sh の DIR の解決は CDPATH に左右されない（#6173）
-# `./` を付けない相対パスで起動する（付けると CDPATH が効かず偽の合格になる）。reject_args（2）まで届けば lib.sh は読めている。
-cdpath_root="${HOOKS_DIR}/../.."
-for cdpath_s in check-crate-deps check dev-pg-check doctor e2e-chrome e2e-firefox help it-db-ci it-db lint setup hooks/test-hooks; do
-  cdpath_rc=0
-  cdpath_out="$(cd "${cdpath_root}" && CDPATH=. "${HOOK_BASH}" "scripts/${cdpath_s}.sh" --cdpath-probe 2>&1)" || cdpath_rc=$?
-  if [ "${cdpath_rc}" -eq 2 ] && ! printf '%s' "${cdpath_out}" | grep -q 'No such file or directory'; then
-    pass "cdpath: ${cdpath_s}.sh resolves DIR under CDPATH=."
+# 実物の repo のルートでは起動しない。停止の検査（引数・環境変数の拒否）が壊れたとき、part 7 の再帰・.env の作成・docker・rustup の
+# 起動が実物の repo に及ばないよう、scripts/ の複製（work_dir 内。パスで解決するため git は要らない）の上で起動する。
+cdpath_src="${HOOKS_DIR}/../.."
+cdpath_root="${work_dir}/cdpath-repo"
+mkdir -p "${cdpath_root}"
+cp -R "${cdpath_src}/scripts" "${cdpath_root}/scripts"
+# `./` を付けない相対パスで起動する（付けると CDPATH が効かず偽の合格になる）。
+# 合格は「終了コード 2」と「そのスクリプトの停止の文言が出る」の両方（到達先の取り違え・source の失敗を合格にしない）。
+cdpath_case() { # name expected-text env-and-command...
+  local name="$1" want="$2" rc=0 out
+  shift 2
+  out="$(cd "${cdpath_root}" && env CDPATH=. "$@" 2>&1)" || rc=$?
+  if [ "${rc}" -eq 2 ] && printf '%s' "${out}" | grep -qF -- "${want}" && ! printf '%s' "${out}" | grep -q 'No such file or directory'; then
+    pass "cdpath: ${name} resolves DIR under CDPATH=."
   else
-    fail "cdpath: ${cdpath_s}.sh resolves DIR under CDPATH=." "expected exit 2 without a source failure, got ${cdpath_rc}" "output: ${cdpath_out}"
+    fail "cdpath: ${name} resolves DIR under CDPATH=." "expected exit 2 with '${want}' and no source failure, got ${rc}" "output: ${out}"
+  fi
+}
+for cdpath_s in check-crate-deps check dev-pg-check doctor e2e-chrome e2e-firefox help it-db-ci it-db lint setup hooks/test-hooks; do
+  cdpath_case "${cdpath_s}.sh" "usage: " "${HOOK_BASH}" "scripts/${cdpath_s}.sh" --cdpath-probe
+done
+# msrv.sh は引数 2 つで require_cmd より前に usage で止まる
+cdpath_case "msrv.sh" "usage: msrv.sh" "${HOOK_BASH}" scripts/msrv.sh --cdpath-probe --cdpath-probe
+# install-msrv.sh は RUSTUP_DIST_SERVER が（空でも）設定されていると rustup の前に止まる
+cdpath_case "install-msrv.sh" "must not be set" RUSTUP_DIST_SERVER= "${HOOK_BASH}" scripts/install-msrv.sh
+# test-hooks-core.sh・test-hooks-lib.sh は part から source される。相対パスで source し、HOOKS_DIR が 1 行の絶対パスに解決されることを確かめる
+cdpath_hooks="$(cd "${cdpath_root}/scripts/hooks" && pwd)"
+for cdpath_s in core lib; do
+  cdpath_rc=0
+  cdpath_out="$(cd "${cdpath_root}" && CDPATH=. "${HOOK_BASH}" -c "source scripts/hooks/test-hooks-${cdpath_s}.sh && printf '%s' \"\${HOOKS_DIR}\"" 2>&1)" || cdpath_rc=$?
+  if [ "${cdpath_rc}" -eq 0 ] && [ "${cdpath_out}" = "${cdpath_hooks}" ]; then
+    pass "cdpath: test-hooks-${cdpath_s}.sh resolves HOOKS_DIR under CDPATH=."
+  else
+    fail "cdpath: test-hooks-${cdpath_s}.sh resolves HOOKS_DIR under CDPATH=." "expected exit 0 and HOOKS_DIR=${cdpath_hooks}, got ${cdpath_rc}" "output: ${cdpath_out}"
   fi
 done
-cdpath_rc=0
-cdpath_out="$(cd "${cdpath_root}" && RUSTUP_DIST_SERVER='' CDPATH=. "${HOOK_BASH}" scripts/install-msrv.sh 2>&1)" || cdpath_rc=$?
-if [ "${cdpath_rc}" -eq 2 ] && ! printf '%s' "${cdpath_out}" | grep -q 'No such file or directory'; then
-  pass "cdpath: install-msrv.sh resolves DIR under CDPATH=."
-else
-  fail "cdpath: install-msrv.sh resolves DIR under CDPATH=." "expected exit 2, got ${cdpath_rc}" "output: ${cdpath_out}"
-fi
 # 陰性対照: 修正前の help.sh は CDPATH=. で lib.sh を読めず 1 で落ちる（試験が CDPATH を効かせている証拠）
 mkdir -p "${work_dir}/cdpath-old/scripts"
-cp "${cdpath_root}/scripts/lib.sh" "${work_dir}/cdpath-old/scripts/lib.sh"
-sed '/^unset CDPATH$/d' "${cdpath_root}/scripts/help.sh" > "${work_dir}/cdpath-old/scripts/help.sh"
+cp "${cdpath_src}/scripts/lib.sh" "${work_dir}/cdpath-old/scripts/lib.sh"
+sed '/^unset CDPATH$/d' "${cdpath_src}/scripts/help.sh" > "${work_dir}/cdpath-old/scripts/help.sh"
 cdpath_rc=0
 cdpath_out="$(cd "${work_dir}/cdpath-old" && CDPATH=. "${HOOK_BASH}" scripts/help.sh --cdpath-probe 2>&1)" || cdpath_rc=$?
 if [ "${cdpath_rc}" -eq 1 ] && printf '%s' "${cdpath_out}" | grep -q 'No such file or directory'; then
