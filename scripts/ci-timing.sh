@@ -11,6 +11,8 @@
 #   scripts/ci-timing.sh rows [--workflow <file>] [--event <event>] [FILE]   jobs API の JSON（{"jobs":[...]}）を行の TSV にする（オフライン）
 #   scripts/ci-timing.sh summary [FILE]                                       行の TSV を集計して Markdown で出す
 # 終了コード: 0 = 成功、2 = 誤用、または取得・検査ができない（0 件の取得も 2。空の記録を成功にしない）。
+#   report は 0 件の系統も「0 runs」と記録して最後まで出し、全系統が空、または ci.yml・ai-review.yml の系統が空なら 2 を返す。
+#   0 件を許すのは定期系（scheduled.yml・update-external.yml）だけ。
 # 出す列は許可リストに限る（runner の名前・label・step・URL・ブランチ名は出さない。SECR-23。実機の名前を書かない規約）。
 # 認証は gh の既存の資格情報をそのまま使う。トークンを読まず・出さず・環境変数へ書かない。宛先は gh の既定の GitHub だけ。
 set -euo pipefail
@@ -247,7 +249,7 @@ END {
 }
 
 cmd_report() {
-  local spec wf ev br rows_file rc
+  local spec wf ev br rows_file rc empty_required=0 nonempty=0
   [ "$#" -eq 0 ] || usage
   require_cmd gh || exit 2
   require_cmd jq || exit 2
@@ -277,13 +279,25 @@ cmd_report() {
     fetch_rows > "${rows_file}" || rc=$?
     if [ "${rc}" -eq 3 ]; then
       echo "0 runs"
+      # 0 件を許すのは、まだ実行の無い定期系（scheduled.yml・update-external.yml）だけ。ci.yml・ai-review.yml の 0 件は失敗にする。
+      case "${wf}" in
+        scheduled.yml | update-external.yml) ;;
+        *) empty_required=$((empty_required + 1)) ;;
+      esac
     elif [ "${rc}" -ne 0 ]; then
       die "fetch failed for ${wf} / ${ev}"
     else
       OPT_FILE="${rows_file}"
       summary_from
+      nonempty=$((nonempty + 1))
     fi
   done
+  if [ "${nonempty}" -eq 0 ]; then
+    die "no completed runs in any series"
+  fi
+  if [ "${empty_required}" -gt 0 ]; then
+    die "no completed runs for ${empty_required} required series (ci.yml / ai-review.yml)"
+  fi
 }
 
 [ "$#" -ge 1 ] || usage

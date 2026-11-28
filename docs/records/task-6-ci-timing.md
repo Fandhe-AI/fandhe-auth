@@ -48,6 +48,7 @@ scripts/ci-timing.sh fetch --workflow ci.yml --event push --branch main --limit 
 ```
 
 0 件の取得・取得の失敗・形式の不一致は終了コード 2 で、空の記録を成功にしない。
+`report` は 0 件の系統も `0 runs` と記録して最後まで出し、全系統が空、または `ci.yml`・`ai-review.yml` の系統が空なら 2 を返す。0 件を許すのは定期系（`scheduled.yml`・`update-external.yml`）だけ。
 
 ## 4. 初回の記録
 
