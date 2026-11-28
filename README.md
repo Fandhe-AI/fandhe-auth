@@ -199,9 +199,9 @@ Linux・macOS（標準の bash 3.2 を含む）について実行します。`sc
 | `scheduled.yml` | 定期の実行の系統の枠（現状は手動起動 `workflow_dispatch` のみ。`pull_request`・`push` は持たない）。schedule の起動は、例外の見直しの後に TASK-681 で追加する予定。頻度の上限は規約の「日次以下」のままで、候補は日次、時刻とあわせて暫定。決めるのは TASK-681。検査は未結線で、緑でも DPOL-35 を満たしたことにはならない（TASK-681） |
 | `update-external.yml` | エージェントスキル（`skills-lock.json`）と submodule（`.gitmodules`）の日次自動追従 PR。secrets は org の `SUBMODULE_PAT` を使う（`SKILLS_PAT` 未登録時は共通側が `SUBMODULE_PAT` へフォールバック）。作成する PR には `dependencies` / `automated` ラベルが付く |
 
-- ruleset の required status checks には `ci-complete`（と ai-review の `codex / *`）を登録する。
+- ruleset の required status checks には `ci-complete`・ai-review の `codex / *`・`ci.yml` の PR の検査のジョブを個別に登録する（規則と未定の点は `.claude/rules/github-actions.md` の「必須チェックと集約ジョブ」の節）。
   ruleset・マージ設定の導入は `setup-repo-guards` スキルの手順に従う
-- `ci.yml` にジョブを追加したら `ci-complete` の `needs` にも必ず追加する（`scheduled.yml` の定期ジョブの扱いは `.claude/rules/github-actions.md` の「PR ごとの実行と定期の実行の振り分け」の節を参照）
+- `ci.yml` に PR の検査のジョブを追加したら `ci-complete` の `needs` と required status checks の両方に加える（`scheduled.yml` の定期ジョブの扱いは `.claude/rules/github-actions.md` の「PR ごとの実行と定期の実行の振り分け」の節を参照）
 - runner 方針（public は GitHub ホステッド、ai-review の review ジョブのみ self-hosted の例外）・発火条件・
   ジョブ追加時のチェックリスト・キャッシュ方針は `.claude/rules/github-actions.md` に定義している
 
@@ -220,7 +220,7 @@ API キー等は値を直接書かず `"${EXAMPLE_API_KEY:-}"` のように環�
 
 1. **言語固有のコマンド**: `scripts/` に処理（例: `scripts/verify.sh`）を追加し、`Makefile` に 1 行で呼ぶターゲットと `## ` コメントを足し、`scripts/help.sh` の一覧も更新する（中身の無いターゲット `@true` 等は置かない。手順と規約は `.claude/rules/makefile.md`）
 2. **`make check` の拡張**: `scripts/check.sh` に fmt チェック・lint 等を追記する（自動修正は別ターゲットに分ける）
-3. **hooks の追加**: `.claude/rules/git-hooks.md` の時間予算と判断手順に従う。staged 限定で 1 秒未満の検査のみ `lefthook.yml` に job を追加し（実体が長くなる場合は `scripts/hooks/` へ切り出す）、テスト・ビルド等は `ci.yml` にジョブを追加して `ci-complete` の `needs` にも加える
+3. **hooks の追加**: `.claude/rules/git-hooks.md` の時間予算と判断手順に従う。staged 限定で 1 秒未満の検査のみ `lefthook.yml` に job を追加し（実体が長くなる場合は `scripts/hooks/` へ切り出す）、テスト・ビルド等は `ci.yml` にジョブを追加して `ci-complete` の `needs` と required status checks にも加える
 4. **EditorConfig**: 言語ごとのセクション（例: `[*.rs] indent_size = 4`）を `.editorconfig` に追加する
 5. **`.gitignore`**: ビルド成果物（`/target`・`/dist`・`node_modules/` 等）を追加する
 6. **Rust の導入**: `.claude/rules/rust-build-profile.md` に従い、ルートの `Cargo.toml` に依存クレートの debuginfo を行番号のみにする dev プロファイルを入れ、README のセットアップ節に `cargo sweep` による `target/` の掃除手順を書く。ビルド設定（`[profile]`・`RUSTFLAGS`・`CARGO_PROFILE_*` 等）を変えるときは CI キャッシュのキーへの影響を確認する（`.claude/rules/github-actions.md` の「キャッシュ方針」）
