@@ -26,6 +26,7 @@ CI 独自のロジックは持たず、ローカルと同じ `make` / `scripts/`
 | `trust-root-secret-scan.yml` | `trusted secret scan (tracked files)` | `pull_request`（`branches` を一致しにくい名前に絞っており、通常は発火しない。組織の ruleset の「Require workflows to pass」から呼ばれたときに動く。発火の前提は「必須チェックと集約ジョブ」の節の例外を参照） | `ubuntu-latest` |
 | `scheduled.yml` | `scheduled frame (no checks wired; TASK-681)` | `workflow_dispatch` のみ（`schedule` は持たない。足すときに例外を見直す（TASK-681）。`pull_request`・`push` は持たない） | `ubuntu-latest` |
 | `update-external.yml` | `update-external / *`（Fandhe-AI/actions の reusable workflow） | `schedule`（毎日 00:00 UTC）・`workflow_dispatch` | `ubuntu-latest`（`runner-json` で指定） |
+| `main-red-notify.yml` | `notify`（Fandhe-AI/actions の composite action `main-red-issue` を SHA 固定で呼ぶ。check-run は main の commit に付き、PR の HEAD には付かない） | `workflow_run`（`CI` の `completed`・`branches: [main]`。ジョブの `if` で main への push の run に限る） | `ubuntu-latest` |
 
 `ci.yml` の Rust のジョブ（`build-test`・`lint`・`it-db-ci`）は、toolchain を MSRV の版で入れて流す（利用者の指示、2026-11-20）。
 入れるのは `scripts/install-msrv.sh` で、版は `scripts/msrv.sh` が読む（ルートの `[workspace.package].rust-version` を TOML の構造どおりに読み、全 workspace メンバーの `rust-version` と一致するときだけ採る。食い違いは終了コード 2）。
@@ -60,6 +61,46 @@ MSRV の値そのものは `.claude/rules/coding-rust.md` の「unsafe・MSRV・
 - 失敗の通知は GitHub の既定だけで、運用の警報には結線していない。
 - schedule は default ブランチ（main）の定義で動く。活動の無い public の repo では GitHub が止めることがある。
 - cron の時刻と頻度は暫定で、人が決める（TASK-681）。頻度の上限は下の「schedule は日次以下」の項の規則のままで、`scheduled.yml` に足すときの候補（日次）だけが暫定。
+
+## main の赤の通知（`main-red-notify.yml`）
+
+`ci.yml` の `main` への push の**最新の run** が success 以外で終わったら Issue を 1 件にし、success に戻れば close する
+（Fandhe-AI/actions の `main-red-issue`。仕様は上流の `main-red-issue/README.md`）。PR の検査ではなく、マージは止めない。
+
+- 監視する workflow: `ci.yml`（`CI`、workflow ID `399642103`）だけ。`ai-review.yml`・`trust-root-secret-scan.yml` は
+  `pull_request` だけで動き、`scheduled.yml`・`update-external.yml` は `main` への push で動かないため対象外
+- `ci.yml` に置かない理由: 起動が `workflow_run`（`CI` の完了）で、`ci.yml` の `pull_request`・`push` と違うトリガーである
+  （チェックリスト 1 の「同じトリガーなら `ci.yml` に集約」に当たらない）。`main-red-issue` は `workflow_run` から呼ばれたときだけ動く
+  （それ以外は API を呼ばずに失敗する）。`ci.yml` のジョブにすると、PR の HEAD に必須チェックに無い check-run が増える
+- `ci-complete` の `needs` と required status checks に入れない理由（チェックリスト 2 の例外）: 別の workflow のジョブは
+  `needs` で参照できない（GitHub Actions の仕様）。check-run は `main` の commit に付き、PR の HEAD には報告されないため、
+  required に登録すると報告されないこと自体がマージを止める
+- 権限: トップ `{}`、ジョブに `actions: read`・`contents: read`・`issues: write` だけ（`main-red-issue` の前提条件の最小）。
+  `contents`・`pull-requests` への書き込みと secrets は与えない
+- 特権トリガーの扱い: `workflow_run` は `main` の版のこのファイルで動く。ジョブの `if` で workflow ID・`event == 'push'`・
+  `head_branch == 'main'`・`head_repository` が同じリポジトリの 4 つを確かめ、PR（fork を含む）の run の完了では動かさない。
+  checkout をせず、PR のコード・成果物を取り込まない（観点 1 の「特権トリガーを PR のコードと組み合わせる」に当たらない）
+- 参照: composite action のため、チェックリスト 9 の「公式・サードパーティ action」と同じく commit SHA で固定し、行末に `# latest` と注記する
+  （`@latest` が許されるのは reusable workflow だけ）。固定した commit と確かめた日はファイルの冒頭のコメントに書く。上げるときも同じく読み直して書き換える
+- 信頼の境界: `main` のスコープで動くが、キャッシュの復元・保存をしない（「信頼の境界と汚染を疑ったとき」の境界に入らない）
+- concurrency は付けない（待機枠の置き換えで新しい run の完了通知が取り消され、取りこぼすため）
+- ID が変わったとき: `ci.yml` を作り直して workflow ID が変わったら、ジョブの `if` と `workflow-id` を両方書き換える。
+  `ci.yml` の `name:` を変えたら `on.workflow_run.workflows` と `workflow-name` も同時に直す（名前で購読しているため、直さないと黙って起動しなくなる）
+- 監視する `ci.yml` の `on.push` は `branches` で絞り、`tags` を持たせない（`main-red-issue` の前提）
+- Issue: ラベル `main-red:<workflow_id>` が付き、作成者は `github-actions[bot]`。最新の run が success になると自動で close される。
+  赤のまま手で close しない（管理対象から外れ、次の赤で新しく起票される）
+- 例外: `main-red-notify.yml` を `ci.yml` の外の workflow に置き、`ci-complete` の `needs` にも required にも入れない
+  （チェックリスト 1・2 の例外）。この例外は利用者が承認した（2026-11-28。承認は人が行う。ACPT-7）。
+  - 承認の記録
+    - 根拠: 組織の CI 高速化の展開（各 repo に main の赤の通知 `main-red-notify` を足す）を、利用者が 2026-11-28 に承認した。
+      対象の一覧にこの repo の通知が入っていた。上の「`ci.yml` に置かない理由」「`needs` と required に入れない理由」のとおり、
+      通知は `workflow_run` からだけ動き、PR を検査しないため、`ci.yml` に集約できず、`ci-complete` で束ねても PR の判定に使われない
+    - 適用範囲: `main-red-notify.yml` の 1 本だけ（`ci.yml` の `main` への push の監視・上の権限・`workflow_run` のトリガー）。
+      監視する workflow・権限・トリガーを広げる変更と、ほかの workflow には広げない
+    - 承認者: 利用者
+    - 承認日: 2026-11-28
+    - 見直し: 共通部品（`main-red-issue`）が `workflow_run` 以外から動くようになったとき（`ci.yml` のジョブに置けるかを見直す）、
+      監視する workflow・権限・トリガーを変えるとき、または 2027-05-28 の時点で再確認する。見直して承認が記録されるまで範囲を広げない
 
 ## 依存の検査の拡張点（`deps-audit`。TASK-6 6/10）
 
@@ -276,11 +317,13 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
 1. 新規ワークフローを作らず、まず既存の `ci.yml` へのジョブ追加で済むか検討する（同じトリガーなら `ci.yml` に集約）
     - 例外: `scheduled.yml`。トリガーが `schedule`・`workflow_dispatch` の定期の系統は別にする（「PR ごとの実行と定期の実行の振り分け」。例外は利用者が承認済み。2026-11-26。範囲は `workflow_dispatch` だけで動く間。`schedule` を足すときは見直す〔TASK-681〕）
     - 例外: `trust-root-secret-scan.yml`。(a) 先行配置の期間と、(b) 組織の ruleset が workflow のファイルを固定して要求する間は、`ci.yml` に入れられない（要求されうる）（「必須チェックと集約ジョブ」の例外）
+    - 例外: `main-red-notify.yml`。トリガーが `workflow_run` の通知は別にする（「main の赤の通知」の節。例外は利用者が承認済み。2026-11-28。範囲は `main-red-notify.yml` の 1 本だけ。見直しは同じ節）
 2. 追加したジョブを `ci-complete` の `needs` に必ず加える（漏れると未検査のままマージ可能になる）。条件付きで skip
     するジョブは、許容する条件を `ci-complete` の jq 式に明示する
     - `ci.yml` の PR の検査のジョブは、必須チェックにも個別に登録する（2026-11-28 の変更。「必須チェックと集約ジョブ」の節）。登録は ruleset の変更で、上の承認の範囲（G0 で止まった、`ci.yml` に PR の検査のジョブを足す PR）を除き、利用者の指示を待つ。登録するまで PR の自動マージの G0 で止まりうる
     - 例外: `scheduled.yml` は `needs` に入れない（PR を検査しない。利用者が承認済み。2026-11-26。範囲は `workflow_dispatch` だけで動く間）
     - 例外: `trust-root-secret-scan.yml` は `needs` に入れない。(a)・(b) の期間の間だけ（「必須チェックと集約ジョブ」の節の例外）
+    - 例外: `main-red-notify.yml` は `needs` にも required にも入れない（PR を検査しない通知。利用者が承認済み。2026-11-28。範囲は `main-red-notify.yml` の 1 本だけ。理由・見直しは「main の赤の通知」の節）
 3. 処理は `make <target>` / `scripts/*.sh` を呼ぶ。CI 側に複数行のロジックを書かない
     （ツール導入のように CI 固有のステップは例外。secret-scan ジョブの走査対象の取得も例外で、理由は「秘密情報の検査ジョブ」の節を参照）
     - 例外: `trust-root-secret-scan.yml` の検出器と走査対象の取得の step は workflow に置く。取得の前に検出器（`scripts/`）が無いため（「秘密情報の検査ジョブ」の節の `scripts/` に置かない理由と同じ趣旨）。取得後の走査は `scripts/secret-scan-ci.sh` を呼ぶ

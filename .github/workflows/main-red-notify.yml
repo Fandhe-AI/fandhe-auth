@@ -1,0 +1,66 @@
+# main の赤の通知。
+#
+# main への push で動く CI（ci.yml の `CI`）の完了ごとに Fandhe-AI/actions の main-red-issue を呼び、
+# CI の main への push の**最新の run** が success 以外なら Issue を 1 件にし、success に戻れば close する
+# （判定は起動元の run ではなく最新の run で行う。仕様は Fandhe-AI/actions の main-red-issue/README.md）。
+# success 以外は failure・cancelled・timed_out・skipped なども起票する（入力で抑止できない）。
+# CI の push の run は集約ジョブ `ci-complete` が `always()` で必ず動くため、run 全体が skipped にはならない。
+# 品質ゲートではないため ci-complete の needs にも required status checks にも入れない。
+# 規約上の位置づけ（ci.yml に置かない理由・needs に入れない理由）は .claude/rules/github-actions.md の
+# 「main の赤の通知（main-red-notify.yml）」の節。
+#
+# AGENTS.md 観点 1 との対応:
+# - 特権トリガーを PR のコードと組み合わせない（AGENTS.md の workflow_run・pull_request_target の項）:
+#   workflow_run は既定ブランチ（main）の版のこのファイルで動く。ジョブの if で、監視する workflow の ID・
+#   起動元が push・ブランチが main・同じリポジトリの 4 つをすべて満たすときだけ動かす（PR・fork の PR・
+#   fork の main という名前のブランチ・schedule・workflow_dispatch の run の完了では動かない）。checkout をせず、
+#   PR・起動元の run の成果物・コードを取り込まない。外部入力を run: に展開しない（run: を持たない）。
+# - 書き込み権限は最小（AGENTS.md の書き込み権限の過剰な付与の項）: トップは {}。ジョブは main-red-issue が
+#   要る 3 つだけ（actions: read = run の一覧、contents: read = ブランチの ref の読み取り、
+#   issues: write = Issue とラベルの作成・更新・close）。contents・pull-requests への書き込みは与えない。
+#   secrets は使わない（github.token のみ）。
+# - アクションの SHA 固定（AGENTS.md のアクションを SHA で固定していない項）: main-red-issue は reusable workflow
+#   ではなく composite action のため、@latest ではなく commit SHA で固定し、行末に `# latest` と注記する。
+#   固定した 6cf201edc8d5d43c53fb938757f96a2e5ca9b9f5 は、2026-11-28 に `git ls-remote` で読んだ
+#   Fandhe-AI/actions の refs/tags/latest と refs/heads/main の値（同じ commit）。入力は workflow-id（必須）・
+#   workflow-name・branch（既定 main）の 3 つで、Issue の操作に `gh` と github.token だけを使う。
+# - 信頼の境界（github-actions.md の「信頼の境界と汚染を疑ったとき」）: workflow_run は main のスコープで動くが、
+#   このジョブはキャッシュを復元も保存もしない。動くのは SHA で固定した上の action だけ。
+#
+# 監視する workflow の ID は `gh api repos/Fandhe-AI/fandhe-auth/actions/workflows/ci.yml --jq '.id, .name, .path'`
+# で読んだ値（399642103 = `CI`。2026-11-28）。if と workflow-id の両方に同じ値を書く（起動元の ID を渡すと、
+# 同じ名前の別の workflow も通るため）。ci.yml を作り直して ID が変わったら両方を書き換え、ci.yml の `name:` を
+# 変えたら `workflows:` と `workflow-name` も同時に直す（名前で購読しているため、直さないと黙って起動しなくなる）。
+# 監視する ci.yml の on.push は branches: [main] で絞り、tags を持たない（main-red-issue の前提）。
+#
+# concurrency は付けない（待機枠の置き換えで新しい run の完了通知が取り消され、取りこぼすため）。
+# runs-on は監視する ci.yml の push のジョブと同じ GitHub ホステッド（public のため。runner 方針）。
+
+name: main-red-notify
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  notify:
+    if: >-
+      github.event.workflow_run.workflow_id == 399642103 &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - uses: Fandhe-AI/actions/main-red-issue@6cf201edc8d5d43c53fb938757f96a2e5ca9b9f5 # latest
+        with:
+          workflow-id: '399642103'
+          workflow-name: CI
