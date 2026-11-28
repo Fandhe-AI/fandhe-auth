@@ -18,7 +18,9 @@
 //! （`Q-2026-10-30-4` の暫定の扱い）。PoC の絶対期限切れは `SESS-4`（`UISF-1`）の
 //! 確定の範囲に含む。24 時間・無操作の期限と新しい `sid` の経路は `SESS-21`（検討中）。
 //!
-//! 後続の sub-issue: 到達の条件の検査関数（#5787）、画面ごとの区分の一覧（#5788）、
+//! 到達の条件の検査関数 [`ScreenAccessRule::decide`] は #5787（2/8）で実装済み。
+//!
+//! 後続の sub-issue: 画面ごとの区分の一覧（#5788）、
 //! 登録の導線の規則（#5789）、導線の列挙と走査（#5790）、負の試験（#5791）、
 //! 契約テスト（#5792）、使い方の文書（#5793）。
 
@@ -57,7 +59,7 @@ pub enum SessionState {
 impl SessionState {
     /// 描画に進んでよい状態かを返す。`Valid` だけが `true`（`UISF-1`・`SESS-44`）。
     ///
-    /// 判定の関数（#5787）は「その他は描画」の腕を書かず、この関数を起点に組む。
+    /// 判定の関数 [`ScreenAccessRule::decide`] は「その他は描画」の腕を書かず、この関数を起点に組む。
     #[must_use]
     pub const fn is_valid(self) -> bool {
         matches!(self, Self::Valid)
@@ -74,6 +76,42 @@ pub enum ScreenAccessRule {
     RequiresSession,
     /// 利用者ごとに変わらない画面。セッションの状態を描画の条件にしない。
     SessionNotRequired,
+}
+
+impl ScreenAccessRule {
+    /// 規則と要求時の状態から、到達の判定の意味を返す（`UISF-1`・`SESS-44`）。
+    ///
+    /// - [`ScreenAccessRule::RequiresSession`]: [`SessionState::Valid`] のときだけ
+    ///   [`AccessDecision::Render`]、他の 4 状態は [`AccessDecision::RedirectToLogin`]。
+    /// - [`ScreenAccessRule::SessionNotRequired`]: 常に [`AccessDecision::Render`]。
+    ///
+    /// 同じ入力には同じ出力を返す純粋関数で、時刻・乱数・I/O を読まない（`DPOL-1`・`DPOL-3`）。
+    /// 判定を外す引数・設定は持たない（`DPOL-28`）。`SessionState` の知らない列挙子は
+    /// `is_valid()` が `false` になり、`RedirectToLogin` へ倒れる（fail-closed）。
+    ///
+    /// 返すのは判定の意味だけで、状態コード・`Location`・描画の実行は Hub が行う
+    /// （`ARUN-36`・`ASCR`）。状態の判別（Cookie の解析・DB の照会）はこの関数の外（`SESS-4`。
+    /// TODO(TASK-217)）。DB に届かない間は、この関数へ渡す前に 5 状態へ丸めない
+    /// （`AVLB-22`。TODO(TASK-551)）。`Expired` の 24 時間・無操作の期限は `SESS-21`（検討中）で、
+    /// 確定の範囲の外。
+    ///
+    /// `UISF-3` との関係（この段の範囲）: 返す値は `Render` と `RedirectToLogin` だけで、
+    /// 登録の入口へ送る結果を持たない。登録の入口は招待の受け取りだけという規則は #5789、
+    /// 他の導線が 0 件であることの列挙と走査は #5790、画面での確認は Hub の `ASCR-65` に残る。
+    /// `UISF-3` は検討中である。
+    #[must_use]
+    pub const fn decide(self, state: SessionState) -> AccessDecision {
+        match self {
+            Self::RequiresSession => {
+                if state.is_valid() {
+                    AccessDecision::Render
+                } else {
+                    AccessDecision::RedirectToLogin
+                }
+            }
+            Self::SessionNotRequired => AccessDecision::Render,
+        }
+    }
 }
 
 /// 到達の判定の意味（`UISF-1`）。
@@ -125,5 +163,102 @@ mod tests {
             ScreenAccessRule::SessionNotRequired
         );
         assert_ne!(AccessDecision::Render, AccessDecision::RedirectToLogin);
+    }
+
+    const ALL_STATES: [SessionState; 5] = [
+        SessionState::Valid,
+        SessionState::NoCookie,
+        SessionState::Revoked,
+        SessionState::Expired,
+        SessionState::Malformed,
+    ];
+
+    const ALL_RULES: [ScreenAccessRule; 2] = [
+        ScreenAccessRule::RequiresSession,
+        ScreenAccessRule::SessionNotRequired,
+    ];
+
+    // UISF-1: 認証の要る画面は Valid のときだけ描画する。
+    #[test]
+    fn uisf_1_requires_session_renders_only_when_valid() {
+        assert_eq!(
+            ScreenAccessRule::RequiresSession.decide(SessionState::Valid),
+            AccessDecision::Render
+        );
+    }
+
+    // SESS-44: 有効でない 4 状態の到達は拒否してログインの誘導へ送る。
+    #[test]
+    fn sess_44_requires_session_redirects_non_valid_states() {
+        for s in NON_VALID {
+            assert_eq!(
+                ScreenAccessRule::RequiresSession.decide(s),
+                AccessDecision::RedirectToLogin,
+                "{s:?}"
+            );
+        }
+    }
+
+    // UISF-1: セッション不要の画面は状態を条件にしない。
+    #[test]
+    fn uisf_1_session_not_required_renders_in_all_states() {
+        for s in ALL_STATES {
+            assert_eq!(
+                ScreenAccessRule::SessionNotRequired.decide(s),
+                AccessDecision::Render,
+                "{s:?}"
+            );
+        }
+    }
+
+    // UISF-1: 2 規則 x 5 状態の判定表が期待と全件一致する。
+    #[test]
+    fn uisf_1_decision_table_is_fixed() {
+        use AccessDecision::{RedirectToLogin, Render};
+        use ScreenAccessRule::{RequiresSession, SessionNotRequired};
+        use SessionState::{Expired, Malformed, NoCookie, Revoked, Valid};
+        let table = [
+            (RequiresSession, Valid, Render),
+            (RequiresSession, NoCookie, RedirectToLogin),
+            (RequiresSession, Revoked, RedirectToLogin),
+            (RequiresSession, Expired, RedirectToLogin),
+            (RequiresSession, Malformed, RedirectToLogin),
+            (SessionNotRequired, Valid, Render),
+            (SessionNotRequired, NoCookie, Render),
+            (SessionNotRequired, Revoked, Render),
+            (SessionNotRequired, Expired, Render),
+            (SessionNotRequired, Malformed, Render),
+        ];
+        assert_eq!(table.len(), ALL_RULES.len() * ALL_STATES.len());
+        for (rule, state, want) in table {
+            assert_eq!(rule.decide(state), want, "{rule:?} {state:?}");
+        }
+    }
+
+    // UISF-3（この段の範囲）: 返す結果は Render とログインの誘導だけで、登録の入口へ送る結果は出ない。
+    // 登録の入口は招待の受け取りだけという規則は #5789、導線の走査は #5790、画面は Hub の ASCR-65。
+    #[test]
+    fn uisf_3_non_render_destination_is_login_only() {
+        for rule in ALL_RULES {
+            for s in ALL_STATES {
+                let d = rule.decide(s);
+                assert!(
+                    matches!(d, AccessDecision::Render | AccessDecision::RedirectToLogin),
+                    "{rule:?} {s:?}"
+                );
+            }
+        }
+    }
+
+    // DPOL-3: 同じ入力は同じ出力。const の文脈でも評価できる（DPOL-1）。
+    #[test]
+    fn dpol_3_decide_is_deterministic() {
+        const D: AccessDecision = ScreenAccessRule::RequiresSession.decide(SessionState::Expired);
+        assert_eq!(D, AccessDecision::RedirectToLogin);
+        for rule in ALL_RULES {
+            for s in ALL_STATES {
+                assert_eq!(rule.decide(s), rule.decide(s));
+            }
+        }
     }
 }
