@@ -14,51 +14,84 @@
 //!    （`DGRT-3`）。組込み先は申告の項目を観測の項目と別の欄に出し、「検証されていない」ことを示す
 //!    ラベルを付ける（`UISF-12`）。
 //! 3. ラベルの文言は本体に持たない（Hub `ASCR-40`）。PoC の文言も定数にしない。
-//! 4. 申告した環境は表示専用の自由文で、長さの上限（設定で受ける。値は本体で決めない）を超える値と、
-//!    表示を操作・隠す文字（制御文字・双方向制御・ゼロ幅等）を含む値は構築で拒否する
-//!    （[`DeclaredEnvironment::from_agent_declaration`]。`UISF-12`・`LGUI-14`）。
-//!    判定（承認の可否・scope・有効期限）の入力にしない
+//! 4. 申告した環境は表示専用の自由文で、判定（承認の可否・scope・有効期限）の入力にしない
 //!    （`ADLG-7`・`HAPR-1`）。判定の関数はこの型を引数に取らず、観測の型との相互の変換も持たない。
-//! 5. 要約は出力専用で、承認・拒否の能力を持たない。確認の手順の判定は `DVUI-12`・`DVUI-13`・
+//!    型 [`DeclaredEnvironment`] は「エージェントの申告で、検証されていない」ことを型で分けるもので、
+//!    値の検査は行わない。
+//! 5. 申告した環境の検査（HTML の特殊文字は文字列のまま受ける・制御文字・双方向制御・ゼロ幅・BOM と
+//!    長さ超過は拒否する、という `DGRT-33` の規則）は、本体の `AgentEnv`（`TASK-412`・#3871）が
+//!    行う。長さの上限の値は `DGRT-21`（`DeviceGrantPolicy`・`TASK-417`）の側に残る。
+//!    **現状は未検査の値を受ける**: この module は検査も上限の型も持たず、
+//!    [`DeclaredEnvironment::from_unverified_declaration`] は受けた `String` をそのまま保つ。
+//!    検査の前に呼ぶと、制御文字・双方向制御・長すぎる値も要約に入る。追跡の中身は、#3871 で
+//!    この引数を `AgentEnv` の検査済みの型に替え、`String` の口をなくすこと（`TODO(#3871)`）。
+//! 6. 要約は出力専用で、承認・拒否の能力を持たない。確認の手順の判定は `DVUI-12`・`DVUI-13`・
 //!    `DVUI-15`・`HAPR-3` が正本で、画面は結果を受けるだけ（`UISF-14`）。
-//! 6. ユーザーコードを URL に含む案内の項目を持たない（`UISF-13`・`DGRT-2`）。ユーザーコード自体は
-//!    低エントロピーの秘密値の扱いを受けるので（`SECR-7`・`SECR-34`）、骨組みでは要約に載せない。
-//!    載せるかは人が決める（`TODO(#5841)`）。
-//! 7. HTML へ出すときはエスケープする（`LGUI-14`・`UISF-2`）。`SafeHtml` との結合は
+//! 7. ユーザーコードを URL に含む案内の項目を持たない（`UISF-13`・`DGRT-2`）。ユーザーコードを
+//!    要約に載せるかは未決で、骨組みでは持たない。載せない既定として断定しない。根拠が割れている:
+//!    承認画面はユーザーコードの表示を求め（`UISF-24`）、エージェント側の表示と照合する案内を
+//!    求める（`UISF-37`）。一方、保存の形は低エントロピーの秘密値の扱い（`SECR-7`・`SECR-34`）で、
+//!    これは保存の形の行であり、画面に出す可否を決める行ではない。判断は人に預ける（`TODO(#5841)`）。
+//! 8. HTML へ出すときはエスケープする（`UISF-2`）。`SafeHtml` との結合は
 //!    `TODO(#5842)`。
-//! 8. 観察（`UISF-37`）の実施は Hub の `ASCR-37` と人が行い、AI・自動処理に代えない
+//! 9. 観察（`UISF-37`）の実施は Hub の `ASCR-37` と人が行い、AI・自動処理に代えない
 //!    （`D-2026-10-17-51` の (1)）。観察の仕様は `TODO(#5847)`。
-//! 9. `UISF-38`（交換専用の scope を含む要求の別表示）は規則としてだけ置く。項目は持たない。
-//!    トークン交換は MS-12 に延期されている（`D-2026-11-06-4`）ので、今実装するかは人に伺う
-//!    （`TODO(#5841)`）。
-//! 10. ステータス: `UISF-12`・`UISF-13`・`UISF-14`・`UISF-37`・`UISF-38` は検討中、`UISF-24` は確定の
+//! 10. `UISF-38`（交換専用の scope を含む要求の別表示）は規則としてだけ置く。項目は持たない。
+//!     トークン交換は MS-12 に延期されている（`D-2026-11-06-4`）ので、今実装するかは人に伺う
+//!     （`TODO(#5841)`）。
+//! 11. ステータス: `UISF-12`・`UISF-13`・`UISF-14`・`UISF-37`・`UISF-38` は検討中、`UISF-24` は確定の
 //!     範囲つき。型を置いても、どの行も満たしたことにはならない（`ACPT-7`）。
-//! 11. I/O・時刻・乱数を持たず、HTTP・Hub・DB の型を出さない（`DPOL-1`・`LIB-3`）。
+//! 12. I/O・時刻・乱数を持たず、HTTP・Hub・DB の型を出さない（`DPOL-1`・`LIB-3`）。
 //!
 //! # 申告と観測の取り違えを型で拒む
 //!
-//! ```compile_fail
-//! use fandhe_auth_core::approval_summary::{DeclaredEnvironment, DeclaredEnvironmentLimits, StartSource};
-//! let l = DeclaredEnvironmentLimits::new(16);
-//! let d = DeclaredEnvironment::from_agent_declaration("x".to_string(), l).unwrap();
+//! 安定版の rustdoc は `compile_fail` のエラーコードを照合しない。コードを付けても、別の理由で
+//! 落ちていないことは下の陽性対照（通る doctest）で確かめる。
+//!
+//! 申告から観測への変換は無い。
+//!
+//! ```compile_fail,E0277
+//! use fandhe_auth_core::approval_summary::{DeclaredEnvironment, StartSource};
+//! let d = DeclaredEnvironment::from_unverified_declaration("x".to_string());
 //! let _ = StartSource::from(d);
 //! ```
 //!
-//! ```compile_fail
-//! use fandhe_auth_core::approval_summary::{DeclaredEnvironment, DeclaredEnvironmentLimits};
-//! let l = DeclaredEnvironmentLimits::new(16);
-//! let d = DeclaredEnvironment::from_agent_declaration("x".to_string(), l).unwrap();
+//! 観測から申告への変換も無い（送信元）。
+//!
+//! ```compile_fail,E0277
+//! use std::net::{IpAddr, Ipv4Addr};
+//! use fandhe_auth_core::approval_summary::{DeclaredEnvironment, StartSource};
+//! let s = StartSource::from_observed_peer(IpAddr::V4(Ipv4Addr::LOCALHOST));
+//! let _ = DeclaredEnvironment::from(s);
+//! ```
+//!
+//! 観測から申告への変換も無い（開始の時刻）。
+//!
+//! ```compile_fail,E0277
+//! use fandhe_auth_core::approval_summary::{DeclaredEnvironment, StartedAt};
+//! let t = StartedAt::from_unix_millis_utc(0);
+//! let _ = DeclaredEnvironment::from(t);
+//! ```
+//!
+//! `Display` を持たない。
+//!
+//! ```compile_fail,E0277
+//! use fandhe_auth_core::approval_summary::DeclaredEnvironment;
+//! let d = DeclaredEnvironment::from_unverified_declaration("x".to_string());
 //! let _ = format!("{}", d);
 //! ```
 //!
-//! ```compile_fail
+//! 検査を通さない `From<&str>` を持たない。
+//!
+//! ```compile_fail,E0277
 //! use fandhe_auth_core::approval_summary::DeclaredEnvironment;
 //! let _ = DeclaredEnvironment::from("x");
 //! ```
 //!
-//! ```compile_fail
+//! `#[non_exhaustive]` のため、wildcard なしの網羅的な match は通らない。
+//!
+//! ```compile_fail,E0004
 //! use fandhe_auth_core::approval_summary::SummaryItem;
-//! // `#[non_exhaustive]` のため、wildcard なしの網羅的な match は通らない。
 //! fn f(i: SummaryItem) -> u8 {
 //!     match i {
 //!         SummaryItem::Client => 0,
@@ -70,25 +103,42 @@
 //! }
 //! ```
 //!
-//! 陽性対照（上の `compile_fail` が別の理由で落ちていないことの確認）:
+//! 陽性対照（上の各 `compile_fail` が、型名・列挙子の綴りや import の誤りで落ちていないことの確認）。
+//! 同じ型・列挙子・関数に触れ、変換と `Display` だけを除いている:
 //!
 //! ```
 //! use std::net::{IpAddr, Ipv4Addr};
 //! use fandhe_auth_core::approval_summary::*;
-//! let s = ApprovalSummary::new(
+//! let d = DeclaredEnvironment::from_unverified_declaration("env".to_string());
+//! let s = StartSource::from_observed_peer(IpAddr::V4(Ipv4Addr::LOCALHOST));
+//! let t = StartedAt::from_unix_millis_utc(0);
+//! // `Debug` はある（`Display` だけが無い）。値は出ない。
+//! assert_eq!(format!("{d:?}"), "DeclaredEnvironment(..)");
+//! assert_eq!(s.addr(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+//! assert_eq!(t.unix_millis_utc(), 0);
+//! // 列挙子に触れる。wildcard を付ければ通る（`#[non_exhaustive]`）。
+//! fn f(i: SummaryItem) -> u8 {
+//!     match i {
+//!         SummaryItem::Client => 0,
+//!         SummaryItem::Scope => 1,
+//!         SummaryItem::DeclaredEnvironment => 2,
+//!         SummaryItem::StartedAt => 3,
+//!         SummaryItem::StartSource => 4,
+//!         _ => 255,
+//!     }
+//! }
+//! let got: Vec<u8> = SummaryItem::ALL.iter().map(|i| f(*i)).collect();
+//! assert_eq!(got, [0, 1, 2, 3, 4]);
+//! let summary = ApprovalSummary::new(
 //!     "client".to_string(),
 //!     "client-id".to_string(),
 //!     vec!["read".to_string()],
-//!     DeclaredEnvironment::from_agent_declaration(
-//!         "env".to_string(),
-//!         DeclaredEnvironmentLimits::new(16),
-//!     )
-//!     .unwrap(),
-//!     StartedAt::from_unix_millis_utc(0),
-//!     StartSource::from_observed_peer(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+//!     d,
+//!     t,
+//!     s,
 //! );
-//! assert_eq!(s.client_id(), "client-id");
-//! assert_eq!(s.declared_environment().as_unescaped_text(), "env");
+//! assert_eq!(summary.client_id(), "client-id");
+//! assert_eq!(summary.declared_environment().as_unescaped_text(), "env");
 //! ```
 
 use std::net::IpAddr;
@@ -147,89 +197,23 @@ pub enum Provenance {
     AgentDeclared,
 }
 
-/// 申告した環境の検査の設定。上限の数値は設定で受け、本体は既定値を持たない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeclaredEnvironmentLimits {
-    max_chars: usize,
-}
-
-impl DeclaredEnvironmentLimits {
-    /// 許す最大の文字数（Unicode のスカラー値の数）で作る。
-    pub const fn new(max_chars: usize) -> Self {
-        Self { max_chars }
-    }
-}
-
-/// 申告した環境の検査の失敗。値そのものは載せない（文字の種類は載せる）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DeclaredEnvironmentError {
-    /// 上限を超えている。
-    TooLong,
-    /// 表示を操作・隠す文字を含む。
-    ForbiddenChar(char),
-}
-
-/// 表示の順序の操作・不可視・制御の文字か（`UISF-12`・`LGUI-14`）。
-///
-/// 拒否の範囲: 制御文字（Cc）、行・段落区切り（Zl・Zp）、書式制御（Cf）、
-/// `Default_Ignorable_Code_Point` 相当（結合書字素ジョイナー・ハングルのフィラー・
-/// variation selectors の全範囲・tag 文字の全範囲・不可視の音楽書式制御を含む）。
-/// 依存なしで持つため範囲を列挙する。Unicode の版が進んだら見直す。
-fn is_display_manipulating(c: char) -> bool {
-    c.is_control() // Cc: C0・C1・DEL（改行・タブも含む）
-        || matches!(
-            c,
-            '\u{00AD}' // soft hyphen
-            | '\u{034F}' // combining grapheme joiner
-            | '\u{0600}'..='\u{0605}' // Cf: 数字記号の前置
-            | '\u{061C}' // ALM
-            | '\u{06DD}' // Cf
-            | '\u{070F}' // Cf
-            | '\u{0890}'..='\u{0891}' // Cf
-            | '\u{08E2}' // Cf
-            | '\u{115F}'..='\u{1160}' // ハングルのフィラー
-            | '\u{17B4}'..='\u{17B5}' // クメールの固有母音
-            | '\u{180B}'..='\u{180F}' // モンゴルの variation selectors ほか
-            | '\u{200B}'..='\u{200F}' // ゼロ幅・LRM・RLM
-            | '\u{2028}'..='\u{202E}' // 行・段落区切り・双方向制御
-            | '\u{2060}'..='\u{206F}' // word joiner・不可視演算子・双方向 isolate
-            | '\u{3164}' // ハングルのフィラー
-            | '\u{FE00}'..='\u{FE0F}' // variation selectors
-            | '\u{FEFF}' // BOM・ZWNBSP
-            | '\u{FFA0}' // 半角ハングルのフィラー
-            | '\u{FFF0}'..='\u{FFFB}' // 未割当の無視可能・interlinear annotation
-            | '\u{110BD}' | '\u{110CD}' // Cf
-            | '\u{13430}'..='\u{1343F}' // エジプト聖刻文字の書式制御
-            | '\u{1BCA0}'..='\u{1BCA3}' // 速記の書式制御
-            | '\u{1D173}'..='\u{1D17A}' // 音楽記号の書式制御
-            | '\u{E0000}'..='\u{E0FFF}' // tag 文字・補助の variation selectors（全範囲）
-        )
-}
-
 /// エージェントが申告した環境。表示専用の自由文で、判定に使わない（`ADLG-7`）。
 ///
-/// 攻撃者が選べる値なので、HTML へ出す前に必ずエスケープする（`LGUI-14`・`UISF-2`）。
+/// 攻撃者が選べる値なので、HTML へ出す前に必ずエスケープする（`UISF-2`）。
 /// `Display`・`FromStr`・`From<&str>`・`Default`・`Deref` は意図して持たない。
 #[derive(Clone)]
 pub struct DeclaredEnvironment(String);
 
 impl DeclaredEnvironment {
-    /// エージェントの申告から作る唯一の道。
+    /// 申告の値を、検査せずにそのまま保って作る。
     ///
-    /// 長さ（文字数）が `limits` の上限を超える値、表示を操作・隠す文字を含む値は拒否する。
-    /// 上限の数値は呼び出し側が設定で渡す（本体は既定値を持たない）。
-    pub fn from_agent_declaration(
-        text: String,
-        limits: DeclaredEnvironmentLimits,
-    ) -> Result<Self, DeclaredEnvironmentError> {
-        if let Some(c) = text.chars().find(|c| is_display_manipulating(*c)) {
-            return Err(DeclaredEnvironmentError::ForbiddenChar(c));
-        }
-        if text.chars().count() > limits.max_chars {
-            return Err(DeclaredEnvironmentError::TooLong);
-        }
-        Ok(Self(text))
+    /// この関数は何も保証しない。制御文字・双方向制御・ゼロ幅・BOM の拒否（`DGRT-33`）と長さの
+    /// 上限（`DGRT-21`）は行わない。**現状は未検査の値を受ける**: 検査は本体の `AgentEnv`
+    /// （`TASK-412`・#3871）が行うが、まだ無い。検査の前に呼ぶと、検査していない値も要約に入る。
+    /// 型は「検証されていない申告」であることを示すだけで、安全な文字だけを持つことを示さない。
+    // TODO(#3871): 引数を `AgentEnv` の検査済みの型に替え、`String` の口をなくす。
+    pub fn from_unverified_declaration(text: String) -> Self {
+        Self(text)
     }
 
     /// エスケープ前の値を読む唯一の道。HTML へ出す前にエスケープする義務がある。
@@ -252,7 +236,8 @@ pub struct StartSource(IpAddr);
 
 impl StartSource {
     /// 組込み先が渡す、観測した接続元からだけ作る。転送ヘッダから取らない（Hub `ARUN-29`・`ARUN-43`）。
-    // TODO(#5841): 型の形は仮。観測した接続元の型（`PeerInfo`〔仮称〕）が決まったら合わせる。
+    // TODO(#3868): 型の形は仮。開始の送信元を観測した接続元だけにする作業（`TASK-412` の 1/8。`DGRT-4`）で
+    // 観測した接続元の型（`PeerInfo`〔仮称〕）が決まったら合わせる。要約への組み立ては #5841。
     pub fn from_observed_peer(addr: IpAddr) -> Self {
         Self(addr)
     }
@@ -282,7 +267,7 @@ impl StartedAt {
 
 /// 承認画面に出す要約。出力専用で、承認・拒否の能力を持たない（`UISF-14`）。
 ///
-/// ユーザーコード・URL・`UISF-38` の項目は持たない（規則 6・9）。
+/// ユーザーコード・URL・`UISF-38` の項目は持たない（規則 7・10）。
 #[derive(Debug, Clone)]
 pub struct ApprovalSummary {
     client_name: String,
@@ -351,105 +336,6 @@ mod tests {
     use std::collections::HashSet;
     use std::net::Ipv4Addr;
 
-    fn limits() -> DeclaredEnvironmentLimits {
-        DeclaredEnvironmentLimits::new(32)
-    }
-
-    #[test]
-    fn declared_length_boundary() {
-        // 上限ちょうどは受け、1 文字超過は拒否（文字数で数える）。
-        let ok = "a".repeat(32);
-        assert!(DeclaredEnvironment::from_agent_declaration(ok, limits()).is_ok());
-        let over = "a".repeat(33);
-        assert_eq!(
-            DeclaredEnvironment::from_agent_declaration(over, limits()).unwrap_err(),
-            DeclaredEnvironmentError::TooLong
-        );
-        let multibyte = "あ".repeat(32);
-        assert!(DeclaredEnvironment::from_agent_declaration(multibyte, limits()).is_ok());
-        let zero = DeclaredEnvironmentLimits::new(0);
-        assert!(DeclaredEnvironment::from_agent_declaration(String::new(), zero).is_ok());
-        assert!(DeclaredEnvironment::from_agent_declaration("a".into(), zero).is_err());
-    }
-
-    #[test]
-    fn declared_rejects_display_manipulating_chars() {
-        let forbidden = [
-            '\u{0000}',
-            '\u{0007}',
-            '\u{000A}',
-            '\u{001B}',
-            '\u{007F}',
-            '\u{0085}',
-            '\u{009F}',
-            '\u{00AD}',
-            '\u{061C}',
-            '\u{200B}',
-            '\u{200C}',
-            '\u{200D}',
-            '\u{200E}',
-            '\u{200F}',
-            '\u{2028}',
-            '\u{2029}',
-            '\u{202A}',
-            '\u{202B}',
-            '\u{202C}',
-            '\u{202D}',
-            '\u{202E}',
-            '\u{2060}',
-            '\u{2066}',
-            '\u{2067}',
-            '\u{2068}',
-            '\u{2069}',
-            '\u{FEFF}',
-            '\u{E0041}',
-            '\u{034F}',
-            '\u{115F}',
-            '\u{1160}',
-            '\u{17B4}',
-            '\u{180B}',
-            '\u{180F}',
-            '\u{3164}',
-            '\u{FFA0}',
-            '\u{FFF0}',
-            '\u{FFFB}',
-            '\u{1D173}',
-            '\u{E0100}',
-            '\u{E01EF}',
-            '\u{E0FFF}',
-            '\u{0600}',
-            '\u{06DD}',
-        ];
-        for c in forbidden {
-            let t = format!("a{c}b");
-            assert_eq!(
-                DeclaredEnvironment::from_agent_declaration(t, limits()).unwrap_err(),
-                DeclaredEnvironmentError::ForbiddenChar(c),
-                "U+{:04X}",
-                c as u32
-            );
-        }
-        // 境界の外側の文字は受ける。
-        for c in [
-            '\u{00AC}',
-            '\u{00AE}',
-            '\u{034E}',
-            '\u{0350}',
-            '\u{E1000}',
-            '\u{FFFC}',
-        ] {
-            let t = format!("a{c}b");
-            assert!(
-                DeclaredEnvironment::from_agent_declaration(t, limits()).is_ok(),
-                "U+{:04X}",
-                c as u32
-            );
-        }
-        // 通常の文字（空白・日本語・記号）は受ける。
-        let ok = "Linux x86_64 日本語";
-        assert!(DeclaredEnvironment::from_agent_declaration(ok.into(), limits()).is_ok());
-    }
-
     #[test]
     fn items_are_five_and_distinct() {
         // UISF-24: 項目は 5 件で互いに異なる。
@@ -480,7 +366,7 @@ mod tests {
     fn debug_does_not_leak_declared_text() {
         // UISF-12・ADLG-7: Debug は申告の自由文を出さない。
         let marker = "sentinel-text-123";
-        let d = DeclaredEnvironment::from_agent_declaration(marker.to_string(), limits()).unwrap();
+        let d = DeclaredEnvironment::from_unverified_declaration(marker.to_string());
         assert!(!format!("{d:?}").contains(marker));
         assert!(!format!("{d:#?}").contains(marker));
         let s = ApprovalSummary::new(
