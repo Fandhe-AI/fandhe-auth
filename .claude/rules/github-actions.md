@@ -156,15 +156,15 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
 - **`deps audit frame` の登録の記録**（2026-11-28。登録は利用者の決定と指示による。実行と読み返しの照合は main（AI）で、人の判定ではない）
   - `deps audit frame (tool install only; checks wired in TASK-680)` を、ruleset の required に GitHub Actions の App で足した。足したのは main で、API で行い、読み返して照合した
   - required は 15 件になった。strict=false と bypass が空なのは変わっていない
-  - この登録は利用者の個別の指示による。下の承認の範囲（G0 で止まった CI のジョブ追加の PR）を広げるものではない
+  - この登録は利用者の個別の指示による。下の承認の範囲（G0 で止まった、`ci.yml` に PR の検査のジョブを足す PR）を広げるものではない
 - **2026-11-28 の規則の変更**（利用者の決定。実際の登録に合わせて直す。ruleset から外す方向にはしない）。上の 2026-11-22 の記録の時点の規則
   「`ci.yml` のジョブを required に個別登録せず、集約ジョブ `ci-complete` だけを登録する」は、次の規則で置き換える
   - `ci-complete` を required に登録する
   - 加えて、`ci.yml` の PR の検査のジョブも required に個別に登録する。理由は、implement-issue-tree の自動マージの G0 が、合格の判定に使うチェックの context が required であることを要求するため。
-  - 利用者の承認の範囲（2026-11-19。承認したのは利用者で、AI ではない。ACPT-7）は、「CI のジョブを足す PR が implement-issue-tree の G0 で止まったとき」に限る。この範囲では次を行ってよい
+  - 利用者の承認の範囲（2026-11-19。承認したのは利用者で、AI ではない。ACPT-7）は、「`ci.yml` に PR の検査のジョブを足す PR が implement-issue-tree の G0 で止まったとき」に限る（2026-11-28 に利用者がこの範囲に絞った。それまでは「CI のジョブを足す PR」）。この範囲では次を行ってよい
     - main（Claude Code）がその PR を squash で手でマージする。条件は、全チェックの成功・mergeable・未解決のスレッドが 0。これは、ほかの規約のマージの条件（`./security.md` の未解決の高・中が 0、PR の前の `security-auditor` の監査など）に加えて満たすもので、それらを置き換えない
-    - そのうえで、足したジョブの context を、GitHub Actions の App で ruleset の required に追加する。strict=false と bypass が空なのを保ち、変更前の ruleset を退避し（退避先は git 管理外、例: 作業用の一時領域とし、追跡ファイルに置かない）、変更の後に読み返して照合する
-  - 上の範囲の外は、これまでどおり利用者の指示を待つ。範囲の外は、上の 2 つ以外のすべて。例: 必須チェックの削除、strict・bypass・enforcement・対象の条件の変更、ほかの規則・ほかの ruleset の変更、GitHub Actions 以外の App での登録、名前の変更に伴う context の差し替え、ジョブの追加に伴わない登録
+    - そのうえで、`ci.yml` に PR の検査のジョブとして足したジョブの context を、GitHub Actions の App で ruleset の required に追加する。strict=false と bypass が空なのを保ち、変更前の ruleset を退避し（退避先は git 管理外、例: 作業用の一時領域とし、追跡ファイルに置かない）、変更の後に読み返して照合する
+  - 上の範囲の外は、これまでどおり利用者の指示を待つ。範囲の外は、上の 2 つ以外のすべて。例: 必須チェックの削除、strict・bypass・enforcement・対象の条件の変更、ほかの規則・ほかの ruleset の変更、GitHub Actions 以外の App での登録、名前の変更に伴う context の差し替え、ジョブの追加に伴わない登録、`ci.yml` 以外の workflow（`scheduled.yml` など）のジョブの context の登録
   - 新しい PR の検査のジョブを足すときは、`ci-complete` の `needs` と required の両方に入れる（`needs` だけでは G0 で止まりうる。required だけでは `ci-complete` の集約から漏れる）
   - `deps audit frame` は 2026-11-28 に個別に登録した（上の「`deps audit frame` の登録の記録」）。名前の変更に伴う context の差し替えは、承認の範囲の外で、利用者の指示を待つ
   - 上の承認の範囲を除き、この規約を根拠に ruleset を変更せず、利用者の指示を待つ
@@ -278,7 +278,7 @@ fork PR で実行されない根拠（Fandhe-AI/actions の `latest` タグ = `1
     - 例外: `trust-root-secret-scan.yml`。(a) 先行配置の期間と、(b) 組織の ruleset が workflow のファイルを固定して要求する間は、`ci.yml` に入れられない（要求されうる）（「必須チェックと集約ジョブ」の例外）
 2. 追加したジョブを `ci-complete` の `needs` に必ず加える（漏れると未検査のままマージ可能になる）。条件付きで skip
     するジョブは、許容する条件を `ci-complete` の jq 式に明示する
-    - `ci.yml` の PR の検査のジョブは、必須チェックにも個別に登録する（2026-11-28 の変更。「必須チェックと集約ジョブ」の節）。登録は ruleset の変更で、上の承認の範囲（G0 で止まった CI のジョブ追加の PR）を除き、利用者の指示を待つ。登録するまで PR の自動マージの G0 で止まりうる
+    - `ci.yml` の PR の検査のジョブは、必須チェックにも個別に登録する（2026-11-28 の変更。「必須チェックと集約ジョブ」の節）。登録は ruleset の変更で、上の承認の範囲（G0 で止まった、`ci.yml` に PR の検査のジョブを足す PR）を除き、利用者の指示を待つ。登録するまで PR の自動マージの G0 で止まりうる
     - 例外: `scheduled.yml` は `needs` に入れない（PR を検査しない。利用者が承認済み。2026-11-26。範囲は `workflow_dispatch` だけで動く間）
     - 例外: `trust-root-secret-scan.yml` は `needs` に入れない。(a)・(b) の期間の間だけ（「必須チェックと集約ジョブ」の節の例外）
 3. 処理は `make <target>` / `scripts/*.sh` を呼ぶ。CI 側に複数行のロジックを書かない
