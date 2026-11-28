@@ -39,6 +39,7 @@ Hub の本番のバイナリの依存監査・advisory の運用は Hub が持�
 - 自前の実装 0 件は `scripts/check-crypto-primitives.sh`（`make crypto-scan`）で発見的に走査する（LIB-21・TASK-715 3/4）。合否は本番メンバーだけで、試験専用 crate は参考の警告にとどめ、含めるかは人が決める。規則は人のレビューの代わりにならない。
 - JWT の署名・検証は `aws-lc-rs` か `ring`（DPOL-10・DPOL-11）。
 - `jsonwebtoken` は `aws_lc_rs` feature だけ。`rust_crypto` は `rsa` を引くので有効にしない（DPOL-17）。
+- RS256 の PKCS#8 の署名鍵は `EncodingKey::from_rsa_pem` で渡し、`from_rsa_der` を使わない（DPOL-14。DER は PKCS#1 を期待し署名に失敗する）。試験は `crates/trial-deps/tests/dpol14_*.rs`。
 
 ## bans
 
