@@ -88,6 +88,7 @@ description: >
 - `scripts/lib.sh` を source し、その関数を使う
 
     ```bash
+    unset CDPATH  # 相対パスの cd が CDPATH に左右されないよう DIR の解決より前に外す
     DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     # shellcheck source=./lib.sh
     source "${DIR}/lib.sh"

@@ -12,6 +12,8 @@
 # 変数・関数は source した側の part が参照するため、単独で未使用に見える定義には、宣言ごとに理由付きの disable を置く。
 # scripts/lib.sh は source しない（part・helper は使わない。source すると shellcheck が辿って part ごとに解析し直す）。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 # shellcheck disable=SC2034 # part・test-hooks-lib.sh から参照する（本ファイルだけを検査すると未使用に見える）
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

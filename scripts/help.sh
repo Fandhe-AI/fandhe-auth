@@ -4,6 +4,8 @@
 # 両者を自動で同期する仕組みは無い。Makefile のターゲットを追加・改名・
 # 削除したら同じ変更で本ファイルも更新すること。
 set -euo pipefail
+# 相対パスの cd が CDPATH に左右されない（CDPATH=. で cd が移動先を標準出力へ出し DIR が 2 行になる）ように、DIR の解決より前に外す（#6173）。
+unset CDPATH
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
