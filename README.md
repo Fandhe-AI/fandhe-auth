@@ -55,7 +55,7 @@ MIT OR Apache-2.0 のデュアルライセンスです（[LICENSE-MIT](./LICENSE
 | `docs/stubs/` | 検証用 stub（`TASK-7`・`TASK-8`）の振る舞いと実物との差の文書 |
 | `.gitmodules` | submodule 定義（`docs/spec` を `update = none` で登録） |
 | `LICENSE-MIT`・`LICENSE-APACHE` | ライセンス（前述の「ライセンス」） |
-| `.github/workflows/` | CI・AI PR レビュー・外部ソース自動追従（後述の「CI」） |
+| `.github/workflows/` | CI・AI PR レビュー・外部ソース自動追従・main の赤の通知（後述の「CI」） |
 
 ## 必要なツール
 
@@ -198,6 +198,7 @@ Linux・macOS（標準の bash 3.2 を含む）について実行します。`sc
 | `ai-review.yml` | Fandhe-AI/actions の ai-review（codex）による PR 自動レビュー。Actions variable `CODEX_HOME_DIR` が未設定の間は skip される |
 | `scheduled.yml` | 定期の実行の系統の枠（現状は手動起動 `workflow_dispatch` のみ。`pull_request`・`push` は持たない）。schedule の起動は、例外の見直しの後に TASK-681 で追加する予定。頻度の上限は規約の「日次以下」のままで、候補は日次、時刻とあわせて暫定。決めるのは TASK-681。検査は未結線で、緑でも DPOL-35 を満たしたことにはならない（TASK-681） |
 | `update-external.yml` | エージェントスキル（`skills-lock.json`）と submodule（`.gitmodules`）の日次自動追従 PR。secrets は org の `SUBMODULE_PAT` を使う（`SKILLS_PAT` 未登録時は共通側が `SUBMODULE_PAT` へフォールバック）。作成する PR には `dependencies` / `automated` ラベルが付く |
+| `main-red-notify.yml` | `ci.yml` の main への push の最新の run が success 以外なら Issue（ラベル `main-red:<workflow_id>`）で知らせ、success に戻れば close する（`workflow_run`。Fandhe-AI/actions の `main-red-issue` を SHA 固定で呼ぶ）。PR の検査ではなく、`ci-complete` の `needs` にも required status checks にも入れない（`.claude/rules/github-actions.md` の「main の赤の通知」の節） |
 
 - ruleset の required status checks には `ci-complete`・ai-review の `codex / *`・`ci.yml` の PR の検査のジョブを個別に登録する（規則と例外は `.claude/rules/github-actions.md` の「必須チェックと集約ジョブ」の節）。
   ruleset・マージ設定の導入は `setup-repo-guards` スキルの手順に従う
