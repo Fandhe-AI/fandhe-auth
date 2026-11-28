@@ -12,7 +12,7 @@
 # 規則（合否 = 1 件でも違反）:
 #   C1: 既知の暗号定数（SHA-1/2・MD5 の IV と K[0]、ChaCha/Salsa の sigma、黄金比の定数、Poly1305 の clamp、Keccak の RC、P-256 の素数の断片、AES の S-box の先頭）。
 #       判定の前に `_` を除き、大小文字を区別しない。
-#   C2: インラインアセンブリ・アーキテクチャ固有の命令（asm!・global_asm!・naked_asm!・#[naked]・#[unsafe(naked)]・core::arch・std::arch・`core::{arch::…}`）
+#   C2: インラインアセンブリ・アーキテクチャ固有の命令（asm!・global_asm!・naked_asm!・#[naked]・#[unsafe(naked)]・core::arch・std::arch・`core::{arch::…}`・`std::{arch::…}`・入れ子の波括弧の後ろの `core::{mem::{self}, arch}`。波括弧の後ろは同じ行の `arch` の語まで見る）
 #   C3: Rust 以外のネイティブのソース（*.c *.h *.cc *.cpp *.cxx *.hh *.hpp *.hxx *.inc *.cu *.m *.mm *.s *.S *.asm、コンパイル済みの *.o *.a *.so *.dylib *.lib *.obj *.ll *.bc）が crate の中にあること
 #   C4: 暗号の trait の自前の実装（RngCore・CryptoRng・BlockCipher・StreamCipher・Digest・Mac・Signer・Verifier・PasswordHasher 等への impl ... for。先頭の `::` も許す）
 #   C5: 同じファイルに rotate_left/rotate_right と wrapping_add/sub/mul が併存すること（ハッシュ・ストリーム暗号のラウンドの典型）
@@ -23,7 +23,7 @@
 # 限界: 名前を変えた実装・10 進や別表現の定数・マクロで生成したコードは見落としうる。C1 は `*.rs` だけを見るため、`include!`・`#[path]` で
 #   取り込まれる別拡張子のファイルは見えない。C4 は行単位の grep のため、複数行にまたがる `impl` は拾えない。XML 署名は SAML の Plugin（段階 2）の側で、まだ crate が無い。
 #
-# 実行のたびに自己試験（陽性対照 S1〜S8・S11・S13〜S18、陰性対照 S8〜S10、grep の誤用 S12。番号は欠けを含む）を先に流し、検出器が常に 0 を返す状態を防ぐ。
+# 実行のたびに自己試験（陽性対照 S1〜S8・S11・S13〜S20、陰性対照 S8〜S10、grep の誤用 S12。番号は欠けを含む）を先に流し、検出器が常に 0 を返す状態を防ぐ。
 # 出力は規則 ID・件数・相対パス:行だけ（絶対パスは出さない）。終了コード: 0 = 合格、1 = 違反（または自己試験の失敗）、2 = 検査不能（fail-closed）。
 set -euo pipefail
 unset CDPATH
@@ -45,7 +45,7 @@ PROD_DIRS=(core secret db-tests client plugin-oidc backend)
 TEST_ONLY_DIRS=(hub-stub console-stub it-harness e2e-harness load-harness trial-deps)
 
 CONSTS='6a09e667|bb67ae85|3c6ef372|a54ff53a|510e527f|9b05688c|1f83d9ab|5be0cd19|428a2f98|67452301|efcdab89|98badcfe|10325476|c3d2e1f0|f3bcc908|cbbb9d5d|61707865|3320646e|79622d32|6b206574|9e3779b9|243f6a88|0ffffffc0fffffff|800000000000808a|ffffffff00000001|0x63, *0x7c, *0x77, *0x7b'
-ASM='\b(asm|global_asm|naked_asm)!|#\[naked\]|#\[unsafe\(naked\)\]|\b(core|std)::arch\b|\bcore::\{[^}]*\barch\b'
+ASM='\b(asm|global_asm|naked_asm)!|#\[naked\]|#\[unsafe\(naked\)\]|\b(core|std)::arch\b|\b(core|std)::\{.*\barch\b'
 TRAITS='RngCore|CryptoRng|CryptoRngCore|SeedableRng|BlockCipher|BlockEncrypt|BlockDecrypt|StreamCipher|KeyInit|KeyIvInit|UniversalHash|Digest|DynDigest|FixedOutput|Mac|Signer|Verifier|PasswordHasher'
 C4RE="^[[:space:]]*(unsafe[[:space:]]+)?impl(<[^>]*>)?[[:space:]]+(::)?([A-Za-z0-9_]+::)*(${TRAITS})(<.*>)?[[:space:]]+for\\b"
 WORDS='sha1|sha256|sha384|sha512|sha3|md5|hmac|hkdf|pbkdf2|argon2|scrypt|bcrypt|aes|chacha20|poly1305|ed25519|x25519|p256|p384|secp256k1|ecdsa|ecdh|rsa|keccak|blake2|blake3|siphash|xorshift|xoshiro|pcg32|lcg|mt19937|totp|hotp|gcm'
@@ -182,6 +182,8 @@ selftest() {
   mk s8.rs 'fn r(a: u32) -> u32 { a.rotate_left(7) }'
   mk 'x|;e id;#&\1 y.rs' 'const IV: u32 = 0x6a09e667;'
   mk s13.rs 'use core::{arch::x86_64::_mm_pause, mem};'
+  mk s19.rs 'use std::{arch::asm, mem};'
+  mk s20.rs 'use core::{mem::{self}, arch};'
   mk s14.rs '#[unsafe(naked)] extern "C" fn f() {}'
   mk s15.rs 'impl ::rand_core::RngCore for Foo {}'
   mk s16.rs 'impl Signer for Foo {}'
@@ -222,6 +224,12 @@ selftest() {
   : >"${out}"
   scan_rs "${out}" "${t}/s13.rs"
   expect_count S13 C2 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s19.rs"
+  expect_count S19 C2 pos "${out}"
+  : >"${out}"
+  scan_rs "${out}" "${t}/s20.rs"
+  expect_count S20 C2 pos "${out}"
   : >"${out}"
   scan_rs "${out}" "${t}/s14.rs"
   expect_count S14 C2 pos "${out}"
