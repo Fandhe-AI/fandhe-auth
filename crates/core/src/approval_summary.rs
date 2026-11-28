@@ -170,21 +170,40 @@ pub enum DeclaredEnvironmentError {
     ForbiddenChar(char),
 }
 
-/// 表示の順序の操作・不可視・制御の文字か。
+/// 表示の順序の操作・不可視・制御の文字か（`UISF-12`・`LGUI-14`）。
+///
+/// 拒否の範囲: 制御文字（Cc）、行・段落区切り（Zl・Zp）、書式制御（Cf）、
+/// `Default_Ignorable_Code_Point` 相当（結合書字素ジョイナー・ハングルのフィラー・
+/// variation selectors の全範囲・tag 文字の全範囲・不可視の音楽書式制御を含む）。
+/// 依存なしで持つため範囲を列挙する。Unicode の版が進んだら見直す。
 fn is_display_manipulating(c: char) -> bool {
-    c.is_control() // C0・C1・DEL（改行・タブも含む）
+    c.is_control() // Cc: C0・C1・DEL（改行・タブも含む）
         || matches!(
             c,
             '\u{00AD}' // soft hyphen
+            | '\u{034F}' // combining grapheme joiner
+            | '\u{0600}'..='\u{0605}' // Cf: 数字記号の前置
             | '\u{061C}' // ALM
-            | '\u{180E}'
+            | '\u{06DD}' // Cf
+            | '\u{070F}' // Cf
+            | '\u{0890}'..='\u{0891}' // Cf
+            | '\u{08E2}' // Cf
+            | '\u{115F}'..='\u{1160}' // ハングルのフィラー
+            | '\u{17B4}'..='\u{17B5}' // クメールの固有母音
+            | '\u{180B}'..='\u{180F}' // モンゴルの variation selectors ほか
             | '\u{200B}'..='\u{200F}' // ゼロ幅・LRM・RLM
             | '\u{2028}'..='\u{202E}' // 行・段落区切り・双方向制御
             | '\u{2060}'..='\u{206F}' // word joiner・不可視演算子・双方向 isolate
+            | '\u{3164}' // ハングルのフィラー
             | '\u{FE00}'..='\u{FE0F}' // variation selectors
             | '\u{FEFF}' // BOM・ZWNBSP
-            | '\u{FFF9}'..='\u{FFFB}' // interlinear annotation
-            | '\u{E0000}'..='\u{E007F}' // tag characters
+            | '\u{FFA0}' // 半角ハングルのフィラー
+            | '\u{FFF0}'..='\u{FFFB}' // 未割当の無視可能・interlinear annotation
+            | '\u{110BD}' | '\u{110CD}' // Cf
+            | '\u{13430}'..='\u{1343F}' // エジプト聖刻文字の書式制御
+            | '\u{1BCA0}'..='\u{1BCA3}' // 速記の書式制御
+            | '\u{1D173}'..='\u{1D17A}' // 音楽記号の書式制御
+            | '\u{E0000}'..='\u{E0FFF}' // tag 文字・補助の variation selectors（全範囲）
         )
 }
 
@@ -384,12 +403,44 @@ mod tests {
             '\u{2069}',
             '\u{FEFF}',
             '\u{E0041}',
+            '\u{034F}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{17B4}',
+            '\u{180B}',
+            '\u{180F}',
+            '\u{3164}',
+            '\u{FFA0}',
+            '\u{FFF0}',
+            '\u{FFFB}',
+            '\u{1D173}',
+            '\u{E0100}',
+            '\u{E01EF}',
+            '\u{E0FFF}',
+            '\u{0600}',
+            '\u{06DD}',
         ];
         for c in forbidden {
             let t = format!("a{c}b");
             assert_eq!(
                 DeclaredEnvironment::from_agent_declaration(t, limits()).unwrap_err(),
                 DeclaredEnvironmentError::ForbiddenChar(c),
+                "U+{:04X}",
+                c as u32
+            );
+        }
+        // 境界の外側の文字は受ける。
+        for c in [
+            '\u{00AC}',
+            '\u{00AE}',
+            '\u{034E}',
+            '\u{0350}',
+            '\u{E1000}',
+            '\u{FFFC}',
+        ] {
+            let t = format!("a{c}b");
+            assert!(
+                DeclaredEnvironment::from_agent_declaration(t, limits()).is_ok(),
                 "U+{:04X}",
                 c as u32
             );
